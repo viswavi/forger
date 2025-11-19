@@ -1,0 +1,1 @@
+"""Decompose module for Forger."""

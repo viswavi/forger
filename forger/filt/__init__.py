@@ -1,1 +1,0 @@
-"""Filtering module for Forger."""

@@ -1,1 +1,0 @@
-"""Acquisition module for Forger."""

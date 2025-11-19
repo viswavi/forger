@@ -1,0 +1,1 @@
+"""Acquire module for Forger."""
