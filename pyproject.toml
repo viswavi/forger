@@ -21,3 +21,29 @@ Issues = "https://github.com/viswavi/forger/issues"
 [build-system]
 requires = ["uv_build >= 0.9.8, <0.10.0"]
 build-backend = "uv_build"
+
+[tool.hatch.build]
+include = [
+    "*.py",
+]
+exclude = [
+    "*_test.py",
+    "test_*.py",
+]
+only-packages = true
+
+[project.optional-dependencies]
+test = [
+    "pytest>=6.0.0",
+]
+dev = [
+    "pytest",
+    "pre-commit"
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["forger"]
+
+[tool.pytest.ini_options]
+pythonpath = ["forger/test_helpers"]
+testpaths = ["forger/tests"]
