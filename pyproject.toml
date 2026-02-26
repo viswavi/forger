@@ -45,5 +45,5 @@ dev = [
 packages = ["forger"]
 
 [tool.pytest.ini_options]
-pythonpath = ["forger/test_helpers"]
-testpaths = ["forger/tests"]
+pythonpath = ["src", "test_helpers"]
+testpaths = ["tests"]
