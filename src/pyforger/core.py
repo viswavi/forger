@@ -1,122 +1,56 @@
 """Core classes for the Forger computation graph.
 
 This module implements the lazy evaluation infrastructure that allows users
-to write code that looks like sequential data transformations, but actually
-builds a DAG that can be parallelized and cached.
+to write pipelines as plain Python functions, building a DAG that is only
+executed when run() is called.
 """
-
 from __future__ import annotations
 
-from abc import ABC
+from collections.abc import Callable
 from enum import Enum, auto
-from typing import Any
 
 
-class ExecutionStatus(Enum):
-    """Status of a DataSpec node during execution."""
+class NodeType(Enum):
+    """The semantic type of a node in the computation graph.
 
-    PENDING = auto()
-    RUNNING = auto()
-    COMPLETED = auto()
-    FAILED = auto()
-    FILTERED = auto()  # Node was filtered out (early termination)
+    Used by the runner to apply type-specific behavior (e.g. early
+    termination on empty FILTER results).
+    """
+
+    ACQUIRE = auto()  # Generates or retrieves new data
+    ALTER = auto()  # Transforms existing data
+    FILTER = auto()  # Removes data based on criteria
+    DECOMPOSE = auto()  # Generates new sub-pipelines
+    RAW = auto()  # Literal/raw data node
 
 
 class DataSpec:
-    """Represents a node in the computation graph.
+    """A node in the computation graph.
 
-    DataSpec objects are created by operations but don't execute immediately.
-    They track dependencies and cache results after execution.
+    Created by functional operations (forger.acquire.*, forger.filter.*, etc.)
+    and linked together to form a DAG. Execution is deferred until run().
 
     Attributes:
-        operation: The Operation instance that created this node
-        inputs: List of upstream DataSpec nodes this depends on
-        _cached_result: Stored result after execution (None until run)
-        _status: Current execution status
+        node_type: The semantic type of this node
+        inputs: Upstream DataSpec nodes this depends on
+        execute_fn: Callable that performs the actual computation
+        name: Human-readable label for debugging
 
     Example:
-        >>> op = SomeOperation(param=42)
-        >>> spec = op()  # Creates DataSpec, doesn't execute
-        >>> result = run(spec)  # Now it executes
+        >>> retrieved = forger.acquire.retrieve_from_hf(description="math", max_n=100)
+        >>> filtered = forger.filter.by_diversity(retrieved, threshold=0.8)
+        >>> result = forger.run(filtered)  # executes the graph
     """
 
     def __init__(
         self,
-        operation: Operation,
-        inputs: list[DataSpec] | None = None,
-        raw_data: Any | None = None,
+        node_type: NodeType,
+        inputs: list[DataSpec],
+        execute_fn: Callable,
+        name: str = "",
     ) -> None:
-        """Initialize a DataSpec node."""
-        raise NotImplementedError
-
-
-class Operation(ABC):
-    """Abstract base class for all Forger operations.
-
-    Operations define transformations on data, executed just-in-time.
-
-    Subclasses must implement:
-        - execute(*input_data): Perform the actual computation
-
-    Example:
-        class MyOperation(Operation):
-            def __init__(self, threshold: float):
-                self.threshold = threshold
-
-            def execute(self, *input_data) -> List[dict]:
-                # Actually process the data
-                return [row for row in input_data[0] if row['score'] > self.threshold]
-    """
-
-    def __call__(self, *args, **kwargs) -> DataSpec:
-        """Create a DataSpec node for this operation."""
-        raise NotImplementedError
-
-
-class AcquireOperation(Operation):
-    """Operations that generate or retrieve new data.
-
-    Acquire operations are typically "source" nodes in the DAG - they have
-    no DataSpec inputs and produce new data from external sources.
-
-    Examples: HuggingfaceRetrieve, GenerateInstance, CritiqueInstance
-    """
-
-    expected_inputs = 0  # Acquire operations don't take DataSpec inputs
-
-
-class AlterOperation(Operation):
-    """Operations that transform existing data.
-
-    Alter operations take one or more input datasets and produce a
-    transformed output. They don't filter data, just modify it.
-
-    Examples: Refine, Translate, Concatenate
-    """
-
-    pass  # Variable inputs depending on operation
-
-
-class FilterOperation(Operation):
-    """Operations that remove data based on criteria.
-
-    Filter operations take an input dataset and return a subset.
-    If a filter removes ALL data, the pipeline can terminate early.
-
-    Examples: Diversity, Agreement, Disagreement, Quality
-    """
-
-    expected_inputs = 1  # Filters typically take one dataset
-
-    # If True, empty results will cause early pipeline termination
-    terminate_on_empty: bool = True
-
-
-class DecomposeOperation(Operation):
-    """Operations that generate new operations or sub-pipelines.
-
-    Decompose operations are meta-operations that create new operations
-    from a given sequence of operations, enabling dynamic pipelines.
-    """
-
-    expected_inputs = 1
+        """Store basic data in DataSpec object."""
+        self.node_type = node_type
+        self.inputs = inputs
+        self.execute_fn = execute_fn
+        self.name = name
