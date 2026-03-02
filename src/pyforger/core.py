@@ -15,7 +15,11 @@ from typing import Any
 
 
 class NodeType(Enum):
-    """The semantic type of a node in the computation graph."""
+    """The semantic type of a node in the computation graph.
+
+    Used by the runner to apply type-specific behavior (e.g. early
+    termination on empty FILTER results).
+    """
 
     ACQUIRE = auto()  # Generates or retrieves new data
     ALTER = auto()  # Transforms existing data
@@ -53,10 +57,8 @@ class DataSpec:
         name: Human-readable label for debugging
 
     Example:
-        >>> source = DataSpec(NodeType.SOURCE, (), lambda: ["a", "a", "b"], "source")
-        >>> _execute_fn = lambda inputs: [x * 2 for x in inputs[0]]
-        >>> doubled = DataSpec(NodeType.ALTER, source, _execute_fn, "test_double")
-        >>> filtered = forger.filter.by_diversity(source, threshold=0.8)
+        >>> retrieved = forger.acquire.retrieve_from_hf(description="math", max_n=100)
+        >>> filtered = forger.filter.by_diversity(retrieved, threshold=0.8)
         >>> result = forger.run(filtered)  # executes the graph
     """
 
