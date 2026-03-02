@@ -4,27 +4,24 @@ The run() function executes a Forger pipeline.
 """
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
-from typing import Any
+from collections.abc import Callable
+from typing import Any, Union
 
-from pyforger.core import DataSpec
-from pyforger.utils import get_formatted_logger
-
-logger = get_formatted_logger("Runner")
+from core import DataSpec
 
 
 def run(
-    pipeline: DataSpec | Callable[..., DataSpec | Iterable[DataSpec]],
-    cache: dict[int, Any] | None = None,
+    pipeline: Union[DataSpec, Callable], cache: dict[int, Any] | None = None
 ) -> Any:
-    """Execute a dataset creation pipeline (expressing a DAG of data operations).
+    """Execute a dataset creation pipeline.
+
+    Accepts either a DataSpec node or a callable that returns one.
+    Executes the DAG in topological order with caching.
 
     Args:
         pipeline: A DataSpec node, or a function that builds and returns one.
                   Passing a function lets you define pipelines as plain Python
-                  functions and pass them directly to run(). If a function is passed,
-                  it must return a DataSpec or an iterable (e.g. a list of multiple
-                  DataSpecs).
+                  functions and pass them directly to run().
         cache: Optional shared cache (for advanced use / testing).
 
     Returns:
