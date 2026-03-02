@@ -8,6 +8,9 @@ from collections.abc import Callable
 from typing import Any, Union
 
 from core import DataSpec
+from utils import get_formatted_logger
+
+logger = get_formatted_logger("Runner")
 
 
 def run(
