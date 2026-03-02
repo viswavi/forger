@@ -18,10 +18,7 @@ def run(
     pipeline: DataSpec | Callable[..., DataSpec],
     cache: dict[int, Any] | None = None,
 ) -> Any:
-    """Execute a dataset creation pipeline.
-
-    Accepts either a DataSpec node or a callable that returns one.
-    Executes the DAG in topological order with caching.
+    """Execute a dataset creation pipeline (expressing a DAG of data operations).
 
     Accepts either a DataSpec node or a callable that returns one.
     Executes the DAG in topological order with caching.

@@ -15,11 +15,7 @@ from typing import Any
 
 
 class NodeType(Enum):
-    """The semantic type of a node in the computation graph.
-
-    Used by the runner to apply type-specific behavior (e.g. early
-    termination on empty FILTER results).
-    """
+    """The semantic type of a node in the computation graph."""
 
     ACQUIRE = auto()  # Generates or retrieves new data
     ALTER = auto()  # Transforms existing data
