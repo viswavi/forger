@@ -14,6 +14,6 @@ __all__ = [
     "ExecutionStatus",
     "acquire",
     "alter",
-    "filter",
     "decompose",
+    "filter",
 ]

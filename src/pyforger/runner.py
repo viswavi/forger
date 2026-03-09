@@ -8,6 +8,9 @@ from collections.abc import Callable
 from typing import Any, Union
 
 from pyforger.core import DataSpec
+from pyforger.utils import get_formatted_logger
+
+logger = get_formatted_logger("Runner")
 
 
 def run(
