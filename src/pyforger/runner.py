@@ -7,10 +7,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, Union
 
-from core import DataSpec
-from utils import get_formatted_logger
-
-logger = get_formatted_logger("Runner")
+from pyforger.core import DataSpec
 
 
 def run(
