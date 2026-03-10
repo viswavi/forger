@@ -5,13 +5,13 @@ The run() function executes a Forger pipeline.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from typing import Any, Union
+from typing import Any
 
 from pyforger.core import DataSpec
 
 
 def run(
-    pipeline: Union[DataSpec, Callable[..., DataSpec | Iterable[DataSpec]]],
+    pipeline: DataSpec | Callable[..., DataSpec | Iterable[DataSpec]],
     cache: dict[int, Any] | None = None,
 ) -> Any:
     """Execute a dataset creation pipeline (expressing a DAG of data operations).
