@@ -11,7 +11,7 @@ import typing
 from collections.abc import Callable, Iterable
 from dataclasses import InitVar, dataclass, field
 from enum import Enum, auto
-from typing import Any
+from typing import Any, Optional
 
 
 class NodeType(Enum):
@@ -30,10 +30,10 @@ ExecuteFn = Callable[..., list[dict]]
 class ExecutionStatus(Enum):
     """Status of a DataSpec node during execution."""
 
-    PENDING = auto()  # The execution of the graph has not yet reached this node
-    RUNNING = auto()  # This node is currently being executed
-    COMPLETED = auto()  # Execution was successful and the result has been cached
-    FAILED = auto()  # Execution failed
+    PENDING = auto()
+    RUNNING = auto()
+    COMPLETED = auto()
+    FAILED = auto()
 
 
 _MUTABLE_FIELDS: frozenset[str] = frozenset({"_status", "_cached_result"})
@@ -151,8 +151,8 @@ class DataSpec:
                 )
 
     @staticmethod
-    def _validate_inputs(inputs: Iterable[DataSpec] | DataSpec) -> tuple[DataSpec, ...]:
-        """Normalize inputs to an immutable sequence of DataSpec instances."""
+    def _validate_inputs(inputs: DataSpec | list[DataSpec]) -> list[DataSpec]:
+        """Normalize inputs to a fresh list of DataSpec instances."""
         if isinstance(inputs, DataSpec):
             deps = [inputs]
         else:
@@ -165,7 +165,7 @@ class DataSpec:
         for dep in deps:
             if not isinstance(dep, DataSpec):
                 raise TypeError("All inputs must be DataSpec instances")
-        return tuple(deps)
+        return list(deps)
 
     # Dataclasses are not hashable by default if they are mutable, so we overwrite this
     # behavior to alow custom hashing based on object identity (not its contents).
@@ -180,17 +180,17 @@ class DataSpec:
 
     def get_dependencies(self) -> list[DataSpec]:
         """Return list of upstream DataSpec nodes."""
-        return list(self.inputs)
+        return self.inputs.copy()
 
     @property
-    def is_completed(self) -> bool:
+    def is_computed(self) -> bool:
         """Return status of whether this node has been computed."""
         return self._status == ExecutionStatus.COMPLETED
 
     @property
     def result(self) -> Any:
         """Return the computed result, or raise if not computed yet."""
-        if not self.is_completed:
+        if not self.is_computed:
             raise RuntimeError(
                 f"DataSpec '{self.name}' has not been executed yet. Call run() first."
             )
