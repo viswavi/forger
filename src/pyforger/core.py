@@ -171,6 +171,23 @@ class DataSpec:
     # behavior to alow custom hashing based on object identity (not its contents).
     __hash__ = object.__hash__
 
+    @staticmethod
+    def _validate_inputs(inputs: DataSpec | list[DataSpec]) -> list[DataSpec]:
+        """Normalize inputs to a fresh list of DataSpec instances."""
+        if isinstance(inputs, DataSpec):
+            deps = [inputs]
+        else:
+            try:
+                deps = list(inputs)
+            except TypeError as exc:
+                raise TypeError(
+                    "inputs must be a DataSpec or an iterable of DataSpec instances"
+                ) from exc
+        for dep in deps:
+            if not isinstance(dep, DataSpec):
+                raise TypeError("All inputs must be DataSpec instances")
+        return list(deps)
+
     def __repr__(self) -> str:
         """Show node type and status for debugging."""
         return (
