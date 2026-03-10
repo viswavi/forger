@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from enum import Enum, auto
+from typing import Any, Optional
 
 
 class NodeType(Enum):
@@ -18,6 +19,16 @@ class NodeType(Enum):
     FILTER = auto()  # Removes data based on criteria
     DECOMPOSE = auto()  # Generates new sub-pipelines
     RAW = auto()  # Literal/raw data node
+
+
+class ExecutionStatus(Enum):
+    """Status of a DataSpec node during execution."""
+
+    PENDING = auto()
+    RUNNING = auto()
+    COMPLETED = auto()
+    FAILED = auto()
+    FILTERED = auto()
 
 
 class DataSpec:
@@ -41,12 +52,25 @@ class DataSpec:
     def __init__(
         self,
         node_type: NodeType,
-        inputs: list[DataSpec],
+        inputs: list[DataSpec] | DataSpec,
         execute_fn: Callable,
         name: str = "",
     ) -> None:
         """Store basic data in DataSpec object."""
         self.node_type = node_type
-        self.inputs = inputs
+        self.inputs = [inputs] if isinstance(inputs, DataSpec) else inputs
         self.execute_fn = execute_fn
         self.name = name
+        self._cached_result: Optional[Any] = None
+        self._status = ExecutionStatus.PENDING
+
+    def __repr__(self) -> str:
+        """Show node type and status for debugging."""
+        return (
+            f"DataSpec({self.name}, status={self._status.name.lower()},"
+            + f" deps={len(self.inputs)})"
+        )
+
+    def get_dependencies(self) -> list[DataSpec]:
+        """Return list of upstream DataSpec nodes."""
+        return self.inputs.copy()

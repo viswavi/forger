@@ -7,7 +7,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, Union
 
-from core import DataSpec
+from pyforger.core import DataSpec
 
 
 def run(
