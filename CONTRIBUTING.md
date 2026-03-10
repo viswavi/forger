@@ -2,7 +2,7 @@
 
 Thanks for your interest in contributing to Forger!
 We appreciate your support and welcome your
- contributions. Here's a guide to help you get started:
+contributions. Here's a guide to help you get started:
 
 ## Developer Installation
 
