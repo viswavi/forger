@@ -6,14 +6,10 @@ executed when run() is called.
 """
 from __future__ import annotations
 
-<<<<<<< HEAD
 import inspect
 import typing
 from collections.abc import Callable, Iterable
 from dataclasses import InitVar, dataclass, field
-=======
-from collections.abc import Callable, Iterable
->>>>>>> 2937bc6 (Make the field `inputs` immutable)
 from enum import Enum, auto
 from typing import Any
 
