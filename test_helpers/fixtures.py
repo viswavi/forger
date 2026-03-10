@@ -55,3 +55,12 @@ def make_concat(*sources: DataSpec) -> DataSpec:
         return result
 
     return DataSpec(NodeType.ALTER, list(sources), _execute, "test_concat")
+
+
+def make_empty_filter(source: DataSpec) -> DataSpec:
+    """Filter node that always returns empty."""
+
+    def _execute(data):
+        return []
+
+    return DataSpec(NodeType.FILTER, [source], _execute, "test_empty_filter")

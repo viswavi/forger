@@ -14,6 +14,21 @@ from pyforger.utils import get_formatted_logger
 logger = get_formatted_logger("Runner")
 
 
+class CycleDetectedError(Exception):
+    """Raised when a cycle is detected in the computation graph."""
+
+    pass
+
+
+class FilterTerminationError(Exception):
+    """Raised when a filter operation returns empty results."""
+
+    def __init__(self, operation_name: str, message: str = ""):
+        """Initialize with the name of the filter operation that caused the error."""
+        self.operation_name = operation_name
+        super().__init__(message or f"Filter '{operation_name}' returned empty results")
+
+
 def run(
     pipeline: DataSpec | Callable[..., DataSpec], cache: dict[int, Any] | None = None
 ) -> Any:
