@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from enum import Enum, auto
+from typing import Any
 
 
 class NodeType(Enum):
@@ -42,11 +43,22 @@ class DataSpec:
         self,
         node_type: NodeType,
         inputs: Iterable[DataSpec],
-        execute_fn: Callable,
+        execute_fn: Callable[..., Iterable[Any]],
         name: str,
     ) -> None:
-        """Store basic data in DataSpec object."""
+        """Store basic data in DataSpec object.
+
+        Args:
+            node_type: The semantic type of this node
+            inputs: Upstream DataSpec nodes this depends on
+            execute_fn: Callable that performs the actual data processing
+            name: Human-readable label for debugging
+        """
         self.node_type = node_type
+        # The inputs, coming from upstream nodes, correspond to the arguments that will
+        # be passed to execute_fn at execution time.
         self.inputs: tuple[DataSpec, ...] = tuple(inputs)
-        self.execute_fn = execute_fn
+        # execute_fn is a callable that takes as input the outputs of upstream nodes
+        # and returns a list-like iterable of data items (e.g. List[dict])
+        self.execute_fn: Callable[..., Iterable[Any]] = execute_fn
         self.name = name
