@@ -58,11 +58,29 @@ class DataSpec:
     ) -> None:
         """Store basic data in DataSpec object."""
         self.node_type = node_type
-        self.inputs = [inputs] if isinstance(inputs, DataSpec) else inputs
+        # Normalize inputs to a new list of DataSpecs to avoid external mutation.
+        self.inputs = self._validate_inputs(inputs)
         self.execute_fn = execute_fn
         self.name = name
         self._cached_result: Optional[Any] = None
         self._status = ExecutionStatus.PENDING
+
+    @staticmethod
+    def _validate_inputs(inputs: DataSpec | list[DataSpec]) -> list[DataSpec]:
+        """Normalize inputs to a fresh list of DataSpec instances."""
+        if isinstance(inputs, DataSpec):
+            deps = [inputs]
+        else:
+            try:
+                deps = list(inputs)
+            except TypeError as exc:
+                raise TypeError(
+                    "inputs must be a DataSpec or an iterable of DataSpec instances"
+                ) from exc
+        for dep in deps:
+            if not isinstance(dep, DataSpec):
+                raise TypeError("All inputs must be DataSpec instances")
+        return list(deps)
 
     def __repr__(self) -> str:
         """Show node type and status for debugging."""
