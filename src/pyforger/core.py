@@ -6,7 +6,7 @@ executed when run() is called.
 """
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from enum import Enum, auto
 
 
@@ -41,12 +41,12 @@ class DataSpec:
     def __init__(
         self,
         node_type: NodeType,
-        inputs: list[DataSpec],
+        inputs: Iterable[DataSpec],
         execute_fn: Callable,
         name: str,
     ) -> None:
         """Store basic data in DataSpec object."""
         self.node_type = node_type
-        self.inputs = inputs
+        self.inputs: tuple[DataSpec, ...] = tuple(inputs)
         self.execute_fn = execute_fn
         self.name = name
