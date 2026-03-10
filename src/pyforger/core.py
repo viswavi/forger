@@ -92,3 +92,17 @@ class DataSpec:
     def get_dependencies(self) -> list[DataSpec]:
         """Return list of upstream DataSpec nodes."""
         return self.inputs.copy()
+
+    @property
+    def is_computed(self) -> bool:
+        """Return status of whether this node has been computed."""
+        return self._status == ExecutionStatus.COMPLETED
+
+    @property
+    def result(self) -> Any:
+        """Return the computed result, or raise if not computed yet."""
+        if not self.is_computed:
+            raise RuntimeError(
+                f"DataSpec '{self.name}' has not been executed yet. Call run() first."
+            )
+        return self._cached_result
