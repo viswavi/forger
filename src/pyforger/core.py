@@ -43,7 +43,7 @@ class DataSpec:
         node_type: NodeType,
         inputs: list[DataSpec],
         execute_fn: Callable,
-        name: str = "",
+        name: str,
     ) -> None:
         """Store basic data in DataSpec object."""
         self.node_type = node_type
