@@ -10,7 +10,7 @@ import inspect
 import typing
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any
+from typing import Any, Optional
 
 
 class NodeType(Enum):
@@ -34,10 +34,11 @@ class ExecuteFn(typing.Protocol):
 class ExecutionStatus(Enum):
     """Status of a DataSpec node during execution."""
 
-    PENDING = auto()  # The execution of the graph has not yet reached this node
-    RUNNING = auto()  # This node is currently being executed
-    COMPLETED = auto()  # Execution was successful and the result has been cached
-    FAILED = auto()  # Execution failed
+    PENDING = auto()
+    RUNNING = auto()
+    COMPLETED = auto()
+    FAILED = auto()
+    FILTERED = auto()
 
 
 _MUTABLE_FIELDS: frozenset[str] = frozenset({"_status", "_cached_result"})
@@ -184,17 +185,17 @@ class DataSpec:
 
     def get_dependencies(self) -> list[DataSpec]:
         """Return list of upstream DataSpec nodes."""
-        return list(self.inputs)
+        return self.inputs.copy()
 
     @property
-    def is_completed(self) -> bool:
+    def is_computed(self) -> bool:
         """Return status of whether this node has been computed."""
         return self._status == ExecutionStatus.COMPLETED
 
     @property
     def result(self) -> Any:
         """Return the computed result, or raise if not computed yet."""
-        if not self.is_completed:
+        if not self.is_computed:
             raise RuntimeError(
                 f"DataSpec '{self.name}' has not been executed yet. Call run() first."
             )
