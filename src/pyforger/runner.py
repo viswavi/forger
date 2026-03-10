@@ -8,23 +8,39 @@ from collections import deque
 from collections.abc import Callable
 from typing import Any
 
-from pyforger.core import DataSpec, ExecutionStatus
+from pyforger.core import DataSpec, ExecutionStatus, NodeType
 from pyforger.utils import get_formatted_logger
 
 logger = get_formatted_logger("Runner")
 
 
+class CycleDetectedError(Exception):
+    """Raised when a cycle is detected in the computation graph."""
+
+    pass
+
+
+class FilterTerminationError(Exception):
+    """Raised when a filter operation returns empty results."""
+
+    def __init__(self, operation_name: str, message: str = ""):
+        """Initialize with the name of the filter operation that caused the error."""
+        self.operation_name = operation_name
+        super().__init__(message or f"Filter '{operation_name}' returned empty results")
+
+
 def run(
-    pipeline: DataSpec | Callable[..., DataSpec],
-    cache: dict[int, Any] | None = None,
+    pipeline: DataSpec | Callable[..., DataSpec], cache: dict[int, Any] | None = None
 ) -> Any:
     """Execute a dataset creation pipeline (expressing a DAG of data operations).
+
+    Accepts either a DataSpec node or a callable that returns one.
+    Executes the DAG in topological order with caching.
 
     Args:
         pipeline: A DataSpec node, or a function that builds and returns one.
                   Passing a function lets you define pipelines as plain Python
-                  functions and pass them directly to run(). If a function is passed,
-                  it must return a DataSpec.
+                  functions and pass them directly to run().
         cache: Optional shared cache (for advanced use / testing).
 
     Returns:
@@ -38,13 +54,8 @@ def run(
     """
     if callable(pipeline) and not isinstance(pipeline, DataSpec):
         pipeline = pipeline()
-    else:
-        resolved = pipeline
 
-    if isinstance(resolved, DataSpec):
-        dataset: DataSpec = resolved
-    else:
-        raise TypeError(f"pipeline must resolve to a DataSpec, got {type(resolved)}")
+    dataset: DataSpec = pipeline
 
     if cache is None:
         cache = {}
@@ -53,13 +64,17 @@ def run(
     if node_id in cache:
         return cache[node_id]
 
-    if dataset.is_completed:
+    if dataset.is_computed:
         return dataset.result
 
     execution_order = _topological_sort(dataset)
 
     for node in execution_order:
-        _execute_node(node, cache)
+        try:
+            _execute_node(node, cache)
+        except FilterTerminationError as e:
+            logger.debug(f"Filter removed all data: {e}")
+            return []
 
     return cache[id(dataset)]
 
@@ -101,7 +116,12 @@ def _topological_sort(root: DataSpec) -> list[DataSpec]:
             if in_degree[dependent_id] == 0:
                 queue.append(dependent_id)
 
-    assert len(result) == len(all_nodes), "Cycle detected in computation graph"
+    if len(result) != len(all_nodes):
+        remaining = [node_map[nid].name for nid in all_nodes if in_degree[nid] > 0]
+        raise CycleDetectedError(
+            f"Cycle detected in computation graph. Nodes involved: {remaining}"
+        )
+
     return result
 
 
@@ -112,7 +132,7 @@ def _execute_node(node: DataSpec, cache: dict[int, Any]) -> None:
     if node_id in cache:
         return
 
-    if node.is_completed:
+    if node.is_computed:
         cache[node_id] = node.result
         return
 
@@ -121,12 +141,20 @@ def _execute_node(node: DataSpec, cache: dict[int, Any]) -> None:
 
     try:
         result = node.execute_fn(*input_data)
-        cache[node_id] = result
+
+        if node.node_type == NodeType.FILTER and _is_empty(result):
+            node._status = ExecutionStatus.FILTERED
+            raise FilterTerminationError(node.name)
+
         node._cached_result = result
         node._status = ExecutionStatus.COMPLETED
+        cache[node_id] = result
 
     except NotImplementedError:
         node._status = ExecutionStatus.FAILED
+        raise
+
+    except FilterTerminationError:
         raise
 
     except Exception as e:
@@ -137,7 +165,9 @@ def _execute_node(node: DataSpec, cache: dict[int, Any]) -> None:
 def _is_empty(data: Any) -> bool:
     if data is None:
         return True
-    if hasattr(data, "__len__"):
+    if isinstance(data, (list, tuple, set, frozenset)):
+        return len(data) == 0
+    elif hasattr(data, "__len__"):
         return len(data) == 0
     elif hasattr(data, "empty"):
         return data.empty
