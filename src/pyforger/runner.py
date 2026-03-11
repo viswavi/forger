@@ -79,7 +79,9 @@ def run(
             _execute_node(node, cache)
         except FilterTerminationError as e:
             logger.debug(f"Filter removed all data: {e}")
-            return []
+            empty_result: list[dict] = []
+            cache[id(dataset)] = empty_result
+            return empty_result
 
     return cache[id(dataset)]
 
@@ -146,6 +148,7 @@ def _execute_node(node: DataSpec, cache: dict[int, Any]) -> None:
 
     try:
         result = node.execute_fn(*input_data)
+        cache[node_id] = result
 
         if node.node_type == NodeType.FILTER and _is_empty(result):
             node._status = ExecutionStatus.FILTERED
@@ -153,7 +156,6 @@ def _execute_node(node: DataSpec, cache: dict[int, Any]) -> None:
 
         node._cached_result = result
         node._status = ExecutionStatus.COMPLETED
-        cache[node_id] = result
 
     except NotImplementedError:
         node._status = ExecutionStatus.FAILED
