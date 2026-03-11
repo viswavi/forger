@@ -8,8 +8,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from pyforger.core import DataSpec, NodeType
-
 from pyforger.acquire.sources import (
     ArxivRetrievalSource,
     HFRetrievalSource,
@@ -19,6 +17,7 @@ from pyforger.acquire.sources import (
     WebRetrievalSource,
     WikiRetrievalSource,
 )
+from pyforger.core import DataSpec, NodeType
 
 
 def retrieve(

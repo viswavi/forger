@@ -3,6 +3,7 @@
 MockRetrievalSource is defined here (not in test_helpers/fixtures) per plan.
 """
 from __future__ import annotations
+
 from typing import Any
 
 from pyforger import DataSpec, NodeType

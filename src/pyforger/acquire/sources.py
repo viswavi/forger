@@ -117,7 +117,10 @@ class WikiRetrievalSource(RetrievalSource):
 
 
 class HFRetrievalSource(RetrievalSource):
-    """Hugging Face datasets (load_dataset + shuffle/filter/select). Stub implementation."""
+    """Hugging Face datasets (load_dataset + shuffle/filter/select).
+
+    Stub implementation.
+    """
 
     def __init__(
         self,
