@@ -67,7 +67,9 @@ def run(
             _execute_node(node, cache)
         except FilterTerminationError as e:
             logger.debug(f"Filter removed all data: {e}")
-            return []
+            empty_result: list[dict] = []
+            cache[id(dataset)] = empty_result
+            return empty_result
 
     return cache[id(dataset)]
 
@@ -146,16 +148,3 @@ def _execute_node(node: DataSpec, cache: dict[int, Any]) -> None:
     except Exception as e:
         node._status = ExecutionStatus.FAILED
         raise RuntimeError(f"Error executing '{node.name}': {e}") from e
-<<<<<<< HEAD
-=======
-
-
-def _is_empty(data: Any) -> bool:
-    if data is None:
-        return True
-    if hasattr(data, "__len__"):
-        return len(data) == 0
-    elif hasattr(data, "empty"):
-        return data.empty
-    return False
->>>>>>> edd68a5 (Simplify empty iterable detection)
