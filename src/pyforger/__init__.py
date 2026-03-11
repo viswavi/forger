@@ -7,7 +7,7 @@ import pyforger.alter as alter
 import pyforger.decompose as decompose
 import pyforger.filter as filter  # noqa: A001
 from pyforger.core import DataSpec, ExecutionStatus, NodeType
-from pyforger.runner import CycleDetectedError, FilterTerminationError, run
+from pyforger.runner import FilterTerminationError, run
 
 __all__ = [
     "DataSpec",
