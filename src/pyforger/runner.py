@@ -14,12 +14,6 @@ from pyforger.utils import get_formatted_logger
 logger = get_formatted_logger("Runner")
 
 
-class CycleDetectedError(Exception):
-    """Raised when a cycle is detected in the computation graph."""
-
-    pass
-
-
 def run(
     pipeline: DataSpec | Callable[..., DataSpec], cache: dict[int, Any] | None = None
 ) -> Any:
@@ -111,12 +105,7 @@ def _topological_sort(root: DataSpec) -> list[DataSpec]:
             if in_degree[dependent_id] == 0:
                 queue.append(dependent_id)
 
-    if len(result) != len(all_nodes):
-        remaining = [node_map[nid].name for nid in all_nodes if in_degree[nid] > 0]
-        raise CycleDetectedError(
-            f"Cycle detected in computation graph. Nodes involved: {remaining}"
-        )
-
+    assert len(result) != len(all_nodes), "Cycle detected in computation graph"
     return result
 
 
