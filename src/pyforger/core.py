@@ -188,6 +188,11 @@ class DataSpec:
         return self._status == ExecutionStatus.COMPLETED
 
     @property
+    def is_filtered(self) -> bool:
+        """Return status of whether this node has been filtered."""
+        return self._status == ExecutionStatus.FILTERED
+
+    @property
     def result(self) -> Any:
         """Return the computed result, or raise if not computed yet."""
         if not self.is_completed:
