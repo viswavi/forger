@@ -104,7 +104,7 @@ class TestExecution:
 class TestErrorHandling:
     """Errors during execution are handled properly."""
 
-    def test_not_implemented_propagates(self):
+    def test_node_throws_not_implemented_error(self):
         """Running a node that raises NotImplementedError, leads to a thrown error."""
 
         def _throw_error():
