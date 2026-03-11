@@ -18,5 +18,5 @@ __all__ = [
     "alter",
     "decompose",
     "filter",
-    "run",
+    "run"
 ]
