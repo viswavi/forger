@@ -99,16 +99,14 @@ class TestByInvalidResponse:
         assert result == []
 
     def test_removes_output_substring_of_instruction(self):
-        """Items where output is a similar-length substring of instruction are removed."""
-        data = [
-            {"instruction": "Tell me a funny joke", "output": "me a funny joke"}
-        ]
+        """Output that is a substring of instruction is removed."""
+        data = [{"instruction": "Tell me a funny joke", "output": "me a funny joke"}]
         source = make_source(data)
         result = run(by_invalid_response(source))
         assert result == []
 
     def test_removes_similar_length_substring(self):
-        """Items where one is a substring of the other with similar length are removed."""
+        """Instruction that is a substring of output is removed."""
         data = [{"instruction": "Tell me a funny joke", "output": "Tell me a funny"}]
         source = make_source(data)
         result = run(by_invalid_response(source))
@@ -129,7 +127,10 @@ class TestByInvalidResponse:
     def test_removes_high_similarity(self):
         """Items with similarity above threshold are removed."""
         data = [
-            {"instruction": "Tell me a joke about cats", "output": "Tell me a joke about dogs"}
+            {
+                "instruction": "Tell me a joke about cats",
+                "output": "Tell me a joke about dogs",
+            }
         ]
         source = make_source(data)
         result = run(by_invalid_response(source, similarity_threshold=0.8))
@@ -140,7 +141,7 @@ class TestByInvalidResponse:
         data = [
             {
                 "instruction": "Tell me a joke",
-                "output": "Why did the chicken cross the road? To get to the other side!",
+                "output": "Why did the chicken cross the road?",
             }
         ]
         source = make_source(data)
@@ -203,8 +204,14 @@ class TestByKeywordBlocklist:
     def test_removes_default_blocklist_match(self):
         """Items matching default blocklist phrases are removed."""
         data = [
-            {"instruction": "Do something bad", "output": "As an AI, I cannot do that."},
-            {"instruction": "Tell a joke", "output": "Why did the chicken cross the road?"},
+            {
+                "instruction": "Do something bad",
+                "output": "As an AI, I cannot do that.",
+            },
+            {
+                "instruction": "Tell a joke",
+                "output": "Why did the chicken cross the road?",
+            },
         ]
         source = make_source(data)
         result = run(by_keyword_blocklist(source))

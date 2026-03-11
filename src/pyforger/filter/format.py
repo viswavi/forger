@@ -55,9 +55,7 @@ def by_length(
 
     def _execute(data: list[dict]) -> list[dict]:
         return [
-            item
-            for item in data
-            if min_len <= len(item[instruction_field]) <= max_len
+            item for item in data if min_len <= len(item[instruction_field]) <= max_len
         ]
 
     return DataSpec(NodeType.FILTER, source, _execute, "filter_by_length")
