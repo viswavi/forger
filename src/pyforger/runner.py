@@ -175,9 +175,7 @@ def _execute_node(node: DataSpec, cache: dict[int, Any]) -> None:
 def _is_empty(data: Any) -> bool:
     if data is None:
         return True
-    if isinstance(data, (list, tuple, set, frozenset)):
-        return len(data) == 0
-    elif hasattr(data, "__len__"):
+    if hasattr(data, "__len__"):
         return len(data) == 0
     elif hasattr(data, "empty"):
         return data.empty
