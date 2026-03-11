@@ -2,13 +2,13 @@
 
 MockRetrievalSource is defined here (not in test_helpers/fixtures) per plan.
 """
-
+from __future__ import annotations
 from typing import Any
 
 from pyforger import DataSpec, NodeType
 from pyforger.acquire import (
-    RetrieveMode,
     RetrievalSource,
+    RetrieveMode,
     retrieve,
     retrieve_from_arxiv,
     retrieve_from_hf,
@@ -39,14 +39,15 @@ class MockRetrievalSource(RetrievalSource):
         criteria: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
+        """Return the fixed data list; ignores mode/query/n/seed/criteria."""
         return self.data
 
 
 class TestRetrieve:
-    """retrieve() and wrappers return DataSpec and behave as specified."""
+    """Retrieve() and wrappers return DataSpec and behave as specified."""
 
     def test_retrieve_returns_dataspec(self):
-        """retrieve with a mock source returns a DataSpec with node_type ACQUIRE."""
+        """Retrieve with a mock source returns a DataSpec with node_type ACQUIRE."""
         source = MockRetrievalSource([{"text": "a"}, {"text": "b"}])
         spec = retrieve(source, mode=RetrieveMode.QUERY, query="x")
         assert isinstance(spec, DataSpec)
@@ -74,38 +75,38 @@ class TestRetrieve:
         assert result == [{"text": "a"}]
 
     def test_retrieve_has_no_dependencies(self):
-        """retrieve node has no upstream dependencies."""
+        """Retrieve node has no upstream dependencies."""
         source = MockRetrievalSource([])
         spec = retrieve(source)
         assert spec.get_dependencies() == []
 
     def test_retrieve_from_hf_returns_dataspec(self):
-        """retrieve_from_hf returns a DataSpec."""
+        """Return a DataSpec from retrieve_from_hf."""
         spec = retrieve_from_hf("some/dataset", n=5)
         assert isinstance(spec, DataSpec)
         assert spec.node_type == NodeType.ACQUIRE
         assert spec.get_dependencies() == []
 
     def test_retrieve_from_web_returns_dataspec(self):
-        """retrieve_from_web returns a DataSpec."""
+        """Return a DataSpec from retrieve_from_web."""
         spec = retrieve_from_web(query="test", n=3)
         assert isinstance(spec, DataSpec)
         assert spec.get_dependencies() == []
 
     def test_retrieve_from_wiki_returns_dataspec(self):
-        """retrieve_from_wiki returns a DataSpec."""
+        """Return a DataSpec from retrieve_from_wiki."""
         spec = retrieve_from_wiki(query="Python", n=3)
         assert isinstance(spec, DataSpec)
         assert spec.get_dependencies() == []
 
     def test_retrieve_from_arxiv_returns_dataspec(self):
-        """retrieve_from_arxiv returns a DataSpec."""
+        """Return a DataSpec from retrieve_from_arxiv."""
         spec = retrieve_from_arxiv(query="machine learning", n=5)
         assert isinstance(spec, DataSpec)
         assert spec.get_dependencies() == []
 
     def test_retrieve_from_s2_returns_dataspec(self):
-        """retrieve_from_s2 returns a DataSpec."""
+        """Return a DataSpec from retrieve_from_s2."""
         spec = retrieve_from_s2(query="NLP", n=5)
         assert isinstance(spec, DataSpec)
         assert spec.get_dependencies() == []

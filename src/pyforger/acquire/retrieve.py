@@ -10,7 +10,7 @@ from typing import Any
 
 from pyforger.core import DataSpec, NodeType
 
-from .sources import (
+from pyforger.acquire.sources import (
     ArxivRetrievalSource,
     HFRetrievalSource,
     RetrievalSource,
@@ -32,7 +32,7 @@ def retrieve(
     name: str = "retrieve",
     **kwargs: Any,
 ) -> DataSpec:
-    """Build an ACQUIRE node that, when run, calls source.fetch(...) and returns the list.
+    """Build an ACQUIRE node that, when run, calls source.fetch() and returns the list.
 
     Args:
         source: The corpus or API wrapper; must implement fetch().

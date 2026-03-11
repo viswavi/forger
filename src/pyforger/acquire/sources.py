@@ -20,9 +20,10 @@ class RetrieveMode(Enum):
 
 
 class RetrievalSource(ABC):
-    """Abstract base for a corpus or API that can yield text segments (passages, docs, rows).
+    """Abstract base for a corpus or API that can yield text segments.
 
-    Subclasses implement fetch() to return a list of items (e.g. dicts with "text", "id").
+    Segments may be passages, docs, or rows. Subclasses implement fetch()
+    to return a list of items (e.g. dicts with "text", "id").
     """
 
     @abstractmethod
@@ -36,7 +37,9 @@ class RetrievalSource(ABC):
         criteria: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
-        """Return list of items (e.g. [{"text": "...", "id": "..."}]). Mode-specific args used as needed.
+        """Return list of items (e.g. [{"text": "...", "id": "..."}]).
+
+        Mode-specific args used as needed.
 
         Args:
             mode: How to select segments (QUERY, RANDOM, or STRUCTURED).
@@ -47,7 +50,8 @@ class RetrievalSource(ABC):
             **kwargs: Passed through to backend; mode-specific.
 
         Returns:
-            List of dicts, each typically containing at least "text" and optionally "id".
+            List of dicts, each typically containing at least "text"
+            and optionally "id".
         """
         ...
 
@@ -75,7 +79,10 @@ class WebRetrievalSource(RetrievalSource):
         criteria: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
-        # Stub: would use requests/crawler with query/random/structured mode.
+        """Return list of items; stub returns empty list.
+
+        Would use requests/crawler with query/random/structured mode.
+        """
         return []
 
 
@@ -102,7 +109,10 @@ class WikiRetrievalSource(RetrievalSource):
         criteria: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
-        # Stub: would use wikipedia-api or MediaWiki with query/random/structured.
+        """Return list of items; stub returns empty list.
+
+        Would use wikipedia-api or MediaWiki with query/random/structured.
+        """
         return []
 
 
@@ -123,7 +133,8 @@ class HFRetrievalSource(RetrievalSource):
             dataset: Hugging Face dataset name (e.g. "user/repo").
             config: Optional dataset config name.
             split: Split to use (e.g. "train", "validation").
-            text_column: Column name containing text; used when normalizing rows to dicts.
+            text_column: Column name containing text; used when
+                normalizing rows to dicts.
             **kwargs: Passed through to fetch(); reserved for load_dataset options.
         """
         self.dataset = dataset
@@ -142,7 +153,11 @@ class HFRetrievalSource(RetrievalSource):
         criteria: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
-        # Stub: would use datasets.load_dataset(), shuffle(seed), select(range(n)), filter(criteria).
+        """Return list of items; stub returns empty list.
+
+        Would use datasets.load_dataset(), shuffle(seed), select(range(n)),
+        filter(criteria).
+        """
         return []
 
 
@@ -167,7 +182,11 @@ class ArxivRetrievalSource(RetrievalSource):
         criteria: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
-        # Stub: would use arxiv.Search and Client().results() with query/random/structured.
+        """Return list of items; stub returns empty list.
+
+        Would use arxiv.Search and Client().results() with
+        query/random/structured.
+        """
         return []
 
 
@@ -192,5 +211,9 @@ class S2RetrievalSource(RetrievalSource):
         criteria: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
-        # Stub: would use SemanticScholar().search_paper() with query/random/structured.
+        """Return list of items; stub returns empty list.
+
+        Would use SemanticScholar().search_paper() with
+        query/random/structured.
+        """
         return []
