@@ -114,7 +114,7 @@ class TestErrorHandling:
             NodeType.ACQUIRE, [], _throw_error, "test_failing_node"
         )
         with pytest.raises(NotImplementedError):
-            run(node_throwing_err())
+            run(node_throwing_err)
 
     def test_result_before_run_raises(self):
         """Test that a pipeline's result cannot be accessed before it has run."""
