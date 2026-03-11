@@ -114,7 +114,7 @@ def _topological_sort(root: DataSpec) -> list[DataSpec]:
             if in_degree[dependent_id] == 0:
                 queue.append(dependent_id)
 
-    assert len(result) != len(all_nodes), "Cycle detected in computation graph"
+    assert len(result) == len(all_nodes), "Cycle detected in computation graph"
     return result
 
 
