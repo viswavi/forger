@@ -34,7 +34,9 @@ def run(
     Args:
         pipeline: A DataSpec node, or a function that builds and returns one.
                   Passing a function lets you define pipelines as plain Python
-                  functions and pass them directly to run().
+                  functions and pass them directly to run(). If a function is passed,
+                  it must return a DataSpec or an iterable (e.g. a list of multiple
+                  DataSpecs).
         cache: Optional shared cache (for advanced use / testing).
 
     Returns:

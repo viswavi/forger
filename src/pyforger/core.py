@@ -6,9 +6,9 @@ executed when run() is called.
 """
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from enum import Enum, auto
-from typing import Any, Optional
+from typing import Any
 
 
 class NodeType(Enum):
@@ -52,22 +52,32 @@ class DataSpec:
     def __init__(
         self,
         node_type: NodeType,
-        inputs: list[DataSpec] | DataSpec,
-        execute_fn: Callable,
-        name: str = "",
+        inputs: Iterable[DataSpec] | DataSpec,
+        execute_fn: Callable[..., Iterable[Any]],
+        name: str,
     ) -> None:
-        """Store basic data in DataSpec object."""
+        """Store basic data in DataSpec object.
+
+        Args:
+            node_type: The semantic type of this node
+            inputs: Upstream DataSpec nodes this depends on
+            execute_fn: Callable that performs the actual data processing
+            name: Human-readable label for debugging
+        """
         self.node_type = node_type
-        # Normalize inputs to a new list of DataSpecs to avoid external mutation.
-        self.inputs = self._validate_inputs(inputs)
-        self.execute_fn = execute_fn
+        # The inputs, coming from upstream nodes, correspond to the arguments that will
+        # be passed to execute_fn at execution time.
+        self.inputs: tuple[DataSpec, ...] = self._validate_inputs(inputs)
+        # execute_fn is a callable that takes as input the outputs of upstream nodes
+        # and returns a list-like iterable of data items (e.g. List[dict])
+        self.execute_fn: Callable[..., Iterable[Any]] = execute_fn
         self.name = name
-        self._cached_result: Optional[Any] = None
+        self._cached_result: Any | None = None
         self._status = ExecutionStatus.PENDING
 
     @staticmethod
-    def _validate_inputs(inputs: DataSpec | list[DataSpec]) -> list[DataSpec]:
-        """Normalize inputs to a fresh list of DataSpec instances."""
+    def _validate_inputs(inputs: Iterable[DataSpec] | DataSpec) -> tuple[DataSpec, ...]:
+        """Normalize inputs to an immutable sequence of DataSpec instances."""
         if isinstance(inputs, DataSpec):
             deps = [inputs]
         else:
@@ -80,7 +90,7 @@ class DataSpec:
         for dep in deps:
             if not isinstance(dep, DataSpec):
                 raise TypeError("All inputs must be DataSpec instances")
-        return list(deps)
+        return tuple(deps)
 
     def __repr__(self) -> str:
         """Show node type and status for debugging."""
@@ -91,7 +101,7 @@ class DataSpec:
 
     def get_dependencies(self) -> list[DataSpec]:
         """Return list of upstream DataSpec nodes."""
-        return self.inputs.copy()
+        return list(self.inputs)
 
     @property
     def is_computed(self) -> bool:
