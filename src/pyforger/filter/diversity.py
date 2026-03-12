@@ -5,6 +5,8 @@ examples based on exact matching, ROUGE-L similarity, and n-gram overlap.
 """
 from __future__ import annotations
 
+from rouge_score import rouge_scorer
+
 from pyforger.core import DataSpec, NodeType
 from pyforger.utils import get_field
 
