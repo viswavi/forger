@@ -38,7 +38,14 @@ test = [
 ]
 dev = [
     "pytest",
-    "pre-commit"
+    "pre-commit",
+    "pyyaml",
+    "types-pyyaml",
+    "jsonschema",
+]
+validation = [
+    "pyyaml",
+    "jsonschema",
 ]
 
 [tool.hatch.build.targets.wheel]
