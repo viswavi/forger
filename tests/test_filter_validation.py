@@ -42,6 +42,22 @@ class TestBySyntaxBasic:
         result = run(by_syntax(source))
         assert result == []
 
+    def test_empty_string_removed(self):
+        """Empty string is rejected for all languages."""
+        data = [{"output": ""}]
+        source = make_source(data)
+        for lang in ("json", "yaml", "python", "xml"):
+            result = run(by_syntax(source, lang=lang))
+            assert result == [], f"empty string should be rejected for {lang}"
+
+    def test_whitespace_only_removed(self):
+        """Whitespace-only string is rejected for all languages."""
+        data = [{"output": "   \n\t  "}]
+        source = make_source(data)
+        for lang in ("json", "yaml", "python", "xml"):
+            result = run(by_syntax(source, lang=lang))
+            assert result == [], f"whitespace should be rejected for {lang}"
+
     def test_missing_field_raises_error(self):
         """Missing expected field raises an error."""
         data = [{"instruction": "hello"}]
