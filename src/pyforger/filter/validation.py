@@ -2,6 +2,10 @@
 
 Filters that remove items whose text field is not syntactically valid
 in a specified format (JSON, YAML, Python, XML).
+
+Note: YAML is extremely permissive — most plain text parses as a valid
+YAML scalar. The YAML validator is mainly useful for catching broken
+structured YAML (e.g. unclosed brackets), not for rejecting free-form text.
 """
 from __future__ import annotations
 
@@ -9,6 +13,7 @@ import ast
 import json
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
+from typing import Any
 
 from pyforger.core import DataSpec, NodeType
 
@@ -21,12 +26,15 @@ def by_syntax(
     lang: str = "json",
     field: str = "output",
     required_keys: list[str] | None = None,
-    json_schema: dict | None = None,
+    json_schema: dict[str, Any] | None = None,
 ) -> DataSpec:
     """Remove items whose field value is not valid syntax in the given language.
 
-    Supports JSON, YAML, Python, and XML.
+    Supports JSON, YAML, Python, and XML. Empty or whitespace-only
+    values are always rejected regardless of language.
     For JSON, optional deeper validation via required_keys or json_schema.
+
+    Note: YAML is very permissive — most plain text is valid YAML.
 
     Args:
         source: Upstream DataSpec providing list[dict] data.
@@ -44,20 +52,36 @@ def by_syntax(
     Raises:
         ValueError: If lang is not supported, or if required_keys /
             json_schema is used with a non-JSON lang.
+        ImportError: If lang='yaml' and PyYAML is not installed, or
+            if json_schema is used and jsonschema is not installed.
     """
     if lang not in _SUPPORTED_LANGS:
         raise ValueError(
-            f"Unsupported lang {lang!r}. "
-            f"Supported: {sorted(_SUPPORTED_LANGS)}"
+            f"Unsupported lang {lang!r}. " f"Supported: {sorted(_SUPPORTED_LANGS)}"
         )
     if required_keys is not None and lang != "json":
-        raise ValueError(
-            "required_keys is only supported when lang='json'"
-        )
+        raise ValueError("required_keys is only supported when lang='json'")
     if json_schema is not None and lang != "json":
-        raise ValueError(
-            "json_schema is only supported when lang='json'"
-        )
+        raise ValueError("json_schema is only supported when lang='json'")
+
+    # Import optional dependencies eagerly so users get errors at
+    # construction time, not when the pipeline runs.
+    if lang == "yaml":
+        try:
+            import yaml  # type: ignore[import]  # noqa: F401
+        except ImportError:
+            raise ImportError(
+                "PyYAML is required for lang='yaml'. "
+                "Install it with: pip install pyyaml"
+            ) from None
+    if json_schema is not None:
+        try:
+            import jsonschema  # noqa: F401
+        except ImportError:
+            raise ImportError(
+                "jsonschema is required for json_schema validation. "
+                "Install it with: pip install jsonschema"
+            ) from None
 
     def _execute(data: list[dict]) -> list[dict]:
         return [
@@ -66,20 +90,20 @@ def by_syntax(
             if _validate(item[field], lang, required_keys, json_schema)
         ]
 
-    return DataSpec(
-        NodeType.FILTER, source, _execute, "filter_by_syntax"
-    )
+    return DataSpec(NodeType.FILTER, source, _execute, "filter_by_syntax")
 
 
 def _validate(
     text: str | None,
     lang: str,
     required_keys: list[str] | None,
-    json_schema: dict | None,
+    json_schema: dict[str, Any] | None,
 ) -> bool:
     """Route validation to the appropriate language validator."""
-    if text is None:
+    if text is None or not text.strip():
         return False
+    # JSON is handled separately because it accepts extra validation
+    # args (required_keys, json_schema). Other langs use _VALIDATORS.
     if lang == "json":
         return _validate_json(text, required_keys, json_schema)
     return _VALIDATORS[lang](text)
@@ -88,7 +112,7 @@ def _validate(
 def _validate_json(
     text: str,
     required_keys: list[str] | None,
-    json_schema: dict | None,
+    json_schema: dict[str, Any] | None,
 ) -> bool:
     """Validate JSON syntax, optionally checking keys or schema."""
     try:
@@ -103,13 +127,8 @@ def _validate_json(
             return False
 
     if json_schema is not None:
-        try:
-            import jsonschema
-        except ImportError:
-            raise ImportError(
-                "jsonschema is required for json_schema validation. "
-                "Install it with: pip install jsonschema"
-            ) from None
+        import jsonschema
+
         try:
             jsonschema.validate(parsed, json_schema)
         except jsonschema.ValidationError:
@@ -120,13 +139,8 @@ def _validate_json(
 
 def _validate_yaml(text: str) -> bool:
     """Validate YAML syntax."""
-    try:
-        import yaml  # type: ignore[import]
-    except ImportError:
-        raise ImportError(
-            "PyYAML is required for lang='yaml'. "
-            "Install it with: pip install pyyaml"
-        ) from None
+    import yaml  # type: ignore[import]
+
     try:
         yaml.safe_load(text)
     except yaml.YAMLError:

@@ -42,6 +42,22 @@ class TestBySyntaxBasic:
         result = run(by_syntax(source))
         assert result == []
 
+    def test_empty_string_removed(self):
+        """Empty string is rejected for all languages."""
+        data = [{"output": ""}]
+        source = make_source(data)
+        for lang in ("json", "yaml", "python", "xml"):
+            result = run(by_syntax(source, lang=lang))
+            assert result == [], f"empty string should be rejected for {lang}"
+
+    def test_whitespace_only_removed(self):
+        """Whitespace-only string is rejected for all languages."""
+        data = [{"output": "   \n\t  "}]
+        source = make_source(data)
+        for lang in ("json", "yaml", "python", "xml"):
+            result = run(by_syntax(source, lang=lang))
+            assert result == [], f"whitespace should be rejected for {lang}"
+
     def test_missing_field_raises_error(self):
         """Missing expected field raises an error."""
         data = [{"instruction": "hello"}]
@@ -106,27 +122,21 @@ class TestBySyntaxJson:
         """JSON with all required keys passes."""
         data = [{"output": '{"name": "Alice", "age": 30}'}]
         source = make_source(data)
-        result = run(
-            by_syntax(source, lang="json", required_keys=["name"])
-        )
+        result = run(by_syntax(source, lang="json", required_keys=["name"]))
         assert result == data
 
     def test_required_keys_missing_key(self):
         """JSON missing a required key is filtered out."""
         data = [{"output": '{"age": 30}'}]
         source = make_source(data)
-        result = run(
-            by_syntax(source, lang="json", required_keys=["name"])
-        )
+        result = run(by_syntax(source, lang="json", required_keys=["name"]))
         assert result == []
 
     def test_required_keys_non_object(self):
         """JSON non-object with required_keys is filtered out."""
         data = [{"output": "[1, 2, 3]"}]
         source = make_source(data)
-        result = run(
-            by_syntax(source, lang="json", required_keys=["name"])
-        )
+        result = run(by_syntax(source, lang="json", required_keys=["name"]))
         assert result == []
 
     def test_json_schema_valid(self):
@@ -138,9 +148,7 @@ class TestBySyntaxJson:
         }
         data = [{"output": '{"name": "Alice"}'}]
         source = make_source(data)
-        result = run(
-            by_syntax(source, lang="json", json_schema=schema)
-        )
+        result = run(by_syntax(source, lang="json", json_schema=schema))
         assert result == data
 
     def test_json_schema_invalid(self):
@@ -152,9 +160,7 @@ class TestBySyntaxJson:
         }
         data = [{"output": '{"age": 30}'}]
         source = make_source(data)
-        result = run(
-            by_syntax(source, lang="json", json_schema=schema)
-        )
+        result = run(by_syntax(source, lang="json", json_schema=schema))
         assert result == []
 
     def test_required_keys_and_schema_combined(self):

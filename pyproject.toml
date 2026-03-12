@@ -40,8 +40,8 @@ dev = [
     "pytest",
     "pre-commit",
     "pyyaml",
-    "types-pyyaml",
     "jsonschema",
+    "types-pyyaml",
 ]
 validation = [
     "pyyaml",
