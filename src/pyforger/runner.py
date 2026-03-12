@@ -8,7 +8,7 @@ from collections import deque
 from collections.abc import Callable
 from typing import Any
 
-from pyforger.core import DataSpec, ExecutionStatus, NodeType
+from pyforger.core import DataSpec, ExecutionStatus
 from pyforger.utils import get_formatted_logger
 
 logger = get_formatted_logger("Runner")
@@ -51,19 +51,13 @@ def run(
     if node_id in cache:
         return cache[node_id]
 
-    if dataset.is_computed:
+    if dataset.is_completed:
         return dataset.result
 
     execution_order = _topological_sort(dataset)
 
     for node in execution_order:
-        try:
-            _execute_node(node, cache)
-        except FilterTerminationError as e:
-            logger.debug(f"Filter removed all data: {e}")
-            empty_result: list[dict] = []
-            cache[id(dataset)] = empty_result
-            return empty_result
+        _execute_node(node, cache)
 
     return cache[id(dataset)]
 
@@ -116,7 +110,7 @@ def _execute_node(node: DataSpec, cache: dict[int, Any]) -> None:
     if node_id in cache:
         return
 
-    if node.is_computed:
+    if node.is_completed:
         cache[node_id] = node.result
         return
 

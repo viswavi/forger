@@ -11,7 +11,7 @@ import typing
 from collections.abc import Callable, Iterable
 from dataclasses import InitVar, dataclass, field
 from enum import Enum, auto
-from typing import Any, Optional
+from typing import Any
 
 
 class NodeType(Enum):
@@ -183,19 +183,14 @@ class DataSpec:
         return self.inputs.copy()
 
     @property
-    def is_computed(self) -> bool:
+    def is_completed(self) -> bool:
         """Return status of whether this node has been computed."""
         return self._status == ExecutionStatus.COMPLETED
 
     @property
-    def is_filtered(self) -> bool:
-        """Return status of whether this node has been filtered."""
-        return self._status == ExecutionStatus.FILTERED
-
-    @property
     def result(self) -> Any:
         """Return the computed result, or raise if not computed yet."""
-        if not (self.is_computed or self.is_filtered):
+        if not self.is_completed:
             raise RuntimeError(
                 f"DataSpec '{self.name}' has not been executed yet. Call run() first."
             )
