@@ -120,9 +120,7 @@ def by_n_gram_overlap(
             pool.update(item_ngrams)
         return kept
 
-    return DataSpec(
-        NodeType.FILTER, source, _execute, "filter_by_n_gram_overlap"
-    )
+    return DataSpec(NodeType.FILTER, source, _execute, "filter_by_n_gram_overlap")
 
 
 def _lcs_length(a: list[str], b: list[str]) -> int:
