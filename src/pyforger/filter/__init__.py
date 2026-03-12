@@ -4,6 +4,7 @@ Filter operations remove data based on criteria.
 If a filter removes ALL data, the pipeline terminates early.
 """
 from pyforger.filter.diversity import by_exact_match, by_n_gram_overlap, by_rouge_l
+<<<<<<< HEAD
 from pyforger.filter.format import by_invalid_response, by_keyword_blocklist, by_length
 from pyforger.filter.validation import by_syntax
 
@@ -16,3 +17,7 @@ __all__ = [
     "by_rouge_l",
     "by_syntax",
 ]
+=======
+
+__all__ = ["by_exact_match", "by_n_gram_overlap", "by_rouge_l"]
+>>>>>>> 11ebb21 (Format diversity and test cases)
