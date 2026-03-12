@@ -230,9 +230,7 @@ class TestByNGramOverlap:
             {"prompt": "the quick brown fox leaps"},
         ]
         source = make_source(data)
-        result = run(
-            by_n_gram_overlap(source, threshold=0.5, n=2, field="prompt")
-        )
+        result = run(by_n_gram_overlap(source, threshold=0.5, n=2, field="prompt"))
         assert result == [data[0]]
 
     def test_missing_field_raises_error(self):
