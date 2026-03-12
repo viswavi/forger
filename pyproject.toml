@@ -35,6 +35,8 @@ only-packages = true
 [project.optional-dependencies]
 test = [
     "pytest>=6.0.0",
+    "pyyaml",
+    "jsonschema",
 ]
 dev = [
     "pytest",
