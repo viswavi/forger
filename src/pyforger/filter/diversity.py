@@ -5,6 +5,8 @@ examples based on exact matching, ROUGE-L similarity, and n-gram overlap.
 """
 from __future__ import annotations
 
+from rouge_score import rouge_scorer
+
 from pyforger.core import DataSpec, NodeType
 
 
@@ -62,17 +64,18 @@ def by_rouge_l(
     """
 
     def _execute(data: list[dict]) -> list[dict]:
+        scorer = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=False)
         kept: list[dict] = []
-        kept_texts: list[list[str]] = []
+        kept_texts: list[str] = []
         for item in data:
-            tokens = item[field].split()
+            text = item[field]
             is_dup = any(
-                _rouge_l_f1(tokens, other) >= threshold
+                scorer.score(other, text)["rougeL"].fmeasure >= threshold
                 for other in kept_texts
             )
             if not is_dup:
                 kept.append(item)
-                kept_texts.append(tokens)
+                kept_texts.append(text)
         return kept
 
     return DataSpec(NodeType.FILTER, source, _execute, "filter_by_rouge_l")
@@ -111,9 +114,7 @@ def by_n_gram_overlap(
             if not item_ngrams:
                 kept.append(item)
                 continue
-            overlap = sum(
-                1 for ng in item_ngrams if ng in pool
-            ) / len(item_ngrams)
+            overlap = sum(1 for ng in item_ngrams if ng in pool) / len(item_ngrams)
             if overlap >= threshold:
                 continue
             kept.append(item)
@@ -121,33 +122,6 @@ def by_n_gram_overlap(
         return kept
 
     return DataSpec(NodeType.FILTER, source, _execute, "filter_by_n_gram_overlap")
-
-
-def _lcs_length(a: list[str], b: list[str]) -> int:
-    """Compute length of the longest common subsequence."""
-    m, n = len(a), len(b)
-    if m == 0 or n == 0:
-        return 0
-    prev = [0] * (n + 1)
-    for i in range(1, m + 1):
-        curr = [0] * (n + 1)
-        for j in range(1, n + 1):
-            if a[i - 1] == b[j - 1]:
-                curr[j] = prev[j - 1] + 1
-            else:
-                curr[j] = max(prev[j], curr[j - 1])
-        prev = curr
-    return prev[n]
-
-
-def _rouge_l_f1(a: list[str], b: list[str]) -> float:
-    """Compute ROUGE-L F1 between two word-token lists."""
-    lcs = _lcs_length(a, b)
-    if lcs == 0:
-        return 0.0
-    recall = lcs / len(b)
-    precision = lcs / len(a)
-    return 2 * precision * recall / (precision + recall)
 
 
 def _word_ngrams(text: str, n: int) -> list[tuple[str, ...]]:
