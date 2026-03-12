@@ -39,7 +39,7 @@ def by_syntax(
     Args:
         source: Upstream DataSpec providing list[dict] data.
         lang: Language/format to validate against.
-            One of: json, yaml,python, xml.
+            One of: json, yaml, python, xml.
         field: Key in each dict containing the text to validate.
         required_keys: JSON-only. If provided, parsed JSON must be a
             dict containing all listed keys.
