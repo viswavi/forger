@@ -6,9 +6,12 @@ replaced with real API calls.
 
 from __future__ import annotations
 
+import random
 from abc import ABC, abstractmethod
 from enum import Enum, auto
 from typing import Any
+
+import arxiv
 
 
 class RetrieveMode(Enum):
@@ -165,15 +168,79 @@ class HFRetrievalSource(RetrievalSource):
 
 
 class ArxivRetrievalSource(RetrievalSource):
-    """arXiv (arxiv package Search + Client). Stub implementation."""
+    """Retrieval source that fetches papers from arXiv via the API.
+
+    Uses the arxiv Python package (Client and Search) to run queries in three
+    modes: QUERY (text search + n), RANDOM (sample n from a category with seed),
+    and STRUCTURED (criteria-based filters). Returns a list of item dicts with
+    "text", "id", "title", and "summary" per paper.
+
+    Attributes:
+        _kwargs: Options passed at construction; used for Client config and fetch overrides.
+        _client: Lazy-initialized arxiv.Client, reused across fetch() calls.
+    """
 
     def __init__(self, **kwargs: Any) -> None:
-        """Store options for arXiv retrieval. Stub does not call the API.
+        """Store options for arXiv retrieval.
 
         Args:
-            **kwargs: Passed through to fetch(); reserved for Client/Search options.
+            **kwargs: Passed to arxiv.Client (e.g. page_size, delay_seconds,
+                num_retries). Also used for fetch() overrides (sort_by, sort_order,
+                random_category).
         """
         self._kwargs = kwargs
+        self._client: arxiv.Client | None = None
+
+    @staticmethod
+    def _parse_sort_criterion(value: Any) -> arxiv.SortCriterion:
+        """Normalize sort_by from string or enum to arxiv.SortCriterion; default Relevance."""
+        if isinstance(value, arxiv.SortCriterion):
+            return value
+        if value is None:
+            return arxiv.SortCriterion.Relevance
+        m = {
+            "relevance": arxiv.SortCriterion.Relevance,
+            "lastupdateddate": arxiv.SortCriterion.LastUpdatedDate,
+            "submitteddate": arxiv.SortCriterion.SubmittedDate,
+        }
+        key = str(value).lower() if isinstance(value, str) else value
+        return m.get(key, arxiv.SortCriterion.Relevance)
+
+    @staticmethod
+    def _parse_sort_order(value: Any) -> arxiv.SortOrder:
+        """Normalize sort_order from string or enum to arxiv.SortOrder; default Descending."""
+        if isinstance(value, arxiv.SortOrder):
+            return value
+        if value is None:
+            return arxiv.SortOrder.Descending
+        m = {"ascending": arxiv.SortOrder.Ascending, "descending": arxiv.SortOrder.Descending}
+        return m.get(str(value).lower() if isinstance(value, str) else value, arxiv.SortOrder.Descending)
+
+    @staticmethod
+    def _result_to_item(result: arxiv.Result) -> dict[str, Any]:
+        """Convert a single arxiv.Result into a retrieval item dict with text, id, title, summary."""
+        summary = " ".join(result.summary.split()) if result.summary else ""
+        text = f"{result.title}\n\n{summary}".strip() if result.title else summary
+        return {
+            "text": text,  # Title + normalized abstract for embedding/display
+            "id": result.get_short_id(),  # arXiv id e.g. 2107.05580v1
+            "title": result.title,
+            "summary": result.summary or "",
+        }
+
+    def _get_client(self) -> arxiv.Client:
+        """Return the shared arxiv.Client, creating it once with only client-safe kwargs."""
+        if self._client is None:
+            # Only pass Client-supported options: page_size (results per API request),
+            # delay_seconds (pause between requests, e.g. 3 for arXiv guidelines),
+            # num_retries (retries on failure).
+            client_kwargs = {
+                k: v
+                for k, v in self._kwargs.items()
+                if k in ("page_size", "delay_seconds", "num_retries")
+            }
+            self._client = arxiv.Client(**client_kwargs)
+        return self._client
 
     def fetch(
         self,
@@ -185,11 +252,79 @@ class ArxivRetrievalSource(RetrievalSource):
         criteria: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
-        """Return list of items; stub returns empty list.
+        """Return list of items from arXiv according to mode (QUERY, RANDOM, or STRUCTURED).
 
-        Would use arxiv.Search and Client().results() with
-        query/random/structured.
+        Mode behavior:
+        - QUERY: Uses query (default "all:*" when empty) and n. Optional
+          kwargs: sort_by (relevance|submittedDate|lastUpdatedDate or
+          arxiv.SortCriterion), sort_order (ascending|descending or
+          arxiv.SortOrder).
+        - RANDOM: Fetches from category cs.AI with max_results=min(n*10, 500),
+          then samples n with seed. Optional kwargs: random_category (e.g.
+          "cs.CL") to change the category.
+        - STRUCTURED: criteria keys: id_list or ids (list of arXiv ids),
+          category (e.g. "cs.LG"), author, title, query (raw query string).
+          Sort is taken from kwargs (sort_by, sort_order), not from criteria.
+          Query parts are ANDed.
+
+        Returns:
+            List of dicts; each has "text", "id", "title", "summary".
         """
+        # Merge instance options with per-call kwargs; resolve sort from kwargs only
+        merged = {**self._kwargs, **kwargs}
+        sort_by = self._parse_sort_criterion(merged.get("sort_by"))
+        sort_order = self._parse_sort_order(merged.get("sort_order"))
+        client = self._get_client()
+
+        if mode == RetrieveMode.QUERY:
+            q = query or "all:*"
+            search = arxiv.Search(
+                query=q,  # arXiv search query (e.g. "quantum" or "all:*" for broad)
+                max_results=n,  # Maximum number of results to return
+                sort_by=sort_by,  # Field to sort by (relevance, submittedDate, lastUpdatedDate)
+                sort_order=sort_order,  # ascending or descending
+            )
+            results = list(client.results(search))
+            return [self._result_to_item(r) for r in results]
+
+        if mode == RetrieveMode.RANDOM:
+            category = merged.get("random_category", "cs.AI")
+            pool_size = min(n * 10, 500)
+            search = arxiv.Search(
+                query=f"cat:{category}",
+                max_results=pool_size,
+                sort_by=arxiv.SortCriterion.SubmittedDate,
+                sort_order=arxiv.SortOrder.Descending,
+            )
+            results = list(client.results(search))
+            rng = random.Random(seed)
+            sample_size = min(n, len(results))
+            sampled = rng.sample(results, sample_size)
+            return [self._result_to_item(r) for r in sampled]
+
+        if mode == RetrieveMode.STRUCTURED:
+            crit = criteria or {}
+            id_list = crit.get("id_list") or crit.get("ids") or []
+            parts = []
+            if crit.get("category"):
+                parts.append(f"cat:{crit['category']}")  # arXiv category filter
+            if crit.get("author"):
+                parts.append(f'au:{crit["author"]}')  # Author name filter
+            if crit.get("title"):
+                parts.append(f'ti:{crit["title"]}')  # Title text filter
+            if crit.get("query"):
+                parts.append(crit["query"])  # Raw query string
+            search_query = " AND ".join(parts) if parts else ""
+            search = arxiv.Search(
+                query=search_query,  # AND-combined filters (category, author, title, raw query)
+                id_list=id_list,
+                max_results=n,
+                sort_by=sort_by,
+                sort_order=sort_order,  # Ascending or descending (from kwargs)
+            )
+            results = list(client.results(search))
+            return [self._result_to_item(r) for r in results[:n]]
+
         return []
 
 

@@ -162,10 +162,23 @@ def retrieve_from_arxiv(
     name: str = "retrieve_from_arxiv",
     **kwargs: Any,
 ) -> DataSpec:
-    """Retrieve from arXiv (arxiv package Search + Client).
+    """Build an ACQUIRE node that fetches papers from arXiv when the graph runs.
+
+    Args:
+        mode: QUERY (text search), RANDOM (sample from category), or STRUCTURED
+            (filter by criteria).
+        query: Search string for QUERY mode; default "all:*" if empty.
+        n: Number of papers to return.
+        seed: Random seed for RANDOM mode (optional; for reproducibility).
+        criteria: For STRUCTURED mode only. Keys (all optional): id_list or ids
+            (list of arXiv ids), category (e.g. "cs.LG"), author, title, query
+            (raw string). Sort via kwargs sort_by/sort_order, not here.
+        name: Label for the node.
+        **kwargs: Arxiv options: sort_by, sort_order, random_category (RANDOM),
+            page_size, delay_seconds, num_retries (Client).
 
     Returns:
-        DataSpec whose execute_fn returns the fetched list.
+        DataSpec whose execute_fn returns list of dicts with text (title + abstract), id, title, summary.
     """
     source = ArxivRetrievalSource(**kwargs)
     return retrieve(
