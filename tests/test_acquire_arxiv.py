@@ -9,7 +9,9 @@ import pytest
 from pyforger.acquire import ArxivRetrievalSource, RetrieveMode
 
 
-def _make_mock_result(short_id: str, title: str = "Title", summary: str = "Abstract.") -> MagicMock:
+def _make_mock_result(
+    short_id: str, title: str = "Title", summary: str = "Abstract."
+) -> MagicMock:
     r = MagicMock()
     r.get_short_id.return_value = short_id
     r.title = title
@@ -27,8 +29,12 @@ class TestArxivRetrievalSourceFetch:
         self, mock_client_cls: MagicMock, mock_search_cls: MagicMock
     ) -> None:
         """QUERY mode returns n items each with text, id, title, summary."""
-        mock_result1 = _make_mock_result("2107.05580v1", "Quantum ML", "We study quantum.")
-        mock_result2 = _make_mock_result("2301.00001v1", "Deep Learning", "We propose a model.")
+        mock_result1 = _make_mock_result(
+            "2107.05580v1", "Quantum ML", "We study quantum."
+        )
+        mock_result2 = _make_mock_result(
+            "2301.00001v1", "Deep Learning", "We propose a model."
+        )
         mock_client = MagicMock()
         mock_client.results.return_value = iter([mock_result1, mock_result2])
         mock_client_cls.return_value = mock_client
@@ -40,7 +46,8 @@ class TestArxivRetrievalSourceFetch:
         assert items[0]["id"] == "2107.05580v1"
         assert items[0]["title"] == "Quantum ML"
         assert items[0]["summary"] == "We study quantum."
-        assert "Quantum ML" in items[0]["text"] and "We study quantum." in items[0]["text"]
+        assert "Quantum ML" in items[0]["text"]
+        assert "We study quantum." in items[0]["text"]
         assert items[1]["id"] == "2301.00001v1"
         assert items[1]["title"] == "Deep Learning"
         mock_search_cls.assert_called_once()
@@ -78,7 +85,7 @@ class TestArxivRetrievalSourceFetch:
             for i in range(10)
         ]
         mock_client = MagicMock()
-        # Return a fresh iterator each time results() is called (exhausted after first fetch)
+        # Fresh iterator each time results() is called (exhausted after first)
         mock_client.results.side_effect = lambda search: iter(results_10)
         mock_client_cls.return_value = mock_client
 
@@ -129,7 +136,9 @@ class TestArxivRetrievalSourceFetch:
         mock_client_cls.return_value = mock_client
 
         source = ArxivRetrievalSource()
-        source.fetch(RetrieveMode.STRUCTURED, n=5, criteria={"ids": ["9999.9999v1"]})
+        source.fetch(
+            RetrieveMode.STRUCTURED, n=5, criteria={"ids": ["9999.9999v1"]}
+        )
 
         call_kw = mock_search_cls.call_args[1]
         assert call_kw["id_list"] == ["9999.9999v1"]
@@ -139,7 +148,8 @@ class TestArxivRetrievalSourceFetch:
         reason="Set PYFORGER_ARXIV_LIVE=1 to run live arXiv API test",
     )
     def test_fetch_live_query(self) -> None:
-        """Integration test: real API call for QUERY mode (skipped unless PYFORGER_ARXIV_LIVE=1)."""
+        """Integration test: real API call for QUERY mode
+        (skipped unless PYFORGER_ARXIV_LIVE=1)."""
         source = ArxivRetrievalSource()
         items = source.fetch(RetrieveMode.QUERY, query="machine learning", n=2)
         assert len(items) == 2

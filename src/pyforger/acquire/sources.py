@@ -176,7 +176,8 @@ class ArxivRetrievalSource(RetrievalSource):
     "text", "id", "title", and "summary" per paper.
 
     Attributes:
-        _kwargs: Options passed at construction; used for Client config and fetch overrides.
+        _kwargs: Options passed at construction; used for Client config and
+            fetch overrides.
         _client: Lazy-initialized arxiv.Client, reused across fetch() calls.
     """
 
@@ -193,7 +194,8 @@ class ArxivRetrievalSource(RetrievalSource):
 
     @staticmethod
     def _parse_sort_criterion(value: Any) -> arxiv.SortCriterion:
-        """Normalize sort_by from string or enum to arxiv.SortCriterion; default Relevance."""
+        """Normalize sort_by from string or enum to arxiv.SortCriterion;
+        default Relevance."""
         if isinstance(value, arxiv.SortCriterion):
             return value
         if value is None:
@@ -208,17 +210,25 @@ class ArxivRetrievalSource(RetrievalSource):
 
     @staticmethod
     def _parse_sort_order(value: Any) -> arxiv.SortOrder:
-        """Normalize sort_order from string or enum to arxiv.SortOrder; default Descending."""
+        """Normalize sort_order from string or enum to arxiv.SortOrder;
+        default Descending."""
         if isinstance(value, arxiv.SortOrder):
             return value
         if value is None:
             return arxiv.SortOrder.Descending
-        m = {"ascending": arxiv.SortOrder.Ascending, "descending": arxiv.SortOrder.Descending}
-        return m.get(str(value).lower() if isinstance(value, str) else value, arxiv.SortOrder.Descending)
+        m = {
+            "ascending": arxiv.SortOrder.Ascending,
+            "descending": arxiv.SortOrder.Descending,
+        }
+        return m.get(
+            str(value).lower() if isinstance(value, str) else value,
+            arxiv.SortOrder.Descending,
+        )
 
     @staticmethod
     def _result_to_item(result: arxiv.Result) -> dict[str, Any]:
-        """Convert a single arxiv.Result into a retrieval item dict with text, id, title, summary."""
+        """Convert a single arxiv.Result into a retrieval item dict with
+        text, id, title, summary."""
         summary = " ".join(result.summary.split()) if result.summary else ""
         text = f"{result.title}\n\n{summary}".strip() if result.title else summary
         return {
@@ -229,7 +239,8 @@ class ArxivRetrievalSource(RetrievalSource):
         }
 
     def _get_client(self) -> arxiv.Client:
-        """Return the shared arxiv.Client, creating it once with only client-safe kwargs."""
+        """Return the shared arxiv.Client, creating it once with only
+        client-safe kwargs."""
         if self._client is None:
             # Only pass Client-supported options: page_size (results per API request),
             # delay_seconds (pause between requests, e.g. 3 for arXiv guidelines),
@@ -252,7 +263,8 @@ class ArxivRetrievalSource(RetrievalSource):
         criteria: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
-        """Return list of items from arXiv according to mode (QUERY, RANDOM, or STRUCTURED).
+        """Return list of items from arXiv according to mode
+        (QUERY, RANDOM, or STRUCTURED).
 
         Mode behavior:
         - QUERY: Uses query (default "all:*" when empty) and n. Optional
@@ -279,10 +291,10 @@ class ArxivRetrievalSource(RetrievalSource):
         if mode == RetrieveMode.QUERY:
             q = query or "all:*"
             search = arxiv.Search(
-                query=q,  # arXiv search query (e.g. "quantum" or "all:*" for broad)
-                max_results=n,  # Maximum number of results to return
-                sort_by=sort_by,  # Field to sort by (relevance, submittedDate, lastUpdatedDate)
-                sort_order=sort_order,  # ascending or descending
+                query=q,  # arXiv search query (e.g. "quantum" or "all:*")
+                max_results=n,
+                sort_by=sort_by,  # relevance, submittedDate, lastUpdatedDate
+                sort_order=sort_order,
             )
             results = list(client.results(search))
             return [self._result_to_item(r) for r in results]
@@ -316,11 +328,11 @@ class ArxivRetrievalSource(RetrievalSource):
                 parts.append(crit["query"])  # Raw query string
             search_query = " AND ".join(parts) if parts else ""
             search = arxiv.Search(
-                query=search_query,  # AND-combined filters (category, author, title, raw query)
+                query=search_query,  # AND-combined filters
                 id_list=id_list,
                 max_results=n,
                 sort_by=sort_by,
-                sort_order=sort_order,  # Ascending or descending (from kwargs)
+                sort_order=sort_order,
             )
             results = list(client.results(search))
             return [self._result_to_item(r) for r in results[:n]]

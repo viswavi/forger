@@ -178,7 +178,8 @@ def retrieve_from_arxiv(
             page_size, delay_seconds, num_retries (Client).
 
     Returns:
-        DataSpec whose execute_fn returns list of dicts with text (title + abstract), id, title, summary.
+        DataSpec whose execute_fn returns list of dicts with text (title +
+        abstract), id, title, summary.
     """
     source = ArxivRetrievalSource(**kwargs)
     return retrieve(
