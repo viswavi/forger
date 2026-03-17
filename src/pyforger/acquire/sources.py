@@ -384,7 +384,7 @@ class S2RetrievalSource(RetrievalSource):
         }
 
     def _get_client(self) -> SemanticScholar:
-        """Return shared SemanticScholar client, creating once with client-safe kwargs."""
+        """Return shared S2 client, creating once with client-safe kwargs."""
         if self._client is None:
             client_kwargs = {
                 k: v
@@ -500,14 +500,16 @@ class S2RetrievalSource(RetrievalSource):
             year = crit.get("year")
             venue = crit.get("venue")
             fields_of_study = crit.get("fields_of_study")
-            kwargs_s2 = {"limit": self._PAGE_LIMIT}
+            kwargs_s2: dict[str, Any] = {"limit": self._PAGE_LIMIT}
             if year is not None:
                 kwargs_s2["year"] = str(year)
             if venue is not None:
                 kwargs_s2["venue"] = venue if isinstance(venue, list) else [venue]
             if fields_of_study is not None:
                 kwargs_s2["fields_of_study"] = (
-                    fields_of_study if isinstance(fields_of_study, list) else [fields_of_study]
+                    fields_of_study
+                    if isinstance(fields_of_study, list)
+                    else [fields_of_study]
                 )
             results = client.search_paper(q, **kwargs_s2)
             accumulated = self._collect_paginated(results, n)

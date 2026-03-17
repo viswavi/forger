@@ -204,7 +204,7 @@ def retrieve_from_s2(
     name: str = "retrieve_from_s2",
     **kwargs: Any,
 ) -> DataSpec:
-    """Build an ACQUIRE node that fetches papers from Semantic Scholar when the graph runs.
+    """Build an ACQUIRE node that fetches papers from S2 when the graph runs.
 
     Args:
         mode: QUERY (text search), RANDOM (sample from pool), or STRUCTURED

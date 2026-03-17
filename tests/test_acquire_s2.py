@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from pyforger.acquire import S2RetrievalSource, RetrieveMode
+from pyforger.acquire import RetrieveMode, S2RetrievalSource
 
 
 def _make_mock_paper(
@@ -63,7 +63,7 @@ class TestS2RetrievalSourceFetch:
     def test_query_mode_empty_query_uses_default(
         self, mock_scholar_cls: MagicMock
     ) -> None:
-        """When query is empty, assert the call uses the default query (machine learning)."""
+        """When query is empty, call uses the default query (machine learning)."""
         mock_results = _make_paginated_results([])
         mock_results.next = None
         mock_client = MagicMock()
@@ -85,8 +85,7 @@ class TestS2RetrievalSourceFetch:
     ) -> None:
         """RANDOM mode samples n items using seed; same seed gives same order."""
         results_10 = [
-            _make_mock_paper(f"id{i}", f"Paper {i}", f"Abstract {i}")
-            for i in range(10)
+            _make_mock_paper(f"id{i}", f"Paper {i}", f"Abstract {i}") for i in range(10)
         ]
         mock_results = _make_paginated_results(results_10)
         mock_results.next = None
@@ -163,7 +162,7 @@ class TestS2RetrievalSourceFetch:
         assert "learning" in query_str
 
     def test_result_to_item_normalization(self) -> None:
-        """_result_to_item produces text, id, title, summary with normalized whitespace."""
+        """_result_to_item produces text, id, title, summary; normalized whitespace."""
         mock_paper = _make_mock_paper(
             "norm-1", "  A Title  ", "Line one.\n\nLine two."
         )
@@ -181,8 +180,12 @@ class TestS2RetrievalSourceFetch:
     ) -> None:
         """When n > 100, next_page() is called until enough items are collected."""
         page1 = [_make_mock_paper(f"p1-{i}", f"Paper {i}", "Abst") for i in range(100)]
-        page2 = [_make_mock_paper(f"p2-{i}", f"Paper {i+100}", "Abst") for i in range(100)]
-        page3 = [_make_mock_paper(f"p3-{i}", f"Paper {i+200}", "Abst") for i in range(50)]
+        page2 = [
+            _make_mock_paper(f"p2-{i}", f"Paper {i+100}", "Abst") for i in range(100)
+        ]
+        page3 = [
+            _make_mock_paper(f"p3-{i}", f"Paper {i+200}", "Abst") for i in range(50)
+        ]
         all_250 = page1 + page2 + page3
 
         mock_results = MagicMock()
@@ -216,7 +219,9 @@ class TestS2RetrievalSourceFetch:
         self, mock_scholar_cls: MagicMock
     ) -> None:
         """When n*10 > 1000, bulk search is used automatically (e.g. n=200)."""
-        pool_2000 = [_make_mock_paper(f"bulk-{i}", f"Bulk {i}", "Abst") for i in range(2000)]
+        pool_2000 = [
+            _make_mock_paper(f"bulk-{i}", f"Bulk {i}", "Abst") for i in range(2000)
+        ]
         mock_results = MagicMock()
         mock_results.items = pool_2000[:1000]
         mock_results.next = 1001
