@@ -194,9 +194,7 @@ class ArxivRetrievalSource(RetrievalSource):
 
     @staticmethod
     def _parse_sort_criterion(value: Any) -> arxiv.SortCriterion:
-        """Normalize sort_by from string or enum to arxiv.SortCriterion; default Relevance.
-
-        """
+        """Normalize sort_by to arxiv.SortCriterion; default Relevance."""
         if isinstance(value, arxiv.SortCriterion):
             return value
         if value is None:
@@ -211,9 +209,7 @@ class ArxivRetrievalSource(RetrievalSource):
 
     @staticmethod
     def _parse_sort_order(value: Any) -> arxiv.SortOrder:
-        """Normalize sort_order from string or enum to arxiv.SortOrder; default Descending.
-
-        """
+        """Normalize sort_order to arxiv.SortOrder; default Descending."""
         if isinstance(value, arxiv.SortOrder):
             return value
         if value is None:
@@ -229,9 +225,7 @@ class ArxivRetrievalSource(RetrievalSource):
 
     @staticmethod
     def _result_to_item(result: arxiv.Result) -> dict[str, Any]:
-        """Convert a single arxiv.Result into a retrieval item dict with text, id, title, summary.
-
-        """
+        """Convert arxiv.Result to item dict (text, id, title, summary)."""
         summary = " ".join(result.summary.split()) if result.summary else ""
         text = f"{result.title}\n\n{summary}".strip() if result.title else summary
         return {
@@ -242,9 +236,7 @@ class ArxivRetrievalSource(RetrievalSource):
         }
 
     def _get_client(self) -> arxiv.Client:
-        """Return the shared arxiv.Client, creating it once with only client-safe kwargs.
-
-        """
+        """Return shared arxiv.Client, creating once with client-safe kwargs."""
         if self._client is None:
             # Only pass Client-supported options: page_size (results per API request),
             # delay_seconds (pause between requests, e.g. 3 for arXiv guidelines),
@@ -267,7 +259,7 @@ class ArxivRetrievalSource(RetrievalSource):
         criteria: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
-        """Return list of items from arXiv according to mode (QUERY, RANDOM, or STRUCTURED).
+        """Return items from arXiv by mode (QUERY, RANDOM, or STRUCTURED).
 
         Mode behavior:
         - QUERY: Uses query (default "all:*" when empty) and n. Optional

@@ -146,9 +146,7 @@ class TestArxivRetrievalSourceFetch:
         reason="Set PYFORGER_ARXIV_LIVE=1 to run live arXiv API test",
     )
     def test_fetch_live_query(self) -> None:
-        """Integration test: real API call for QUERY mode (skipped unless PYFORGER_ARXIV_LIVE=1).
-
-        """
+        """Live API test for QUERY mode (skipped unless PYFORGER_ARXIV_LIVE=1)."""
         source = ArxivRetrievalSource()
         items = source.fetch(RetrieveMode.QUERY, query="machine learning", n=2)
         assert len(items) == 2
