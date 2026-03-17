@@ -136,9 +136,7 @@ class TestArxivRetrievalSourceFetch:
         mock_client_cls.return_value = mock_client
 
         source = ArxivRetrievalSource()
-        source.fetch(
-            RetrieveMode.STRUCTURED, n=5, criteria={"ids": ["9999.9999v1"]}
-        )
+        source.fetch(RetrieveMode.STRUCTURED, n=5, criteria={"ids": ["9999.9999v1"]})
 
         call_kw = mock_search_cls.call_args[1]
         assert call_kw["id_list"] == ["9999.9999v1"]
@@ -148,8 +146,9 @@ class TestArxivRetrievalSourceFetch:
         reason="Set PYFORGER_ARXIV_LIVE=1 to run live arXiv API test",
     )
     def test_fetch_live_query(self) -> None:
-        """Integration test: real API call for QUERY mode
-        (skipped unless PYFORGER_ARXIV_LIVE=1)."""
+        """Integration test: real API call for QUERY mode (skipped unless PYFORGER_ARXIV_LIVE=1).
+
+        """
         source = ArxivRetrievalSource()
         items = source.fetch(RetrieveMode.QUERY, query="machine learning", n=2)
         assert len(items) == 2
