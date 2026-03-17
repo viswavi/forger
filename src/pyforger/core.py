@@ -28,7 +28,6 @@ class ExecutionStatus(Enum):
     RUNNING = auto()
     COMPLETED = auto()
     FAILED = auto()
-    FILTERED = auto()
 
 
 class DataSpec:
