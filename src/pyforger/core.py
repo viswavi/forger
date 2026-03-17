@@ -28,6 +28,7 @@ class ExecutionStatus(Enum):
     RUNNING = auto()
     COMPLETED = auto()
     FAILED = auto()
+    SKIPPED = auto()
 
 
 class DataSpec:
@@ -101,3 +102,17 @@ class DataSpec:
     def get_dependencies(self) -> list[DataSpec]:
         """Return list of upstream DataSpec nodes."""
         return list(self.inputs)
+
+    @property
+    def is_computed(self) -> bool:
+        """Return status of whether this node has been computed."""
+        return self._status == ExecutionStatus.COMPLETED
+
+    @property
+    def result(self) -> Any:
+        """Return the computed result, or raise if not computed yet."""
+        if not self.is_computed:
+            raise RuntimeError(
+                f"DataSpec '{self.name}' has not been executed yet. Call run() first."
+            )
+        return self._cached_result
