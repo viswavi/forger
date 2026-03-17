@@ -12,6 +12,7 @@ from enum import Enum, auto
 from typing import Any
 
 import arxiv
+from semanticscholar import SemanticScholar  # type: ignore[import-untyped]
 
 
 class RetrieveMode(Enum):
@@ -336,15 +337,91 @@ class ArxivRetrievalSource(RetrievalSource):
 
 
 class S2RetrievalSource(RetrievalSource):
-    """Semantic Scholar (semanticscholar library). Stub implementation."""
+    """Retrieval source that fetches papers from Semantic Scholar via the API.
 
-    def __init__(self, **kwargs: Any) -> None:
-        """Store options for Semantic Scholar retrieval. Stub does not call the API.
+    Uses the semanticscholar library (SemanticScholar.search_paper) in three
+    modes: QUERY (up to 1000), RANDOM (pool up to 1000 or 1000+ with bulk),
+    and STRUCTURED (up to 1000). Returns a list of item dicts with
+    "text", "id", "title", and "summary" per paper. QUERY and STRUCTURED
+    are capped at 1000 results due to API limits.
+    """
+
+    # Default query when QUERY mode is called with empty query
+    _DEFAULT_QUERY = "machine learning"
+    # Relevance search returns at most 1000 results; 100 per request
+    _PAGE_LIMIT = 100
+    _RELEVANCE_CAP = 1000
+    # Bulk search: 1000 items per page; cap pool size for RANDOM
+    _BULK_PAGE_SIZE = 1000
+    _RANDOM_POOL_MAX_BULK = 10_000
+
+    def __init__(self, api_key: str | None = None, **kwargs: Any) -> None:
+        """Store options for Semantic Scholar retrieval.
 
         Args:
-            **kwargs: Passed through to fetch(); reserved for SemanticScholar options.
+            api_key: Optional API key for Semantic Scholar (forwarded to
+                SemanticScholar(api_key=...)).
+            **kwargs: Passed to SemanticScholar (timeout, api_url, retry)
+                and to fetch() overrides (e.g. fields_of_study for RANDOM).
         """
+        self._api_key = api_key
         self._kwargs = kwargs
+        self._client: SemanticScholar | None = None
+
+    @staticmethod
+    def _result_to_item(paper: Any) -> dict[str, Any]:
+        """Convert semanticscholar Paper to item dict (text, id, title, summary)."""
+        abstract = paper.abstract if getattr(paper, "abstract", None) else None
+        title = paper.title if getattr(paper, "title", None) else None
+        summary = " ".join(abstract.split()) if abstract else ""
+        text = f"{title}\n\n{summary}".strip() if title else summary
+        paper_id = getattr(paper, "paperId", None) or ""
+        return {
+            "text": text,
+            "id": paper_id,
+            "title": title or "",
+            "summary": abstract or "",
+        }
+
+    def _get_client(self) -> SemanticScholar:
+        """Return shared SemanticScholar client, creating once with client-safe kwargs."""
+        if self._client is None:
+            client_kwargs = {
+                k: v
+                for k, v in self._kwargs.items()
+                if k in ("timeout", "api_url", "debug", "retry")
+            }
+            api_key = self._kwargs.get("api_key", self._api_key)
+            if api_key is not None:
+                client_kwargs["api_key"] = api_key
+            self._client = SemanticScholar(**client_kwargs)
+        return self._client
+
+    def _collect_paginated(
+        self,
+        results: Any,
+        n: int,
+        cap: int | None = None,
+    ) -> list[Any]:
+        """Accumulate items from PaginatedResults via next_page() until n or cap."""
+        if cap is None:
+            cap = self._RELEVANCE_CAP
+        accumulated = list(getattr(results, "items", []) or [])
+        need = min(n, cap)
+        while len(accumulated) < need:
+            next_pos = getattr(results, "next", None)
+            total = getattr(results, "total", None)
+            if next_pos is None or (total is not None and next_pos >= total):
+                break
+            try:
+                results.next_page()
+            except Exception:
+                break
+            new_items = getattr(results, "items", []) or []
+            if len(new_items) <= len(accumulated):
+                break
+            accumulated = list(new_items)
+        return accumulated[:n]
 
     def fetch(
         self,
@@ -356,9 +433,84 @@ class S2RetrievalSource(RetrievalSource):
         criteria: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
-        """Return list of items; stub returns empty list.
+        """Return items from Semantic Scholar by mode (QUERY, RANDOM, or STRUCTURED).
 
-        Would use SemanticScholar().search_paper() with
-        query/random/structured.
+        QUERY: When query is empty, uses default "machine learning". Paginates
+        (100 per request) up to n or 1000. STRUCTURED: Builds search from
+        criteria (query, year, fields_of_study, venue; author folded into query).
+        Same pagination; cap 1000. RANDOM: Builds pool via relevance search
+        (paginated, up to 1000) or bulk when requested pool size (n*10) exceeds
+        1000; bulk pool is capped at 10,000. Then samples n with seed. Effective
+        max for QUERY/STRUCTURED: 1000.
+
+        Returns:
+            List of dicts; each has "text", "id", "title", "summary".
         """
+        merged = {**self._kwargs, **kwargs}
+        client = self._get_client()
+
+        if mode == RetrieveMode.QUERY:
+            q = query or self._DEFAULT_QUERY
+            results = client.search_paper(q, limit=self._PAGE_LIMIT)
+            accumulated = self._collect_paginated(results, n)
+            return [self._result_to_item(p) for p in accumulated]
+
+        if mode == RetrieveMode.RANDOM:
+            use_bulk = (n * 10) > self._RELEVANCE_CAP
+            pool_size = (
+                min(n * 10, self._RANDOM_POOL_MAX_BULK)
+                if use_bulk
+                else min(n * 10, self._RELEVANCE_CAP)
+            )
+            default_query = merged.get("fields_of_study", ["Computer Science"])
+            if isinstance(default_query, list):
+                query_str = default_query[0] if default_query else "Computer Science"
+            else:
+                query_str = str(default_query)
+            if use_bulk:
+                results = client.search_paper(query_str, bulk=True)
+                accumulated = []
+                need = pool_size
+                while len(accumulated) < need:
+                    accumulated.extend(getattr(results, "items", []) or [])
+                    if len(accumulated) >= need:
+                        break
+                    try:
+                        results.next_page()
+                    except Exception:
+                        break
+                    new_items = getattr(results, "items", []) or []
+                    if len(new_items) <= len(accumulated):
+                        break
+                    accumulated = list(new_items)
+                pool = accumulated[:need]
+            else:
+                results = client.search_paper(query_str, limit=self._PAGE_LIMIT)
+                pool = self._collect_paginated(results, pool_size)
+            rng = random.Random(seed)
+            sample_size = min(n, len(pool))
+            sampled = rng.sample(pool, sample_size)
+            return [self._result_to_item(p) for p in sampled]
+
+        if mode == RetrieveMode.STRUCTURED:
+            crit = criteria or {}
+            q = " ".join(
+                x for x in (crit.get("query", ""), crit.get("author", "")) if x
+            ).strip() or self._DEFAULT_QUERY
+            year = crit.get("year")
+            venue = crit.get("venue")
+            fields_of_study = crit.get("fields_of_study")
+            kwargs_s2 = {"limit": self._PAGE_LIMIT}
+            if year is not None:
+                kwargs_s2["year"] = str(year)
+            if venue is not None:
+                kwargs_s2["venue"] = venue if isinstance(venue, list) else [venue]
+            if fields_of_study is not None:
+                kwargs_s2["fields_of_study"] = (
+                    fields_of_study if isinstance(fields_of_study, list) else [fields_of_study]
+                )
+            results = client.search_paper(q, **kwargs_s2)
+            accumulated = self._collect_paginated(results, n)
+            return [self._result_to_item(p) for p in accumulated]
+
         return []

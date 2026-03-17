@@ -204,10 +204,25 @@ def retrieve_from_s2(
     name: str = "retrieve_from_s2",
     **kwargs: Any,
 ) -> DataSpec:
-    """Retrieve from Semantic Scholar (semanticscholar library).
+    """Build an ACQUIRE node that fetches papers from Semantic Scholar when the graph runs.
+
+    Args:
+        mode: QUERY (text search), RANDOM (sample from pool), or STRUCTURED
+            (filter by criteria).
+        query: Search string for QUERY mode; default "machine learning" if empty.
+        n: Number of papers to return.
+        seed: Random seed for RANDOM mode (optional; for reproducibility).
+        criteria: For STRUCTURED mode only. Keys (all optional): query, author
+            (folded into query), year, venue, fields_of_study. Same pagination
+            as QUERY; cap 1000.
+        name: Label for the node.
+        **kwargs: S2 client options: api_key, timeout, api_url, debug, retry.
+            For RANDOM mode: fields_of_study (e.g. ["Computer Science"]) to
+            build the search pool.
 
     Returns:
-        DataSpec whose execute_fn returns the fetched list.
+        DataSpec whose execute_fn returns list of dicts with text (title +
+        abstract), id, title, summary.
     """
     source = S2RetrievalSource(**kwargs)
     return retrieve(
