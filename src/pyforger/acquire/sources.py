@@ -494,9 +494,12 @@ class S2RetrievalSource(RetrievalSource):
 
         if mode == RetrieveMode.STRUCTURED:
             crit = criteria or {}
-            q = " ".join(
-                x for x in (crit.get("query", ""), crit.get("author", "")) if x
-            ).strip() or self._DEFAULT_QUERY
+            q = (
+                " ".join(
+                    x for x in (crit.get("query", ""), crit.get("author", "")) if x
+                ).strip()
+                or self._DEFAULT_QUERY
+            )
             year = crit.get("year")
             venue = crit.get("venue")
             fields_of_study = crit.get("fields_of_study")

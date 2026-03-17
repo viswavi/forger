@@ -139,9 +139,7 @@ class TestS2RetrievalSourceFetch:
         assert call_kw.get("venue") == ["ACL"]
 
     @patch("pyforger.acquire.sources.SemanticScholar")
-    def test_structured_mode_author_in_query(
-        self, mock_scholar_cls: MagicMock
-    ) -> None:
+    def test_structured_mode_author_in_query(self, mock_scholar_cls: MagicMock) -> None:
         """STRUCTURED mode with author folds author into the query string."""
         mock_results = _make_paginated_results([])
         mock_results.next = None
@@ -163,9 +161,7 @@ class TestS2RetrievalSourceFetch:
 
     def test_result_to_item_normalization(self) -> None:
         """_result_to_item produces text, id, title, summary; normalized whitespace."""
-        mock_paper = _make_mock_paper(
-            "norm-1", "  A Title  ", "Line one.\n\nLine two."
-        )
+        mock_paper = _make_mock_paper("norm-1", "  A Title  ", "Line one.\n\nLine two.")
         item = S2RetrievalSource._result_to_item(mock_paper)
         assert item["id"] == "norm-1"
         assert item["title"] == "  A Title  "
