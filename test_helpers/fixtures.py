@@ -35,7 +35,7 @@ def make_double_length(source: DataSpec) -> DataSpec:
     return DataSpec(NodeType.ALTER, source, _execute, "test_double")
 
 
-def make_concat(*sources) -> DataSpec:
+def make_concat(*sources: DataSpec) -> DataSpec:
     """Alter node that concatenates multiple inputs."""
 
     def _execute(*input_data):
