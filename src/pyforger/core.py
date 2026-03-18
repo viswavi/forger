@@ -103,14 +103,14 @@ class DataSpec:
         return list(self.inputs)
 
     @property
-    def is_computed(self) -> bool:
+    def is_completed(self) -> bool:
         """Return status of whether this node has been computed."""
         return self._status == ExecutionStatus.COMPLETED
 
     @property
     def result(self) -> Any:
         """Return the computed result, or raise if not computed yet."""
-        if not self.is_computed:
+        if not self.is_completed:
             raise RuntimeError(
                 f"DataSpec '{self.name}' has not been executed yet. Call run() first."
             )

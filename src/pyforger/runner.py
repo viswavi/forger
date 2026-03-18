@@ -53,7 +53,7 @@ def run(
     if node_id in cache:
         return cache[node_id]
 
-    if dataset.is_computed:
+    if dataset.is_completed:
         return dataset.result
 
     execution_order = _topological_sort(dataset)
@@ -112,7 +112,7 @@ def _execute_node(node: DataSpec, cache: dict[int, Any]) -> None:
     if node_id in cache:
         return
 
-    if node.is_computed:
+    if node.is_completed:
         cache[node_id] = node.result
         return
 
