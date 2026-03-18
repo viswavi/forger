@@ -9,7 +9,6 @@ from typing import Any, Union
 
 import litellm
 
-# Type aliases
 Message = dict[str, str]
 Prompt = Union[str, list[Message]]
 
@@ -179,3 +178,17 @@ class Model:
         }
 
         return all_results
+
+
+def model(model_id: str, **kwargs: Any) -> Model:
+    """Factory for Model instances. Use as ``forger.model(...)``.
+
+    Args:
+        model_id: LiteLLM model string (e.g. "gpt-4o",
+            "anthropic/claude-sonnet-4-20250514").
+        **kwargs: Forwarded to :class:`Model` (api_key, temperature, etc.).
+
+    Returns:
+        A configured Model instance.
+    """
+    return Model(model_id, **kwargs)

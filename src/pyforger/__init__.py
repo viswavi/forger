@@ -8,12 +8,14 @@ import pyforger.decompose as decompose
 import pyforger.filter as filter  # noqa: A001
 from pyforger.core import DataSpec, ExecutionStatus, NodeType
 from pyforger.runner import run
+from pyforger.acquire.model import model
 
 __all__ = [
     "DataSpec",
     "NodeType",
     "ExecutionStatus",
     "run",
+    "model",
     "acquire",
     "alter",
     "decompose",
