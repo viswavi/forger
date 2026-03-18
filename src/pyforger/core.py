@@ -24,10 +24,10 @@ class NodeType(Enum):
 class ExecutionStatus(Enum):
     """Status of a DataSpec node during execution."""
 
-    PENDING = auto()
-    RUNNING = auto()
-    COMPLETED = auto()
-    FAILED = auto()
+    PENDING = auto()  # The execution of the graph has not yet reached this node
+    RUNNING = auto()  # This node is currently being executed
+    COMPLETED = auto()  # Execution was successful and the result has been cached
+    FAILED = auto()  # Execution failed
 
 
 class DataSpec:
