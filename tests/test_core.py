@@ -1,6 +1,6 @@
 """Tests for Forger core infrastructure."""
 
-from fixtures import make_concat, make_double_length, make_source
+from fixtures import make_concat, make_double_repetition_data, make_source
 
 from pyforger import DataSpec, NodeType
 
@@ -31,7 +31,7 @@ class TestGraphConstruction:
         is recorded.
         """
         source = make_source([1, 2, 3])
-        doubled = make_double_length(source)
+        doubled = make_double_repetition_data(source)
         assert doubled.get_dependencies() == [source]
 
     def test_multiple_dependencies_tracked(self):
