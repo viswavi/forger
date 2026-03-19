@@ -1,8 +1,8 @@
 """Tests for Forger core infrastructure."""
 
-from fixtures import make_concat, make_double_repetition_data, make_source
+from fixtures import CallCounter, make_concat, make_double_repetition_data, make_source
 
-from pyforger import DataSpec, NodeType
+from pyforger import DataSpec
 
 
 class TestGraphConstruction:
@@ -14,15 +14,9 @@ class TestGraphConstruction:
 
     def test_no_execution_on_build(self):
         """Test that execute function is not called on node creation."""
-        execution_count = 0
-
-        def execute():
-            nonlocal execution_count
-            execution_count += 1
-            return [1, 2, 3]
-
-        DataSpec(NodeType.ACQUIRE, [], execute, "test_source")
-        assert execution_count == 0
+        counter = CallCounter()
+        make_source([1, 2, 3], counter=counter)
+        assert counter.count == 0
 
     def test_single_dependency_tracked(self):
         """Test that nodes can track one upstream dependency.
