@@ -1,7 +1,12 @@
 """Tests for Forger core infrastructure."""
 
 import pytest
-from fixtures import make_concat, make_double_length, make_empty_filter, make_source
+from fixtures import (
+    make_concat,
+    make_double_repetition_data,
+    make_empty_filter,
+    make_source,
+)
 
 from pyforger import DataSpec, NodeType, run
 
@@ -32,7 +37,7 @@ class TestGraphConstruction:
         is recorded.
         """
         source = make_source([1, 2, 3])
-        doubled = make_double_length(source)
+        doubled = make_double_repetition_data(source)
         assert doubled.get_dependencies() == [source]
 
     def test_multiple_dependencies_tracked(self):
@@ -55,7 +60,7 @@ class TestExecution:
 
     def test_chain(self):
         """Executing a chain of two nodes gives the expected result."""
-        result = run(make_double_length(make_source([1, 2])))
+        result = run(make_double_repetition_data(make_source([1, 2])))
         assert result == [1, 2, 1, 2]
 
     def test_caching_prevents_reexecution(self):
@@ -68,7 +73,7 @@ class TestExecution:
             return [1, 2]
 
         source = DataSpec(NodeType.ACQUIRE, [], execute, "test_source")
-        doubled = make_double_length(source)
+        doubled = make_double_repetition_data(source)
         run(doubled)
         run(doubled)
         assert execution_count == 1
@@ -83,7 +88,10 @@ class TestExecution:
             return [1, 2]
 
         source = DataSpec(NodeType.ACQUIRE, [], execute, "test_source")
-        merged = make_concat(make_double_length(source), make_double_length(source))
+        merged = make_concat(
+            make_double_repetition_data(source),
+            make_double_repetition_data(source),
+        )
         run(merged)
         assert execution_count == 1
 

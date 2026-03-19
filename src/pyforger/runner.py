@@ -8,23 +8,15 @@ from collections import deque
 from collections.abc import Callable
 from typing import Any
 
-from pyforger.core import DataSpec, ExecutionStatus, NodeType
+from pyforger.core import DataSpec, ExecutionStatus
 from pyforger.utils import get_formatted_logger
 
 logger = get_formatted_logger("Runner")
 
 
-class FilterTerminationError(Exception):
-    """Raised when a filter operation returns empty results."""
-
-    def __init__(self, operation_name: str, message: str = ""):
-        """Initialize with the name of the filter operation that caused the error."""
-        self.operation_name = operation_name
-        super().__init__(message or f"Filter '{operation_name}' returned empty results")
-
-
 def run(
-    pipeline: DataSpec | Callable[..., DataSpec], cache: dict[int, Any] | None = None
+    pipeline: DataSpec | Callable[..., DataSpec],
+    cache: dict[int, Any] | None = None,
 ) -> Any:
     """Execute a dataset creation pipeline (expressing a DAG of data operations).
 
@@ -35,8 +27,7 @@ def run(
         pipeline: A DataSpec node, or a function that builds and returns one.
                   Passing a function lets you define pipelines as plain Python
                   functions and pass them directly to run(). If a function is passed,
-                  it must return a DataSpec or an iterable (e.g. a list of multiple
-                  DataSpecs).
+                  it must return a DataSpec.
         cache: Optional shared cache (for advanced use / testing).
 
     Returns:
@@ -60,19 +51,13 @@ def run(
     if node_id in cache:
         return cache[node_id]
 
-    if dataset.is_computed:
+    if dataset.is_completed:
         return dataset.result
 
     execution_order = _topological_sort(dataset)
 
     for node in execution_order:
-        try:
-            _execute_node(node, cache)
-        except FilterTerminationError as e:
-            logger.debug(f"Filter removed all data: {e}")
-            empty_result: list[dict] = []
-            cache[id(dataset)] = empty_result
-            return empty_result
+        _execute_node(node, cache)
 
     return cache[id(dataset)]
 
@@ -125,7 +110,7 @@ def _execute_node(node: DataSpec, cache: dict[int, Any]) -> None:
     if node_id in cache:
         return
 
-    if node.is_computed:
+    if node.is_completed:
         cache[node_id] = node.result
         return
 
@@ -135,11 +120,6 @@ def _execute_node(node: DataSpec, cache: dict[int, Any]) -> None:
     try:
         result = node.execute_fn(*input_data)
         cache[node_id] = result
-
-        if node.node_type == NodeType.FILTER and _is_empty(result):
-            node._status = ExecutionStatus.FILTERED
-            raise FilterTerminationError(node.name)
-
         node._cached_result = result
         node._status = ExecutionStatus.COMPLETED
 
@@ -147,19 +127,6 @@ def _execute_node(node: DataSpec, cache: dict[int, Any]) -> None:
         node._status = ExecutionStatus.FAILED
         raise
 
-    except FilterTerminationError:
-        raise
-
     except Exception as e:
         node._status = ExecutionStatus.FAILED
         raise RuntimeError(f"Error executing '{node.name}': {e}") from e
-
-
-def _is_empty(data: Any) -> bool:
-    if data is None:
-        return True
-    if hasattr(data, "__len__"):
-        return len(data) == 0
-    elif hasattr(data, "empty"):
-        return data.empty
-    return False

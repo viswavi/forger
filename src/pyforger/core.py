@@ -24,11 +24,10 @@ class NodeType(Enum):
 class ExecutionStatus(Enum):
     """Status of a DataSpec node during execution."""
 
-    PENDING = auto()
-    RUNNING = auto()
-    COMPLETED = auto()
-    FAILED = auto()
-    FILTERED = auto()
+    PENDING = auto()  # The execution of the graph has not yet reached this node
+    RUNNING = auto()  # This node is currently being executed
+    COMPLETED = auto()  # Execution was successful and the result has been cached
+    FAILED = auto()  # Execution failed
 
 
 class DataSpec:
@@ -104,19 +103,14 @@ class DataSpec:
         return list(self.inputs)
 
     @property
-    def is_computed(self) -> bool:
+    def is_completed(self) -> bool:
         """Return status of whether this node has been computed."""
         return self._status == ExecutionStatus.COMPLETED
 
     @property
-    def is_filtered(self) -> bool:
-        """Return status of whether this node has been filtered."""
-        return self._status == ExecutionStatus.FILTERED
-
-    @property
     def result(self) -> Any:
         """Return the computed result, or raise if not computed yet."""
-        if not (self.is_computed or self.is_filtered):
+        if not self.is_completed:
             raise RuntimeError(
                 f"DataSpec '{self.name}' has not been executed yet. Call run() first."
             )
