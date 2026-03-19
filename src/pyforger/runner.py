@@ -8,19 +8,10 @@ from collections import deque
 from collections.abc import Callable
 from typing import Any
 
-from pyforger.core import DataSpec, ExecutionStatus, NodeType
+from pyforger.core import DataSpec, ExecutionStatus
 from pyforger.utils import get_formatted_logger
 
 logger = get_formatted_logger("Runner")
-
-
-class FilterTerminationError(Exception):
-    """Raised when a filter operation returns empty results."""
-
-    def __init__(self, operation_name: str, message: str = ""):
-        """Initialize with the name of the filter operation that caused the error."""
-        self.operation_name = operation_name
-        super().__init__(message or f"Filter '{operation_name}' returned empty results")
 
 
 def run(
@@ -47,17 +38,11 @@ def run(
         >>> result = forger.run(my_pipeline)
     """
     if callable(pipeline) and not isinstance(pipeline, DataSpec):
-<<<<<<< HEAD
         resolved = pipeline()
     else:
         resolved = pipeline
 
     dataset: DataSpec = resolved
-=======
-        pipeline = pipeline()
-
-    dataset: DataSpec = pipeline
->>>>>>> 283c470 (Implement execution engine for Forger pipelines)
 
     if cache is None:
         cache = {}
@@ -141,11 +126,6 @@ def _execute_node(node: DataSpec, cache: dict[int, Any]) -> None:
     try:
         result = node.execute_fn(*input_data)
         cache[node_id] = result
-
-        if node.node_type == NodeType.FILTER and _is_empty(result):
-            node._status = ExecutionStatus.FILTERED
-            raise FilterTerminationError(node.name)
-
         node._cached_result = result
         node._status = ExecutionStatus.COMPLETED
 
@@ -153,22 +133,6 @@ def _execute_node(node: DataSpec, cache: dict[int, Any]) -> None:
         node._status = ExecutionStatus.FAILED
         raise
 
-    except FilterTerminationError:
-        raise
-
     except Exception as e:
         node._status = ExecutionStatus.FAILED
         raise RuntimeError(f"Error executing '{node.name}': {e}") from e
-<<<<<<< HEAD
-=======
-
-
-def _is_empty(data: Any) -> bool:
-    if data is None:
-        return True
-    if hasattr(data, "__len__"):
-        return len(data) == 0
-    elif hasattr(data, "empty"):
-        return data.empty
-    return False
->>>>>>> 283c470 (Implement execution engine for Forger pipelines)
