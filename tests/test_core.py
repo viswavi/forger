@@ -1,7 +1,12 @@
 """Tests for Forger core infrastructure."""
 
 import pytest
-from fixtures import make_concat, make_double_repetition_data, make_empty_filter, make_source
+from fixtures import (
+    make_concat,
+    make_double_repetition_data,
+    make_empty_filter,
+    make_source,
+)
 
 from pyforger import DataSpec, NodeType, run
 
@@ -83,7 +88,9 @@ class TestExecution:
             return [1, 2]
 
         source = DataSpec(NodeType.ACQUIRE, [], execute, "test_source")
-        merged = make_concat(make_double_repetition_data(source), make_double_repetition_data(source))
+        merged = make_concat(
+            make_double_repetition_data(source), make_double_repetition_data(source)
+        )
         run(merged)
         assert execution_count == 1
 
