@@ -24,7 +24,8 @@ class FilterTerminationError(Exception):
 
 
 def run(
-    pipeline: DataSpec | Callable[..., DataSpec], cache: dict[int, Any] | None = None
+    pipeline: DataSpec | Callable[..., DataSpec],
+    cache: dict[int, Any] | None = None,
 ) -> Any:
     """Execute a dataset creation pipeline (expressing a DAG of data operations).
 
@@ -35,8 +36,7 @@ def run(
         pipeline: A DataSpec node, or a function that builds and returns one.
                   Passing a function lets you define pipelines as plain Python
                   functions and pass them directly to run(). If a function is passed,
-                  it must return a DataSpec or an iterable (e.g. a list of multiple
-                  DataSpecs).
+                  it must return a DataSpec.
         cache: Optional shared cache (for advanced use / testing).
 
     Returns:
@@ -50,8 +50,13 @@ def run(
     """
     if callable(pipeline) and not isinstance(pipeline, DataSpec):
         pipeline = pipeline()
+    else:
+        resolved = pipeline
 
-    dataset: DataSpec = pipeline
+    if isinstance(resolved, DataSpec):
+        dataset: DataSpec = resolved
+    else:
+        raise TypeError(f"pipeline must resolve to a DataSpec, got {type(resolved)}")
 
     if cache is None:
         cache = {}
@@ -60,19 +65,13 @@ def run(
     if node_id in cache:
         return cache[node_id]
 
-    if dataset.is_computed:
+    if dataset.is_completed:
         return dataset.result
 
     execution_order = _topological_sort(dataset)
 
     for node in execution_order:
-        try:
-            _execute_node(node, cache)
-        except FilterTerminationError as e:
-            logger.debug(f"Filter removed all data: {e}")
-            empty_result: list[dict] = []
-            cache[id(dataset)] = empty_result
-            return empty_result
+        _execute_node(node, cache)
 
     return cache[id(dataset)]
 
@@ -125,7 +124,7 @@ def _execute_node(node: DataSpec, cache: dict[int, Any]) -> None:
     if node_id in cache:
         return
 
-    if node.is_computed:
+    if node.is_completed:
         cache[node_id] = node.result
         return
 
