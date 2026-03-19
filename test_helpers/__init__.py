@@ -3,15 +3,15 @@
 from fixtures import (
     CallCounter,
     make_concat,
-    make_double_length,
+    make_double_repetition_data,
     make_empty_filter,
     make_source,
 )
 
 __all__ = [
     "CallCounter",
-    "make_source",
-    "make_double_length",
     "make_concat",
+    "make_double_repetition_data",
     "make_empty_filter",
+    "make_source",
 ]
