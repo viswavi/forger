@@ -174,9 +174,7 @@ class HFRetrievalSource(RetrievalSource):
         self.dataset = dataset
         self.config = config
         self.split = split
-        self._base_url: str = kwargs.pop(
-            "base_url", self._DEFAULT_BASE_URL
-        ).rstrip("/")
+        self._base_url: str = kwargs.pop("base_url", self._DEFAULT_BASE_URL).rstrip("/")
         self._timeout: int = kwargs.pop("timeout", self._DEFAULT_TIMEOUT)
         self._headers: dict[str, str] = dict(kwargs.pop("headers", {}))
         token: str | None = kwargs.pop("token", None)
@@ -187,9 +185,7 @@ class HFRetrievalSource(RetrievalSource):
 
     # -- API helpers (QUERY mode) ------------------------------------------
 
-    def _search_rows(
-        self, query: str, *, offset: int, length: int
-    ) -> dict[str, Any]:
+    def _search_rows(self, query: str, *, offset: int, length: int) -> dict[str, Any]:
         """Call the Dataset Viewer /search endpoint and return parsed JSON.
 
         Raises:
@@ -310,10 +306,7 @@ class HFRetrievalSource(RetrievalSource):
             ds = ds.shuffle(seed=seed)
             count = min(n, len(ds))
             selected = ds.select(range(count))
-            return [
-                self._normalize_row(dict(selected[i]), i)
-                for i in range(count)
-            ]
+            return [self._normalize_row(dict(selected[i]), i) for i in range(count)]
 
         if mode == RetrieveMode.STRUCTURED:
             if not criteria:
@@ -323,16 +316,11 @@ class HFRetrievalSource(RetrievalSource):
                 )
             ds = self._get_dataset()
             filtered = ds.filter(
-                lambda row: all(
-                    row.get(k) == v for k, v in criteria.items()
-                )
+                lambda row: all(row.get(k) == v for k, v in criteria.items())
             )
             count = min(n, len(filtered))
             selected = filtered.select(range(count))
-            return [
-                self._normalize_row(dict(selected[i]), i)
-                for i in range(count)
-            ]
+            return [self._normalize_row(dict(selected[i]), i) for i in range(count)]
 
         raise ValueError(f"Unsupported RetrieveMode: {mode}")
 

@@ -9,9 +9,7 @@ import pytest
 from pyforger.acquire import HFRetrievalSource, RetrieveMode
 
 
-def _make_search_response(
-    rows: list[dict], num_rows_total: int = 100
-) -> dict:
+def _make_search_response(rows: list[dict], num_rows_total: int = 100) -> dict:
     """Build a mock /search JSON response body."""
     return {
         "features": [],
@@ -29,9 +27,7 @@ class TestHFRetrievalSourceFetch:
     """HFRetrievalSource.fetch() with mocked requests.get."""
 
     @patch("pyforger.acquire.sources.requests.get")
-    def test_query_mode_returns_flat_rows(
-        self, mock_get: MagicMock
-    ) -> None:
+    def test_query_mode_returns_flat_rows(self, mock_get: MagicMock) -> None:
         """QUERY mode returns flat dicts with row_idx and column values."""
         sample_rows = [
             {"question": "What is gravity?", "answer": "A force."},
@@ -81,9 +77,7 @@ class TestHFRetrievalSourceFetch:
     # -- RANDOM mode tests --------------------------------------------------
 
     @patch("pyforger.acquire.sources.load_dataset")
-    def test_random_mode_returns_sampled_rows(
-        self, mock_load: MagicMock
-    ) -> None:
+    def test_random_mode_returns_sampled_rows(self, mock_load: MagicMock) -> None:
         """RANDOM mode returns flat dicts with row_idx and column values."""
         rows = [
             {"name": "Alice", "age": 30},
@@ -105,9 +99,7 @@ class TestHFRetrievalSourceFetch:
         assert items[1] == {"row_idx": 1, "name": "Bob", "age": 25}
 
     @patch("pyforger.acquire.sources.load_dataset")
-    def test_random_mode_respects_seed(
-        self, mock_load: MagicMock
-    ) -> None:
+    def test_random_mode_respects_seed(self, mock_load: MagicMock) -> None:
         """RANDOM mode passes seed to dataset.shuffle()."""
         mock_ds = MagicMock()
         mock_ds.shuffle.return_value = mock_ds
@@ -153,9 +145,7 @@ class TestHFRetrievalSourceFetch:
             source.fetch(RetrieveMode.STRUCTURED, n=5, criteria={})
 
     @patch("pyforger.acquire.sources.load_dataset")
-    def test_structured_mode_filters_exact_match(
-        self, mock_load: MagicMock
-    ) -> None:
+    def test_structured_mode_filters_exact_match(self, mock_load: MagicMock) -> None:
         """STRUCTURED mode filters rows by exact-match criteria."""
         matching_rows = [
             {"color": "red", "size": 10},
@@ -170,9 +160,7 @@ class TestHFRetrievalSourceFetch:
         mock_load.return_value = mock_ds
 
         source = HFRetrievalSource(dataset="test/ds")
-        items = source.fetch(
-            RetrieveMode.STRUCTURED, n=10, criteria={"color": "red"}
-        )
+        items = source.fetch(RetrieveMode.STRUCTURED, n=10, criteria={"color": "red"})
 
         assert len(items) == 2
         assert items[0] == {"row_idx": 0, "color": "red", "size": 10}
@@ -180,9 +168,7 @@ class TestHFRetrievalSourceFetch:
         mock_ds.filter.assert_called_once()
 
     @patch("pyforger.acquire.sources.load_dataset")
-    def test_structured_mode_limits_to_n(
-        self, mock_load: MagicMock
-    ) -> None:
+    def test_structured_mode_limits_to_n(self, mock_load: MagicMock) -> None:
         """STRUCTURED mode returns at most n rows from filtered results."""
         filtered_rows = [
             {"val": 1},
@@ -198,9 +184,7 @@ class TestHFRetrievalSourceFetch:
         mock_load.return_value = mock_ds
 
         source = HFRetrievalSource(dataset="test/ds")
-        items = source.fetch(
-            RetrieveMode.STRUCTURED, n=2, criteria={"val": 1}
-        )
+        items = source.fetch(RetrieveMode.STRUCTURED, n=2, criteria={"val": 1})
 
         assert len(items) == 2
         mock_filtered.select.assert_called_once_with(range(2))
@@ -208,9 +192,7 @@ class TestHFRetrievalSourceFetch:
     # -- Caching test ------------------------------------------------------
 
     @patch("pyforger.acquire.sources.load_dataset")
-    def test_local_dataset_is_loaded_once(
-        self, mock_load: MagicMock
-    ) -> None:
+    def test_local_dataset_is_loaded_once(self, mock_load: MagicMock) -> None:
         """Repeated RANDOM/STRUCTURED calls reuse the cached dataset."""
         rows = [{"a": 1}]
         mock_ds = MagicMock()
@@ -243,9 +225,7 @@ class TestHFRetrievalSourceFetch:
         assert "cfg" in msg
 
     @patch("pyforger.acquire.sources.requests.get")
-    def test_query_mode_passes_config_when_set(
-        self, mock_get: MagicMock
-    ) -> None:
+    def test_query_mode_passes_config_when_set(self, mock_get: MagicMock) -> None:
         """Config is included in request params when provided."""
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -262,9 +242,7 @@ class TestHFRetrievalSourceFetch:
         assert params["split"] == "validation"
 
     @patch("pyforger.acquire.sources.requests.get")
-    def test_query_mode_omits_config_when_none(
-        self, mock_get: MagicMock
-    ) -> None:
+    def test_query_mode_omits_config_when_none(self, mock_get: MagicMock) -> None:
         """Config key is absent from request params when not set."""
         mock_resp = MagicMock()
         mock_resp.status_code = 200
