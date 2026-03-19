@@ -1,8 +1,8 @@
 """Tests for Forger core infrastructure."""
 
-from fixtures import make_concat, make_double_repetition_data, make_source
+from fixtures import CallCounter, make_concat, make_double_repetition_data, make_source
 
-from pyforger import DataSpec, NodeType
+from pyforger import DataSpec
 
 
 class TestGraphConstruction:
