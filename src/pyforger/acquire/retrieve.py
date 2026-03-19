@@ -118,8 +118,7 @@ def retrieve_from_hf(
     dataset: str,
     config: str | None = None,
     split: str = "train",
-    text_column: str | None = None,
-    mode: RetrieveMode = RetrieveMode.RANDOM,
+    mode: RetrieveMode = RetrieveMode.QUERY,
     *,
     query: str | None = None,
     n: int = 10,
@@ -128,16 +127,36 @@ def retrieve_from_hf(
     name: str = "retrieve_from_hf",
     **kwargs: Any,
 ) -> DataSpec:
-    """Retrieve from Hugging Face datasets (load_dataset + shuffle/filter/select).
+    """Retrieve rows from a Hugging Face dataset (hybrid backend).
+
+    Uses a hybrid backend depending on mode:
+        QUERY      — hosted Dataset Viewer API (/search, BM25 full-text).
+        RANDOM     — local datasets.load_dataset().shuffle().select().
+        STRUCTURED — local datasets.load_dataset().filter() with
+                     exact-match criteria.
+
+    Args:
+        dataset: HF dataset identifier (e.g. "ibm/duorc").
+        config: Optional dataset config/subset name (e.g. "SelfRC").
+        split: Dataset split (default "train").
+        mode: QUERY, RANDOM, or STRUCTURED.
+        query: Search string; required when mode is QUERY.
+        n: Maximum number of rows to return.
+        seed: Random seed for reproducible sampling in RANDOM mode.
+        criteria: Exact-match field constraints for STRUCTURED mode.
+        name: Label for the node.
+        **kwargs: Passed to HFRetrievalSource — base_url, timeout,
+            token, headers (API); remaining kwargs forwarded to
+            load_dataset() for local modes.
 
     Returns:
-        DataSpec whose execute_fn returns the fetched list.
+        DataSpec whose execute_fn returns a list of flat dicts with
+        row_idx and the dataset's column values.
     """
     source = HFRetrievalSource(
         dataset=dataset,
         config=config,
         split=split,
-        text_column=text_column,
         **kwargs,
     )
     return retrieve(
@@ -148,7 +167,6 @@ def retrieve_from_hf(
         seed=seed,
         criteria=criteria,
         name=name,
-        **kwargs,
     )
 
 

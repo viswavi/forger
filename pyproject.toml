@@ -13,7 +13,7 @@ classifiers = [
 ]
 license = "MIT"
 license-files = ["LICEN[CS]E*"]
-dependencies = ["arxiv>=2.0"]
+dependencies = ["arxiv>=2.0", "requests>=2.20", "datasets"]
 
 [project.urls]
 Homepage = "https://github.com/viswavi/forger"
