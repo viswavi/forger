@@ -21,6 +21,15 @@ class NodeType(Enum):
     RAW = auto()  # Literal/raw data node
 
 
+class ExecutionStatus(Enum):
+    """Status of a DataSpec node during execution."""
+
+    PENDING = auto()  # The execution of the graph has not yet reached this node
+    RUNNING = auto()  # This node is currently being executed
+    COMPLETED = auto()  # Execution was successful and the result has been cached
+    FAILED = auto()  # Execution failed
+
+
 class DataSpec:
     """A node in the computation graph.
 
@@ -42,7 +51,7 @@ class DataSpec:
     def __init__(
         self,
         node_type: NodeType,
-        inputs: Iterable[DataSpec],
+        inputs: Iterable[DataSpec] | DataSpec,
         execute_fn: Callable[..., Iterable[Any]],
         name: str,
     ) -> None:
@@ -57,8 +66,38 @@ class DataSpec:
         self.node_type = node_type
         # The inputs, coming from upstream nodes, correspond to the arguments that will
         # be passed to execute_fn at execution time.
-        self.inputs: tuple[DataSpec, ...] = tuple(inputs)
+        self.inputs: tuple[DataSpec, ...] = self._validate_inputs(inputs)
         # execute_fn is a callable that takes as input the outputs of upstream nodes
         # and returns a list-like iterable of data items (e.g. List[dict])
         self.execute_fn: Callable[..., Iterable[Any]] = execute_fn
         self.name = name
+        self._cached_result: Any | None = None
+        self._status = ExecutionStatus.PENDING
+
+    @staticmethod
+    def _validate_inputs(inputs: Iterable[DataSpec] | DataSpec) -> tuple[DataSpec, ...]:
+        """Normalize inputs to an immutable sequence of DataSpec instances."""
+        if isinstance(inputs, DataSpec):
+            deps = [inputs]
+        else:
+            try:
+                deps = list(inputs)
+            except TypeError as exc:
+                raise TypeError(
+                    "inputs must be a DataSpec or an iterable of DataSpec instances"
+                ) from exc
+        for dep in deps:
+            if not isinstance(dep, DataSpec):
+                raise TypeError("All inputs must be DataSpec instances")
+        return tuple(deps)
+
+    def __repr__(self) -> str:
+        """Show node type and status for debugging."""
+        return (
+            f"DataSpec({self.name}, status={self._status.name.lower()},"
+            + f" deps={len(self.inputs)})"
+        )
+
+    def get_dependencies(self) -> list[DataSpec]:
+        """Return list of upstream DataSpec nodes."""
+        return list(self.inputs)
