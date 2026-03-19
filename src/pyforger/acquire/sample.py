@@ -195,7 +195,7 @@ def _generation_loop(
     batch_size: int,
     rng: random.Random,
 ) -> Generator[dict[str, Any], None, None]:
-    """Generator that yields accepted samples until n are collected or retries exhausted.
+    """Yield accepted samples until *n* collected or retries exhausted.
 
     Works in batched rounds: each round builds a batch of prompts, calls
     model.generate_batch(), then parses each result and accepts on success.
@@ -240,7 +240,10 @@ def _generation_loop(
         for raw_text in raw_responses:
             parsed = _parse_output(raw_text, output_schema)
             if parsed is None:
-                log.debug("Parse failed for output (schema=%s)", output_schema is not None)
+                log.debug(
+                    "Parse failed for output (schema=%s)",
+                    output_schema is not None,
+                )
                 continue
             accepted.append(parsed)
             round_accepts += 1

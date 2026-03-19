@@ -40,6 +40,7 @@ class RecordingMockModel(MockModel):
     """MockModel that records the prompts list passed to generate_batch."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Initialize and set up prompt recording."""
         super().__init__(*args, **kwargs)
         self.prompts: list[str] = []
 
@@ -80,10 +81,10 @@ class TestSchemaFormatInstructions:
 
 
 class TestSchemaPromptInjection:
-    """When output_schema is set, prompt passed to model contains schema instructions."""
+    """Prompt includes schema instructions when output_schema is set."""
 
     def test_prompt_includes_schema_instructions(self):
-        """First prompt passed to generate_batch contains Required keys and schema key."""
+        """Prompt passed to generate_batch has Required keys."""
         model = RecordingMockModel(responses=['{"answer": "42"}'])
         spec = sample_from_LLM(
             "Generate an answer",
@@ -105,7 +106,12 @@ class TestSampleFromLLMReturnsDataSpec:
     def test_returns_dataspec(self):
         """Return value is a DataSpec with ACQUIRE node type."""
         model = MockModel(responses=['{"answer": "x"}'])
-        spec = sample_from_LLM("Generate something", model, n=2, output_schema={"answer": str})
+        spec = sample_from_LLM(
+            "Generate something",
+            model,
+            n=2,
+            output_schema={"answer": str},
+        )
         assert isinstance(spec, DataSpec)
         assert spec.node_type == NodeType.ACQUIRE
 
@@ -177,7 +183,7 @@ class TestParseAndSchema:
         assert items[0]["reason"] == "math"
 
     def test_schema_rejects_missing_keys(self):
-        """JSON missing required keys is rejected; no sample yielded from that response."""
+        """JSON missing required keys is rejected."""
         model = MockModel(responses=['{"answer": "42"}'])  # missing "reason"
         spec = sample_from_LLM(
             "Generate",
@@ -244,7 +250,7 @@ class TestRetriesAndBatch:
             raise AssertionError("Expected ValueError")
 
     def test_invalid_n_rejected(self):
-        """n <= 0 raises ValueError."""
+        """Zero or negative n raises ValueError."""
         model = MockModel(responses=['{"text": "x"}'])
         try:
             sample_from_LLM("Hi", model, n=0)
