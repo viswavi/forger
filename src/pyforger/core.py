@@ -94,8 +94,8 @@ class DataSpec:
     def __repr__(self) -> str:
         """Show node type and status for debugging."""
         return (
-            f"DataSpec({self.name}, status={self._status.name.lower()},"
-            + f" deps={len(self.inputs)})"
+            f"DataSpec({self.name}, status={self._status.name.lower()}, "
+            + f"deps={len(self.inputs)})"
         )
 
     def get_dependencies(self) -> list[DataSpec]:
