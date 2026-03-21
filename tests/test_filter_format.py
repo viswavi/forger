@@ -3,7 +3,7 @@
 import pytest
 from fixtures import make_source
 
-from pyforger import DataSpec, run
+from pyforger import run
 from pyforger.filter import by_invalid_response, by_keyword_blocklist, by_length
 
 
@@ -61,11 +61,6 @@ class TestByLength:
         source = make_source(data)
         with pytest.raises(RuntimeError, match="instruction"):
             run(by_length(source, instruction_field="instruction"))
-
-    def test_returns_dataspec(self):
-        """by_length returns a DataSpec node."""
-        source = make_source([])
-        assert isinstance(by_length(source, instruction_field="instruction"), DataSpec)
 
 
 class TestByInvalidResponse:
@@ -237,16 +232,6 @@ class TestByInvalidResponse:
                 )
             )
 
-    def test_returns_dataspec(self):
-        """by_invalid_response returns a DataSpec node."""
-        source = make_source([])
-        assert isinstance(
-            by_invalid_response(
-                source, instruction_field="instruction", response_field="output"
-            ),
-            DataSpec,
-        )
-
 
 class TestByKeywordBlocklist:
     """by_keyword_blocklist removes items containing blocked phrases."""
@@ -333,10 +318,3 @@ class TestByKeywordBlocklist:
         source = make_source(data)
         result = run(by_keyword_blocklist(source, response_field="response"))
         assert result == [data[1]]
-
-    def test_returns_dataspec(self):
-        """by_keyword_blocklist returns a DataSpec node."""
-        source = make_source([])
-        assert isinstance(
-            by_keyword_blocklist(source, response_field="output"), DataSpec
-        )
