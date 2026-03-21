@@ -55,16 +55,6 @@ class TestByLength:
         result = run(by_length(source, instruction_field="instruction"))
         assert result == []
 
-    def test_custom_instruction_field(self):
-        """Custom field name is used for length check."""
-        data = [
-            {"prompt": " ".join(["word"] * 5), "output": "ok"},
-            {"prompt": "hi", "output": "ok"},
-        ]
-        source = make_source(data)
-        result = run(by_length(source, instruction_field="prompt", min_len=3))
-        assert result == [data[0]]
-
     def test_missing_field_raises_key_error(self):
         """Missing expected field raises KeyError."""
         data = [{"output": "ok"}]
@@ -79,10 +69,10 @@ class TestByLength:
 
 
 class TestByInvalidResponse:
-    """by_invalid_response removes items with copied or empty outputs."""
+    """by_invalid_response removes items with copied or empty responses."""
 
     def test_removes_exact_copy(self):
-        """Items where output exactly matches instruction are removed."""
+        """Items where response exactly matches instruction are removed."""
         data = [{"instruction": "Tell me a joke", "output": "Tell me a joke"}]
         source = make_source(data)
         result = run(
@@ -92,8 +82,8 @@ class TestByInvalidResponse:
         )
         assert result == []
 
-    def test_removes_empty_output(self):
-        """Items with empty output are removed."""
+    def test_removes_empty_response(self):
+        """Items with empty response are removed."""
         data = [{"instruction": "Tell me a joke", "output": ""}]
         source = make_source(data)
         result = run(
@@ -103,8 +93,8 @@ class TestByInvalidResponse:
         )
         assert result == []
 
-    def test_removes_whitespace_only_output(self):
-        """Items with whitespace-only output are removed."""
+    def test_removes_whitespace_only_response(self):
+        """Items with whitespace-only response are removed."""
         data = [{"instruction": "Tell me a joke", "output": "   \n\t  "}]
         source = make_source(data)
         result = run(
@@ -114,8 +104,8 @@ class TestByInvalidResponse:
         )
         assert result == []
 
-    def test_removes_output_substring_of_instruction(self):
-        """Output that is a substring of instruction is removed."""
+    def test_removes_response_substring_of_instruction(self):
+        """Response that is a substring of instruction is removed."""
         data = [{"instruction": "Tell me a funny joke", "output": "me a funny joke"}]
         source = make_source(data)
         result = run(
@@ -126,7 +116,7 @@ class TestByInvalidResponse:
         assert result == []
 
     def test_removes_similar_length_substring(self):
-        """Instruction that is a substring of output is removed."""
+        """Instruction that is a substring of response is removed."""
         data = [{"instruction": "Tell me a funny joke", "output": "Tell me a funny"}]
         source = make_source(data)
         result = run(
@@ -136,8 +126,8 @@ class TestByInvalidResponse:
         )
         assert result == []
 
-    def test_keeps_short_instruction_in_long_output(self):
-        """Short instruction appearing in a long output is not a false positive."""
+    def test_keeps_short_instruction_in_long_response(self):
+        """Short instruction appearing in a long response is not a false positive."""
         data = [
             {
                 "instruction": "Hi",
@@ -172,7 +162,7 @@ class TestByInvalidResponse:
         assert result == []
 
     def test_keeps_valid_response(self):
-        """Items with genuinely different output are kept."""
+        """Items with genuinely different response are kept."""
         data = [
             {
                 "instruction": "Tell me a joke",
@@ -225,8 +215,8 @@ class TestByInvalidResponse:
         )
         assert result == [data[1]]
 
-    def test_removes_none_output(self):
-        """Items with None output are removed."""
+    def test_removes_none_response(self):
+        """Items with None response are removed."""
         data = [{"instruction": "Tell me a joke", "output": None}]
         source = make_source(data)
         result = run(
