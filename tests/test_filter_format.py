@@ -13,9 +13,9 @@ class TestByLength:
     def test_keeps_items_within_bounds(self):
         """Items with instruction word count in [min_len, max_len] are kept."""
         data = [
-            {"instruction": "too short", "output": "ok"},  # 2 words
-            {"instruction": " ".join(["word"] * 5), "output": "ok"},  # 5 words
-            {"instruction": " ".join(["word"] * 15), "output": "ok"},  # 15 words
+            {"instruction": "too short", "response": "ok"},  # 2 words
+            {"instruction": " ".join(["word"] * 5), "response": "ok"},  # 5 words
+            {"instruction": " ".join(["word"] * 15), "response": "ok"},  # 15 words
         ]
         source = make_source(data)
         result = run(
@@ -25,14 +25,14 @@ class TestByLength:
 
     def test_removes_too_short(self):
         """Items with fewer words than min_len are removed."""
-        data = [{"instruction": "hi", "output": "ok"}]
+        data = [{"instruction": "hi", "response": "ok"}]
         source = make_source(data)
         result = run(by_length(source, instruction_field="instruction", min_len=5))
         assert result == []
 
     def test_removes_too_long(self):
         """Items with more words than max_len are removed."""
-        data = [{"instruction": " ".join(["word"] * 20), "output": "ok"}]
+        data = [{"instruction": " ".join(["word"] * 20), "response": "ok"}]
         source = make_source(data)
         result = run(by_length(source, instruction_field="instruction", max_len=10))
         assert result == []
@@ -40,8 +40,8 @@ class TestByLength:
     def test_inclusive_bounds(self):
         """Boundary values (exactly min_len and max_len) are kept."""
         data = [
-            {"instruction": " ".join(["word"] * 3), "output": "ok"},
-            {"instruction": " ".join(["word"] * 7), "output": "ok"},
+            {"instruction": " ".join(["word"] * 3), "response": "ok"},
+            {"instruction": " ".join(["word"] * 7), "response": "ok"},
         ]
         source = make_source(data)
         result = run(
@@ -57,7 +57,7 @@ class TestByLength:
 
     def test_missing_field_raises_key_error(self):
         """Missing expected field raises KeyError."""
-        data = [{"output": "ok"}]
+        data = [{"response": "ok"}]
         source = make_source(data)
         with pytest.raises(RuntimeError, match="instruction"):
             run(by_length(source, instruction_field="instruction"))
@@ -68,55 +68,55 @@ class TestByInvalidResponse:
 
     def test_removes_exact_copy(self):
         """Items where response exactly matches instruction are removed."""
-        data = [{"instruction": "Tell me a joke", "output": "Tell me a joke"}]
+        data = [{"instruction": "Tell me a joke", "response": "Tell me a joke"}]
         source = make_source(data)
         result = run(
             by_invalid_response(
-                source, instruction_field="instruction", response_field="output"
+                source, instruction_field="instruction", response_field="response"
             )
         )
         assert result == []
 
     def test_removes_empty_response(self):
         """Items with empty response are removed."""
-        data = [{"instruction": "Tell me a joke", "output": ""}]
+        data = [{"instruction": "Tell me a joke", "response": ""}]
         source = make_source(data)
         result = run(
             by_invalid_response(
-                source, instruction_field="instruction", response_field="output"
+                source, instruction_field="instruction", response_field="response"
             )
         )
         assert result == []
 
     def test_removes_whitespace_only_response(self):
         """Items with whitespace-only response are removed."""
-        data = [{"instruction": "Tell me a joke", "output": "   \n\t  "}]
+        data = [{"instruction": "Tell me a joke", "response": "   \n\t  "}]
         source = make_source(data)
         result = run(
             by_invalid_response(
-                source, instruction_field="instruction", response_field="output"
+                source, instruction_field="instruction", response_field="response"
             )
         )
         assert result == []
 
     def test_removes_response_substring_of_instruction(self):
         """Response that is a substring of instruction is removed."""
-        data = [{"instruction": "Tell me a funny joke", "output": "me a funny joke"}]
+        data = [{"instruction": "Tell me a funny joke", "response": "me a funny joke"}]
         source = make_source(data)
         result = run(
             by_invalid_response(
-                source, instruction_field="instruction", response_field="output"
+                source, instruction_field="instruction", response_field="response"
             )
         )
         assert result == []
 
     def test_removes_similar_length_substring(self):
         """Instruction that is a substring of response is removed."""
-        data = [{"instruction": "Tell me a funny joke", "output": "Tell me a funny"}]
+        data = [{"instruction": "Tell me a funny joke", "response": "Tell me a funny"}]
         source = make_source(data)
         result = run(
             by_invalid_response(
-                source, instruction_field="instruction", response_field="output"
+                source, instruction_field="instruction", response_field="response"
             )
         )
         assert result == []
@@ -126,13 +126,13 @@ class TestByInvalidResponse:
         data = [
             {
                 "instruction": "Hi",
-                "output": "Hi there! Here is a detailed explanation of the topic.",
+                "response": "Hi there! Here is a detailed explanation of the topic.",
             }
         ]
         source = make_source(data)
         result = run(
             by_invalid_response(
-                source, instruction_field="instruction", response_field="output"
+                source, instruction_field="instruction", response_field="response"
             )
         )
         assert result == data
@@ -142,7 +142,7 @@ class TestByInvalidResponse:
         data = [
             {
                 "instruction": "Tell me a joke about cats",
-                "output": "Tell me a joke about dogs",
+                "response": "Tell me a joke about dogs",
             }
         ]
         source = make_source(data)
@@ -150,7 +150,7 @@ class TestByInvalidResponse:
             by_invalid_response(
                 source,
                 instruction_field="instruction",
-                response_field="output",
+                response_field="response",
                 similarity_threshold=0.8,
             )
         )
@@ -161,13 +161,13 @@ class TestByInvalidResponse:
         data = [
             {
                 "instruction": "Tell me a joke",
-                "output": "Why did the chicken cross the road?",
+                "response": "Why did the chicken cross the road?",
             }
         ]
         source = make_source(data)
         result = run(
             by_invalid_response(
-                source, instruction_field="instruction", response_field="output"
+                source, instruction_field="instruction", response_field="response"
             )
         )
         assert result == data
@@ -175,13 +175,13 @@ class TestByInvalidResponse:
     def test_keeps_no_matches_removed(self):
         """When all items are valid, none are removed."""
         data = [
-            {"instruction": "What is 2+2?", "output": "4"},
-            {"instruction": "Name a color", "output": "Blue"},
+            {"instruction": "What is 2+2?", "response": "4"},
+            {"instruction": "Name a color", "response": "Blue"},
         ]
         source = make_source(data)
         result = run(
             by_invalid_response(
-                source, instruction_field="instruction", response_field="output"
+                source, instruction_field="instruction", response_field="response"
             )
         )
         assert result == data
@@ -191,32 +191,18 @@ class TestByInvalidResponse:
         source = make_source([])
         result = run(
             by_invalid_response(
-                source, instruction_field="instruction", response_field="output"
+                source, instruction_field="instruction", response_field="response"
             )
         )
         assert result == []
 
-    def test_custom_field_names(self):
-        """Custom field names work correctly."""
-        data = [
-            {"prompt": "Hello", "response": "Hello"},
-            {"prompt": "Hello", "response": "World"},
-        ]
-        source = make_source(data)
-        result = run(
-            by_invalid_response(
-                source, instruction_field="prompt", response_field="response"
-            )
-        )
-        assert result == [data[1]]
-
     def test_removes_none_response(self):
         """Items with None response are removed."""
-        data = [{"instruction": "Tell me a joke", "output": None}]
+        data = [{"instruction": "Tell me a joke", "response": None}]
         source = make_source(data)
         result = run(
             by_invalid_response(
-                source, instruction_field="instruction", response_field="output"
+                source, instruction_field="instruction", response_field="response"
             )
         )
         assert result == []
@@ -225,10 +211,10 @@ class TestByInvalidResponse:
         """Missing expected field raises KeyError."""
         data = [{"instruction": "Tell me a joke"}]
         source = make_source(data)
-        with pytest.raises(RuntimeError, match="output"):
+        with pytest.raises(RuntimeError, match="response"):
             run(
                 by_invalid_response(
-                    source, instruction_field="instruction", response_field="output"
+                    source, instruction_field="instruction", response_field="response"
                 )
             )
 
@@ -241,80 +227,70 @@ class TestByKeywordBlocklist:
         data = [
             {
                 "instruction": "Do something bad",
-                "output": "As an AI, I cannot do that.",
+                "response": "As an AI, I cannot do that.",
             },
             {
                 "instruction": "Tell a joke",
-                "output": "Why did the chicken cross the road?",
+                "response": "Why did the chicken cross the road?",
             },
         ]
         source = make_source(data)
-        result = run(by_keyword_blocklist(source, response_field="output"))
+        result = run(by_keyword_blocklist(source, response_field="response"))
         assert result == [data[1]]
 
     def test_case_insensitive_by_default(self):
         """Matching is case-insensitive by default."""
-        data = [{"instruction": "test", "output": "AS AN AI, I refuse."}]
+        data = [{"instruction": "test", "response": "AS AN AI, I refuse."}]
         source = make_source(data)
-        result = run(by_keyword_blocklist(source, response_field="output"))
+        result = run(by_keyword_blocklist(source, response_field="response"))
         assert result == []
 
     def test_case_sensitive_when_enabled(self):
         """Case-sensitive matching only blocks exact case matches."""
         data = [
-            {"instruction": "test", "output": "AS AN AI, I refuse."},
-            {"instruction": "test", "output": "as an ai, I refuse."},
+            {"instruction": "test", "response": "AS AN AI, I refuse."},
+            {"instruction": "test", "response": "as an ai, I refuse."},
         ]
         source = make_source(data)
         result = run(
-            by_keyword_blocklist(source, response_field="output", case_sensitive=True)
+            by_keyword_blocklist(source, response_field="response", case_sensitive=True)
         )
         assert result == [data[0]]
 
     def test_custom_blocklist(self):
         """Custom blocklist replaces the default."""
         data = [
-            {"instruction": "test", "output": "This contains foo in it."},
-            {"instruction": "test", "output": "This is clean."},
+            {"instruction": "test", "response": "This contains foo in it."},
+            {"instruction": "test", "response": "This is clean."},
         ]
         source = make_source(data)
         result = run(
-            by_keyword_blocklist(source, response_field="output", blocklist=["foo"])
+            by_keyword_blocklist(source, response_field="response", blocklist=["foo"])
         )
         assert result == [data[1]]
 
     def test_no_matches_keeps_all(self):
         """When no items match blocklist, all are kept."""
         data = [
-            {"instruction": "test", "output": "Perfectly fine answer."},
-            {"instruction": "test", "output": "Another good response."},
+            {"instruction": "test", "response": "Perfectly fine answer."},
+            {"instruction": "test", "response": "Another good response."},
         ]
         source = make_source(data)
-        result = run(by_keyword_blocklist(source, response_field="output"))
+        result = run(by_keyword_blocklist(source, response_field="response"))
         assert result == data
 
     def test_all_filtered_returns_empty(self):
         """When all items match blocklist, returns empty list."""
         data = [
-            {"instruction": "test", "output": "I cannot fulfill your request."},
-            {"instruction": "test", "output": "I'm sorry, I cannot help."},
+            {"instruction": "test", "response": "I cannot fulfill your request."},
+            {"instruction": "test", "response": "I'm sorry, I cannot help."},
         ]
         source = make_source(data)
-        result = run(by_keyword_blocklist(source, response_field="output"))
+        result = run(by_keyword_blocklist(source, response_field="response"))
         assert result == []
 
     def test_empty_input(self):
         """Empty input returns empty list."""
         source = make_source([])
-        result = run(by_keyword_blocklist(source, response_field="output"))
-        assert result == []
-
-    def test_custom_response_field(self):
-        """Custom response field name works correctly."""
-        data = [
-            {"instruction": "test", "response": "As an AI, I cannot."},
-            {"instruction": "test", "response": "Sure, here you go."},
-        ]
-        source = make_source(data)
         result = run(by_keyword_blocklist(source, response_field="response"))
-        assert result == [data[1]]
+        assert result == []
