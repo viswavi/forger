@@ -138,9 +138,7 @@ def by_keyword_blocklist(
         return [
             item
             for item in data
-            if not _contains_blocked(
-                item[response_field], keywords, case_sensitive
-            )
+            if not _contains_blocked(item[response_field], keywords, case_sensitive)
         ]
 
     return DataSpec(NodeType.FILTER, source, _execute, "filter_by_keyword_blocklist")
