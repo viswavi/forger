@@ -47,7 +47,8 @@ def by_length(
         source: Upstream DataSpec providing list[dict] data.
         min_len: Minimum allowed character count (inclusive).
         max_len: Maximum allowed character count (inclusive).
-        instruction_field: Key in each dict containing the instruction text.
+        instruction_field: Key in each dict containing the instruction text (e.g.
+        "instruction").
 
     Returns:
         A FILTER DataSpec that keeps only items within the length bounds.
