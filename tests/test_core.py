@@ -2,6 +2,7 @@
 
 import pytest
 from fixtures import (
+    CallCounter,
     make_concat,
     make_double_repetition_data,
     make_empty_filter,
