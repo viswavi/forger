@@ -35,20 +35,20 @@ DEFAULT_BLOCKLIST = [
 def by_length(
     source: DataSpec,
     *,
+    instruction_field: str,
     min_len: int = 10,
     max_len: int = 10000,
-    instruction_field: str = "instruction",
 ) -> DataSpec:
-    """Filter items whose instruction length is outside [min_len, max_len].
+    """Filter items whose instruction word count is outside [min_len, max_len].
 
-    Uses character count to determine length.
+    Uses whitespace-delimited word count to determine length.
 
     Args:
         source: Upstream DataSpec providing list[dict] data.
-        min_len: Minimum allowed character count (inclusive).
-        max_len: Maximum allowed character count (inclusive).
-        instruction_field: Key in each dict containing the instruction text (e.g.
-        "instruction").
+        instruction_field: Key in each dict containing the instruction text
+            (e.g. "instruction").
+        min_len: Minimum allowed word count (inclusive).
+        max_len: Maximum allowed word count (inclusive).
 
     Returns:
         A FILTER DataSpec that keeps only items within the length bounds.
@@ -56,7 +56,9 @@ def by_length(
 
     def _execute(data: list[dict]) -> list[dict]:
         return [
-            item for item in data if min_len <= len(item[instruction_field]) <= max_len
+            item
+            for item in data
+            if min_len <= len(item[instruction_field].split()) <= max_len
         ]
 
     return DataSpec(NodeType.FILTER, source, _execute, "filter_by_length")
@@ -65,24 +67,24 @@ def by_length(
 def by_invalid_response(
     source: DataSpec,
     *,
-    instruction_field: str = "instruction",
-    output_field: str = "output",
+    instruction_field: str,
+    response_field: str,
     similarity_threshold: float = 0.85,
 ) -> DataSpec:
     """Filter items with invalid responses (copies of instruction or empty).
 
     Removes items where:
-    - The output is None, empty, or whitespace-only.
-    - The output exactly matches the instruction.
+    - The response is None, empty, or whitespace-only.
+    - The response exactly matches the instruction.
     - One string is a substring of the other and their lengths are within
       a factor of two (avoids false positives for short instructions).
     - The normalized string similarity exceeds the threshold.
 
     Args:
         source: Upstream DataSpec providing list[dict] data.
-        instruction_field: Key containing the instruction text.
-        output_field: Key containing the output/response text.
-        similarity_threshold: SequenceMatcher ratio above which the output
+        instruction_field: Key containing the instruction text (e.g. "instruction").
+        response_field: Key containing the response text (e.g. "response").
+        similarity_threshold: SequenceMatcher ratio above which the response
             is considered a copy of the instruction.
 
     Returns:
@@ -90,17 +92,17 @@ def by_invalid_response(
     """
 
     def _is_invalid(item: dict) -> bool:
-        output = item[output_field]
-        if output is None or not output.strip():
+        response = item[response_field]
+        if response is None or not response.strip():
             return True
         instruction = item[instruction_field]
-        if output == instruction:
+        if response == instruction:
             return True
-        shorter, longer = sorted([instruction, output], key=len)
+        shorter, longer = sorted([instruction, response], key=len)
         if len(longer) > 0 and len(shorter) / len(longer) > 0.5:
             if shorter in longer:
                 return True
-        ratio = SequenceMatcher(None, instruction, output).ratio()
+        ratio = SequenceMatcher(None, instruction, response).ratio()
         return ratio >= similarity_threshold
 
     def _execute(data: list[dict]) -> list[dict]:
@@ -112,36 +114,32 @@ def by_invalid_response(
 def by_keyword_blocklist(
     source: DataSpec,
     *,
+    response_field: str,
     blocklist: list[str] | None = None,
-    output_field: str = "output",
     case_sensitive: bool = False,
 ) -> DataSpec:
-    """Filter items whose output contains blocked keywords.
+    """Filter items whose response contains blocked keywords.
 
     Uses substring matching against a configurable blocklist of phrases
     commonly found in AI refusals and disclaimers.
 
     Args:
         source: Upstream DataSpec providing list[dict] data.
+        response_field: Key containing the response text (e.g. "response").
         blocklist: Keywords to block. Defaults to common AI refusal phrases.
-        output_field: Key containing the output/response text.
         case_sensitive: Whether matching is case-sensitive.
 
     Returns:
         A FILTER DataSpec that keeps only items without blocked keywords.
     """
-    raw_keywords = blocklist if blocklist is not None else DEFAULT_BLOCKLIST
-    if not case_sensitive:
-        normalized_keywords = [kw.lower() for kw in raw_keywords]
-    else:
-        normalized_keywords = list(raw_keywords)
+    keywords = blocklist if blocklist is not None else DEFAULT_BLOCKLIST
 
     def _execute(data: list[dict]) -> list[dict]:
         return [
             item
             for item in data
             if not _contains_blocked(
-                item[output_field], normalized_keywords, case_sensitive
+                item[response_field], keywords, case_sensitive
             )
         ]
 
@@ -149,10 +147,8 @@ def by_keyword_blocklist(
 
 
 def _contains_blocked(text: str, blocklist: list[str], case_sensitive: bool) -> bool:
-    """Check whether text contains any keyword from the blocklist.
-
-    Expects blocklist keywords to already be lowered when case_sensitive is False.
-    """
+    """Check whether text contains any keyword from the blocklist."""
     if not case_sensitive:
         text = text.lower()
+        return any(kw.lower() in text for kw in blocklist)
     return any(kw in text for kw in blocklist)
