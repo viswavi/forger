@@ -89,7 +89,7 @@ def by_n_gram_overlap(
     source: DataSpec,
     *,
     threshold: float = 0.7,
-    n: int = 3,
+    n: int = 2,
     field: str,
 ) -> DataSpec:
     """Remove items with high n-gram overlap against the kept pool.
