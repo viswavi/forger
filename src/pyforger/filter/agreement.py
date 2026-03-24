@@ -8,6 +8,7 @@ from __future__ import annotations
 from rouge_score import rouge_scorer
 
 from pyforger.core import DataSpec, NodeType
+from pyforger.utils import get_field
 
 
 def by_exact_agreement(
@@ -32,7 +33,12 @@ def by_exact_agreement(
     """
 
     def _execute(data: list[dict]) -> list[dict]:
-        return [item for item in data if item[field_a] == item[field_b]]
+        return [
+            item
+            for item in data
+            if get_field(item, field_a, "by_exact_agreement")
+            == get_field(item, field_b, "by_exact_agreement")
+        ]
 
     return DataSpec(NodeType.FILTER, source, _execute, "filter_by_exact_agreement")
 
@@ -66,7 +72,10 @@ def by_rouge_l_agreement(
         return [
             item
             for item in data
-            if scorer.score(item[field_a], item[field_b])["rougeL"].fmeasure
+            if scorer.score(
+                get_field(item, field_a, "by_rouge_l_agreement"),
+                get_field(item, field_b, "by_rouge_l_agreement"),
+            )["rougeL"].fmeasure
             >= threshold
         ]
 
