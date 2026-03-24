@@ -203,8 +203,18 @@ class TestByNGramOverlap:
         )
         assert len(bigram) <= len(trigram)
 
-    def test_short_text_kept(self):
-        """Text shorter than n produces no n-grams and is kept."""
+    def test_short_text_padded(self):
+        """Text shorter than n is padded and participates in overlap checking."""
+        data = [
+            {"instruction": "Yes"},
+            {"instruction": "Yes"},
+        ]
+        source = make_source(data)
+        result = run(by_n_gram_overlap(source, field="instruction", threshold=0.5, n=2))
+        assert result == [data[0]]
+
+    def test_short_text_different_values_kept(self):
+        """Different short texts are kept despite padding."""
         data = [
             {"instruction": "hello world foo bar baz"},
             {"instruction": "hi"},
