@@ -36,8 +36,8 @@ def by_exact_agreement(
         return [
             item
             for item in data
-            if get_field(item, field_a, "by_exact_agreement")
-            == get_field(item, field_b, "by_exact_agreement")
+            if str(get_field(item, field_a, "by_exact_agreement")).strip()
+            == str(get_field(item, field_b, "by_exact_agreement")).strip()
         ]
 
     return DataSpec(NodeType.FILTER, source, _execute, "filter_by_exact_agreement")
