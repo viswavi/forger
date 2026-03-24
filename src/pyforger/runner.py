@@ -15,7 +15,8 @@ logger = get_formatted_logger("Runner")
 
 
 def run(
-    pipeline: DataSpec | Callable[..., DataSpec], cache: dict[int, Any] | None = None
+    pipeline: DataSpec | Callable[..., DataSpec],
+    cache: dict[int, Any] | None = None,
 ) -> Any:
     """Execute a dataset creation pipeline (expressing a DAG of data operations).
 
@@ -25,7 +26,8 @@ def run(
     Args:
         pipeline: A DataSpec node, or a function that builds and returns one.
                   Passing a function lets you define pipelines as plain Python
-                  functions and pass them directly to run().
+                  functions and pass them directly to run(). If a function is passed,
+                  it must return a DataSpec.
         cache: Optional shared cache (for advanced use / testing).
 
     Returns:
@@ -51,7 +53,7 @@ def run(
     if node_id in cache:
         return cache[node_id]
 
-    if dataset.is_computed:
+    if dataset.is_completed:
         return dataset.result
 
     execution_order = _topological_sort(dataset)
@@ -110,7 +112,7 @@ def _execute_node(node: DataSpec, cache: dict[int, Any]) -> None:
     if node_id in cache:
         return
 
-    if node.is_computed:
+    if node.is_completed:
         cache[node_id] = node.result
         return
 
@@ -122,7 +124,6 @@ def _execute_node(node: DataSpec, cache: dict[int, Any]) -> None:
         cache[node_id] = result
         node._cached_result = result
         node._status = ExecutionStatus.COMPLETED
-        cache[node_id] = result
 
     except NotImplementedError:
         node._status = ExecutionStatus.FAILED
