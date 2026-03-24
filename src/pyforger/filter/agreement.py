@@ -46,9 +46,9 @@ def by_exact_agreement(
 def by_rouge_l_agreement(
     source: DataSpec,
     *,
-    threshold: float = 0.7,
     field_a: str,
     field_b: str,
+    threshold: float = 0.7,
 ) -> DataSpec:
     """Keep items where ROUGE-L F1 between two fields meets the threshold.
 
@@ -57,10 +57,10 @@ def by_rouge_l_agreement(
 
     Args:
         source: Upstream DataSpec providing list[dict] data.
-        threshold: Minimum ROUGE-L F1 score to consider the fields
-            in agreement.
         field_a: Key for the first text to compare.
         field_b: Key for the second text to compare.
+        threshold: Minimum ROUGE-L F1 score to consider the fields
+            in agreement.
 
     Returns:
         A FILTER DataSpec that keeps only items where the two fields
