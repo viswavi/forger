@@ -8,12 +8,13 @@ from __future__ import annotations
 from rouge_score import rouge_scorer
 
 from pyforger.core import DataSpec, NodeType
+from pyforger.utils import get_field
 
 
 def by_exact_match(
     source: DataSpec,
     *,
-    field: str = "instruction",
+    field: str,
 ) -> DataSpec:
     """Remove items with duplicate field values.
 
@@ -32,7 +33,7 @@ def by_exact_match(
         seen: set[str] = set()
         result: list[dict] = []
         for item in data:
-            val = item[field]
+            val = get_field(item, field, "by_exact_match")
             if val not in seen:
                 seen.add(val)
                 result.append(item)
@@ -45,7 +46,7 @@ def by_rouge_l(
     source: DataSpec,
     *,
     threshold: float = 0.7,
-    field: str = "instruction",
+    field: str,
 ) -> DataSpec:
     """Remove items whose ROUGE-L F1 against any kept item exceeds threshold.
 
@@ -68,7 +69,7 @@ def by_rouge_l(
         kept: list[dict] = []
         kept_texts: list[str] = []
         for item in data:
-            text = item[field]
+            text = get_field(item, field, "by_rouge_l")
             is_dup = any(
                 scorer.score(other, text)["rougeL"].fmeasure >= threshold
                 for other in kept_texts
@@ -86,7 +87,7 @@ def by_n_gram_overlap(
     *,
     threshold: float = 0.7,
     n: int = 3,
-    field: str = "instruction",
+    field: str,
 ) -> DataSpec:
     """Remove items with high n-gram overlap against the kept pool.
 
@@ -110,7 +111,7 @@ def by_n_gram_overlap(
         pool: set[tuple[str, ...]] = set()
         kept: list[dict] = []
         for item in data:
-            item_ngrams = _word_ngrams(item[field], n)
+            item_ngrams = _word_ngrams(get_field(item, field, "by_n_gram_overlap"), n)
             if not item_ngrams:
                 kept.append(item)
                 continue
