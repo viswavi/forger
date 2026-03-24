@@ -16,6 +16,7 @@ from collections.abc import Callable
 from typing import Any
 
 from pyforger.core import DataSpec, NodeType
+from pyforger.utils import get_field
 
 _SUPPORTED_LANGS = frozenset({"json", "yaml", "python", "xml"})
 
@@ -24,7 +25,7 @@ def by_syntax(
     source: DataSpec,
     *,
     lang: str = "json",
-    field: str = "output",
+    field: str,
     required_keys: list[str] | None = None,
     json_schema: dict[str, Any] | None = None,
 ) -> DataSpec:
@@ -87,7 +88,9 @@ def by_syntax(
         return [
             item
             for item in data
-            if _validate(item[field], lang, required_keys, json_schema)
+            if _validate(
+                get_field(item, field, "by_syntax"), lang, required_keys, json_schema
+            )
         ]
 
     return DataSpec(NodeType.FILTER, source, _execute, "filter_by_syntax")
