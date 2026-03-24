@@ -116,7 +116,6 @@ def by_n_gram_overlap(
         for item in data:
             item_ngrams = _word_ngrams(get_field(item, field, "by_n_gram_overlap"), n)
             if not item_ngrams:
-                kept.append(item)
                 continue
             overlap = sum(1 for ng in item_ngrams if ng in pool) / len(item_ngrams)
             if overlap >= threshold:
@@ -129,8 +128,14 @@ def by_n_gram_overlap(
 
 
 def _word_ngrams(text: str, n: int) -> list[tuple[str, ...]]:
-    """Extract word-level n-grams from text."""
+    """Extract word-level n-grams from text.
+
+    When the text has fewer than n words, pads with "_" placeholders
+    so short texts still participate in overlap checking.
+    """
     words = text.split()
-    if len(words) < n:
+    if not words:
         return []
+    if len(words) < n:
+        words = words + ["_"] * (n - len(words))
     return [tuple(words[i : i + n]) for i in range(len(words) - n + 1)]
