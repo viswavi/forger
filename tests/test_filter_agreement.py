@@ -53,12 +53,21 @@ class TestByExactAgreement:
         result = run(by_exact_agreement(source, field_a="output_1", field_b="output_2"))
         assert result == []
 
-    def test_whitespace_matters(self):
-        """Trailing whitespace causes mismatch."""
-        data = [{"output_1": "hello", "output_2": "hello "}]
+    def test_whitespace_ignored(self):
+        """Leading/trailing whitespace is stripped before comparison."""
+        data = [
+            {"output_1": "hello ", "output_2": "hello"},
+            {"output_1": " hello", "output_2": "hello"},
+            {"output_1": "hello", "output_2": " hello"},
+            {"output_1": "hello", "output_2": "hello "},
+            {"output_1": "hello.", "output_2": "hello"},
+            {"output_1": "hello", "output_2": "hello."},
+        ]
         source = make_source(data)
         result = run(by_exact_agreement(source, field_a="output_1", field_b="output_2"))
-        assert result == []
+        assert len(result) == 4
+        assert data[4] not in result
+        assert data[5] not in result
 
     def test_missing_field_raises_error(self):
         """Missing expected field raises an error."""
