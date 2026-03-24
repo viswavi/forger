@@ -13,10 +13,7 @@ def by_exact_match(
     source: DataSpec,
     *,
     field: str,
-<<<<<<< HEAD
     max_count: int = 1,
-=======
->>>>>>> 832e431 (Make field required, add get_field utility to diversity filters)
 ) -> DataSpec:
     """Remove items with duplicate field values.
 
@@ -38,13 +35,8 @@ def by_exact_match(
         result: list[dict] = []
         for item in data:
             val = get_field(item, field, "by_exact_match")
-<<<<<<< HEAD
             counts[val] = counts.get(val, 0) + 1
             if counts[val] <= max_count:
-=======
-            if val not in seen:
-                seen.add(val)
->>>>>>> 832e431 (Make field required, add get_field utility to diversity filters)
                 result.append(item)
         return result
 
@@ -56,10 +48,6 @@ def by_rouge_l(
     *,
     field: str,
     threshold: float = 0.7,
-<<<<<<< HEAD
-=======
-    field: str,
->>>>>>> 832e431 (Make field required, add get_field utility to diversity filters)
 ) -> DataSpec:
     """Remove items whose ROUGE-L F1 against any kept item exceeds threshold.
 
@@ -107,12 +95,7 @@ def by_n_gram_overlap(
     *,
     field: str,
     threshold: float = 0.7,
-<<<<<<< HEAD
     n: int = 2,
-=======
-    n: int = 3,
-    field: str,
->>>>>>> 832e431 (Make field required, add get_field utility to diversity filters)
 ) -> DataSpec:
     """Remove items with high n-gram overlap against the kept pool.
 
