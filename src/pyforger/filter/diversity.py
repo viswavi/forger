@@ -15,27 +15,30 @@ def by_exact_match(
     source: DataSpec,
     *,
     field: str,
+    max_count: int = 1,
 ) -> DataSpec:
     """Remove items with duplicate field values.
 
-    Keeps the first occurrence of each unique value and discards
-    subsequent duplicates.
+    Keeps up to max_count occurrences of each unique value and discards
+    the rest.
 
     Args:
         source: Upstream DataSpec providing list[dict] data.
         field: Key in each dict to check for duplicates.
+        max_count: Maximum number of items with the same field value
+            to keep (e.g. 5 allows each value to appear up to 5 times).
 
     Returns:
-        A FILTER DataSpec that keeps only unique items.
+        A FILTER DataSpec that keeps only items within the count limit.
     """
 
     def _execute(data: list[dict]) -> list[dict]:
-        seen: set[str] = set()
+        counts: dict[str, int] = {}
         result: list[dict] = []
         for item in data:
             val = get_field(item, field, "by_exact_match")
-            if val not in seen:
-                seen.add(val)
+            counts[val] = counts.get(val, 0) + 1
+            if counts[val] <= max_count:
                 result.append(item)
         return result
 
