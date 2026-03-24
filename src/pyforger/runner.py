@@ -8,10 +8,25 @@ from collections import deque
 from collections.abc import Callable
 from typing import Any
 
-from pyforger.core import DataSpec, ExecutionStatus
+from pyforger.core import DataSpec, ExecutionStatus, NodeType
 from pyforger.utils import get_formatted_logger
 
 logger = get_formatted_logger("Runner")
+
+
+class CycleDetectedError(Exception):
+    """Raised when a cycle is detected in the computation graph."""
+
+    pass
+
+
+class FilterTerminationError(Exception):
+    """Raised when a filter operation returns empty results."""
+
+    def __init__(self, operation_name: str, message: str = ""):
+        """Initialize with the name of the filter operation that caused the error."""
+        self.operation_name = operation_name
+        super().__init__(message or f"Filter '{operation_name}' returned empty results")
 
 
 def run(
@@ -103,7 +118,12 @@ def _topological_sort(root: DataSpec) -> list[DataSpec]:
             if in_degree[dependent_id] == 0:
                 queue.append(dependent_id)
 
-    assert len(result) == len(all_nodes), "Cycle detected in computation graph"
+    if len(result) != len(all_nodes):
+        remaining = [node_map[nid].name for nid in all_nodes if in_degree[nid] > 0]
+        raise CycleDetectedError(
+            f"Cycle detected in computation graph. Nodes involved: {remaining}"
+        )
+
     return result
 
 
@@ -123,14 +143,35 @@ def _execute_node(node: DataSpec, cache: dict[int, Any]) -> None:
 
     try:
         result = node.execute_fn(*input_data)
-        cache[node_id] = result
+
+        if node.node_type == NodeType.FILTER and _is_empty(result):
+            node._status = ExecutionStatus.FILTERED
+            raise FilterTerminationError(node.name)
+
         node._cached_result = result
         node._status = ExecutionStatus.COMPLETED
+        cache[node_id] = result
 
     except NotImplementedError:
         node._status = ExecutionStatus.FAILED
         raise
 
+    except FilterTerminationError:
+        raise
+
     except Exception as e:
         node._status = ExecutionStatus.FAILED
         raise RuntimeError(f"Error executing '{node.name}': {e}") from e
+
+
+def _is_empty(data: Any) -> bool:
+    """Check if a result is empty."""
+    if data is None:
+        return True
+    if isinstance(data, (list, tuple, set, frozenset)):
+        return len(data) == 0
+    elif hasattr(data, "__len__"):
+        return len(data) == 0
+    elif hasattr(data, "empty"):
+        return data.empty
+    return False
