@@ -8,6 +8,7 @@ from __future__ import annotations
 from difflib import SequenceMatcher
 
 from pyforger.core import DataSpec, NodeType
+from pyforger.utils import get_field
 
 # Sourced from Eric Hartford's WizardLM cleaning script:
 # https://huggingface.co/datasets/ehartford/WizardLM_alpaca_evol_instruct_70k_unfiltered
@@ -58,7 +59,9 @@ def by_length(
         return [
             item
             for item in data
-            if min_len <= len(item[instruction_field].split()) <= max_len
+            if min_len
+            <= len(get_field(item, instruction_field, "by_length").split())
+            <= max_len
         ]
 
     return DataSpec(NodeType.FILTER, source, _execute, "filter_by_length")
@@ -92,10 +95,10 @@ def by_invalid_response(
     """
 
     def _is_invalid(item: dict) -> bool:
-        response = item[response_field]
+        response = get_field(item, response_field, "by_invalid_response")
         if response is None or not response.strip():
             return True
-        instruction = item[instruction_field]
+        instruction = get_field(item, instruction_field, "by_invalid_response")
         if response == instruction:
             return True
         shorter, longer = sorted([instruction, response], key=len)
@@ -138,7 +141,11 @@ def by_keyword_blocklist(
         return [
             item
             for item in data
-            if not _contains_blocked(item[response_field], keywords, case_sensitive)
+            if not _contains_blocked(
+                get_field(item, response_field, "by_keyword_blocklist"),
+                keywords,
+                case_sensitive,
+            )
         ]
 
     return DataSpec(NodeType.FILTER, source, _execute, "filter_by_keyword_blocklist")

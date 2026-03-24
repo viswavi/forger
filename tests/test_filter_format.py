@@ -59,7 +59,7 @@ class TestByLength:
         """Missing expected field raises KeyError."""
         data = [{"response": "ok"}]
         source = make_source(data)
-        with pytest.raises(RuntimeError, match="instruction"):
+        with pytest.raises(RuntimeError, match="missing required field 'instruction'"):
             run(by_length(source, instruction_field="instruction"))
 
 
@@ -211,7 +211,7 @@ class TestByInvalidResponse:
         """Missing expected field raises KeyError."""
         data = [{"instruction": "Tell me a joke"}]
         source = make_source(data)
-        with pytest.raises(RuntimeError, match="response"):
+        with pytest.raises(RuntimeError, match="missing required field 'response'"):
             run(
                 by_invalid_response(
                     source, instruction_field="instruction", response_field="response"
