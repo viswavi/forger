@@ -3,7 +3,7 @@
 import pytest
 from fixtures import make_source
 
-from pyforger import DataSpec, run
+from pyforger import run
 from pyforger.filter import by_exact_match, by_n_gram_overlap, by_rouge_l
 
 
@@ -18,7 +18,7 @@ class TestByExactMatch:
             {"instruction": "world", "output": "c"},
         ]
         source = make_source(data)
-        result = run(by_exact_match(source))
+        result = run(by_exact_match(source, field="instruction"))
         assert result == [data[0], data[2]]
 
     def test_keeps_first_occurrence(self):
@@ -28,7 +28,7 @@ class TestByExactMatch:
             {"instruction": "same", "output": "second"},
         ]
         source = make_source(data)
-        result = run(by_exact_match(source))
+        result = run(by_exact_match(source, field="instruction"))
         assert result == [data[0]]
 
     def test_all_unique(self):
@@ -38,7 +38,7 @@ class TestByExactMatch:
             {"instruction": "b", "output": "2"},
         ]
         source = make_source(data)
-        result = run(by_exact_match(source))
+        result = run(by_exact_match(source, field="instruction"))
         assert result == data
 
     def test_all_duplicates_returns_single(self):
@@ -49,37 +49,21 @@ class TestByExactMatch:
             {"instruction": "same", "output": "z"},
         ]
         source = make_source(data)
-        result = run(by_exact_match(source))
+        result = run(by_exact_match(source, field="instruction"))
         assert result == [data[0]]
 
     def test_empty_input(self):
         """Empty input returns empty list."""
         source = make_source([])
-        result = run(by_exact_match(source))
+        result = run(by_exact_match(source, field="instruction"))
         assert result == []
-
-    def test_custom_field(self):
-        """Custom field name is used for deduplication."""
-        data = [
-            {"prompt": "hello", "output": "a"},
-            {"prompt": "hello", "output": "b"},
-            {"prompt": "world", "output": "c"},
-        ]
-        source = make_source(data)
-        result = run(by_exact_match(source, field="prompt"))
-        assert result == [data[0], data[2]]
 
     def test_missing_field_raises_error(self):
         """Missing expected field raises an error."""
         data = [{"output": "a"}]
         source = make_source(data)
-        with pytest.raises(RuntimeError, match="instruction"):
-            run(by_exact_match(source))
-
-    def test_returns_dataspec(self):
-        """by_exact_match returns a DataSpec node."""
-        source = make_source([])
-        assert isinstance(by_exact_match(source), DataSpec)
+        with pytest.raises(RuntimeError, match="missing required field 'instruction'"):
+            run(by_exact_match(source, field="instruction"))
 
 
 class TestByRougeL:
@@ -92,7 +76,7 @@ class TestByRougeL:
             {"instruction": "the cat sat on a mat"},
         ]
         source = make_source(data)
-        result = run(by_rouge_l(source, threshold=0.7))
+        result = run(by_rouge_l(source, field="instruction", threshold=0.7))
         assert result == [data[0]]
 
     def test_keeps_dissimilar_items(self):
@@ -102,7 +86,7 @@ class TestByRougeL:
             {"instruction": "a quick brown fox"},
         ]
         source = make_source(data)
-        result = run(by_rouge_l(source, threshold=0.7))
+        result = run(by_rouge_l(source, field="instruction", threshold=0.7))
         assert result == data
 
     def test_threshold_affects_filtering(self):
@@ -112,8 +96,8 @@ class TestByRougeL:
             {"instruction": "the cat sat on a mat"},
         ]
         source = make_source(data)
-        strict = run(by_rouge_l(source, threshold=0.5))
-        lenient = run(by_rouge_l(source, threshold=0.99))
+        strict = run(by_rouge_l(source, field="instruction", threshold=0.5))
+        lenient = run(by_rouge_l(source, field="instruction", threshold=0.99))
         assert len(strict) <= len(lenient)
 
     def test_exact_duplicates_removed(self):
@@ -123,43 +107,28 @@ class TestByRougeL:
             {"instruction": "hello world"},
         ]
         source = make_source(data)
-        result = run(by_rouge_l(source, threshold=0.7))
+        result = run(by_rouge_l(source, field="instruction", threshold=0.7))
         assert result == [data[0]]
 
     def test_empty_input(self):
         """Empty input returns empty list."""
         source = make_source([])
-        result = run(by_rouge_l(source))
+        result = run(by_rouge_l(source, field="instruction"))
         assert result == []
 
     def test_single_item(self):
         """Single item is always kept."""
         data = [{"instruction": "hello world"}]
         source = make_source(data)
-        result = run(by_rouge_l(source))
+        result = run(by_rouge_l(source, field="instruction"))
         assert result == data
-
-    def test_custom_field(self):
-        """Custom field name is used for comparison."""
-        data = [
-            {"prompt": "the cat sat on the mat"},
-            {"prompt": "the cat sat on a mat"},
-        ]
-        source = make_source(data)
-        result = run(by_rouge_l(source, threshold=0.7, field="prompt"))
-        assert result == [data[0]]
 
     def test_missing_field_raises_error(self):
         """Missing expected field raises an error."""
         data = [{"output": "a"}]
         source = make_source(data)
-        with pytest.raises(RuntimeError, match="instruction"):
-            run(by_rouge_l(source))
-
-    def test_returns_dataspec(self):
-        """by_rouge_l returns a DataSpec node."""
-        source = make_source([])
-        assert isinstance(by_rouge_l(source), DataSpec)
+        with pytest.raises(RuntimeError, match="missing required field 'instruction'"):
+            run(by_rouge_l(source, field="instruction"))
 
 
 class TestByNGramOverlap:
@@ -172,7 +141,7 @@ class TestByNGramOverlap:
             {"instruction": "the quick brown fox leaps"},
         ]
         source = make_source(data)
-        result = run(by_n_gram_overlap(source, threshold=0.5, n=2))
+        result = run(by_n_gram_overlap(source, field="instruction", threshold=0.5, n=2))
         assert result == [data[0]]
 
     def test_keeps_low_overlap(self):
@@ -182,7 +151,7 @@ class TestByNGramOverlap:
             {"instruction": "a lazy dog sleeps outside"},
         ]
         source = make_source(data)
-        result = run(by_n_gram_overlap(source, threshold=0.5, n=2))
+        result = run(by_n_gram_overlap(source, field="instruction", threshold=0.5, n=2))
         assert result == data
 
     def test_threshold_affects_filtering(self):
@@ -192,8 +161,10 @@ class TestByNGramOverlap:
             {"instruction": "the quick brown fox leaps"},
         ]
         source = make_source(data)
-        strict = run(by_n_gram_overlap(source, threshold=0.2, n=2))
-        lenient = run(by_n_gram_overlap(source, threshold=0.99, n=2))
+        strict = run(by_n_gram_overlap(source, field="instruction", threshold=0.2, n=2))
+        lenient = run(
+            by_n_gram_overlap(source, field="instruction", threshold=0.99, n=2)
+        )
         assert len(strict) <= len(lenient)
 
     def test_n_value_affects_filtering(self):
@@ -203,8 +174,10 @@ class TestByNGramOverlap:
             {"instruction": "a b c x y z"},
         ]
         source = make_source(data)
-        bigram = run(by_n_gram_overlap(source, threshold=0.3, n=2))
-        trigram = run(by_n_gram_overlap(source, threshold=0.3, n=3))
+        bigram = run(by_n_gram_overlap(source, field="instruction", threshold=0.3, n=2))
+        trigram = run(
+            by_n_gram_overlap(source, field="instruction", threshold=0.3, n=3)
+        )
         assert len(bigram) <= len(trigram)
 
     def test_short_text_kept(self):
@@ -214,33 +187,18 @@ class TestByNGramOverlap:
             {"instruction": "hi"},
         ]
         source = make_source(data)
-        result = run(by_n_gram_overlap(source, threshold=0.5, n=3))
+        result = run(by_n_gram_overlap(source, field="instruction", threshold=0.5, n=3))
         assert len(result) == 2
 
     def test_empty_input(self):
         """Empty input returns empty list."""
         source = make_source([])
-        result = run(by_n_gram_overlap(source))
+        result = run(by_n_gram_overlap(source, field="instruction"))
         assert result == []
-
-    def test_custom_field(self):
-        """Custom field name is used for comparison."""
-        data = [
-            {"prompt": "the quick brown fox jumps"},
-            {"prompt": "the quick brown fox leaps"},
-        ]
-        source = make_source(data)
-        result = run(by_n_gram_overlap(source, threshold=0.5, n=2, field="prompt"))
-        assert result == [data[0]]
 
     def test_missing_field_raises_error(self):
         """Missing expected field raises an error."""
         data = [{"output": "a"}]
         source = make_source(data)
-        with pytest.raises(RuntimeError, match="instruction"):
-            run(by_n_gram_overlap(source))
-
-    def test_returns_dataspec(self):
-        """by_n_gram_overlap returns a DataSpec node."""
-        source = make_source([])
-        assert isinstance(by_n_gram_overlap(source), DataSpec)
+        with pytest.raises(RuntimeError, match="missing required field 'instruction'"):
+            run(by_n_gram_overlap(source, field="instruction"))
