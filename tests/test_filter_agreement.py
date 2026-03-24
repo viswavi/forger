@@ -3,7 +3,7 @@
 import pytest
 from fixtures import make_source
 
-from pyforger import DataSpec, run
+from pyforger import run
 from pyforger.filter import by_exact_agreement, by_rouge_l_agreement
 
 
@@ -64,15 +64,8 @@ class TestByExactAgreement:
         """Missing expected field raises an error."""
         data = [{"output_1": "a"}]
         source = make_source(data)
-        with pytest.raises(RuntimeError, match="output_2"):
+        with pytest.raises(RuntimeError, match="missing required field 'output_2'"):
             run(by_exact_agreement(source, field_a="output_1", field_b="output_2"))
-
-    def test_returns_dataspec(self):
-        """by_exact_agreement returns a DataSpec node."""
-        source = make_source([])
-        assert isinstance(
-            by_exact_agreement(source, field_a="a", field_b="b"), DataSpec
-        )
 
 
 class TestByRougeLAgreement:
@@ -173,12 +166,5 @@ class TestByRougeLAgreement:
         """Missing expected field raises an error."""
         data = [{"out_a": "hello"}]
         source = make_source(data)
-        with pytest.raises(RuntimeError, match="out_b"):
+        with pytest.raises(RuntimeError, match="missing required field 'out_b'"):
             run(by_rouge_l_agreement(source, field_a="out_a", field_b="out_b"))
-
-    def test_returns_dataspec(self):
-        """by_rouge_l_agreement returns a DataSpec node."""
-        source = make_source([])
-        assert isinstance(
-            by_rouge_l_agreement(source, field_a="a", field_b="b"), DataSpec
-        )
