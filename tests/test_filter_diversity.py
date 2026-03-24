@@ -58,6 +58,29 @@ class TestByExactMatch:
         result = run(by_exact_match(source, field="instruction"))
         assert result == []
 
+    def test_max_count_allows_multiple(self):
+        """max_count allows up to N occurrences of each value."""
+        data = [
+            {"instruction": "same", "response": "a"},
+            {"instruction": "same", "response": "b"},
+            {"instruction": "same", "response": "c"},
+            {"instruction": "same", "response": "d"},
+            {"instruction": "other", "response": "e"},
+        ]
+        source = make_source(data)
+        result = run(by_exact_match(source, field="instruction", max_count=3))
+        assert result == [data[0], data[1], data[2], data[4]]
+
+    def test_max_count_one_is_default(self):
+        """Default max_count=1 keeps only first occurrence."""
+        data = [
+            {"instruction": "same", "response": "a"},
+            {"instruction": "same", "response": "b"},
+        ]
+        source = make_source(data)
+        result = run(by_exact_match(source, field="instruction"))
+        assert result == [data[0]]
+
     def test_missing_field_raises_error(self):
         """Missing expected field raises an error."""
         data = [{"output": "a"}]
