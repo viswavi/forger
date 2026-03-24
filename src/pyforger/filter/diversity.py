@@ -5,8 +5,6 @@ examples based on exact matching, ROUGE-L similarity, and n-gram overlap.
 """
 from __future__ import annotations
 
-from rouge_score import rouge_scorer
-
 from pyforger.core import DataSpec, NodeType
 from pyforger.utils import get_field
 
@@ -48,8 +46,8 @@ def by_exact_match(
 def by_rouge_l(
     source: DataSpec,
     *,
-    threshold: float = 0.7,
     field: str,
+    threshold: float = 0.7,
 ) -> DataSpec:
     """Remove items whose ROUGE-L F1 against any kept item exceeds threshold.
 
@@ -68,6 +66,13 @@ def by_rouge_l(
     """
 
     def _execute(data: list[dict]) -> list[dict]:
+        try:
+            from rouge_score import rouge_scorer
+        except ImportError:
+            raise ImportError(
+                "rouge-score is required for by_rouge_l. "
+                "Install it with: pip install rouge-score"
+            ) from None
         scorer = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=False)
         kept: list[dict] = []
         kept_texts: list[str] = []
@@ -88,9 +93,9 @@ def by_rouge_l(
 def by_n_gram_overlap(
     source: DataSpec,
     *,
+    field: str,
     threshold: float = 0.7,
     n: int = 2,
-    field: str,
 ) -> DataSpec:
     """Remove items with high n-gram overlap against the kept pool.
 
