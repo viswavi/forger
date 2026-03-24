@@ -20,6 +20,9 @@ def run(
 ) -> Any:
     """Execute a dataset creation pipeline (expressing a DAG of data operations).
 
+    Accepts either a DataSpec node or a callable that returns one.
+    Executes the DAG in topological order with caching.
+
     Args:
         pipeline: A DataSpec node, or a function that builds and returns one.
                   Passing a function lets you define pipelines as plain Python
@@ -38,13 +41,8 @@ def run(
     """
     if callable(pipeline) and not isinstance(pipeline, DataSpec):
         pipeline = pipeline()
-    else:
-        resolved = pipeline
 
-    if isinstance(resolved, DataSpec):
-        dataset: DataSpec = resolved
-    else:
-        raise TypeError(f"pipeline must resolve to a DataSpec, got {type(resolved)}")
+    dataset: DataSpec = pipeline
 
     if cache is None:
         cache = {}
@@ -132,13 +130,3 @@ def _execute_node(node: DataSpec, cache: dict[int, Any]) -> None:
     except Exception as e:
         node._status = ExecutionStatus.FAILED
         raise RuntimeError(f"Error executing '{node.name}': {e}") from e
-
-
-def _is_empty(data: Any) -> bool:
-    if data is None:
-        return True
-    if hasattr(data, "__len__"):
-        return len(data) == 0
-    elif hasattr(data, "empty"):
-        return data.empty
-    return False
