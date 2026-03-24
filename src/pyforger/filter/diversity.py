@@ -52,7 +52,7 @@ def by_rouge_l(
 
     Compares each item against all previously-kept items. If the ROUGE-L
     F1 score exceeds the threshold for any pair, the item is discarded.
-    Default threshold of 0.7 per project specification.
+    Default threshold of 0.7.
 
     Args:
         source: Upstream DataSpec providing list[dict] data.
