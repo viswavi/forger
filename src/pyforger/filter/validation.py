@@ -46,24 +46,26 @@ def by_syntax(
             dict containing all listed keys.
         json_schema: JSON-only. If provided, parsed JSON must conform
             to this JSON Schema.
+            e.g.: "{'type': 'object', 'required': ['name', 'score']}"
 
     Returns:
         A FILTER DataSpec that keeps only syntactically valid items.
 
     Raises:
-        ValueError: If lang is not supported, or if required_keys /
+        AssertionError: If lang is not supported, or if required_keys /
             json_schema is used with a non-JSON lang.
         ImportError: If lang='yaml' and PyYAML is not installed, or
             if json_schema is used and jsonschema is not installed.
     """
-    if lang not in _SUPPORTED_LANGS:
-        raise ValueError(
-            f"Unsupported lang {lang!r}. " f"Supported: {sorted(_SUPPORTED_LANGS)}"
-        )
-    if required_keys is not None and lang != "json":
-        raise ValueError("required_keys is only supported when lang='json'")
-    if json_schema is not None and lang != "json":
-        raise ValueError("json_schema is only supported when lang='json'")
+    assert (
+        lang in _SUPPORTED_LANGS
+    ), f"Unsupported lang {lang!r}. Supported: {sorted(_SUPPORTED_LANGS)}"
+    assert (
+        required_keys is None or lang == "json"
+    ), "required_keys is only supported when lang='json'"
+    assert (
+        json_schema is None or lang == "json"
+    ), "json_schema is only supported when lang='json'"
 
     # Import optional dependencies eagerly so users get errors at
     # construction time, not when the pipeline runs.
