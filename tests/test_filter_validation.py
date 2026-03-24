@@ -47,21 +47,21 @@ class TestBySyntaxBasic:
             run(by_syntax(source, field="output"))
 
     def test_unsupported_lang_raises_value_error(self):
-        """Unsupported lang raises ValueError."""
+        """Unsupported lang raises AssertionError."""
         source = make_source([])
-        with pytest.raises(ValueError, match="rust"):
+        with pytest.raises(AssertionError, match="rust"):
             by_syntax(source, lang="rust", field="output")
 
     def test_required_keys_with_non_json_raises(self):
-        """required_keys with non-JSON lang raises ValueError."""
+        """required_keys with non-JSON lang raises AssertionError."""
         source = make_source([])
-        with pytest.raises(ValueError, match="required_keys"):
+        with pytest.raises(AssertionError, match="required_keys"):
             by_syntax(source, lang="yaml", field="output", required_keys=["a"])
 
     def test_json_schema_with_non_json_raises(self):
-        """json_schema with non-JSON lang raises ValueError."""
+        """json_schema with non-JSON lang raises AssertionError."""
         source = make_source([])
-        with pytest.raises(ValueError, match="json_schema"):
+        with pytest.raises(AssertionError, match="json_schema"):
             by_syntax(source, lang="yaml", field="output", json_schema={})
 
 
