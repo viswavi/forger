@@ -26,6 +26,6 @@ def get_formatted_logger(logger_name: str, level: int = logging.INFO) -> logging
         formatter = logging.Formatter(
             "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
         )
-        ch.setFormatter(formatter)
-        logger.addHandler(ch)
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
     return logger
