@@ -78,6 +78,8 @@ class DataSpec:
         object.__setattr__(self, "inputs", tuple(self.inputs))
         # execute_fn is a callable that takes as input the outputs of upstream nodes
         # and returns a list-like iterable of data items (e.g. List[dict])
+        # The arguments to execute_fn must correspond in number and order to the
+        # inputs to the node.
         if not callable(execute_fn):
             raise TypeError(
                 f"execute_fn must be callable, got {type(execute_fn).__name__!r}"
