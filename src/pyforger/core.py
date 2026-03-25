@@ -9,7 +9,7 @@ from __future__ import annotations
 import inspect
 import typing
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, auto
 
 
@@ -65,16 +65,10 @@ class DataSpec:
     inputs: tuple[DataSpec, ...]
     execute_fn: ExecuteFn
     name: str
-    _cached_result: typing.Any | None
-    _status: ExecutionStatus
+    _cached_result: typing.Any | None = field(default=None)
+    _status: ExecutionStatus = field(default=ExecutionStatus.PENDING)
 
-    def __post_init__(
-        self,
-        node_type: NodeType,
-        inputs: Iterable[DataSpec] | DataSpec,
-        execute_fn: ExecuteFn,
-        name: str,
-    ) -> None:
+    def __post_init__(self) -> None:
         """Store basic data in DataSpec object.
 
         Args:
@@ -83,23 +77,22 @@ class DataSpec:
             execute_fn: Callable that performs the actual data processing
             name: Human-readable label for debugging
         """
-        object.__setattr__(self, "node_type", node_type)
         # The inputs, coming from upstream nodes, correspond to the arguments that will
         # be passed to execute_fn at execution time.
-        object.__setattr__(self, "inputs", self._validate_inputs(inputs))
+        object.__setattr__(self, "inputs", self._validate_inputs(self.inputs))
         # execute_fn is a callable that takes as input the outputs of upstream nodes
         # and returns a list-like iterable of data items (e.g. List[dict])
         # The arguments to execute_fn must correspond in number and order to the
         # inputs to the node.
-        if not callable(execute_fn):
+        if not callable(self.execute_fn):
             raise TypeError(
-                f"execute_fn must be callable, got {type(execute_fn).__name__!r}"
+                f"execute_fn must be callable, got {type(self.execute_fn).__name__!r}"
             )
 
         # Validate that execute_fn only takes positional arguments, and that the
         # number of arguments matches the number of inputs.
         try:
-            sig = inspect.signature(execute_fn)
+            sig = inspect.signature(self.execute_fn)
         except ValueError:
             pass  # can't introspect (e.g. C extensions), skip arity check
         else:
@@ -112,9 +105,24 @@ class DataSpec:
                 raise TypeError("execute_fn must only take positional arguments")
             if any(p.default is not inspect.Parameter.empty for p in params):
                 raise TypeError("execute_fn should not have default arguments")
-            if len(params) != len(self.inputs):
+            fixed_params = [
+                p
+                for p in params
+                if p.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD
+                or p.kind == inspect.Parameter.POSITIONAL_ONLY
+            ]
+            has_var_positional = any(
+                p.kind == inspect.Parameter.VAR_POSITIONAL for p in params
+            )
+            if has_var_positional:
+                if len(self.inputs) < len(fixed_params):
+                    raise TypeError(
+                        f"execute_fn requires at least {len(fixed_params)} args but "
+                        + f"node has only {len(self.inputs)} inputs"
+                    )
+            elif len(fixed_params) != len(self.inputs):
                 raise TypeError(
-                    f"execute_fn takes {len(params)} args but "
+                    f"execute_fn takes {len(fixed_params)} args but "
                     + f"node expects {len(self.inputs)} inputs"
                 )
 
@@ -122,7 +130,7 @@ class DataSpec:
         # more args of type list[dict] and returns a list[dict].
         # This check should be paired with runtime type validation.
         try:
-            hints = typing.get_type_hints(execute_fn)
+            hints = typing.get_type_hints(self.execute_fn)
         except Exception:
             pass  # unannotated or unresolvable, skip
         else:
@@ -136,10 +144,6 @@ class DataSpec:
                 raise TypeError(
                     f"execute_fn must return list[dict], got {hints['return']}"
                 )
-        object.__setattr__(self, "execute_fn", execute_fn)
-        object.__setattr__(self, "name", name)
-        object.__setattr__(self, "_cached_result", None)
-        object.__setattr__(self, "_status", ExecutionStatus.PENDING)
 
     @staticmethod
     def _validate_inputs(inputs: Iterable[DataSpec] | DataSpec) -> tuple[DataSpec, ...]:
