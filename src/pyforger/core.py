@@ -60,5 +60,9 @@ class DataSpec:
         self.inputs: tuple[DataSpec, ...] = tuple(inputs)
         # execute_fn is a callable that takes as input the outputs of upstream nodes
         # and returns a list-like iterable of data items (e.g. List[dict])
+        if not callable(execute_fn):
+            raise TypeError(
+                f"execute_fn must be callable, got {type(execute_fn).__name__!r}"
+            )
         self.execute_fn: Callable[..., Iterable[Any]] = execute_fn
         self.name = name
