@@ -7,6 +7,7 @@ executed when run() is called.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Any
 
@@ -21,6 +22,7 @@ class NodeType(Enum):
     RAW = auto()  # Literal/raw data node
 
 
+@dataclass(frozen=True)
 class DataSpec:
     """A node in the computation graph.
 
@@ -39,7 +41,12 @@ class DataSpec:
         >>> result = forger.run(filtered)  # executes the graph
     """
 
-    def __init__(
+    node_type: NodeType
+    inputs: tuple[DataSpec, ...]
+    execute_fn: Callable[..., Iterable[Any]]
+    name: str
+
+    def __post_init__(
         self,
         node_type: NodeType,
         inputs: Iterable[DataSpec],
@@ -54,15 +61,15 @@ class DataSpec:
             execute_fn: Callable that performs the actual data processing
             name: Human-readable label for debugging
         """
-        self.node_type = node_type
+        object.__setattr__(self, "node_type", node_type)
         # The inputs, coming from upstream nodes, correspond to the arguments that will
         # be passed to execute_fn at execution time.
-        self.inputs: tuple[DataSpec, ...] = tuple(inputs)
+        object.__setattr__(self, "inputs", tuple(self.inputs))
         # execute_fn is a callable that takes as input the outputs of upstream nodes
         # and returns a list-like iterable of data items (e.g. List[dict])
         if not callable(execute_fn):
             raise TypeError(
                 f"execute_fn must be callable, got {type(execute_fn).__name__!r}"
             )
-        self.execute_fn: Callable[..., Iterable[Any]] = execute_fn
-        self.name = name
+        object.__setattr__(self, "execute_fn", execute_fn)
+        object.__setattr__(self, "name", name)
