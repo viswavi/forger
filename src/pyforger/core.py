@@ -53,8 +53,10 @@ class DataSpec:
         name: Human-readable label for debugging
 
     Example:
-        >>> retrieved = forger.acquire.retrieve_from_hf(description="math", max_n=100)
-        >>> filtered = forger.filter.by_diversity(retrieved, threshold=0.8)
+        >>> source = DataSpec(NodeType.SOURCE, (), lambda: ["a", "a", "b"], "source")
+        >>> _execute_fn = lambda inputs: [x * 2 for x in inputs[0]]
+        >>> doubled = DataSpec(NodeType.ALTER, source, _execute_fn, "test_double")
+        >>> filtered = forger.filter.by_diversity(source, threshold=0.8)
         >>> result = forger.run(filtered)  # executes the graph
     """
 
@@ -185,6 +187,10 @@ class DataSpec:
             if not isinstance(dep, DataSpec):
                 raise TypeError("All inputs must be DataSpec instances")
         return list(deps)
+
+    # Dataclasses are not hashable by default if they are mutable, so we overwrite this
+    # behavior to alow custom hashing based on object identity (not its contents).
+    __hash__ = object.__hash__
 
     def __repr__(self) -> str:
         """Show node type and status for debugging."""
