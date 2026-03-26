@@ -11,7 +11,7 @@ import typing
 from collections.abc import Callable, Iterable
 from dataclasses import InitVar, dataclass, field
 from enum import Enum, auto
-from typing import Any, Optional
+from typing import Any
 
 
 class NodeType(Enum):
@@ -30,11 +30,10 @@ ExecuteFn = Callable[..., list[dict]]
 class ExecutionStatus(Enum):
     """Status of a DataSpec node during execution."""
 
-    PENDING = auto()
-    RUNNING = auto()
-    COMPLETED = auto()
-    FAILED = auto()
-    FILTERED = auto()
+    PENDING = auto()  # The execution of the graph has not yet reached this node
+    RUNNING = auto()  # This node is currently being executed
+    COMPLETED = auto()  # Execution was successful and the result has been cached
+    FAILED = auto()  # Execution failed
 
 
 _MUTABLE_FIELDS: frozenset[str] = frozenset({"_status", "_cached_result"})
@@ -187,7 +186,7 @@ class DataSpec:
         for dep in deps:
             if not isinstance(dep, DataSpec):
                 raise TypeError("All inputs must be DataSpec instances")
-        return list(deps)
+        return tuple(deps)
 
     # Dataclasses are not hashable by default if they are mutable, so we overwrite this
     # behavior to alow custom hashing based on object identity (not its contents).
@@ -202,22 +201,17 @@ class DataSpec:
 
     def get_dependencies(self) -> list[DataSpec]:
         """Return list of upstream DataSpec nodes."""
-        return self.inputs.copy()
+        return list(self.inputs)
 
     @property
-    def is_computed(self) -> bool:
+    def is_completed(self) -> bool:
         """Return status of whether this node has been computed."""
         return self._status == ExecutionStatus.COMPLETED
 
     @property
-    def is_filtered(self) -> bool:
-        """Return status of whether this node has been filtered."""
-        return self._status == ExecutionStatus.FILTERED
-
-    @property
     def result(self) -> Any:
         """Return the computed result, or raise if not computed yet."""
-        if not (self.is_computed or self.is_filtered):
+        if not self.is_completed:
             raise RuntimeError(
                 f"DataSpec '{self.name}' has not been executed yet. Call run() first."
             )
