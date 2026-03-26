@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import inspect
 import typing
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterable
+from dataclasses import InitVar, dataclass, field
 from enum import Enum, auto
-from typing import Any, Optional
+from typing import Any
 
 
 class NodeType(Enum):
@@ -23,22 +24,16 @@ class NodeType(Enum):
     RAW = auto()  # Literal/raw data node
 
 
-class ExecuteFn(typing.Protocol):
-    """Protocol for the execute function of a DataSpec node."""
-
-    def __call__(self, *args: list[dict]) -> list[dict]:
-        """This is a protocol for the function performing actual data processing."""
-        ...
+ExecuteFn = Callable[..., list[dict]]
 
 
 class ExecutionStatus(Enum):
     """Status of a DataSpec node during execution."""
 
-    PENDING = auto()
-    RUNNING = auto()
-    COMPLETED = auto()
-    FAILED = auto()
-    FILTERED = auto()
+    PENDING = auto()  # The execution of the graph has not yet reached this node
+    RUNNING = auto()  # This node is currently being executed
+    COMPLETED = auto()  # Execution was successful and the result has been cached
+    FAILED = auto()  # Execution failed
 
 
 _MUTABLE_FIELDS: frozenset[str] = frozenset({"_status", "_cached_result"})
@@ -66,9 +61,12 @@ class DataSpec:
     """
 
     node_type: NodeType
-    inputs: tuple[DataSpec, ...]
+    # inputs_arg is the raw input passed at initialization, which is converted to a
+    # tuple of DataSpecs and stored as `inputs`.
+    inputs_arg: InitVar[Iterable[DataSpec] | DataSpec]
     execute_fn: ExecuteFn
     name: str
+    inputs: tuple[DataSpec, ...] = field(init=False)
     _cached_result: typing.Any | None = field(default=None)
     _status: ExecutionStatus = field(default=ExecutionStatus.PENDING)
 
@@ -78,18 +76,15 @@ class DataSpec:
             raise AttributeError(f"DataSpec field '{name}' is read-only")
         object.__setattr__(self, name, value)
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, inputs_arg: Iterable[DataSpec] | DataSpec) -> None:
         """Store basic data in DataSpec object.
 
         Args:
-            node_type: The semantic type of this node
-            inputs: Upstream DataSpec nodes this depends on
-            execute_fn: Callable that performs the actual data processing
-            name: Human-readable label for debugging
+            inputs_arg: The raw input DataSpec(s) passed at initialization.
         """
         # The inputs, coming from upstream nodes, correspond to the arguments that will
         # be passed to execute_fn at execution time.
-        object.__setattr__(self, "inputs", self._validate_inputs(self.inputs))
+        object.__setattr__(self, "inputs", self._validate_inputs(inputs_arg))
         # execute_fn is a callable that takes as input the outputs of upstream nodes
         # and returns a list-like iterable of data items (e.g. List[dict])
         # The arguments to execute_fn must correspond in number and order to the
@@ -156,8 +151,8 @@ class DataSpec:
                 )
 
     @staticmethod
-    def _validate_inputs(inputs: DataSpec | list[DataSpec]) -> list[DataSpec]:
-        """Normalize inputs to a fresh list of DataSpec instances."""
+    def _validate_inputs(inputs: Iterable[DataSpec] | DataSpec) -> tuple[DataSpec, ...]:
+        """Normalize inputs to an immutable sequence of DataSpec instances."""
         if isinstance(inputs, DataSpec):
             deps = [inputs]
         else:
@@ -170,7 +165,7 @@ class DataSpec:
         for dep in deps:
             if not isinstance(dep, DataSpec):
                 raise TypeError("All inputs must be DataSpec instances")
-        return list(deps)
+        return tuple(deps)
 
     # Dataclasses are not hashable by default if they are mutable, so we overwrite this
     # behavior to alow custom hashing based on object identity (not its contents).
@@ -179,28 +174,23 @@ class DataSpec:
     def __repr__(self) -> str:
         """Show node type and status for debugging."""
         return (
-            f"DataSpec({self.name}, status={self._status.name.lower()},"
-            + f" deps={len(self.inputs)})"
+            f"DataSpec({self.name}, status={self._status.name.lower()}, "
+            + f"deps={len(self.inputs)})"
         )
 
     def get_dependencies(self) -> list[DataSpec]:
         """Return list of upstream DataSpec nodes."""
-        return self.inputs.copy()
+        return list(self.inputs)
 
     @property
-    def is_computed(self) -> bool:
+    def is_completed(self) -> bool:
         """Return status of whether this node has been computed."""
         return self._status == ExecutionStatus.COMPLETED
 
     @property
-    def is_filtered(self) -> bool:
-        """Return status of whether this node has been filtered."""
-        return self._status == ExecutionStatus.FILTERED
-
-    @property
     def result(self) -> Any:
         """Return the computed result, or raise if not computed yet."""
-        if not (self.is_computed or self.is_filtered):
+        if not self.is_completed:
             raise RuntimeError(
                 f"DataSpec '{self.name}' has not been executed yet. Call run() first."
             )
