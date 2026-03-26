@@ -21,15 +21,9 @@ class TestGraphConstruction:
 
     def test_no_execution_on_build(self):
         """Test that execute function is not called on node creation."""
-        execution_count = 0
-
-        def execute():
-            nonlocal execution_count
-            execution_count += 1
-            return [1, 2, 3]
-
-        DataSpec(NodeType.ACQUIRE, [], execute, "test_source")
-        assert execution_count == 0
+        counter = CallCounter()
+        make_source([1, 2, 3], counter=counter)
+        assert counter.count == 0
 
     def test_single_dependency_tracked(self):
         """Test that nodes can track one upstream dependency.
@@ -38,7 +32,7 @@ class TestGraphConstruction:
         is recorded.
         """
         source = make_source([1, 2, 3])
-        doubled = make_double_length(source)
+        doubled = make_double_repetition_data(source)
         assert doubled.get_dependencies() == [source]
 
     def test_multiple_dependencies_tracked(self):
