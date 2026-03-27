@@ -5,13 +5,13 @@ completions from any supported LLM provider.
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Union
 
 import litellm
 
 # Type aliases
 Message = dict[str, str]
-Prompt = str | list[Message]
+Prompt = Union[str, list[Message]]
 
 
 def _to_messages(prompt: Prompt) -> list[Message]:
