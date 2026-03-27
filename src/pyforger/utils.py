@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 
 def get_formatted_logger(logger_name: str, level: int = logging.INFO) -> logging.Logger:
@@ -29,3 +30,23 @@ def get_formatted_logger(logger_name: str, level: int = logging.INFO) -> logging
         handler.setFormatter(formatter)
         logger.addHandler(handler)
     return logger
+
+
+def get_field(item: dict, field: str, caller: str) -> Any:
+    """Retrieve a field from a dict item, raising a clear error if missing.
+
+    Args:
+        item: The dictionary to look up.
+        field: The key to retrieve.
+        caller: Name of the calling function, used in the error message.
+
+    Raises:
+        KeyError: If the field is not present in the item.
+    """
+    try:
+        return item[field]
+    except KeyError:
+        raise KeyError(
+            f"{caller}: item is missing required field '{field}'. "
+            f"Available fields: {list(item.keys())}"
+        )

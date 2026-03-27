@@ -64,7 +64,7 @@ class TestExecution:
 
         def execute():
             nonlocal execution_count
-            execution_count = 1
+            execution_count += 1
             return [1, 2]
 
         source = DataSpec(NodeType.ACQUIRE, [], execute, "test_source")
@@ -79,7 +79,7 @@ class TestExecution:
 
         def execute():
             nonlocal execution_count
-            execution_count = 1
+            execution_count += 1
             return [1, 2]
 
         source = DataSpec(NodeType.ACQUIRE, [], execute, "test_source")
