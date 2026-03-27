@@ -1,8 +1,9 @@
 """Tests for the Model class (LiteLLM wrapper)."""
 from __future__ import annotations
 
-import pytest
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from pyforger.acquire.model import Model, _to_messages
 
@@ -107,7 +108,7 @@ class TestConstructor:
         assert model.last_usage is None
 
     def test_repr(self):
-        """repr shows model id."""
+        """Repr shows model id."""
         model = Model("gpt-4o")
         assert repr(model) == "Model('gpt-4o')"
 
@@ -264,15 +265,17 @@ class TestGenerate:
         """Chat message list works as input."""
         mock_litellm.completion.return_value = make_litellm_response(["ahoy"])
         model = Model("gpt-4o", api_key="sk-test")
-        result = model.generate([
-            {"role": "system", "content": "You are a pirate."},
-            {"role": "user", "content": "Hello"},
-        ])
+        result = model.generate(
+            [
+                {"role": "system", "content": "You are a pirate."},
+                {"role": "user", "content": "Hello"},
+            ]
+        )
         assert result == ["ahoy"]
 
     @patch("pyforger.acquire.model.litellm")
     def test_delegates_to_generate_batch(self, mock_litellm):
-        """generate forwards all parameters to litellm.completion."""
+        """Generate forwards all parameters to litellm.completion."""
         mock_litellm.completion.return_value = make_litellm_response(["ok"])
         model = Model("gpt-4o", api_key="sk-test")
         model.generate("Hi", n=2, temperature=0.3, max_tokens=50)
@@ -283,7 +286,7 @@ class TestGenerate:
 
     @patch("pyforger.acquire.model.litellm")
     def test_default_n_is_one(self, mock_litellm):
-        """generate with no n argument returns a single-element list."""
+        """Generate with no n argument returns a single-element list."""
         mock_litellm.completion.return_value = make_litellm_response(["ok"])
         model = Model("gpt-4o", api_key="sk-test")
         result = model.generate("Hi")
@@ -299,7 +302,9 @@ class TestLastUsage:
     def test_tracks_single_call(self, mock_litellm):
         """last_usage reflects a single completion call."""
         mock_litellm.completion.return_value = make_litellm_response(
-            ["ok"], prompt_tokens=15, completion_tokens=25,
+            ["ok"],
+            prompt_tokens=15,
+            completion_tokens=25,
         )
         model = Model("gpt-4o", api_key="sk-test")
         model.generate("Hi")
@@ -324,12 +329,16 @@ class TestLastUsage:
     def test_resets_on_new_call(self, mock_litellm):
         """last_usage resets on each new generate call."""
         mock_litellm.completion.return_value = make_litellm_response(
-            ["ok"], prompt_tokens=100, completion_tokens=200,
+            ["ok"],
+            prompt_tokens=100,
+            completion_tokens=200,
         )
         model = Model("gpt-4o", api_key="sk-test")
         model.generate("First call")
         mock_litellm.completion.return_value = make_litellm_response(
-            ["ok"], prompt_tokens=5, completion_tokens=10,
+            ["ok"],
+            prompt_tokens=5,
+            completion_tokens=10,
         )
         model.generate("Second call")
         assert model.last_usage["prompt_tokens"] == 5
@@ -339,7 +348,8 @@ class TestLastUsage:
     def test_no_usage_from_provider(self, mock_litellm):
         """Providers that omit usage data get zero tokens."""
         mock_litellm.completion.return_value = make_litellm_response(
-            ["ok"], include_usage=False,
+            ["ok"],
+            include_usage=False,
         )
         model = Model("gpt-4o", api_key="sk-test")
         model.generate("Hi")
@@ -350,7 +360,8 @@ class TestLastUsage:
     def test_no_response_cost(self, mock_litellm):
         """Missing response_cost in _hidden_params defaults to 0.0."""
         mock_litellm.completion.return_value = make_litellm_response(
-            ["ok"], include_hidden_params=False,
+            ["ok"],
+            include_hidden_params=False,
         )
         model = Model("gpt-4o", api_key="sk-test")
         model.generate("Hi")

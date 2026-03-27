@@ -160,9 +160,7 @@ class Model:
                 num_retries=self._num_retries,
                 **self._kwargs,
             )
-            completions = [
-                choice.message.content or "" for choice in response.choices
-            ]
+            completions = [choice.message.content or "" for choice in response.choices]
             all_results.append(completions)
 
             usage = getattr(response, "usage", None)
