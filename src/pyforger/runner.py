@@ -40,9 +40,11 @@ def run(
         >>> result = forger.run(my_pipeline)
     """
     if callable(pipeline) and not isinstance(pipeline, DataSpec):
-        pipeline = pipeline()
+        resolved = pipeline()
+    else:
+        resolved = pipeline
 
-    dataset: DataSpec = pipeline
+    dataset: DataSpec = resolved
 
     if cache is None:
         cache = {}
