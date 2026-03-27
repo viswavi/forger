@@ -122,6 +122,7 @@ def _execute_node(node: DataSpec, cache: dict[int, Any]) -> None:
     try:
         result = node.execute_fn(*input_data)
         cache[node_id] = result
+
         node._cached_result = result
         node._status = ExecutionStatus.COMPLETED
 
