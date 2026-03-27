@@ -18,7 +18,6 @@ def get_formatted_logger(logger_name: str, level: int = logging.INFO) -> logging
     """
     logger = logging.getLogger(logger_name)
     logger.setLevel(level)
-    logger.setLevel(level)
     # Check if the logger already has a StreamHandler to prevent adding another one.
     if not any(
         isinstance(handler, logging.StreamHandler) for handler in logger.handlers
