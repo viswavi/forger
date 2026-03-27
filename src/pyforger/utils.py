@@ -23,12 +23,12 @@ def get_formatted_logger(logger_name: str, level: int = logging.INFO) -> logging
     if not any(
         isinstance(handler, logging.StreamHandler) for handler in logger.handlers
     ):
-        ch = logging.StreamHandler()
+        handler = logging.StreamHandler()
         formatter = logging.Formatter(
             "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
         )
-        ch.setFormatter(formatter)
-        logger.addHandler(ch)
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
     return logger
 
 
