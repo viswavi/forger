@@ -171,10 +171,6 @@ class DataSpec:
     # behavior to alow custom hashing based on object identity (not its contents).
     __hash__ = object.__hash__
 
-    # Dataclasses are not hashable by default if they are mutable, so we overwrite this
-    # behavior to alow custom hashing based on object identity (not its contents).
-    __hash__ = object.__hash__
-
     def __repr__(self) -> str:
         """Show node type and status for debugging."""
         return (
