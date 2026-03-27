@@ -40,9 +40,11 @@ def run(
         >>> result = forger.run(my_pipeline)
     """
     if callable(pipeline) and not isinstance(pipeline, DataSpec):
-        pipeline = pipeline()
+        resolved = pipeline()
+    else:
+        resolved = pipeline
 
-    dataset: DataSpec = pipeline
+    dataset: DataSpec = resolved
 
     if cache is None:
         cache = {}
@@ -120,6 +122,7 @@ def _execute_node(node: DataSpec, cache: dict[int, Any]) -> None:
     try:
         result = node.execute_fn(*input_data)
         cache[node_id] = result
+
         node._cached_result = result
         node._status = ExecutionStatus.COMPLETED
 
