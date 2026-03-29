@@ -6,7 +6,6 @@ based on quality scores or multi-judge consensus.
 from __future__ import annotations
 
 import json
-import logging
 
 from pyforger.acquire.model import Model
 from pyforger.core import DataSpec, NodeType
@@ -126,7 +125,8 @@ def by_llm_agreement(
         raise ValueError("agreement_threshold must be in (0, 1]")
     if score_threshold > max_score:
         raise ValueError(
-            f"score_threshold ({score_threshold}) must not exceed max_score ({max_score})"
+            f"score_threshold ({score_threshold}) must not exceed "
+            f"max_score ({max_score})"
         )
 
     def _execute(data: list[dict]) -> list[dict]:

@@ -51,9 +51,7 @@ class _FakeJudge:
             rng = random.Random(hash((prompt, i)))
             score = rng.randint(1, 5)
             words = rng.choices(self._WORD_POOL, k=2)
-            results.append(
-                json.dumps({"score": score, "explanation": " ".join(words)})
-            )
+            results.append(json.dumps({"score": score, "explanation": " ".join(words)}))
         return results
 
 
@@ -503,10 +501,12 @@ class TestMalformedResponses:
             {"instruction": "Q2", "response": "A2"},
         ]
         source = make_source(data)
-        judge = _BadJudge([
-            "not json",
-            json.dumps({"score": 5, "explanation": "great"}),
-        ])
+        judge = _BadJudge(
+            [
+                "not json",
+                json.dumps({"score": 5, "explanation": "great"}),
+            ]
+        )
         result = run(
             by_llm_score(
                 source,
