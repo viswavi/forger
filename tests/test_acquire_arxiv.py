@@ -1,4 +1,4 @@
-"""Tests for ArxivRetrievalSource.fetch() with mocked arxiv API."""
+"""Tests for ArxivRetrievalSource.fetch() with mocked arXiv API."""
 from __future__ import annotations
 
 import os
@@ -9,7 +9,7 @@ import pytest
 from pyforger.acquire import ArxivRetrievalSource, RetrieveMode
 
 
-def _make_mock_result(
+def _make_mock_arxiv_search_result(
     short_id: str, title: str = "Title", summary: str = "Abstract."
 ) -> MagicMock:
     r = MagicMock()
@@ -29,10 +29,10 @@ class TestArxivRetrievalSourceFetch:
         self, mock_client_cls: MagicMock, mock_search_cls: MagicMock
     ) -> None:
         """QUERY mode returns n items each with text, id, title, summary."""
-        mock_result1 = _make_mock_result(
+        mock_result1 = _make_mock_arxiv_search_result(
             "2107.05580v1", "Quantum ML", "We study quantum."
         )
-        mock_result2 = _make_mock_result(
+        mock_result2 = _make_mock_arxiv_search_result(
             "2301.00001v1", "Deep Learning", "We propose a model."
         )
         mock_client = MagicMock()
@@ -81,7 +81,9 @@ class TestArxivRetrievalSourceFetch:
     ) -> None:
         """RANDOM mode samples n items using seed; same seed gives same order."""
         results_10 = [
-            _make_mock_result(f"2001.0000{i}v1", f"Paper {i}", f"Abstract {i}")
+            _make_mock_arxiv_search_result(
+                f"2001.0000{i}v1", f"Paper {i}", f"Abstract {i}"
+            )
             for i in range(10)
         ]
         mock_client = MagicMock()
@@ -99,47 +101,6 @@ class TestArxivRetrievalSourceFetch:
         call_kw = mock_search_cls.call_args[1]
         assert "cat:cs.AI" in call_kw["query"] or call_kw["query"] == "cat:cs.AI"
         assert call_kw["max_results"] == min(3 * 10, 500)
-
-    @patch("pyforger.acquire.sources.arxiv.Search")
-    @patch("pyforger.acquire.sources.arxiv.Client")
-    def test_structured_mode_id_list_builds_search_with_id_list(
-        self, mock_client_cls: MagicMock, mock_search_cls: MagicMock
-    ) -> None:
-        """STRUCTURED mode with criteria id_list builds Search with id_list."""
-        mock_result = _make_mock_result("1234.5678v1", "A Paper", "Summary.")
-        mock_client = MagicMock()
-        mock_client.results.return_value = iter([mock_result])
-        mock_client_cls.return_value = mock_client
-
-        source = ArxivRetrievalSource()
-        items = source.fetch(
-            RetrieveMode.STRUCTURED,
-            n=10,
-            criteria={"id_list": ["1234.5678v1"]},
-        )
-
-        assert len(items) == 1
-        assert items[0]["id"] == "1234.5678v1"
-        assert items[0]["title"] == "A Paper"
-        mock_search_cls.assert_called_once()
-        call_kw = mock_search_cls.call_args[1]
-        assert call_kw["id_list"] == ["1234.5678v1"]
-
-    @patch("pyforger.acquire.sources.arxiv.Search")
-    @patch("pyforger.acquire.sources.arxiv.Client")
-    def test_structured_mode_ids_alias(
-        self, mock_client_cls: MagicMock, mock_search_cls: MagicMock
-    ) -> None:
-        """STRUCTURED mode accepts 'ids' as alias for id_list."""
-        mock_client = MagicMock()
-        mock_client.results.return_value = iter([])
-        mock_client_cls.return_value = mock_client
-
-        source = ArxivRetrievalSource()
-        source.fetch(RetrieveMode.STRUCTURED, n=5, criteria={"ids": ["9999.9999v1"]})
-
-        call_kw = mock_search_cls.call_args[1]
-        assert call_kw["id_list"] == ["9999.9999v1"]
 
     @pytest.mark.skipif(
         not os.environ.get("PYFORGER_ARXIV_LIVE"),

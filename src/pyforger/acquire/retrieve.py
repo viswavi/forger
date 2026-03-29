@@ -27,7 +27,6 @@ def retrieve(
     query: str | None = None,
     n: int = 10,
     seed: int | None = None,
-    criteria: dict[str, Any] | None = None,
     name: str = "retrieve",
     **kwargs: Any,
 ) -> DataSpec:
@@ -35,11 +34,10 @@ def retrieve(
 
     Args:
         source: The corpus or API wrapper; must implement fetch().
-        mode: How to select segments (QUERY, RANDOM, or STRUCTURED).
+        mode: How to select segments (QUERY or RANDOM).
         query: Search or query string; used when mode is QUERY.
         n: Number of segments to return.
         seed: Random seed for reproducible sampling when mode is RANDOM.
-        criteria: Field constraints when mode is STRUCTURED.
         name: Human-readable label for the node (for debugging).
         **kwargs: Passed through to source.fetch().
 
@@ -48,9 +46,7 @@ def retrieve(
     """
 
     def _execute():
-        return source.fetch(
-            mode, query=query, n=n, seed=seed, criteria=criteria, **kwargs
-        )
+        return source.fetch(mode, query=query, n=n, seed=seed, **kwargs)
 
     # ACQUIRE nodes have no inputs; execute_fn is called at run().
     return DataSpec(NodeType.ACQUIRE, [], _execute, name)
@@ -62,7 +58,6 @@ def retrieve_from_web(
     query: str | None = None,
     n: int = 10,
     seed: int | None = None,
-    criteria: dict[str, Any] | None = None,
     base_url: str | None = None,
     name: str = "retrieve_from_web",
     **kwargs: Any,
@@ -79,7 +74,6 @@ def retrieve_from_web(
         query=query,
         n=n,
         seed=seed,
-        criteria=criteria,
         name=name,
         **kwargs,
     )
@@ -91,7 +85,6 @@ def retrieve_from_wiki(
     query: str | None = None,
     n: int = 10,
     seed: int | None = None,
-    criteria: dict[str, Any] | None = None,
     language: str = "en",
     name: str = "retrieve_from_wiki",
     **kwargs: Any,
@@ -108,7 +101,6 @@ def retrieve_from_wiki(
         query=query,
         n=n,
         seed=seed,
-        criteria=criteria,
         name=name,
         **kwargs,
     )
@@ -123,7 +115,6 @@ def retrieve_from_hf(
     query: str | None = None,
     n: int = 10,
     seed: int | None = None,
-    criteria: dict[str, Any] | None = None,
     name: str = "retrieve_from_hf",
     **kwargs: Any,
 ) -> DataSpec:
@@ -165,7 +156,6 @@ def retrieve_from_hf(
         query=query,
         n=n,
         seed=seed,
-        criteria=criteria,
         name=name,
     )
 
@@ -176,21 +166,16 @@ def retrieve_from_arxiv(
     query: str | None = None,
     n: int = 10,
     seed: int | None = None,
-    criteria: dict[str, Any] | None = None,
     name: str = "retrieve_from_arxiv",
     **kwargs: Any,
 ) -> DataSpec:
     """Build an ACQUIRE node that fetches papers from arXiv when the graph runs.
 
     Args:
-        mode: QUERY (text search), RANDOM (sample from category), or STRUCTURED
-            (filter by criteria).
+        mode: QUERY (text search) andRANDOM (sample from category).
         query: Search string for QUERY mode; default "all:*" if empty.
         n: Number of papers to return.
         seed: Random seed for RANDOM mode (optional; for reproducibility).
-        criteria: For STRUCTURED mode only. Keys (all optional): id_list or ids
-            (list of arXiv ids), category (e.g. "cs.LG"), author, title, query
-            (raw string). Sort via kwargs sort_by/sort_order, not here.
         name: Label for the node.
         **kwargs: Arxiv options: sort_by, sort_order, random_category (RANDOM),
             page_size, delay_seconds, num_retries (Client).
@@ -206,7 +191,6 @@ def retrieve_from_arxiv(
         query=query,
         n=n,
         seed=seed,
-        criteria=criteria,
         name=name,
         **kwargs,
     )
@@ -218,11 +202,10 @@ def retrieve_from_s2(
     query: str | None = None,
     n: int = 10,
     seed: int | None = None,
-    criteria: dict[str, Any] | None = None,
     name: str = "retrieve_from_s2",
     **kwargs: Any,
 ) -> DataSpec:
-    """Retrieve from Semantic Scholar (semanticscholar library).
+    """Retrieve from Semantic Scholar.
 
     Returns:
         DataSpec whose execute_fn returns the fetched list.
@@ -234,7 +217,6 @@ def retrieve_from_s2(
         query=query,
         n=n,
         seed=seed,
-        criteria=criteria,
         name=name,
         **kwargs,
     )
