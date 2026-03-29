@@ -164,7 +164,8 @@ class ArxivRetrievalSource(RetrievalSource):
     """Retrieval source that fetches papers from arXiv via the API.
 
     Uses the arxiv Python package (Client and Search) to run queries in three
-    modes: QUERY (text search + n) and RANDOM (sample n from a category with seed). Returns a list of item dicts with
+    modes: QUERY (text search + n) and RANDOM (sample n from a
+    category with seed). Returns a list of item dicts with
     "text", "id", "title", and "summary" per paper.
 
     Attributes:

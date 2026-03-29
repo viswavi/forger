@@ -29,10 +29,10 @@ class TestArxivRetrievalSourceFetch:
         self, mock_client_cls: MagicMock, mock_search_cls: MagicMock
     ) -> None:
         """QUERY mode returns n items each with text, id, title, summary."""
-        mock_result1 = _make_mock_result(
+        mock_result1 = _make_mock_arxiv_search_result(
             "2107.05580v1", "Quantum ML", "We study quantum."
         )
-        mock_result2 = _make_mock_result(
+        mock_result2 = _make_mock_arxiv_search_result(
             "2301.00001v1", "Deep Learning", "We propose a model."
         )
         mock_client = MagicMock()
@@ -81,7 +81,7 @@ class TestArxivRetrievalSourceFetch:
     ) -> None:
         """RANDOM mode samples n items using seed; same seed gives same order."""
         results_10 = [
-            _make_mock_result(f"2001.0000{i}v1", f"Paper {i}", f"Abstract {i}")
+            _make_mock_arxiv_search_result(f"2001.0000{i}v1", f"Paper {i}", f"Abstract {i}")
             for i in range(10)
         ]
         mock_client = MagicMock()
