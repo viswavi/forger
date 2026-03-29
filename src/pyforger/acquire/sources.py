@@ -1,7 +1,7 @@
 """Retrieval sources for acquire.retrieve: abstract base and concrete backends.
 
-Concrete sources (web, wiki, HF, arxiv, S2) are stub implementations that can be
-replaced with real API calls.
+Concrete sources (web, Wikipedia, Hugging Face, ArXiv, Semantic Scholar) are stub
+implementations that can be replaced with real API calls.
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ class RetrieveMode(Enum):
 
     QUERY = auto()  # query string (and optional k/top_k)
     RANDOM = auto()  # random sampling (seed, n)
-    STRUCTURED = auto()  # criteria/filter (e.g. dict of field constraints)
 
 
 class RetrievalSource(ABC):
@@ -37,7 +36,6 @@ class RetrievalSource(ABC):
         query: str | None = None,
         n: int = 10,
         seed: int | None = None,
-        criteria: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
         """Return list of items (e.g. [{"text": "...", "id": "..."}]).
@@ -45,11 +43,10 @@ class RetrievalSource(ABC):
         Mode-specific args used as needed.
 
         Args:
-            mode: How to select segments (QUERY, RANDOM, or STRUCTURED).
+            mode: How to select segments (QUERY or RANDOM).
             query: Search or query string; used when mode is QUERY.
             n: Number of segments to return (e.g. top-k or sample size).
             seed: Random seed for reproducible sampling when mode is RANDOM.
-            criteria: Field constraints or filter when mode is STRUCTURED.
             **kwargs: Passed through to backend; mode-specific.
 
         Returns:
@@ -79,12 +76,11 @@ class WebRetrievalSource(RetrievalSource):
         query: str | None = None,
         n: int = 10,
         seed: int | None = None,
-        criteria: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
         """Return list of items; stub returns empty list.
 
-        Would use requests/crawler with query/random/structured mode.
+        Would use requests/crawler with query or random mode.
         """
         return []
 
@@ -109,18 +105,17 @@ class WikiRetrievalSource(RetrievalSource):
         query: str | None = None,
         n: int = 10,
         seed: int | None = None,
-        criteria: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
         """Return list of items; stub returns empty list.
 
-        Would use wikipedia-api or MediaWiki with query/random/structured.
+        Would use wikipedia-api or MediaWiki with query or random mode.
         """
         return []
 
 
 class HFRetrievalSource(RetrievalSource):
-    """Hugging Face datasets (load_dataset + shuffle/filter/select).
+    """Hugging Face datasets (load_dataset + shuffle/select).
 
     Stub implementation.
     """
@@ -156,13 +151,11 @@ class HFRetrievalSource(RetrievalSource):
         query: str | None = None,
         n: int = 10,
         seed: int | None = None,
-        criteria: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
         """Return list of items; stub returns empty list.
 
-        Would use datasets.load_dataset(), shuffle(seed), select(range(n)),
-        filter(criteria).
+        Would use datasets.load_dataset(), shuffle(seed), select(range(n)).
         """
         return []
 
@@ -256,7 +249,6 @@ class ArxivRetrievalSource(RetrievalSource):
         query: str | None = None,
         n: int = 10,
         seed: int | None = None,
-        criteria: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
         """Return items from arXiv by mode (QUERY, RANDOM, or STRUCTURED).
@@ -269,10 +261,6 @@ class ArxivRetrievalSource(RetrievalSource):
         - RANDOM: Fetches from category cs.AI with max_results=min(n*10, 500),
           then samples n with seed. Optional kwargs: random_category (e.g.
           "cs.CL") to change the category.
-        - STRUCTURED: criteria keys: id_list or ids (list of arXiv ids),
-          category (e.g. "cs.LG"), author, title, query (raw query string).
-          Sort is taken from kwargs (sort_by, sort_order), not from criteria.
-          Query parts are ANDed.
 
         Returns:
             List of dicts; each has "text", "id", "title", "summary".
@@ -353,12 +341,11 @@ class S2RetrievalSource(RetrievalSource):
         query: str | None = None,
         n: int = 10,
         seed: int | None = None,
-        criteria: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
         """Return list of items; stub returns empty list.
 
         Would use SemanticScholar().search_paper() with
-        query/random/structured.
+        query or random mode.
         """
         return []

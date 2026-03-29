@@ -26,16 +26,26 @@ def make_source(data: list, counter: CallCounter = None) -> DataSpec:
     return DataSpec(NodeType.ACQUIRE, [], _execute, "test_source")
 
 
-def make_double_length(source: DataSpec) -> DataSpec:
-    """Alter node that doubles its input list."""
+def make_double_repetition_data(source: DataSpec) -> DataSpec:
+    """Alter node that repeats its input list twice."""
 
     def _execute(data):
         return data + data
 
-    return DataSpec(NodeType.ALTER, source, _execute, "test_double")
+    return DataSpec(NodeType.ALTER, source, _execute, "test_duplicate")
 
 
-def make_concat(*sources) -> DataSpec:
+def make_empty_filter(source: DataSpec) -> DataSpec:
+    """Filter node that always returns empty."""
+
+    def _execute(_data):
+        # _data is unused -- this is just here to match the expected signature.
+        return []
+
+    return DataSpec(NodeType.FILTER, [source], _execute, "test_empty_filter")
+
+
+def make_concat(*sources: DataSpec) -> DataSpec:
     """Alter node that concatenates multiple inputs."""
 
     def _execute(*input_data):
