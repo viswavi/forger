@@ -412,8 +412,8 @@ class S2RetrievalSource(RetrievalSource):
             if n > self._RELEVANCE_CAP:
                 raise ValueError(
                     f"n={n} exceeds Semantic Scholar relevance search cap "
-                    f"of {self._RELEVANCE_CAP}. Use RANDOM mode with bulk=True "
-                    f"for larger result sets."
+                    f"of {self._RELEVANCE_CAP}. Use RANDOM mode for larger "
+                    f"result sets."
                 )
             q = query or self._DEFAULT_QUERY
             results = client.search_paper(q, limit=self._PAGE_LIMIT)
@@ -434,21 +434,17 @@ class S2RetrievalSource(RetrievalSource):
                 query_str = str(default_query)
             if use_bulk:
                 results = client.search_paper(query_str, bulk=True)
-                accumulated = []
-                need = pool_size
-                while len(accumulated) < need:
-                    accumulated.extend(getattr(results, "items", []) or [])
-                    if len(accumulated) >= need:
-                        break
+                accumulated = list(getattr(results, "items", []) or [])
+                while len(accumulated) < pool_size:
                     try:
                         results.next_page()
                     except Exception:
                         break
-                    new_items = getattr(results, "items", []) or []
+                    new_items = list(getattr(results, "items", []) or [])
                     if len(new_items) <= len(accumulated):
                         break
-                    accumulated = list(new_items)
-                pool = accumulated[:need]
+                    accumulated = new_items
+                pool = accumulated[:pool_size]
             else:
                 results = client.search_paper(query_str, limit=self._PAGE_LIMIT)
                 pool = self._collect_paginated(results, pool_size)
