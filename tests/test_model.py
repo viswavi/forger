@@ -222,7 +222,7 @@ class TestGenerateBatch:
 
     @patch("pyforger.acquire.model.litellm")
     def test_temperature_zero_is_not_replaced_by_default(self, mock_litellm):
-        """temperature=0.0 is a valid override and must not fall back to default."""
+        """Passing temperature=0.0 is a valid override, not replaced by default."""
         mock_litellm.completion.return_value = make_litellm_response(["ok"])
         model = Model("gpt-4o", temperature=0.7)
         model.generate_batch(["Hi"], temperature=0.0)
@@ -231,12 +231,21 @@ class TestGenerateBatch:
 
     @patch("pyforger.acquire.model.litellm")
     def test_max_tokens_none_uses_instance_default(self, mock_litellm):
-        """max_tokens=None (the default) falls back to instance value."""
+        """Omitting max_tokens falls back to instance default."""
         mock_litellm.completion.return_value = make_litellm_response(["ok"])
         model = Model("gpt-4o", max_tokens=200)
         model.generate_batch(["Hi"])
         call_args = mock_litellm.completion.call_args
         assert call_args.kwargs["max_tokens"] == 200
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_max_tokens_zero_is_not_replaced_by_default(self, mock_litellm):
+        """Passing max_tokens=0 is a valid override, not replaced by default."""
+        mock_litellm.completion.return_value = make_litellm_response(["ok"])
+        model = Model("gpt-4o", max_tokens=200)
+        model.generate_batch(["Hi"], max_tokens=0)
+        call_args = mock_litellm.completion.call_args
+        assert call_args.kwargs["max_tokens"] == 0
 
 
 class TestGenerate:

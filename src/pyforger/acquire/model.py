@@ -165,12 +165,12 @@ class Model:
 
             usage = getattr(response, "usage", None)
             if usage is not None:
-                total_prompt_tokens += usage.prompt_tokens
-                total_completion_tokens += usage.completion_tokens
+                total_prompt_tokens += usage.prompt_tokens or 0
+                total_completion_tokens += usage.completion_tokens or 0
 
             hidden = getattr(response, "_hidden_params", None)
             if isinstance(hidden, dict):
-                total_cost += hidden.get("response_cost", 0.0)
+                total_cost += hidden.get("response_cost") or 0.0
 
         self._last_usage = {
             "prompt_tokens": total_prompt_tokens,
