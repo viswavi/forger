@@ -81,7 +81,9 @@ class TestArxivRetrievalSourceFetch:
     ) -> None:
         """RANDOM mode samples n items using seed; same seed gives same order."""
         results_10 = [
-            _make_mock_arxiv_search_result(f"2001.0000{i}v1", f"Paper {i}", f"Abstract {i}")
+            _make_mock_arxiv_search_result(
+                f"2001.0000{i}v1", f"Paper {i}", f"Abstract {i}"
+            )
             for i in range(10)
         ]
         mock_client = MagicMock()
