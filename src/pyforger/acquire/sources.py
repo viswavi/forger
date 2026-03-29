@@ -315,8 +315,6 @@ class S2RetrievalSource(RetrievalSource):
     # Relevance search returns at most 1000 results; 100 per request
     _PAGE_LIMIT = 100
     _RELEVANCE_CAP = 1000
-    # Bulk search: 1000 items per page; cap pool size for RANDOM
-    _BULK_PAGE_SIZE = 1000
     _RANDOM_POOL_MAX_BULK = 10_000
 
     def __init__(self, api_key: str | None = None, **kwargs: Any) -> None:
@@ -371,8 +369,8 @@ class S2RetrievalSource(RetrievalSource):
         if cap is None:
             cap = self._RELEVANCE_CAP
         accumulated = list(getattr(results, "items", []) or [])
-        need = min(n, cap)
-        while len(accumulated) < need:
+        target_count = min(n, cap)
+        while len(accumulated) < target_count:
             next_pos = getattr(results, "next", None)
             total = getattr(results, "total", None)
             if next_pos is None or (total is not None and next_pos >= total):
@@ -411,6 +409,12 @@ class S2RetrievalSource(RetrievalSource):
         client = self._get_client()
 
         if mode == RetrieveMode.QUERY:
+            if n > self._RELEVANCE_CAP:
+                raise ValueError(
+                    f"n={n} exceeds Semantic Scholar relevance search cap "
+                    f"of {self._RELEVANCE_CAP}. Use RANDOM mode with bulk=True "
+                    f"for larger result sets."
+                )
             q = query or self._DEFAULT_QUERY
             results = client.search_paper(q, limit=self._PAGE_LIMIT)
             accumulated = self._collect_paginated(results, n)
