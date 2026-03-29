@@ -190,7 +190,7 @@ def retrieve_from_s2(
     name: str = "retrieve_from_s2",
     **kwargs: Any,
 ) -> DataSpec:
-    """Retrieve from Semantic Scholar (semanticscholar library).
+    """Retrieve from Semantic Scholar.
 
     Returns:
         DataSpec whose execute_fn returns the fetched list.
