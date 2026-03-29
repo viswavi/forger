@@ -20,7 +20,7 @@ from pyforger.acquire import (
 
 
 class MockRetrievalSource(RetrievalSource):
-    """Returns fixed data for testing; ignores mode/query/n/seed/criteria."""
+    """Returns fixed data for testing."""
 
     def __init__(self, data: list[dict[str, Any]]) -> None:
         """Store fixed data to return from fetch().
