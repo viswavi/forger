@@ -1,7 +1,4 @@
-"""Tests for Forger acquire.retrieve and retrieval sources.
-
-MockRetrievalSource is defined here (not in test_helpers/fixtures) per plan.
-"""
+"""Tests for Forger acquire.retrieve and retrieval sources."""
 from __future__ import annotations
 
 from typing import Any
@@ -20,7 +17,7 @@ from pyforger.acquire import (
 
 
 class MockRetrievalSource(RetrievalSource):
-    """Returns fixed data for testing."""
+    """Returns fixed data for testing; ignores mode/query/n/seed."""
 
     def __init__(self, data: list[dict[str, Any]]) -> None:
         """Store fixed data to return from fetch().
@@ -37,10 +34,9 @@ class MockRetrievalSource(RetrievalSource):
         query: str | None = None,
         n: int = 10,
         seed: int | None = None,
-        criteria: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
-        """Return the fixed data list; ignores mode/query/n/seed/criteria."""
+        """Return the fixed data list; ignores mode/query/n/seed."""
         return self.data
 
 
