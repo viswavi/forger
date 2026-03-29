@@ -154,14 +154,10 @@ def retrieve_from_arxiv(
     """Build an ACQUIRE node that fetches papers from arXiv when the graph runs.
 
     Args:
-        mode: QUERY (text search), RANDOM (sample from category), or STRUCTURED
-            (filter by criteria).
+        mode: QUERY (text search) or RANDOM (sample from category).
         query: Search string for QUERY mode; default "all:*" if empty.
         n: Number of papers to return.
         seed: Random seed for RANDOM mode (optional; for reproducibility).
-        criteria: For STRUCTURED mode only. Keys (all optional): id_list or ids
-            (list of arXiv ids), category (e.g. "cs.LG"), author, title, query
-            (raw string). Sort via kwargs sort_by/sort_order, not here.
         name: Label for the node.
         **kwargs: Arxiv options: sort_by, sort_order, random_category (RANDOM),
             page_size, delay_seconds, num_retries (Client).
@@ -194,14 +190,10 @@ def retrieve_from_s2(
     """Build an ACQUIRE node that fetches papers from S2 when the graph runs.
 
     Args:
-        mode: QUERY (text search), RANDOM (sample from pool), or STRUCTURED
-            (filter by criteria).
+        mode: QUERY (text search) or RANDOM (sample from pool).
         query: Search string for QUERY mode; default "machine learning" if empty.
         n: Number of papers to return.
         seed: Random seed for RANDOM mode (optional; for reproducibility).
-        criteria: For STRUCTURED mode only. Keys (all optional): query, author
-            (folded into query), year, venue, fields_of_study. Same pagination
-            as QUERY; cap 1000.
         name: Label for the node.
         **kwargs: S2 client options: api_key, timeout, api_url, debug, retry.
             For RANDOM mode: fields_of_study (e.g. ["Computer Science"]) to

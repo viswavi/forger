@@ -164,10 +164,10 @@ class HFRetrievalSource(RetrievalSource):
 class ArxivRetrievalSource(RetrievalSource):
     """Retrieval source that fetches papers from arXiv via the API.
 
-    Uses the arxiv Python package (Client and Search) to run queries in three
-    modes: QUERY (text search + n), RANDOM (sample n from a category with seed),
-    and STRUCTURED (criteria-based filters). Returns a list of item dicts with
-    "text", "id", "title", and "summary" per paper.
+    Uses the arxiv Python package (Client and Search) to run queries in two
+    modes: QUERY (text search + n) and RANDOM (sample n from a category with
+    seed). Returns a list of item dicts with "text", "id", "title", and
+    "summary" per paper.
 
     Attributes:
         _kwargs: Options passed at construction; used for Client config and
@@ -252,7 +252,7 @@ class ArxivRetrievalSource(RetrievalSource):
         seed: int | None = None,
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
-        """Return items from arXiv by mode (QUERY, RANDOM, or STRUCTURED).
+        """Return items from arXiv by mode (QUERY or RANDOM).
 
         Mode behavior:
         - QUERY: Uses query (default "all:*" when empty) and n. Optional
@@ -262,10 +262,6 @@ class ArxivRetrievalSource(RetrievalSource):
         - RANDOM: Fetches from category cs.AI with max_results=min(n*10, 500),
           then samples n with seed. Optional kwargs: random_category (e.g.
           "cs.CL") to change the category.
-        - STRUCTURED: criteria keys: id_list or ids (list of arXiv ids),
-          category (e.g. "cs.LG"), author, title, query (raw query string).
-          Sort is taken from kwargs (sort_by, sort_order), not from criteria.
-          Query parts are ANDed.
 
         Returns:
             List of dicts; each has "text", "id", "title", "summary".
@@ -302,40 +298,16 @@ class ArxivRetrievalSource(RetrievalSource):
             sampled = rng.sample(results, sample_size)
             return [self._result_to_item(r) for r in sampled]
 
-        if mode == RetrieveMode.STRUCTURED:
-            crit = criteria or {}
-            id_list = crit.get("id_list") or crit.get("ids") or []
-            parts = []
-            if crit.get("category"):
-                parts.append(f"cat:{crit['category']}")  # arXiv category filter
-            if crit.get("author"):
-                parts.append(f'au:{crit["author"]}')  # Author name filter
-            if crit.get("title"):
-                parts.append(f'ti:{crit["title"]}')  # Title text filter
-            if crit.get("query"):
-                parts.append(crit["query"])  # Raw query string
-            search_query = " AND ".join(parts) if parts else ""
-            search = arxiv.Search(
-                query=search_query,  # AND-combined filters
-                id_list=id_list,
-                max_results=n,
-                sort_by=sort_by,
-                sort_order=sort_order,
-            )
-            results = list(client.results(search))
-            return [self._result_to_item(r) for r in results[:n]]
-
         return []
 
 
 class S2RetrievalSource(RetrievalSource):
     """Retrieval source that fetches papers from Semantic Scholar via the API.
 
-    Uses the semanticscholar library (SemanticScholar.search_paper) in three
-    modes: QUERY (up to 1000), RANDOM (pool up to 1000 or 1000+ with bulk),
-    and STRUCTURED (up to 1000). Returns a list of item dicts with
-    "text", "id", "title", and "summary" per paper. QUERY and STRUCTURED
-    are capped at 1000 results due to API limits.
+    Uses the semanticscholar library (SemanticScholar.search_paper) in two
+    modes: QUERY (up to 1000) and RANDOM (pool up to 1000 or 1000+ with bulk).
+    Returns a list of item dicts with "text", "id", "title", and "summary"
+    per paper. QUERY is capped at 1000 results due to API limits.
     """
 
     # Default query when QUERY mode is called with empty query
@@ -424,15 +396,13 @@ class S2RetrievalSource(RetrievalSource):
         seed: int | None = None,
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
-        """Return items from Semantic Scholar by mode (QUERY, RANDOM, or STRUCTURED).
+        """Return items from Semantic Scholar by mode (QUERY or RANDOM).
 
         QUERY: When query is empty, uses default "machine learning". Paginates
-        (100 per request) up to n or 1000. STRUCTURED: Builds search from
-        criteria (query, year, fields_of_study, venue; author folded into query).
-        Same pagination; cap 1000. RANDOM: Builds pool via relevance search
-        (paginated, up to 1000) or bulk when requested pool size (n*10) exceeds
-        1000; bulk pool is capped at 10,000. Then samples n with seed. Effective
-        max for QUERY/STRUCTURED: 1000.
+        (100 per request) up to n or 1000. RANDOM: Builds pool via relevance
+        search (paginated, up to 1000) or bulk when requested pool size (n*10)
+        exceeds 1000; bulk pool is capped at 10,000. Then samples n with seed.
+        Effective max for QUERY: 1000.
 
         Returns:
             List of dicts; each has "text", "id", "title", "summary".
@@ -482,31 +452,5 @@ class S2RetrievalSource(RetrievalSource):
             sample_size = min(n, len(pool))
             sampled = rng.sample(pool, sample_size)
             return [self._result_to_item(p) for p in sampled]
-
-        if mode == RetrieveMode.STRUCTURED:
-            crit = criteria or {}
-            q = (
-                " ".join(
-                    x for x in (crit.get("query", ""), crit.get("author", "")) if x
-                ).strip()
-                or self._DEFAULT_QUERY
-            )
-            year = crit.get("year")
-            venue = crit.get("venue")
-            fields_of_study = crit.get("fields_of_study")
-            kwargs_s2: dict[str, Any] = {"limit": self._PAGE_LIMIT}
-            if year is not None:
-                kwargs_s2["year"] = str(year)
-            if venue is not None:
-                kwargs_s2["venue"] = venue if isinstance(venue, list) else [venue]
-            if fields_of_study is not None:
-                kwargs_s2["fields_of_study"] = (
-                    fields_of_study
-                    if isinstance(fields_of_study, list)
-                    else [fields_of_study]
-                )
-            results = client.search_paper(q, **kwargs_s2)
-            accumulated = self._collect_paginated(results, n)
-            return [self._result_to_item(p) for p in accumulated]
 
         return []

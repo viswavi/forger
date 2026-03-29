@@ -104,61 +104,6 @@ class TestS2RetrievalSourceFetch:
         assert call_args[0] == "Computer Science"
         assert call_kw.get("limit") == 100
 
-    @patch("pyforger.acquire.sources.SemanticScholar")
-    def test_structured_mode_criteria_builds_search(
-        self, mock_scholar_cls: MagicMock
-    ) -> None:
-        """STRUCTURED mode with criteria builds search_paper with matching params."""
-        mock_paper = _make_mock_paper("s2-1", "A Paper", "Summary.")
-        mock_results = _make_paginated_results([mock_paper])
-        mock_results.next = None
-        mock_client = MagicMock()
-        mock_client.search_paper.return_value = mock_results
-        mock_scholar_cls.return_value = mock_client
-
-        source = S2RetrievalSource()
-        items = source.fetch(
-            RetrieveMode.STRUCTURED,
-            n=10,
-            criteria={
-                "query": "NLP",
-                "year": "2020",
-                "fields_of_study": ["Computer Science"],
-                "venue": ["ACL"],
-            },
-        )
-
-        assert len(items) == 1
-        assert items[0]["id"] == "s2-1"
-        assert items[0]["title"] == "A Paper"
-        mock_client.search_paper.assert_called_once()
-        call_args, call_kw = mock_client.search_paper.call_args
-        assert call_args[0] == "NLP"
-        assert call_kw.get("year") == "2020"
-        assert call_kw.get("fields_of_study") == ["Computer Science"]
-        assert call_kw.get("venue") == ["ACL"]
-
-    @patch("pyforger.acquire.sources.SemanticScholar")
-    def test_structured_mode_author_in_query(self, mock_scholar_cls: MagicMock) -> None:
-        """STRUCTURED mode with author folds author into the query string."""
-        mock_results = _make_paginated_results([])
-        mock_results.next = None
-        mock_client = MagicMock()
-        mock_client.search_paper.return_value = mock_results
-        mock_scholar_cls.return_value = mock_client
-
-        source = S2RetrievalSource()
-        source.fetch(
-            RetrieveMode.STRUCTURED,
-            n=5,
-            criteria={"query": "learning", "author": "Smith"},
-        )
-
-        call_args = mock_client.search_paper.call_args[0]
-        query_str = call_args[0]
-        assert "Smith" in query_str
-        assert "learning" in query_str
-
     def test_result_to_item_normalization(self) -> None:
         """_result_to_item produces text, id, title, summary; normalized whitespace."""
         mock_paper = _make_mock_paper("norm-1", "  A Title  ", "Line one.\n\nLine two.")
