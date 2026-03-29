@@ -7,6 +7,9 @@ authors = [
 description = "A small example package"
 readme = "README.md"
 requires-python = ">=3.9"
+dependencies = [
+    "rouge-score",
+]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",
@@ -36,10 +39,19 @@ only-packages = true
 [project.optional-dependencies]
 test = [
     "pytest>=6.0.0",
+    "pyyaml",
+    "jsonschema",
 ]
 dev = [
     "pytest",
-    "pre-commit"
+    "pre-commit",
+    "pyyaml",
+    "jsonschema",
+    "types-pyyaml",
+]
+validation = [
+    "pyyaml",
+    "jsonschema",
 ]
 
 [tool.hatch.build.targets.wheel]
