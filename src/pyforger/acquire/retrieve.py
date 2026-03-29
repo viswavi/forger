@@ -154,14 +154,10 @@ def retrieve_from_arxiv(
     """Build an ACQUIRE node that fetches papers from arXiv when the graph runs.
 
     Args:
-        mode: QUERY (text search), RANDOM (sample from category), or STRUCTURED
-            (filter by criteria).
+        mode: QUERY (text search) andRANDOM (sample from category).
         query: Search string for QUERY mode; default "all:*" if empty.
         n: Number of papers to return.
         seed: Random seed for RANDOM mode (optional; for reproducibility).
-        criteria: For STRUCTURED mode only. Keys (all optional): id_list or ids
-            (list of arXiv ids), category (e.g. "cs.LG"), author, title, query
-            (raw string). Sort via kwargs sort_by/sort_order, not here.
         name: Label for the node.
         **kwargs: Arxiv options: sort_by, sort_order, random_category (RANDOM),
             page_size, delay_seconds, num_retries (Client).

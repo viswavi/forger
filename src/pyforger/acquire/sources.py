@@ -164,8 +164,7 @@ class ArxivRetrievalSource(RetrievalSource):
     """Retrieval source that fetches papers from arXiv via the API.
 
     Uses the arxiv Python package (Client and Search) to run queries in three
-    modes: QUERY (text search + n), RANDOM (sample n from a category with seed),
-    and STRUCTURED (criteria-based filters). Returns a list of item dicts with
+    modes: QUERY (text search + n) and RANDOM (sample n from a category with seed). Returns a list of item dicts with
     "text", "id", "title", and "summary" per paper.
 
     Attributes:
@@ -251,7 +250,7 @@ class ArxivRetrievalSource(RetrievalSource):
         seed: int | None = None,
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
-        """Return items from arXiv by mode (QUERY, RANDOM, or STRUCTURED).
+        """Return items from arXiv by mode (QUERY or RANDOM).
 
         Mode behavior:
         - QUERY: Uses query (default "all:*" when empty) and n. Optional
@@ -296,29 +295,6 @@ class ArxivRetrievalSource(RetrievalSource):
             sample_size = min(n, len(results))
             sampled = rng.sample(results, sample_size)
             return [self._result_to_item(r) for r in sampled]
-
-        if mode == RetrieveMode.STRUCTURED:
-            crit = criteria or {}
-            id_list = crit.get("id_list") or crit.get("ids") or []
-            parts = []
-            if crit.get("category"):
-                parts.append(f"cat:{crit['category']}")  # arXiv category filter
-            if crit.get("author"):
-                parts.append(f'au:{crit["author"]}')  # Author name filter
-            if crit.get("title"):
-                parts.append(f'ti:{crit["title"]}')  # Title text filter
-            if crit.get("query"):
-                parts.append(crit["query"])  # Raw query string
-            search_query = " AND ".join(parts) if parts else ""
-            search = arxiv.Search(
-                query=search_query,  # AND-combined filters
-                id_list=id_list,
-                max_results=n,
-                sort_by=sort_by,
-                sort_order=sort_order,
-            )
-            results = list(client.results(search))
-            return [self._result_to_item(r) for r in results[:n]]
 
         return []
 

@@ -9,6 +9,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
     "rouge-score",
+    "arxiv>=2.0",
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -16,7 +17,6 @@ classifiers = [
 ]
 license = "MIT"
 license-files = ["LICEN[CS]E*"]
-dependencies = ["arxiv>=2.0"]
 
 [project.urls]
 Homepage = "https://github.com/viswavi/forger"
