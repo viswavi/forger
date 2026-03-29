@@ -1,4 +1,4 @@
-"""Tests for ArxivRetrievalSource.fetch() with mocked arxiv API."""
+"""Tests for ArxivRetrievalSource.fetch() with mocked arXiv API."""
 from __future__ import annotations
 
 import os
