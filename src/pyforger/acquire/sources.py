@@ -12,6 +12,7 @@ from enum import Enum, auto
 from typing import Any
 
 import arxiv
+import requests
 
 
 class RetrieveMode(Enum):
@@ -86,17 +87,136 @@ class WebRetrievalSource(RetrievalSource):
 
 
 class WikiRetrievalSource(RetrievalSource):
-    """Wikipedia (e.g. wikipedia-api / MediaWiki). Stub implementation."""
+    """Retrieval source that fetches articles from Wikipedia via the MediaWiki API.
+
+    Uses requests.Session to query the MediaWiki Action API for search results
+    and page extracts. Supports QUERY (full-text search) and RANDOM (random
+    article sampling with seed). Returns item dicts in the DPR/BEIR standard
+    format: "id" (page ID), "title" (article title), "text" (intro extract),
+    and "summary" (same as text, for arXiv schema compatibility).
+
+    Attributes:
+        language: Wikipedia language code (e.g. "en", "de").
+        _kwargs: Options passed at construction; used for Session config and
+            fetch overrides.
+        _session: Lazy-initialized requests.Session, reused across fetch() calls.
+    """
+
+    _EXTRACT_BATCH_SIZE = 20
 
     def __init__(self, language: str = "en", **kwargs: Any) -> None:
-        """Store config for Wikipedia retrieval. Stub does not call any API.
+        """Store config for Wikipedia retrieval.
 
         Args:
             language: Wikipedia language code (e.g. "en").
-            **kwargs: Passed through to fetch(); reserved for future options.
+            **kwargs: Session options (e.g. timeout) and fetch overrides.
         """
         self.language = language
-        self._kwargs = kwargs
+        self._kwargs = kwargs  # e.g. WikiRetrievalSource(timeout=10)
+        self._session: requests.Session | None = None
+
+    def _get_session(self) -> requests.Session:
+        """Return shared requests.Session, creating once with a proper User-Agent."""
+        if self._session is None:
+            self._session = requests.Session()
+            self._session.headers.update(
+                {"User-Agent": "pyforger/0.1 (https://github.com/viswavi/forger)"}
+            )
+        return self._session
+
+    @staticmethod
+    def _get_timeout_kw(merged: dict[str, Any]) -> dict[str, Any]:
+        """Build keyword args for requests.Session.get when timeout is set."""
+        # requests.Session has no session-level timeout; must pass per-call.
+        t = merged.get("timeout")
+        if t is not None:
+            return {"timeout": t}
+        return {}
+
+    @staticmethod
+    def _result_to_item(page: dict[str, Any]) -> dict[str, Any]:
+        """Convert a MediaWiki page dict to DPR/BEIR-standard item dict.
+
+        Args:
+            page: Dict from the MediaWiki extracts API with keys "pageid",
+                "title", and optionally "extract".
+
+        Returns:
+            Dict with "text" (intro extract only), "id" (page ID as string),
+            "title", and "summary" (mirrors text).
+        """
+        title = page.get("title", "")
+        extract = page.get("extract", "")
+        return {
+            "text": extract,
+            "id": str(page.get("pageid", "")),
+            "title": title,
+            "summary": extract
+        }
+
+    def _fetch_extracts(
+        self,
+        titles: list[str],
+        merged: dict[str, Any],
+    ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+        """Fetch intro extracts for a list of page titles, batched by 20.
+
+        Args:
+            titles: Wikipedia page titles to fetch extracts for.
+            merged: Merged instance and per-call kwargs (e.g. timeout).
+
+        Returns:
+            (by_requested_title, by_page_id): Lookups for resolving search/random
+            rows. Redirects are applied so a requested title that redirects still
+            maps to the target page dict. by_page_id keys are str(pageid).
+        """
+        session = self._get_session()
+        base_url = f"https://{self.language}.wikipedia.org/w/api.php"
+        timeout_kw = self._get_timeout_kw(merged)
+        title_map: dict[str, dict[str, Any]] = {}
+        id_map: dict[str, dict[str, Any]] = {}
+
+        for i in range(0, len(titles), self._EXTRACT_BATCH_SIZE):
+            batch = titles[i : i + self._EXTRACT_BATCH_SIZE]
+            resp = session.get(
+                base_url,
+                params={
+                    "action": "query",
+                    "format": "json",
+                    "prop": "extracts",
+                    "exintro": "true",
+                    "explaintext": "true",
+                    "redirects": "true",
+                    "titles": "|".join(batch),
+                    "exlimit": str(len(batch)),
+                },
+                **timeout_kw,
+            )
+            resp.raise_for_status()
+            query = resp.json().get("query", {})
+            pages = query.get("pages", {})
+            # MediaWiki keys missing pages with negative ids; skip them.
+            by_canonical_title: dict[str, dict[str, Any]] = {}
+            for page_id, page_data in pages.items():
+                if int(page_id) < 0:
+                    continue
+                pid = str(page_data.get("pageid", page_id))
+                id_map[pid] = page_data
+                ct = page_data.get("title", "")
+                if ct:
+                    by_canonical_title[ct] = page_data
+            # Map redirected titles back so the *requested* name still resolves.
+            for redir in query.get("redirects", []):
+                fr = redir.get("from")
+                to = redir.get("to")
+                if fr and to and to in by_canonical_title:
+                    by_canonical_title[fr] = by_canonical_title[to]
+            for requested in batch:
+                page = by_canonical_title.get(requested)
+                if page is not None:
+                    title_map[requested] = page
+
+        return title_map, id_map
 
     def fetch(
         self,
@@ -107,10 +227,92 @@ class WikiRetrievalSource(RetrievalSource):
         seed: int | None = None,
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
-        """Return list of items; stub returns empty list.
+        """Return items from Wikipedia by mode (QUERY or RANDOM).
 
-        Would use wikipedia-api or MediaWiki with query or random mode.
+        Mode behavior:
+        - QUERY: Searches Wikipedia with srsearch={query} and srlimit={n},
+          then fetches intro extracts for each result. Empty or None query
+          defaults to "Wikipedia". Redirects are resolved so search titles
+          still match extracts.
+        - RANDOM: Fetches min(n*5, 500) random article titles from the main
+          namespace, fetches their extracts, then samples n with seed for
+          reproducibility.
+
+        Per-call **kwargs are merged with constructor kwargs (e.g. timeout for
+        requests.get on every HTTP call).
+
+        Returns:
+            List of dicts in DPR/BEIR format; each has "text" (intro extract),
+            "id" (page ID), "title", "summary" (same as text).
         """
+        # Per-call kwargs override constructor kwargs (e.g. timeout).
+        merged = {**self._kwargs, **kwargs}
+        session = self._get_session()
+        base_url = f"https://{self.language}.wikipedia.org/w/api.php"
+        timeout_kw = self._get_timeout_kw(merged)
+
+        if mode == RetrieveMode.QUERY:
+            q = query or "Wikipedia"
+            resp = session.get(
+                base_url,
+                params={
+                    "action": "query",
+                    "format": "json",
+                    "list": "search",
+                    "srsearch": q,
+                    "srlimit": str(n),
+                },
+                **timeout_kw,
+            )
+            resp.raise_for_status()
+            search_results = resp.json().get("query", {}).get("search", [])
+            if not search_results:
+                return []
+
+            titles = [r["title"] for r in search_results]
+            title_map, id_map = self._fetch_extracts(titles, merged)
+            items = []
+            for row in search_results:
+                title = row["title"]
+                # Fall back to pageid lookup when redirects change the title.
+                page = title_map.get(title) or id_map.get(str(row["pageid"]))
+                if page is not None:
+                    items.append(self._result_to_item(page))
+            return items
+
+        if mode == RetrieveMode.RANDOM:
+            # Fetch more than n so random.sample with seed is reproducible.
+            pool_size = min(n * 5, 500)
+            resp = session.get(
+                base_url,
+                params={
+                    "action": "query",
+                    "format": "json",
+                    "list": "random",
+                    "rnnamespace": "0",
+                    "rnlimit": str(pool_size),
+                },
+                **timeout_kw,
+            )
+            resp.raise_for_status()
+            random_results = resp.json().get("query", {}).get("random", [])
+            if not random_results:
+                return []
+
+            titles = [r["title"] for r in random_results]
+            title_map, id_map = self._fetch_extracts(titles, merged)
+            items = []
+            for row in random_results:
+                title = row["title"]
+                # random API uses "id" not "pageid" for the page identifier.
+                page = title_map.get(title) or id_map.get(str(row["id"]))
+                if page is not None:
+                    items.append(self._result_to_item(page))
+
+            rng = random.Random(seed)
+            sample_size = min(n, len(items))
+            return rng.sample(items, sample_size)
+
         return []
 
 
@@ -163,9 +365,8 @@ class HFRetrievalSource(RetrievalSource):
 class ArxivRetrievalSource(RetrievalSource):
     """Retrieval source that fetches papers from arXiv via the API.
 
-    Uses the arxiv Python package (Client and Search) to run queries in three
-    modes: QUERY (text search + n) and RANDOM (sample n from a
-    category with seed). Returns a list of item dicts with
+    Uses the arxiv Python package (Client and Search) for QUERY (text search)
+    and RANDOM (sample from a category with seed). Returns item dicts with
     "text", "id", "title", and "summary" per paper.
 
     Attributes:

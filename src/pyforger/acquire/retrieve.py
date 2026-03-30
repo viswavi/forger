@@ -89,10 +89,20 @@ def retrieve_from_wiki(
     name: str = "retrieve_from_wiki",
     **kwargs: Any,
 ) -> DataSpec:
-    """Retrieve from Wikipedia (e.g. wikipedia-api / MediaWiki).
+    """Build an ACQUIRE node that fetches articles from Wikipedia when the graph runs.
+
+    Args:
+        mode: QUERY (full-text search) or RANDOM (random article sampling).
+        query: Search string for QUERY mode; defaults to "Wikipedia" if empty.
+        n: Number of articles to return.
+        seed: Random seed for RANDOM mode (optional; for reproducibility).
+        language: Wikipedia language code (e.g. "en", "de").
+        name: Label for the node.
+        **kwargs: Session options (e.g. timeout).
 
     Returns:
-        DataSpec whose execute_fn returns the fetched list.
+        DataSpec whose execute_fn returns list of dicts in DPR/BEIR format
+        with text (intro extract), id (page ID), title, summary.
     """
     source = WikiRetrievalSource(language=language, **kwargs)
     return retrieve(
@@ -154,7 +164,7 @@ def retrieve_from_arxiv(
     """Build an ACQUIRE node that fetches papers from arXiv when the graph runs.
 
     Args:
-        mode: QUERY (text search) andRANDOM (sample from category).
+        mode: QUERY (text search) or RANDOM (sample from category).
         query: Search string for QUERY mode; default "all:*" if empty.
         n: Number of papers to return.
         seed: Random seed for RANDOM mode (optional; for reproducibility).
