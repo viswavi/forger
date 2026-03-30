@@ -151,7 +151,7 @@ class WikiRetrievalSource(RetrievalSource):
             "text": extract,
             "id": str(page.get("pageid", "")),
             "title": title,
-            "summary": extract
+            "summary": extract,
         }
 
     def _fetch_extracts(

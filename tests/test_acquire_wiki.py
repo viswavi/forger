@@ -84,7 +84,10 @@ class TestWikiRetrievalSourceFetch:
                 {
                     "pageid": 21356332,
                     "title": "History of Python",
-                    "extract": "The programming language Python was conceived in the late 1980s.",
+                    "extract": (
+                        "The programming language Python was conceived "
+                        "in the late 1980s."
+                    ),
                 },
             ]
         )
