@@ -59,15 +59,47 @@ def retrieve_from_web(
     n: int = 10,
     seed: int | None = None,
     base_url: str | None = None,
+    fetch_full_content: bool = False,
     name: str = "retrieve_from_web",
     **kwargs: Any,
 ) -> DataSpec:
-    """Retrieve segments from a web corpus (e.g. crawl/search).
+    """Build an ACQUIRE node that searches the web via the Brave Search API.
+
+    Only QUERY mode is supported; RANDOM raises ``NotImplementedError``
+    because web search has no reproducible random corpus.
+
+    Args:
+        mode: Must be QUERY.
+        query: Search string (required; raises ``ValueError`` if empty).
+        n: Number of results to return.
+        seed: Unused (RANDOM mode unsupported).
+        base_url: Optional domain restriction.  When set,
+            ``site:{base_url}`` is prepended to the query.
+        fetch_full_content: When True, fetch full page text from each
+            result URL after search.  When False
+            (default), ``text`` is the short search snippet. 
+        name: Label for the node.
+        **kwargs: Passed to WebRetrievalSource and fetch().  Recognised
+            keys: ``api_key`` (str, required -- Brave subscription token),
+            ``timeout`` (float), ``max_content_length`` (int, default 1 MB).
 
     Returns:
-        DataSpec whose execute_fn returns the fetched list.
+        DataSpec whose execute_fn returns list of dicts with ``text``
+        (snippet or full article), ``id`` (URL), ``title``, ``url``.
+
+    Licensing note:
+        Brave's ToS require a plan with storage rights if results are used
+        for LLM training.  See https://brave.com/search/api/ for details.
     """
-    source = WebRetrievalSource(base_url=base_url, **kwargs)
+    source_kwargs = {
+        k: v for k, v in kwargs.items() if k not in ("api_key",)
+    }
+    source = WebRetrievalSource(
+        base_url=base_url,
+        api_key=kwargs.get("api_key"),
+        fetch_full_content=fetch_full_content,
+        **source_kwargs,
+    )
     return retrieve(
         source,
         mode=mode,
