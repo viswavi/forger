@@ -15,9 +15,7 @@ def _make_search_response(
     """Build a mock MediaWiki search API JSON response."""
     return {
         "query": {
-            "search": [
-                {"pageid": pid, "title": title} for title, pid in titles_and_ids
-            ]
+            "search": [{"pageid": pid, "title": title} for title, pid in titles_and_ids]
         }
     }
 
@@ -56,8 +54,7 @@ def _make_random_response(
     return {
         "query": {
             "random": [
-                {"id": pid, "ns": 0, "title": title}
-                for title, pid in titles_and_ids
+                {"id": pid, "ns": 0, "title": title} for title, pid in titles_and_ids
             ]
         }
     }
@@ -222,9 +219,7 @@ class TestWikiRetrievalSourceFetch:
         assert items[0]["id"] == "2"
 
     @patch("pyforger.acquire.sources.requests.Session")
-    def test_fetch_passes_timeout_to_get(
-        self, mock_session_cls: MagicMock
-    ) -> None:
+    def test_fetch_passes_timeout_to_get(self, mock_session_cls: MagicMock) -> None:
         """timeout= in constructor is forwarded to every session.get."""
         search_resp = _make_search_response([("Wikipedia", 5043734)])
         extracts_resp = _make_extracts_response(
@@ -247,9 +242,7 @@ class TestWikiRetrievalSourceFetch:
             assert call[1].get("timeout") == 15.0
 
     @patch("pyforger.acquire.sources.requests.Session")
-    def test_fetch_handles_missing_extract(
-        self, mock_session_cls: MagicMock
-    ) -> None:
+    def test_fetch_handles_missing_extract(self, mock_session_cls: MagicMock) -> None:
         """Pages with empty or missing extract produce empty text, no crash."""
         search_resp = _make_search_response([("Empty Page", 999)])
         extracts_resp = {
