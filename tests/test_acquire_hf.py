@@ -1,4 +1,4 @@
-"""Tests for HFRetrievalSource.fetch() with mocked HTTP and local dataset."""
+"""Tests for HFRetrievalSource.fetch() with mocked HfApi and load_dataset."""
 from __future__ import annotations
 
 import os
@@ -9,62 +9,66 @@ import pytest
 from pyforger.acquire import HFRetrievalSource, RetrieveMode
 
 
-def _make_search_response(rows: list[dict], num_rows_total: int = 100) -> dict:
-    """Build a mock /search JSON response body."""
-    return {
-        "features": [],
-        "rows": [
-            {"row_idx": i, "row": row, "truncated_cells": []}
-            for i, row in enumerate(rows)
-        ],
-        "num_rows_total": num_rows_total,
-        "num_rows_per_page": 100,
-        "partial": False,
-    }
+def _make_mock_dataset(rows: list[dict]) -> MagicMock:
+    """Build a mock HF Dataset object supporting shuffle/select/len/getitem."""
+    mock_ds = MagicMock()
+    mock_ds.shuffle.return_value = mock_ds
+    mock_ds.__len__ = lambda self: len(rows)
+    mock_ds.select.return_value = mock_ds
+    mock_ds.__getitem__ = lambda self, idx: rows[idx]
+    return mock_ds
 
 
-class TestHFRetrievalSourceFetch:
-    """HFRetrievalSource.fetch() with mocked requests.get."""
+def _make_mock_dataset_info(dataset_id: str) -> MagicMock:
+    """Build a mock DatasetInfo object returned by HfApi.list_datasets."""
+    info = MagicMock()
+    info.id = dataset_id
+    return info
 
-    @patch("pyforger.acquire.sources.requests.get")
-    def test_query_mode_returns_flat_rows(self, mock_get: MagicMock) -> None:
-        """QUERY mode returns flat dicts with row_idx and column values."""
-        sample_rows = [
-            {"question": "What is gravity?", "answer": "A force."},
-            {"question": "What is light?", "answer": "EM radiation."},
-        ]
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = _make_search_response(sample_rows)
-        mock_get.return_value = mock_resp
 
-        source = HFRetrievalSource(dataset="test/ds", config="main", split="train")
-        items = source.fetch(RetrieveMode.QUERY, query="gravity", n=2)
+class TestHFRetrievalSourceQueryMode:
+    """QUERY mode tests for HFRetrievalSource."""
 
-        assert len(items) == 2
-        assert items[0] == {
-            "row_idx": 0,
-            "question": "What is gravity?",
-            "answer": "A force.",
-        }
-        assert items[1] == {
-            "row_idx": 1,
-            "question": "What is light?",
-            "answer": "EM radiation.",
-        }
-
-        mock_get.assert_called_once()
-        call_kwargs = mock_get.call_args
-        assert call_kwargs[1]["params"]["dataset"] == "test/ds"
-        assert call_kwargs[1]["params"]["query"] == "gravity"
-        assert call_kwargs[1]["params"]["length"] == 2
-
-    @patch("pyforger.acquire.sources.requests.get")
-    def test_query_mode_missing_query_raises_value_error(
-        self, mock_get: MagicMock
+    @patch("pyforger.acquire.sources.HFRetrievalSource._load_and_select")
+    @patch("pyforger.acquire.sources.HFRetrievalSource._discover")
+    def test_query_discovers_and_loads_top_dataset(
+        self, mock_discover: MagicMock, mock_load: MagicMock
     ) -> None:
-        """QUERY mode with None or empty query raises ValueError."""
-        source = HFRetrievalSource(dataset="test/ds")
+        """QUERY mode discovers datasets via HfApi, loads the top match."""
+        mock_discover.return_value = [_make_mock_dataset_info("found/dataset")]
+        mock_load.return_value = [
+            {"row_idx": 0, "dataset_id": "found/dataset", "text": "hello"}
+        ]
+
+        source = HFRetrievalSource()
+        items = source.fetch(RetrieveMode.QUERY, query="sentiment", n=1)
+
+        assert len(items) == 1
+        assert items[0]["dataset_id"] == "found/dataset"
+        mock_discover.assert_called_once_with("sentiment", limit=1)
+        mock_load.assert_called_once_with("found/dataset", 1)
+
+    @patch("pyforger.acquire.sources.HFRetrievalSource._load_and_select")
+    @patch("pyforger.acquire.sources.HFRetrievalSource._discover")
+    def test_query_with_explicit_dataset_skips_discovery(
+        self, mock_discover: MagicMock, mock_load: MagicMock
+    ) -> None:
+        """When dataset is provided, discovery is skipped."""
+        mock_load.return_value = [
+            {"row_idx": 0, "dataset_id": "known/ds", "val": 42}
+        ]
+
+        source = HFRetrievalSource(dataset="known/ds")
+        items = source.fetch(RetrieveMode.QUERY, query="anything", n=1)
+
+        assert len(items) == 1
+        assert items[0]["dataset_id"] == "known/ds"
+        mock_discover.assert_not_called()
+        mock_load.assert_called_once_with("known/ds", 1)
+
+    def test_query_empty_query_without_dataset_raises(self) -> None:
+        """Empty query with no dataset raises ValueError."""
+        source = HFRetrievalSource()
 
         with pytest.raises(ValueError, match="non-empty 'query'"):
             source.fetch(RetrieveMode.QUERY, query=None, n=5)
@@ -72,218 +76,199 @@ class TestHFRetrievalSourceFetch:
         with pytest.raises(ValueError, match="non-empty 'query'"):
             source.fetch(RetrieveMode.QUERY, query="", n=5)
 
-        mock_get.assert_not_called()
-
-    # -- RANDOM mode tests --------------------------------------------------
-
-    @patch("pyforger.acquire.sources.load_dataset")
-    def test_random_mode_returns_sampled_rows(self, mock_load: MagicMock) -> None:
-        """RANDOM mode returns flat dicts with row_idx and column values."""
-        rows = [
-            {"name": "Alice", "age": 30},
-            {"name": "Bob", "age": 25},
-            {"name": "Carol", "age": 35},
-        ]
-        mock_ds = MagicMock()
-        mock_ds.shuffle.return_value = mock_ds
-        mock_ds.__len__ = lambda self: len(rows)
-        mock_ds.select.return_value = mock_ds
-        mock_ds.__getitem__ = lambda self, idx: rows[idx]
-        mock_load.return_value = mock_ds
-
-        source = HFRetrievalSource(dataset="test/ds")
-        items = source.fetch(RetrieveMode.RANDOM, n=2, seed=42)
-
-        assert len(items) == 2
-        assert items[0] == {"row_idx": 0, "name": "Alice", "age": 30}
-        assert items[1] == {"row_idx": 1, "name": "Bob", "age": 25}
-
-    @patch("pyforger.acquire.sources.load_dataset")
-    def test_random_mode_respects_seed(self, mock_load: MagicMock) -> None:
-        """RANDOM mode passes seed to dataset.shuffle()."""
-        mock_ds = MagicMock()
-        mock_ds.shuffle.return_value = mock_ds
-        mock_ds.__len__ = lambda self: 5
-        mock_ds.select.return_value = mock_ds
-        mock_ds.__getitem__ = lambda self, idx: {"val": idx}
-        mock_load.return_value = mock_ds
-
-        source = HFRetrievalSource(dataset="test/ds")
-        source.fetch(RetrieveMode.RANDOM, n=2, seed=99)
-
-        mock_ds.shuffle.assert_called_once_with(seed=99)
-
-    @patch("pyforger.acquire.sources.load_dataset")
-    def test_random_mode_handles_n_larger_than_dataset(
+    @patch("pyforger.acquire.sources.HFRetrievalSource._load_and_select")
+    def test_query_with_explicit_dataset_and_no_query(
         self, mock_load: MagicMock
     ) -> None:
-        """RANDOM mode caps to dataset size when n exceeds available rows."""
-        rows = [{"x": 1}, {"x": 2}]
-        mock_ds = MagicMock()
-        mock_ds.shuffle.return_value = mock_ds
-        mock_ds.__len__ = lambda self: len(rows)
-        mock_ds.select.return_value = mock_ds
-        mock_ds.__getitem__ = lambda self, idx: rows[idx]
-        mock_load.return_value = mock_ds
+        """Explicit dataset works even without a query string."""
+        mock_load.return_value = [{"row_idx": 0, "dataset_id": "ds", "x": 1}]
 
-        source = HFRetrievalSource(dataset="test/ds")
-        items = source.fetch(RetrieveMode.RANDOM, n=100, seed=1)
+        source = HFRetrievalSource(dataset="ds")
+        items = source.fetch(RetrieveMode.QUERY, n=1)
 
-        assert len(items) == 2
-        mock_ds.select.assert_called_once_with(range(2))
+        assert len(items) == 1
+        mock_load.assert_called_once_with("ds", 1)
 
-    # -- STRUCTURED mode tests ---------------------------------------------
+    @patch("pyforger.acquire.sources.HFRetrievalSource._discover")
+    def test_query_discovery_returns_empty(self, mock_discover: MagicMock) -> None:
+        """When discovery returns no results, fetch returns empty list."""
+        mock_discover.return_value = []
 
-    def test_structured_mode_requires_criteria(self) -> None:
-        """STRUCTURED mode with None or empty criteria raises ValueError."""
-        source = HFRetrievalSource(dataset="test/ds")
+        source = HFRetrievalSource()
+        items = source.fetch(RetrieveMode.QUERY, query="nonexistent", n=5)
 
-        with pytest.raises(ValueError, match="non-empty 'criteria'"):
-            source.fetch(RetrieveMode.STRUCTURED, n=5, criteria=None)
+        assert items == []
 
-        with pytest.raises(ValueError, match="non-empty 'criteria'"):
-            source.fetch(RetrieveMode.STRUCTURED, n=5, criteria={})
 
-    @patch("pyforger.acquire.sources.load_dataset")
-    def test_structured_mode_filters_exact_match(self, mock_load: MagicMock) -> None:
-        """STRUCTURED mode filters rows by exact-match criteria."""
-        matching_rows = [
-            {"color": "red", "size": 10},
-            {"color": "red", "size": 20},
-        ]
-        mock_ds = MagicMock()
-        mock_filtered = MagicMock()
-        mock_ds.filter.return_value = mock_filtered
-        mock_filtered.__len__ = lambda self: len(matching_rows)
-        mock_filtered.select.return_value = mock_filtered
-        mock_filtered.__getitem__ = lambda self, idx: matching_rows[idx]
-        mock_load.return_value = mock_ds
+class TestHFRetrievalSourceRandomMode:
+    """RANDOM mode tests for HFRetrievalSource."""
 
-        source = HFRetrievalSource(dataset="test/ds")
-        items = source.fetch(RetrieveMode.STRUCTURED, n=10, criteria={"color": "red"})
+    @patch("pyforger.acquire.sources.HFRetrievalSource._load_and_select")
+    @patch("pyforger.acquire.sources.HFRetrievalSource._discover")
+    def test_random_shuffles_with_seed(
+        self, mock_discover: MagicMock, mock_load: MagicMock
+    ) -> None:
+        """RANDOM mode passes shuffle=True and seed to _load_and_select."""
+        mock_discover.return_value = [_make_mock_dataset_info("found/ds")]
+        mock_load.return_value = [{"row_idx": 0, "dataset_id": "found/ds", "v": 1}]
 
-        assert len(items) == 2
-        assert items[0] == {"row_idx": 0, "color": "red", "size": 10}
-        assert items[1] == {"row_idx": 1, "color": "red", "size": 20}
-        mock_ds.filter.assert_called_once()
+        source = HFRetrievalSource()
+        items = source.fetch(RetrieveMode.RANDOM, query="test", n=3, seed=42)
 
-    @patch("pyforger.acquire.sources.load_dataset")
-    def test_structured_mode_limits_to_n(self, mock_load: MagicMock) -> None:
-        """STRUCTURED mode returns at most n rows from filtered results."""
-        filtered_rows = [
-            {"val": 1},
-            {"val": 2},
-            {"val": 3},
-        ]
-        mock_ds = MagicMock()
-        mock_filtered = MagicMock()
-        mock_ds.filter.return_value = mock_filtered
-        mock_filtered.__len__ = lambda self: len(filtered_rows)
-        mock_filtered.select.return_value = mock_filtered
-        mock_filtered.__getitem__ = lambda self, idx: filtered_rows[idx]
-        mock_load.return_value = mock_ds
+        assert len(items) == 1
+        mock_load.assert_called_once_with("found/ds", 3, seed=42, shuffle=True)
 
-        source = HFRetrievalSource(dataset="test/ds")
-        items = source.fetch(RetrieveMode.STRUCTURED, n=2, criteria={"val": 1})
+    @patch("pyforger.acquire.sources.HFRetrievalSource._load_and_select")
+    def test_random_with_explicit_dataset(self, mock_load: MagicMock) -> None:
+        """RANDOM with explicit dataset skips discovery and shuffles."""
+        mock_load.return_value = [{"row_idx": 0, "dataset_id": "my/ds", "a": 1}]
+
+        source = HFRetrievalSource(dataset="my/ds")
+        source.fetch(RetrieveMode.RANDOM, n=2, seed=99)
+
+        mock_load.assert_called_once_with("my/ds", 2, seed=99, shuffle=True)
+
+
+class TestHFRetrievalSourceLoadAndSelect:
+    """Integration-level tests for _load_and_select with mocked load_dataset."""
+
+    @patch("datasets.load_dataset")
+    def test_returns_flat_dicts_with_row_idx_and_dataset_id(
+        self, mock_load: MagicMock
+    ) -> None:
+        """Rows include row_idx, dataset_id, and raw column values."""
+        rows = [{"name": "Alice", "age": 30}, {"name": "Bob", "age": 25}]
+        mock_load.return_value = _make_mock_dataset(rows)
+
+        source = HFRetrievalSource()
+        items = source._load_and_select("test/ds", n=2)
 
         assert len(items) == 2
-        mock_filtered.select.assert_called_once_with(range(2))
+        assert items[0] == {
+            "row_idx": 0, "dataset_id": "test/ds", "name": "Alice", "age": 30,
+        }
+        assert items[1] == {
+            "row_idx": 1, "dataset_id": "test/ds", "name": "Bob", "age": 25,
+        }
 
-    # -- Caching test ------------------------------------------------------
+    @patch("datasets.load_dataset")
+    def test_caps_to_dataset_size(self, mock_load: MagicMock) -> None:
+        """When n exceeds dataset size, returns all available rows."""
+        rows = [{"x": 1}]
+        mock_load.return_value = _make_mock_dataset(rows)
 
-    @patch("pyforger.acquire.sources.load_dataset")
-    def test_local_dataset_is_loaded_once(self, mock_load: MagicMock) -> None:
-        """Repeated RANDOM/STRUCTURED calls reuse the cached dataset."""
-        rows = [{"a": 1}]
-        mock_ds = MagicMock()
-        mock_ds.shuffle.return_value = mock_ds
-        mock_ds.__len__ = lambda self: len(rows)
-        mock_ds.select.return_value = mock_ds
-        mock_ds.__getitem__ = lambda self, idx: rows[idx]
+        source = HFRetrievalSource()
+        items = source._load_and_select("test/ds", n=100)
+
+        assert len(items) == 1
+
+    @patch("datasets.load_dataset")
+    def test_shuffle_calls_dataset_shuffle(self, mock_load: MagicMock) -> None:
+        """When shuffle=True, calls ds.shuffle(seed=seed)."""
+        rows = [{"v": 1}, {"v": 2}]
+        mock_ds = _make_mock_dataset(rows)
         mock_load.return_value = mock_ds
 
+        source = HFRetrievalSource()
+        source._load_and_select("test/ds", n=2, seed=42, shuffle=True)
+
+        mock_ds.shuffle.assert_called_once_with(seed=42)
+
+    @patch("datasets.load_dataset")
+    def test_no_shuffle_by_default(self, mock_load: MagicMock) -> None:
+        """By default, shuffle is not called."""
+        rows = [{"v": 1}]
+        mock_ds = _make_mock_dataset(rows)
+        mock_load.return_value = mock_ds
+
+        source = HFRetrievalSource()
+        source._load_and_select("test/ds", n=1)
+
+        mock_ds.shuffle.assert_not_called()
+
+    @patch("datasets.load_dataset")
+    def test_token_forwarded_to_load_dataset(self, mock_load: MagicMock) -> None:
+        """Token is passed through to load_dataset."""
+        mock_load.return_value = _make_mock_dataset([{"a": 1}])
+
+        source = HFRetrievalSource(token="hf_secret")
+        source._load_and_select("test/ds", n=1)
+
+        call_kwargs = mock_load.call_args
+        assert call_kwargs[1]["token"] == "hf_secret"
+
+    @patch("datasets.load_dataset")
+    def test_config_and_split_forwarded(self, mock_load: MagicMock) -> None:
+        """Config and split are passed through to load_dataset."""
+        mock_load.return_value = _make_mock_dataset([{"a": 1}])
+
+        source = HFRetrievalSource(config="SelfRC", split="validation")
+        source._load_and_select("ibm/duorc", n=1)
+
+        call_args = mock_load.call_args
+        assert call_args[0] == ("ibm/duorc", "SelfRC")
+        assert call_args[1]["split"] == "validation"
+
+
+class TestHFRetrievalSourceDiscover:
+    """Tests for the _discover method with mocked HfApi."""
+
+    @patch("huggingface_hub.HfApi")
+    def test_discover_calls_list_datasets(self, mock_api_cls: MagicMock) -> None:
+        """_discover calls HfApi.list_datasets with search and limit."""
+        mock_api = MagicMock()
+        mock_info = _make_mock_dataset_info("found/ds")
+        mock_api.list_datasets.return_value = iter([mock_info])
+        mock_api_cls.return_value = mock_api
+
+        source = HFRetrievalSource(token="hf_tok")
+        results = source._discover("sentiment", limit=3)
+
+        assert len(results) == 1
+        assert results[0].id == "found/ds"
+        mock_api_cls.assert_called_once_with(token="hf_tok")
+        mock_api.list_datasets.assert_called_once_with(search="sentiment", limit=3)
+
+    @patch("huggingface_hub.HfApi")
+    def test_discover_returns_empty_on_no_match(
+        self, mock_api_cls: MagicMock
+    ) -> None:
+        """_discover returns empty list when Hub has no matches."""
+        mock_api = MagicMock()
+        mock_api.list_datasets.return_value = iter([])
+        mock_api_cls.return_value = mock_api
+
+        source = HFRetrievalSource()
+        results = source._discover("zzz_nonexistent_zzz")
+
+        assert results == []
+
+
+class TestHFRetrievalSourceEdgeCases:
+    """Edge case and unsupported mode tests."""
+
+    def test_unsupported_mode_raises(self) -> None:
+        """An unrecognized RetrieveMode raises ValueError."""
         source = HFRetrievalSource(dataset="test/ds")
-        source.fetch(RetrieveMode.RANDOM, n=1, seed=1)
-        source.fetch(RetrieveMode.RANDOM, n=1, seed=2)
+        fake_mode = MagicMock()
+        fake_mode.name = "FAKE"
 
-        mock_load.assert_called_once()
+        with pytest.raises(ValueError, match="Unsupported"):
+            source.fetch(fake_mode, query="test", n=1)
 
-    @patch("pyforger.acquire.sources.requests.get")
-    def test_api_error_propagation(self, mock_get: MagicMock) -> None:
-        """Non-200 API response raises RuntimeError with context."""
-        mock_resp = MagicMock()
-        mock_resp.status_code = 404
-        mock_resp.json.return_value = {"error": "Not found"}
-        mock_get.return_value = mock_resp
 
-        source = HFRetrievalSource(dataset="bad/dataset", config="cfg")
-        with pytest.raises(RuntimeError, match="HTTP 404") as exc_info:
-            source.fetch(RetrieveMode.QUERY, query="test", n=5)
+@pytest.mark.skipif(
+    not os.environ.get("PYFORGER_HF_LIVE"),
+    reason="Set PYFORGER_HF_LIVE=1 to run live HF Hub test",
+)
+class TestHFRetrievalSourceLive:
+    """Live API tests (skipped unless PYFORGER_HF_LIVE=1)."""
 
-        msg = str(exc_info.value)
-        assert "bad/dataset" in msg
-        assert "cfg" in msg
-
-    @patch("pyforger.acquire.sources.requests.get")
-    def test_query_mode_passes_config_when_set(self, mock_get: MagicMock) -> None:
-        """Config is included in request params when provided."""
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = _make_search_response([])
-        mock_get.return_value = mock_resp
-
-        source = HFRetrievalSource(
-            dataset="ibm/duorc", config="SelfRC", split="validation"
-        )
-        source.fetch(RetrieveMode.QUERY, query="dog", n=3)
-
-        params = mock_get.call_args[1]["params"]
-        assert params["config"] == "SelfRC"
-        assert params["split"] == "validation"
-
-    @patch("pyforger.acquire.sources.requests.get")
-    def test_query_mode_omits_config_when_none(self, mock_get: MagicMock) -> None:
-        """Config key is absent from request params when not set."""
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = _make_search_response([])
-        mock_get.return_value = mock_resp
-
-        source = HFRetrievalSource(dataset="some/ds")
-        source.fetch(RetrieveMode.QUERY, query="hello", n=1)
-
-        params = mock_get.call_args[1]["params"]
-        assert "config" not in params
-
-    @patch("pyforger.acquire.sources.requests.get")
-    def test_custom_base_url_and_token(self, mock_get: MagicMock) -> None:
-        """Custom base_url and token are used in the request."""
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = _make_search_response([])
-        mock_get.return_value = mock_resp
-
-        source = HFRetrievalSource(
-            dataset="test/ds",
-            base_url="https://custom.api.example.com/",
-            token="hf_abc123",
-        )
-        source.fetch(RetrieveMode.QUERY, query="test", n=1)
-
-        call_args = mock_get.call_args
-        assert call_args[0][0] == "https://custom.api.example.com/search"
-        assert call_args[1]["headers"]["Authorization"] == "Bearer hf_abc123"
-
-    @pytest.mark.skipif(
-        not os.environ.get("PYFORGER_HF_LIVE"),
-        reason="Set PYFORGER_HF_LIVE=1 to run live HF Dataset Viewer test",
-    )
-    def test_fetch_live_query(self) -> None:
-        """Live API test for QUERY mode (skipped unless PYFORGER_HF_LIVE=1)."""
-        source = HFRetrievalSource(dataset="ibm/duorc", config="SelfRC")
-        items = source.fetch(RetrieveMode.QUERY, query="dog", n=2)
-        assert len(items) == 2
-        for item in items:
-            assert "row_idx" in item
-            assert "question" in item
-            assert "plot" in item
+    def test_discover_and_load(self) -> None:
+        """Live test: discover a dataset and load rows."""
+        source = HFRetrievalSource()
+        items = source.fetch(RetrieveMode.QUERY, query="sentiment analysis", n=2)
+        assert len(items) <= 2
+        if items:
+            assert "row_idx" in items[0]
+            assert "dataset_id" in items[0]

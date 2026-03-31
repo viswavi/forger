@@ -79,7 +79,7 @@ class TestRetrieve:
 
     def test_retrieve_from_hf_returns_dataspec(self):
         """Return a DataSpec from retrieve_from_hf."""
-        spec = retrieve_from_hf("some/dataset", n=5)
+        spec = retrieve_from_hf(query="sentiment", n=5)
         assert isinstance(spec, DataSpec)
         assert spec.node_type == NodeType.ACQUIRE
         assert spec.get_dependencies() == []

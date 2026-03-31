@@ -107,47 +107,52 @@ def retrieve_from_wiki(
 
 
 def retrieve_from_hf(
-    dataset: str,
-    config: str | None = None,
-    split: str = "train",
     mode: RetrieveMode = RetrieveMode.QUERY,
     *,
     query: str | None = None,
     n: int = 10,
     seed: int | None = None,
+    dataset: str | None = None,
+    config: str | None = None,
+    split: str = "train",
+    token: str | None = None,
     name: str = "retrieve_from_hf",
     **kwargs: Any,
 ) -> DataSpec:
-    """Retrieve rows from a Hugging Face dataset (hybrid backend).
+    """Discover a Hugging Face dataset and return raw rows.
 
-    Uses a hybrid backend depending on mode:
-        QUERY      — hosted Dataset Viewer API (/search, BM25 full-text).
-        RANDOM     — local datasets.load_dataset().shuffle().select().
-        STRUCTURED — local datasets.load_dataset().filter() with
-                     exact-match criteria.
+    Two-stage pipeline:
+        1. **Discovery** -- searches the HF Hub for datasets matching
+           *query* via ``HfApi.list_datasets(search=query)``.
+        2. **Loading** -- loads the top match with
+           ``datasets.load_dataset()`` and returns up to *n* rows.
+
+    When *dataset* is provided, stage 1 is skipped and the given
+    dataset is loaded directly.
 
     Args:
-        dataset: HF dataset identifier (e.g. "ibm/duorc").
-        config: Optional dataset config/subset name (e.g. "SelfRC").
-        split: Dataset split (default "train").
-        mode: QUERY, RANDOM, or STRUCTURED.
-        query: Search string; required when mode is QUERY.
+        mode: QUERY (load in dataset order) or RANDOM (shuffle first).
+        query: Search string for Hub discovery; required when *dataset*
+            is not provided.
         n: Maximum number of rows to return.
         seed: Random seed for reproducible sampling in RANDOM mode.
-        criteria: Exact-match field constraints for STRUCTURED mode.
+        dataset: Optional HF dataset identifier (e.g. "ibm/duorc").
+            Skips Hub discovery when provided.
+        config: Optional dataset config/subset name (e.g. "SelfRC").
+        split: Dataset split (default "train").
+        token: HF auth token for gated datasets and API calls.
         name: Label for the node.
-        **kwargs: Passed to HFRetrievalSource — base_url, timeout,
-            token, headers (API); remaining kwargs forwarded to
-            load_dataset() for local modes.
+        **kwargs: Forwarded to ``datasets.load_dataset()``.
 
     Returns:
         DataSpec whose execute_fn returns a list of flat dicts with
-        row_idx and the dataset's column values.
+        ``row_idx``, ``dataset_id``, and the dataset's column values.
     """
     source = HFRetrievalSource(
         dataset=dataset,
         config=config,
         split=split,
+        token=token,
         **kwargs,
     )
     return retrieve(

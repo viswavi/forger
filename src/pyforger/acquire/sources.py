@@ -12,8 +12,6 @@ from enum import Enum, auto
 from typing import Any
 
 import arxiv
-import requests
-from datasets import load_dataset
 
 
 class RetrieveMode(Enum):
@@ -117,139 +115,98 @@ class WikiRetrievalSource(RetrievalSource):
 
 
 class HFRetrievalSource(RetrievalSource):
-    """Hugging Face dataset retrieval with a hybrid backend.
+    """Hugging Face dataset discovery and retrieval.
 
-    This source uses two different backends depending on the retrieval mode,
-    unlike ArxivRetrievalSource or S2RetrievalSource which each use a single
-    backend. The hybrid design is intentional: the hosted Dataset Viewer API
-    provides BM25 full-text search, while random sampling and exact-match
-    filtering are more natural as local operations via the ``datasets`` library.
+    Two-stage pipeline:
+        1. **Discovery** -- ``HfApi.list_datasets(search=query)`` finds
+           datasets whose name or description match the query.
+        2. **Loading** -- ``datasets.load_dataset()`` loads the top match
+           and returns up to *n* rows.
 
-    Mode backends:
-        QUERY      — hosted Dataset Viewer API at
-                     https://datasets-server.huggingface.co/search (BM25).
-        RANDOM     — local ``datasets.load_dataset().shuffle().select()``.
-        STRUCTURED — local ``datasets.load_dataset().filter()`` with
-                     exact-match criteria.
+    When ``dataset`` is provided at construction, stage 1 is skipped and
+    the given dataset is loaded directly.
 
-    All three modes produce the same output shape: a list of flat dicts with
-    ``row_idx`` and the dataset's column values at the top level.
-
-    Attributes:
-        dataset: HF dataset identifier (e.g. "ibm/duorc").
-        config: Optional dataset subset/config name.
-        split: Dataset split (default "train").
+    Both modes produce the same output shape: a list of flat dicts with
+    ``row_idx``, ``dataset_id``, and the dataset's column values.
     """
-
-    _DEFAULT_BASE_URL = "https://datasets-server.huggingface.co"
-    _DEFAULT_TIMEOUT = 30
 
     def __init__(
         self,
-        dataset: str,
+        dataset: str | None = None,
         config: str | None = None,
         split: str = "train",
+        *,
+        token: str | None = None,
         **kwargs: Any,
     ) -> None:
         """Configure the HF retrieval source.
 
-        API-related kwargs (base_url, timeout, token, headers) are extracted
-        for QUERY mode. Remaining kwargs are passed through to
-        ``datasets.load_dataset()`` when RANDOM or STRUCTURED mode triggers
-        a local load.
-
         Args:
-            dataset: Hugging Face dataset name (e.g. "ibm/duorc").
+            dataset: Optional HF dataset identifier (e.g. "ibm/duorc").
+                When provided, Hub discovery is skipped and this dataset
+                is loaded directly.
             config: Optional dataset config/subset name (e.g. "SelfRC").
-            split: Split to use (e.g. "train", "validation").
-            **kwargs: Optional overrides — base_url (str), timeout (int),
-                token (str for Bearer auth), headers (dict) for the API;
-                all other kwargs forwarded to load_dataset().
+            split: Split to use (default "train").
+            token: HF auth token for gated datasets and API calls.
+            **kwargs: Forwarded to ``datasets.load_dataset()``.
         """
         self.dataset = dataset
         self.config = config
         self.split = split
-        self._base_url: str = kwargs.pop("base_url", self._DEFAULT_BASE_URL).rstrip("/")
-        self._timeout: int = kwargs.pop("timeout", self._DEFAULT_TIMEOUT)
-        self._headers: dict[str, str] = dict(kwargs.pop("headers", {}))
-        token: str | None = kwargs.pop("token", None)
-        if token:
-            self._headers.setdefault("Authorization", f"Bearer {token}")
+        self._token = token
         self._kwargs = kwargs
-        self._dataset_obj: Any = None
 
-    # -- API helpers (QUERY mode) ------------------------------------------
+    def _discover(self, query: str, limit: int = 1) -> list[Any]:
+        """Search the HF Hub for datasets matching *query*.
 
-    def _search_rows(self, query: str, *, offset: int, length: int) -> dict[str, Any]:
-        """Call the Dataset Viewer /search endpoint and return parsed JSON.
+        Args:
+            query: Text search string.
+            limit: Maximum number of dataset info objects to return.
 
-        Raises:
-            RuntimeError: On non-200 status, malformed JSON, or if the
-                dataset is not searchable.
-            requests.exceptions.Timeout: On request timeout.
+        Returns:
+            List of ``DatasetInfo`` objects from the Hub API.
         """
-        params: dict[str, Any] = {
-            "dataset": self.dataset,
-            "split": self.split,
-            "query": query,
-            "offset": offset,
-            "length": length,
-        }
-        if self.config is not None:
-            params["config"] = self.config
+        from huggingface_hub import HfApi
 
-        resp = requests.get(
-            f"{self._base_url}/search",
-            params=params,
-            headers=self._headers or None,
-            timeout=self._timeout,
+        api = HfApi(token=self._token)
+        return list(api.list_datasets(search=query, limit=limit))
+
+    def _load_and_select(
+        self,
+        dataset_id: str,
+        n: int,
+        seed: int | None = None,
+        shuffle: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Load a dataset and return up to *n* rows as flat dicts.
+
+        Args:
+            dataset_id: HF dataset identifier to load.
+            n: Maximum number of rows to return.
+            seed: Random seed passed to ``shuffle()`` when *shuffle* is True.
+            shuffle: Whether to shuffle before selecting rows.
+
+        Returns:
+            List of flat dicts with ``row_idx``, ``dataset_id``, and the
+            dataset's column values.
+        """
+        from datasets import load_dataset
+
+        ds = load_dataset(
+            dataset_id,
+            self.config,
+            split=self.split,
+            token=self._token,
+            **self._kwargs,
         )
-
-        if resp.status_code != 200:
-            try:
-                detail = resp.json()
-            except ValueError:
-                detail = resp.text
-            raise RuntimeError(
-                f"HF Dataset Viewer /search failed "
-                f"(HTTP {resp.status_code}) for "
-                f"dataset={self.dataset!r} config={self.config!r} "
-                f"split={self.split!r} query={query!r}: {detail}"
-            )
-
-        try:
-            return resp.json()
-        except ValueError as exc:
-            raise RuntimeError(
-                f"Malformed JSON from HF Dataset Viewer /search for "
-                f"dataset={self.dataset!r} query={query!r}"
-            ) from exc
-
-    # -- Local helpers (RANDOM / STRUCTURED modes) -------------------------
-
-    def _get_dataset(self) -> Any:
-        """Lazy-load and cache the local HF dataset for RANDOM/STRUCTURED.
-
-        Calls ``datasets.load_dataset()`` once and reuses the result for
-        subsequent fetch() calls on this instance.
-        """
-        if self._dataset_obj is None:
-            self._dataset_obj = load_dataset(
-                self.dataset, self.config, split=self.split, **self._kwargs
-            )
-        return self._dataset_obj
-
-    # -- Shared normalization ----------------------------------------------
-
-    @staticmethod
-    def _normalize_row(row_data: dict[str, Any], row_idx: int) -> dict[str, Any]:
-        """Flatten a dataset row into a plain dict.
-
-        Returns the dataset columns at the top level with ``row_idx``
-        prepended for identification. Used by all three modes to ensure
-        consistent output shape.
-        """
-        return {"row_idx": row_idx, **row_data}
+        if shuffle:
+            ds = ds.shuffle(seed=seed)
+        count = min(n, len(ds))
+        selected = ds.select(range(count))
+        return [
+            {"row_idx": i, "dataset_id": dataset_id, **dict(selected[i])}
+            for i in range(count)
+        ]
 
     def fetch(
         self,
@@ -260,61 +217,42 @@ class HFRetrievalSource(RetrievalSource):
         seed: int | None = None,
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
-        """Return rows from a Hugging Face dataset.
+        """Return rows from a discovered or specified HF dataset.
 
         Args:
-            mode: QUERY (hosted API search), RANDOM (local shuffle+select),
-                or STRUCTURED (local exact-match filter).
-            query: Search string; required when mode is QUERY.
+            mode: QUERY (discover + load in dataset order) or
+                RANDOM (discover + shuffle + sample).
+            query: Search string for Hub discovery; required when no
+                ``dataset`` was provided at construction.
             n: Maximum number of rows to return.
             seed: Random seed for reproducible sampling in RANDOM mode.
-            criteria: Exact-match field constraints for STRUCTURED mode;
-                every (key, value) pair must match.
             **kwargs: Reserved for future use.
 
         Returns:
-            List of flat dicts, each containing ``row_idx`` and the
-            dataset's column values.
+            List of flat dicts, each containing ``row_idx``,
+            ``dataset_id``, and the dataset's raw column values.
 
         Raises:
-            ValueError: If query is missing/empty in QUERY mode, if
-                criteria is missing/empty in STRUCTURED mode, or if the
-                mode is unrecognized.
-            RuntimeError: On API errors (QUERY mode).
-            requests.exceptions.Timeout: On request timeout (QUERY mode).
+            ValueError: If *query* is empty/None and no *dataset* was
+                provided at construction.
         """
-        if mode == RetrieveMode.QUERY:
+        dataset_id = self.dataset
+        if dataset_id is None:
             if not query:
                 raise ValueError(
-                    "HFRetrievalSource QUERY mode requires a "
-                    "non-empty 'query' string."
+                    "HFRetrievalSource requires a non-empty 'query' "
+                    "when no 'dataset' was provided at construction."
                 )
-            data = self._search_rows(query, offset=0, length=n)
-            return [
-                self._normalize_row(r["row"], r["row_idx"])
-                for r in data.get("rows", [])
-            ]
+            results = self._discover(query, limit=1)
+            if not results:
+                return []
+            dataset_id = results[0].id
+
+        if mode == RetrieveMode.QUERY:
+            return self._load_and_select(dataset_id, n)
 
         if mode == RetrieveMode.RANDOM:
-            ds = self._get_dataset()
-            ds = ds.shuffle(seed=seed)
-            count = min(n, len(ds))
-            selected = ds.select(range(count))
-            return [self._normalize_row(dict(selected[i]), i) for i in range(count)]
-
-        if mode == RetrieveMode.STRUCTURED:
-            if not criteria:
-                raise ValueError(
-                    "HFRetrievalSource STRUCTURED mode requires a "
-                    "non-empty 'criteria' mapping."
-                )
-            ds = self._get_dataset()
-            filtered = ds.filter(
-                lambda row: all(row.get(k) == v for k, v in criteria.items())
-            )
-            count = min(n, len(filtered))
-            selected = filtered.select(range(count))
-            return [self._normalize_row(dict(selected[i]), i) for i in range(count)]
+            return self._load_and_select(dataset_id, n, seed=seed, shuffle=True)
 
         raise ValueError(f"Unsupported RetrieveMode: {mode}")
 
