@@ -181,7 +181,7 @@ class Model:
 
 
 def model(model_id: str, **kwargs: Any) -> Model:
-    """Factory for Model instances. Use as ``forger.model(...)``.
+    """Create a configured Model instance.
 
     Args:
         model_id: LiteLLM model string (e.g. "gpt-4o",

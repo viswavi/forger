@@ -5,6 +5,7 @@ from typing import Any
 
 from pyforger import DataSpec, NodeType
 from pyforger.acquire import Model, sample_from_LLM
+from pyforger.acquire.model import Prompt
 from pyforger.acquire.sample import _schema_format_instructions
 
 
@@ -17,18 +18,20 @@ class MockModel(Model):
         model_id: str = "test/model",
         **kwargs: Any,
     ) -> None:
+        """Initialize with canned responses."""
         super().__init__(model_id=model_id, **kwargs)
         self.responses = responses or ['{"text": "sample"}']
         self._call_count = 0
 
     def generate_batch(
         self,
-        prompts: list[str],
+        prompts: list[Prompt],
         *,
         n: int = 1,
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> list[list[str]]:
+        """Return canned responses, one per prompt."""
         self._call_count += 1
         out: list[list[str]] = []
         for i in range(len(prompts)):
@@ -42,18 +45,21 @@ class RecordingMockModel(MockModel):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         """Initialize and set up prompt recording."""
         super().__init__(*args, **kwargs)
-        self.prompts: list[str] = []
+        self.prompts: list[Prompt] = []
 
     def generate_batch(
         self,
-        prompts: list[str],
+        prompts: list[Prompt],
         *,
         n: int = 1,
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> list[list[str]]:
+        """Record prompts then delegate to parent."""
         self.prompts = prompts
-        return super().generate_batch(prompts, n=n, temperature=temperature, max_tokens=max_tokens)
+        return super().generate_batch(
+            prompts, n=n, temperature=temperature, max_tokens=max_tokens,
+        )
 
 
 class TestSchemaFormatInstructions:

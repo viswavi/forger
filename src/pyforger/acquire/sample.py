@@ -12,7 +12,7 @@ import random
 from collections.abc import Generator
 from typing import Any
 
-from pyforger.acquire.model import Model
+from pyforger.acquire.model import Model, Prompt
 from pyforger.core import DataSpec, NodeType
 
 
@@ -151,7 +151,7 @@ def _build_batch(
     seed: int | None,
     rng: random.Random,
     output_schema: dict[str, Any] | None = None,
-) -> tuple[list[str], list[int | None], int]:
+) -> tuple[list[Prompt], list[int | None], int]:
     """Prepare a batch of prompt strings and their per-call seeds.
 
     Each prompt in the batch may have different few-shot examples (re-sampled
@@ -171,7 +171,7 @@ def _build_batch(
     Returns:
         (prompts_list, seeds_list, next_prompt_idx).
     """
-    prompts_list: list[str] = []
+    prompts_list: list[Prompt] = []
     seeds_list: list[int | None] = []
     for i in range(batch_size):
         idx = prompt_idx_start + i
