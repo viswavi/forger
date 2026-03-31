@@ -1,12 +1,14 @@
 """Tests for the Model class (LiteLLM wrapper)."""
 from __future__ import annotations
 
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-import pyforger.acquire.model as _model_module
 from pyforger.acquire.model import Model, _to_messages
+
+_model_module = sys.modules["pyforger.acquire.model"]
 
 
 def make_litellm_response(
