@@ -1,14 +1,11 @@
 """Tests for the Model class (LiteLLM wrapper)."""
 from __future__ import annotations
 
-import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from pyforger.acquire.model import Model, _to_messages
-
-_model_module = sys.modules["pyforger.acquire.model"]
 
 
 def make_litellm_response(
@@ -143,7 +140,7 @@ class TestToMessages:
 class TestGenerateBatch:
     """generate_batch calls litellm.completion for each prompt."""
 
-    @patch.object(_model_module, "litellm")
+    @patch("pyforger.acquire.model.litellm")
     def test_single_prompt_n1(self, mock_litellm):
         """Single prompt with n=1 returns one response per prompt."""
         mock_litellm.completion.return_value = make_litellm_response(["hello"])
@@ -151,7 +148,7 @@ class TestGenerateBatch:
         result = model.generate_batch(["Hi"], n=1)
         assert result == [["hello"]]
 
-    @patch.object(_model_module, "litellm")
+    @patch("pyforger.acquire.model.litellm")
     def test_single_prompt_n4(self, mock_litellm):
         """Single prompt with n=4 returns four responses."""
         mock_litellm.completion.return_value = make_litellm_response(
@@ -161,7 +158,7 @@ class TestGenerateBatch:
         result = model.generate_batch(["Hi"], n=4)
         assert result == [["a", "b", "c", "d"]]
 
-    @patch.object(_model_module, "litellm")
+    @patch("pyforger.acquire.model.litellm")
     def test_multiple_prompts(self, mock_litellm):
         """Multiple prompts each get their own response list."""
         mock_litellm.completion.side_effect = [
@@ -172,7 +169,7 @@ class TestGenerateBatch:
         result = model.generate_batch(["Q1", "Q2"], n=1)
         assert result == [["r1"], ["r2"]]
 
-    @patch.object(_model_module, "litellm")
+    @patch("pyforger.acquire.model.litellm")
     def test_chat_messages_input(self, mock_litellm):
         """Chat message lists are passed through to litellm."""
         mock_litellm.completion.return_value = make_litellm_response(["ahoy"])
@@ -183,7 +180,7 @@ class TestGenerateBatch:
         call_args = mock_litellm.completion.call_args
         assert call_args.kwargs["messages"] == messages
 
-    @patch.object(_model_module, "litellm")
+    @patch("pyforger.acquire.model.litellm")
     def test_forwards_parameters(self, mock_litellm):
         """Model parameters are forwarded to litellm.completion."""
         mock_litellm.completion.return_value = make_litellm_response(["ok"])
@@ -205,7 +202,7 @@ class TestGenerateBatch:
         assert call_args.kwargs["n"] == 2
         assert call_args.kwargs["api_base"] == "http://localhost:8080"
 
-    @patch.object(_model_module, "litellm")
+    @patch("pyforger.acquire.model.litellm")
     def test_per_call_temperature_override(self, mock_litellm):
         """Per-call temperature overrides instance default."""
         mock_litellm.completion.return_value = make_litellm_response(["ok"])
@@ -214,7 +211,7 @@ class TestGenerateBatch:
         call_args = mock_litellm.completion.call_args
         assert call_args.kwargs["temperature"] == 0.1
 
-    @patch.object(_model_module, "litellm")
+    @patch("pyforger.acquire.model.litellm")
     def test_per_call_max_tokens_override(self, mock_litellm):
         """Per-call max_tokens overrides instance default."""
         mock_litellm.completion.return_value = make_litellm_response(["ok"])
@@ -223,7 +220,7 @@ class TestGenerateBatch:
         call_args = mock_litellm.completion.call_args
         assert call_args.kwargs["max_tokens"] == 50
 
-    @patch.object(_model_module, "litellm")
+    @patch("pyforger.acquire.model.litellm")
     def test_temperature_zero_is_not_replaced_by_default(self, mock_litellm):
         """Passing temperature=0.0 is a valid override, not replaced by default."""
         mock_litellm.completion.return_value = make_litellm_response(["ok"])
@@ -232,7 +229,7 @@ class TestGenerateBatch:
         call_args = mock_litellm.completion.call_args
         assert call_args.kwargs["temperature"] == 0.0
 
-    @patch.object(_model_module, "litellm")
+    @patch("pyforger.acquire.model.litellm")
     def test_max_tokens_none_uses_instance_default(self, mock_litellm):
         """Omitting max_tokens falls back to instance default."""
         mock_litellm.completion.return_value = make_litellm_response(["ok"])
@@ -241,7 +238,7 @@ class TestGenerateBatch:
         call_args = mock_litellm.completion.call_args
         assert call_args.kwargs["max_tokens"] == 200
 
-    @patch.object(_model_module, "litellm")
+    @patch("pyforger.acquire.model.litellm")
     def test_max_tokens_zero_is_not_replaced_by_default(self, mock_litellm):
         """Passing max_tokens=0 is a valid override, not replaced by default."""
         mock_litellm.completion.return_value = make_litellm_response(["ok"])
@@ -254,7 +251,7 @@ class TestGenerateBatch:
 class TestGenerate:
     """generate is a convenience wrapper for single prompts."""
 
-    @patch.object(_model_module, "litellm")
+    @patch("pyforger.acquire.model.litellm")
     def test_string_prompt_n1(self, mock_litellm):
         """String prompt with n=1 returns list with one response."""
         mock_litellm.completion.return_value = make_litellm_response(["hello"])
@@ -262,7 +259,7 @@ class TestGenerate:
         result = model.generate("Hi")
         assert result == ["hello"]
 
-    @patch.object(_model_module, "litellm")
+    @patch("pyforger.acquire.model.litellm")
     def test_string_prompt_n4(self, mock_litellm):
         """String prompt with n=4 returns list of four responses."""
         mock_litellm.completion.return_value = make_litellm_response(
@@ -272,7 +269,7 @@ class TestGenerate:
         result = model.generate("Hi", n=4)
         assert result == ["a", "b", "c", "d"]
 
-    @patch.object(_model_module, "litellm")
+    @patch("pyforger.acquire.model.litellm")
     def test_chat_messages(self, mock_litellm):
         """Chat message list works as input."""
         mock_litellm.completion.return_value = make_litellm_response(["ahoy"])
@@ -285,7 +282,7 @@ class TestGenerate:
         )
         assert result == ["ahoy"]
 
-    @patch.object(_model_module, "litellm")
+    @patch("pyforger.acquire.model.litellm")
     def test_delegates_to_generate_batch(self, mock_litellm):
         """Generate forwards all parameters to litellm.completion."""
         mock_litellm.completion.return_value = make_litellm_response(["ok"])
@@ -296,7 +293,7 @@ class TestGenerate:
         assert call_args.kwargs["temperature"] == 0.3
         assert call_args.kwargs["max_tokens"] == 50
 
-    @patch.object(_model_module, "litellm")
+    @patch("pyforger.acquire.model.litellm")
     def test_default_n_is_one(self, mock_litellm):
         """Generate with no n argument returns a single-element list."""
         mock_litellm.completion.return_value = make_litellm_response(["ok"])
@@ -310,7 +307,7 @@ class TestGenerate:
 class TestLastUsage:
     """last_usage tracks token counts and cost."""
 
-    @patch.object(_model_module, "litellm")
+    @patch("pyforger.acquire.model.litellm")
     def test_tracks_single_call(self, mock_litellm):
         """last_usage reflects a single completion call."""
         mock_litellm.completion.return_value = make_litellm_response(
@@ -324,7 +321,7 @@ class TestLastUsage:
         assert model.last_usage["completion_tokens"] == 25
         assert model.last_usage["total_cost"] == 0.001
 
-    @patch.object(_model_module, "litellm")
+    @patch("pyforger.acquire.model.litellm")
     def test_sums_across_batch(self, mock_litellm):
         """last_usage sums tokens across all prompts in a batch."""
         mock_litellm.completion.side_effect = [
@@ -337,7 +334,7 @@ class TestLastUsage:
         assert model.last_usage["completion_tokens"] == 60
         assert model.last_usage["total_cost"] == 0.002
 
-    @patch.object(_model_module, "litellm")
+    @patch("pyforger.acquire.model.litellm")
     def test_resets_on_new_call(self, mock_litellm):
         """last_usage resets on each new generate call."""
         mock_litellm.completion.return_value = make_litellm_response(
@@ -356,7 +353,7 @@ class TestLastUsage:
         assert model.last_usage["prompt_tokens"] == 5
         assert model.last_usage["completion_tokens"] == 10
 
-    @patch.object(_model_module, "litellm")
+    @patch("pyforger.acquire.model.litellm")
     def test_no_usage_from_provider(self, mock_litellm):
         """Providers that omit usage data get zero tokens."""
         mock_litellm.completion.return_value = make_litellm_response(
@@ -368,7 +365,7 @@ class TestLastUsage:
         assert model.last_usage["prompt_tokens"] == 0
         assert model.last_usage["completion_tokens"] == 0
 
-    @patch.object(_model_module, "litellm")
+    @patch("pyforger.acquire.model.litellm")
     def test_no_response_cost(self, mock_litellm):
         """Missing response_cost in _hidden_params defaults to 0.0."""
         mock_litellm.completion.return_value = make_litellm_response(
@@ -383,7 +380,7 @@ class TestLastUsage:
 class TestErrorHandling:
     """Model surfaces errors from litellm."""
 
-    @patch.object(_model_module, "litellm")
+    @patch("pyforger.acquire.model.litellm")
     def test_litellm_exception_propagates(self, mock_litellm):
         """Exceptions from litellm.completion propagate to the caller."""
         mock_litellm.completion.side_effect = RuntimeError("API rate limit")
@@ -391,7 +388,7 @@ class TestErrorHandling:
         with pytest.raises(RuntimeError, match="API rate limit"):
             model.generate("Hi")
 
-    @patch.object(_model_module, "litellm")
+    @patch("pyforger.acquire.model.litellm")
     def test_last_usage_none_on_first_call_error(self, mock_litellm):
         """last_usage is None if the very first call fails."""
         mock_litellm.completion.side_effect = RuntimeError("API error")
@@ -400,7 +397,7 @@ class TestErrorHandling:
             model.generate("Hi")
         assert model.last_usage is None
 
-    @patch.object(_model_module, "litellm")
+    @patch("pyforger.acquire.model.litellm")
     def test_last_usage_cleared_on_batch_error(self, mock_litellm):
         """last_usage from a prior call is cleared when a new call fails."""
         mock_litellm.completion.return_value = make_litellm_response(["ok"])
@@ -413,7 +410,7 @@ class TestErrorHandling:
             model.generate("Second call fails")
         assert model.last_usage is None
 
-    @patch.object(_model_module, "litellm")
+    @patch("pyforger.acquire.model.litellm")
     def test_partial_batch_failure(self, mock_litellm):
         """If second prompt fails, exception propagates and usage is cleared."""
         mock_litellm.completion.side_effect = [
@@ -429,7 +426,7 @@ class TestErrorHandling:
 class TestEdgeCases:
     """Edge cases and boundary conditions."""
 
-    @patch.object(_model_module, "litellm")
+    @patch("pyforger.acquire.model.litellm")
     def test_empty_prompt_list(self, mock_litellm):
         """Empty prompt list returns empty results with zeroed usage."""
         model = Model("gpt-4o", api_key="sk-test")
@@ -442,7 +439,7 @@ class TestEdgeCases:
         }
         mock_litellm.completion.assert_not_called()
 
-    @patch.object(_model_module, "litellm")
+    @patch("pyforger.acquire.model.litellm")
     def test_empty_choices_from_api(self, mock_litellm):
         """API returning zero choices gives empty inner list."""
         mock_litellm.completion.return_value = make_litellm_response([])
@@ -450,7 +447,7 @@ class TestEdgeCases:
         result = model.generate_batch(["Hi"])
         assert result == [[]]
 
-    @patch.object(_model_module, "litellm")
+    @patch("pyforger.acquire.model.litellm")
     def test_empty_string_prompt(self, mock_litellm):
         """Empty string prompt is still sent to litellm."""
         mock_litellm.completion.return_value = make_litellm_response(["response"])
@@ -460,7 +457,7 @@ class TestEdgeCases:
         call_args = mock_litellm.completion.call_args
         assert call_args.kwargs["messages"] == [{"role": "user", "content": ""}]
 
-    @patch.object(_model_module, "litellm")
+    @patch("pyforger.acquire.model.litellm")
     def test_none_content_replaced_with_empty_string(self, mock_litellm):
         """None content from a choice is replaced with empty string."""
         mock_litellm.completion.return_value = make_litellm_response(

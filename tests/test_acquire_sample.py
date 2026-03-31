@@ -289,23 +289,3 @@ class TestRetriesAndBatch:
         # Both should have run one batch; prompts may differ by pool sample
         assert model1._call_count == 1
         assert model2._call_count == 1
-
-
-class TestModelFactory:
-    """model() factory creates configured Model instances."""
-
-    def test_model_factory_returns_model(self):
-        """model() factory returns a Model instance."""
-        from pyforger.acquire import model as model_factory
-
-        m = model_factory("test/id")
-        assert isinstance(m, Model)
-        assert m._model_id == "test/id"
-
-    def test_model_factory_forwards_kwargs(self):
-        """model() forwards keyword arguments to Model."""
-        from pyforger.acquire import model as model_factory
-
-        m = model_factory("test/id", api_key="sk-test", temperature=0.5)
-        assert m._api_key == "sk-test"
-        assert m._temperature == 0.5
