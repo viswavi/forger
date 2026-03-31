@@ -300,18 +300,20 @@ def sample_from_LLM(
 
     def _execute() -> list[dict]:
         rng = random.Random(seed)
-        return list(_generation_loop(
-            prompt=prompt,
-            model=model,
-            n=n,
-            output_schema=output_schema,
-            pool=pool,
-            pool_sample_k=pool_sample_k,
-            temperature=temperature,
-            max_retries=max_retries,
-            seed=seed,
-            batch_size=batch_size,
-            rng=rng,
-        ))
+        return list(
+            _generation_loop(
+                prompt=prompt,
+                model=model,
+                n=n,
+                output_schema=output_schema,
+                pool=pool,
+                pool_sample_k=pool_sample_k,
+                temperature=temperature,
+                max_retries=max_retries,
+                seed=seed,
+                batch_size=batch_size,
+                rng=rng,
+            )
+        )
 
     return DataSpec(NodeType.ACQUIRE, [], _execute, name)

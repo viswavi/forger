@@ -58,7 +58,10 @@ class RecordingMockModel(MockModel):
         """Record prompts then delegate to parent."""
         self.prompts = prompts
         return super().generate_batch(
-            prompts, n=n, temperature=temperature, max_tokens=max_tokens,
+            prompts,
+            n=n,
+            temperature=temperature,
+            max_tokens=max_tokens,
         )
 
 
@@ -294,6 +297,7 @@ class TestModelFactory:
     def test_model_factory_returns_model(self):
         """model() factory returns a Model instance."""
         from pyforger.acquire import model as model_factory
+
         m = model_factory("test/id")
         assert isinstance(m, Model)
         assert m._model_id == "test/id"
@@ -301,6 +305,7 @@ class TestModelFactory:
     def test_model_factory_forwards_kwargs(self):
         """model() forwards keyword arguments to Model."""
         from pyforger.acquire import model as model_factory
+
         m = model_factory("test/id", api_key="sk-test", temperature=0.5)
         assert m._api_key == "sk-test"
         assert m._temperature == 0.5
