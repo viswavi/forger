@@ -54,9 +54,7 @@ class TestHFRetrievalSourceQueryMode:
         self, mock_discover: MagicMock, mock_load: MagicMock
     ) -> None:
         """When dataset is provided, discovery is skipped."""
-        mock_load.return_value = [
-            {"row_idx": 0, "dataset_id": "known/ds", "val": 42}
-        ]
+        mock_load.return_value = [{"row_idx": 0, "dataset_id": "known/ds", "val": 42}]
 
         source = HFRetrievalSource(dataset="known/ds")
         items = source.fetch(RetrieveMode.QUERY, query="anything", n=1)
@@ -145,10 +143,16 @@ class TestHFRetrievalSourceLoadAndSelect:
 
         assert len(items) == 2
         assert items[0] == {
-            "row_idx": 0, "dataset_id": "test/ds", "name": "Alice", "age": 30,
+            "row_idx": 0,
+            "dataset_id": "test/ds",
+            "name": "Alice",
+            "age": 30,
         }
         assert items[1] == {
-            "row_idx": 1, "dataset_id": "test/ds", "name": "Bob", "age": 25,
+            "row_idx": 1,
+            "dataset_id": "test/ds",
+            "name": "Bob",
+            "age": 25,
         }
 
     @patch("datasets.load_dataset")
@@ -230,9 +234,7 @@ class TestHFRetrievalSourceDiscover:
         mock_api.list_datasets.assert_called_once_with(search="sentiment", limit=3)
 
     @patch("huggingface_hub.HfApi")
-    def test_discover_returns_empty_on_no_match(
-        self, mock_api_cls: MagicMock
-    ) -> None:
+    def test_discover_returns_empty_on_no_match(self, mock_api_cls: MagicMock) -> None:
         """_discover returns empty list when Hub has no matches."""
         mock_api = MagicMock()
         mock_api.list_datasets.return_value = iter([])
