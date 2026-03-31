@@ -64,9 +64,7 @@ class TestWebRetrievalSourceFetch:
         assert params["count"] == "3"
 
     @patch("pyforger.acquire.sources.requests.Session")
-    def test_handles_missing_fields(
-        self, mock_session_cls: MagicMock
-    ) -> None:
+    def test_handles_missing_fields(self, mock_session_cls: MagicMock) -> None:
         """Results with missing description or title produce empty strings."""
         brave_resp = _make_brave_search_response(
             [
@@ -130,7 +128,7 @@ class TestWebRetrievalSourceFetch:
 
     @patch("pyforger.acquire.sources.requests.Session")
     def test_pagination(self, mock_session_cls: MagicMock) -> None:
-        """n > 20 triggers multiple paginated requests."""
+        """Multiple paginated requests when n is greater than 20."""
         page1_results = [
             _make_brave_result(f"R{i}", f"https://r{i}.com", f"Snippet {i}")
             for i in range(20)
@@ -171,9 +169,7 @@ class TestWebRetrievalSourceFetch:
             source.fetch(RetrieveMode.QUERY, query=None, n=3)
 
     @patch("pyforger.acquire.sources.requests.Session")
-    def test_fetch_passes_timeout_to_get(
-        self, mock_session_cls: MagicMock
-    ) -> None:
+    def test_fetch_passes_timeout_to_get(self, mock_session_cls: MagicMock) -> None:
         """timeout= in constructor is forwarded to session.get."""
         brave_resp = _make_brave_search_response([_make_brave_result()])
         mock_session = MagicMock()
@@ -194,9 +190,7 @@ class TestWebRetrievalSourceFullContent:
     """WebRetrievalSource.fetch() full-content mode tests."""
 
     @patch("pyforger.acquire.sources.requests.Session")
-    def test_full_content_fetches_urls(
-        self, mock_session_cls: MagicMock
-    ) -> None:
+    def test_full_content_fetches_urls(self, mock_session_cls: MagicMock) -> None:
         """fetch_full_content=True replaces snippet with extracted page text."""
         brave_resp = _make_brave_search_response(
             [
@@ -316,28 +310,20 @@ class TestWebRetrievalSourceFullContent:
         assert items[0]["text"] == "Big snippet"
 
     @patch("pyforger.acquire.sources.trafilatura")
-    def test_extract_text_calls_trafilatura(
-        self, mock_traf: MagicMock
-    ) -> None:
+    def test_extract_text_calls_trafilatura(self, mock_traf: MagicMock) -> None:
         """_extract_text delegates to trafilatura.extract."""
         mock_traf.extract.return_value = "Clean extracted text."
 
-        result = WebRetrievalSource._extract_text(
-            "<html><body>raw</body></html>"
-        )
+        result = WebRetrievalSource._extract_text("<html><body>raw</body></html>")
         assert result == "Clean extracted text."
         mock_traf.extract.assert_called_once()
 
     @patch("pyforger.acquire.sources.trafilatura")
-    def test_extract_text_returns_empty_on_none(
-        self, mock_traf: MagicMock
-    ) -> None:
+    def test_extract_text_returns_empty_on_none(self, mock_traf: MagicMock) -> None:
         """_extract_text returns empty string when trafilatura returns None."""
         mock_traf.extract.return_value = None
 
-        result = WebRetrievalSource._extract_text(
-            "<html><body>raw</body></html>"
-        )
+        result = WebRetrievalSource._extract_text("<html><body>raw</body></html>")
         assert result == ""
 
     @pytest.mark.skipif(
@@ -348,9 +334,7 @@ class TestWebRetrievalSourceFullContent:
         """Live API test for QUERY mode (skipped unless PYFORGER_WEB_LIVE=1)."""
         api_key = os.environ.get("BRAVE_API_KEY", "")
         source = WebRetrievalSource(api_key=api_key)
-        items = source.fetch(
-            RetrieveMode.QUERY, query="python programming", n=2
-        )
+        items = source.fetch(RetrieveMode.QUERY, query="python programming", n=2)
         assert len(items) == 2
         for item in items:
             assert "text" in item

@@ -169,9 +169,7 @@ class WebRetrievalSource(RetrievalSource):
         Returns:
             Extracted plaintext, or empty string on failure.
         """
-        result = trafilatura.extract(
-            html, include_comments=False, include_tables=True
-        )
+        result = trafilatura.extract(html, include_comments=False, include_tables=True)
         return result or ""
 
     # -- result conversion ---------------------------------------------------
@@ -225,9 +223,7 @@ class WebRetrievalSource(RetrievalSource):
         """
         session = self._get_content_session()
         timeout_kw = self._get_timeout_kw(merged)
-        max_len = merged.get(
-            "max_content_length", self._DEFAULT_MAX_CONTENT_LENGTH
-        )
+        max_len = merged.get("max_content_length", self._DEFAULT_MAX_CONTENT_LENGTH)
         content_map: dict[str, str] = {}
 
         for url in urls:
@@ -299,9 +295,7 @@ class WebRetrievalSource(RetrievalSource):
 
         if mode == RetrieveMode.QUERY:
             if not query:
-                raise ValueError(
-                    "query is required for WebRetrievalSource QUERY mode"
-                )
+                raise ValueError("query is required for WebRetrievalSource QUERY mode")
 
             q = f"site:{self.base_url} {query}" if self.base_url else query
 
@@ -327,9 +321,7 @@ class WebRetrievalSource(RetrievalSource):
                     **timeout_kw,
                 )
                 resp.raise_for_status()
-                page_results = (
-                    resp.json().get("web", {}).get("results", [])
-                )
+                page_results = resp.json().get("web", {}).get("results", [])
                 all_results.extend(page_results)
 
             all_results = all_results[:n]

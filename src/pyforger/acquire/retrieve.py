@@ -77,7 +77,7 @@ def retrieve_from_web(
             ``site:{base_url}`` is prepended to the query.
         fetch_full_content: When True, fetch full page text from each
             result URL after search.  When False
-            (default), ``text`` is the short search snippet. 
+            (default), ``text`` is the short search snippet.
         name: Label for the node.
         **kwargs: Passed to WebRetrievalSource and fetch().  Recognised
             keys: ``api_key`` (str, required -- Brave subscription token),
@@ -91,9 +91,7 @@ def retrieve_from_web(
         Brave's ToS require a plan with storage rights if results are used
         for LLM training.  See https://brave.com/search/api/ for details.
     """
-    source_kwargs = {
-        k: v for k, v in kwargs.items() if k not in ("api_key",)
-    }
+    source_kwargs = {k: v for k, v in kwargs.items() if k not in ("api_key",)}
     source = WebRetrievalSource(
         base_url=base_url,
         api_key=kwargs.get("api_key"),
