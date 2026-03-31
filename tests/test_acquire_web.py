@@ -120,10 +120,10 @@ class TestWebRetrievalSourceFetch:
         mock_session_cls.return_value = mock_session
 
         source = WebRetrievalSource(api_key="my-secret-key")
-        session = source._get_session()
+        source._get_session()
 
-        session.headers.update.assert_called_once()
-        headers = session.headers.update.call_args[0][0]
+        mock_session.headers.update.assert_called_once()
+        headers = mock_session.headers.update.call_args[0][0]
         assert headers["X-Subscription-Token"] == "my-secret-key"
 
     @patch("pyforger.acquire.sources.requests.Session")
