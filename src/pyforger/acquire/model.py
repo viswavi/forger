@@ -94,6 +94,7 @@ class Model:
         n: int = 1,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        stop: list[str] | None = None,
     ) -> list[str]:
         """Generate n responses for a single prompt.
 
@@ -107,6 +108,8 @@ class Model:
             temperature: Sampling temperature. Overrides the instance
                 default.
             max_tokens: Max tokens. Overrides the instance default.
+            stop: Stop sequences. Generation stops when any of these
+                strings is produced.
 
         Returns:
             List of n response strings.
@@ -116,6 +119,7 @@ class Model:
             n=n,
             temperature=temperature,
             max_tokens=max_tokens,
+            stop=stop,
         )[0]
 
     def generate_batch(
@@ -125,6 +129,7 @@ class Model:
         n: int = 1,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        stop: list[str] | None = None,
     ) -> list[list[str]]:
         """Generate n responses for each prompt in a batch.
 
@@ -134,6 +139,8 @@ class Model:
             n: Number of completions per prompt.
             temperature: Sampling temperature. Overrides the instance default.
             max_tokens: Max tokens. Overrides the instance default.
+            stop: Stop sequences. Generation stops when any of these
+                strings is produced.
 
         Returns:
             List of lists — one inner list of n responses per prompt.
@@ -156,6 +163,7 @@ class Model:
                 n=n,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                stop=stop,
                 api_key=self._api_key,
                 num_retries=self._num_retries,
                 **self._kwargs,
