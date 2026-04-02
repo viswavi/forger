@@ -155,19 +155,28 @@ class Model:
 
         self._last_usage = None
 
-        for prompt in prompts:
-            messages = _to_messages(prompt)
-            response = litellm.completion(
-                model=self._model_id,
-                messages=messages,
-                n=n,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                stop=stop,
-                api_key=self._api_key,
-                num_retries=self._num_retries,
-                **self._kwargs,
-            )
+        if not prompts:
+            self._last_usage = {
+                "prompt_tokens": total_prompt_tokens,
+                "completion_tokens": total_completion_tokens,
+                "total_cost": total_cost,
+            }
+            return all_results
+
+        all_messages = [_to_messages(prompt) for prompt in prompts]
+        responses = litellm.batch_completion(
+            model=self._model_id,
+            messages=all_messages,
+            n=n,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stop=stop,
+            api_key=self._api_key,
+            num_retries=self._num_retries,
+            **self._kwargs,
+        )
+
+        for response in responses:
             completions = [choice.message.content or "" for choice in response.choices]
             all_results.append(completions)
 
