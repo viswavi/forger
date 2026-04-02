@@ -92,8 +92,8 @@ class TestSchemaFormatInstructions:
 class TestSchemaPromptInjection:
     """Prompt includes schema instructions when output_schema is set."""
 
-    def test_prompt_includes_schema_instructions(self):
-        """Prompt passed to generate_batch has Required keys."""
+    def test_string_prompt_includes_schema_instructions(self):
+        """String prompt passed to generate_batch has Required keys."""
         model = RecordingMockModel(responses=['{"answer": "42"}'])
         spec = sample_from_LLM(
             "Generate an answer",
@@ -104,9 +104,49 @@ class TestSchemaPromptInjection:
         list(spec.execute_fn())
         assert len(model.prompts) == 1
         prompt_text = model.prompts[0]
+        assert isinstance(prompt_text, str)
         assert "Required keys" in prompt_text
         assert "answer" in prompt_text
         assert "JSON object" in prompt_text or "json" in prompt_text.lower()
+
+    def test_message_list_prompt_appends_schema_as_user_message(self):
+        """Message-list prompt gets an extra user message with schema instructions."""
+        model = RecordingMockModel(responses=['{"answer": "42"}'])
+        messages = [
+            {"role": "system", "content": "You are a math tutor."},
+            {"role": "user", "content": "What is 6*7?"},
+        ]
+        spec = sample_from_LLM(
+            messages,
+            model,
+            n=1,
+            output_schema={"answer": str},
+        )
+        list(spec.execute_fn())
+        assert len(model.prompts) == 1
+        recorded = model.prompts[0]
+        assert isinstance(recorded, list)
+        assert len(recorded) == 3
+        assert recorded[0] == messages[0]
+        assert recorded[1] == messages[1]
+        assert recorded[2]["role"] == "user"
+        assert "Required keys" in recorded[2]["content"]
+        assert "answer" in recorded[2]["content"]
+
+    def test_no_schema_string_prompt_unchanged(self):
+        """Without output_schema, string prompt is passed through as-is."""
+        model = RecordingMockModel(responses=["hello"])
+        spec = sample_from_LLM("Generate", model, n=1)
+        list(spec.execute_fn())
+        assert model.prompts[0] == "Generate"
+
+    def test_no_schema_message_list_unchanged(self):
+        """Without output_schema, message list is passed through as-is."""
+        model = RecordingMockModel(responses=["hello"])
+        messages = [{"role": "user", "content": "Hi"}]
+        spec = sample_from_LLM(messages, model, n=1)
+        list(spec.execute_fn())
+        assert model.prompts[0] == messages
 
 
 class TestSampleFromLLMReturnsDataSpec:
@@ -163,7 +203,6 @@ class TestSampleFromLLMExecution:
         spec = sample_from_LLM("Generate", model, n=3, batch_size=10)
         items = list(spec.execute_fn())
         assert len(items) == 3
-        # One batch of 3
         assert model._call_count == 1
 
     def test_no_schema_returns_text_key(self):
@@ -172,6 +211,32 @@ class TestSampleFromLLMExecution:
         spec = sample_from_LLM("Generate", model, n=1)
         items = list(spec.execute_fn())
         assert items == [{"text": "plain text"}]
+
+    def test_message_list_prompt_executes(self):
+        """Message-list prompts run through the generation loop."""
+        model = MockModel(responses=['{"text": "result"}'])
+        messages = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Generate data"},
+        ]
+        spec = sample_from_LLM(messages, model, n=2, batch_size=2)
+        items = list(spec.execute_fn())
+        assert len(items) == 2
+        assert model._call_count == 1
+
+    def test_message_list_with_schema(self):
+        """Message-list prompt with output_schema parses structured output."""
+        model = MockModel(responses=['{"answer": "42"}'])
+        messages = [{"role": "user", "content": "What is 6*7?"}]
+        spec = sample_from_LLM(
+            messages,
+            model,
+            n=1,
+            output_schema={"answer": str},
+        )
+        items = list(spec.execute_fn())
+        assert len(items) == 1
+        assert items[0]["answer"] == "42"
 
 
 class TestParseAndSchema:
@@ -218,33 +283,6 @@ class TestParseAndSchema:
         assert len(items) == 0
 
 
-class TestFewShotPool:
-    """Pool and pool_sample_k behavior."""
-
-    def test_pool_sampling_used_in_prompt(self):
-        """When pool and pool_sample_k are set, batch is built (no crash)."""
-        pool = [{"text": "example1"}, {"text": "example2"}]
-        model = MockModel(responses=['{"text": "out"}'])
-        spec = sample_from_LLM(
-            "Generate",
-            model,
-            n=1,
-            pool=pool,
-            pool_sample_k=1,
-            seed=42,
-        )
-        items = list(spec.execute_fn())
-        assert len(items) == 1
-        assert model._call_count == 1
-
-    def test_empty_pool_ok(self):
-        """pool=None and pool_sample_k=0 run without error."""
-        model = MockModel(responses=['{"text": "x"}'])
-        spec = sample_from_LLM("Generate", model, n=1, pool=None, pool_sample_k=0)
-        items = list(spec.execute_fn())
-        assert len(items) == 1
-
-
 class TestRetriesAndBatch:
     """max_retries and batch_size behavior."""
 
@@ -276,16 +314,3 @@ class TestRetriesAndBatch:
         assert len(items) == 5
         # 3 rounds: 2 + 2 + 1
         assert model._call_count == 3
-
-    def test_seed_reproducibility(self):
-        """Same seed yields same order from pool (deterministic batch build)."""
-        pool = [{"text": "a"}, {"text": "b"}, {"text": "c"}]
-        model1 = MockModel(responses=['{"text": "out"}'])
-        spec1 = sample_from_LLM("G", model1, n=1, pool=pool, pool_sample_k=1, seed=99)
-        list(spec1.execute_fn())
-        model2 = MockModel(responses=['{"text": "out"}'])
-        spec2 = sample_from_LLM("G", model2, n=1, pool=pool, pool_sample_k=1, seed=99)
-        list(spec2.execute_fn())
-        # Both should have run one batch; prompts may differ by pool sample
-        assert model1._call_count == 1
-        assert model2._call_count == 1

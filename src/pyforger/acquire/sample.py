@@ -1,14 +1,13 @@
 """LLM-based data generation building block.
 
 sample_from_LLM is a first-class acquire building block that generates data from
-an LLM until n accepted samples are collected, with optional few-shot prompting,
-structured output parsing.
+an LLM until n accepted samples are collected, with optional structured output
+parsing.
 """
 from __future__ import annotations
 
 import json
 import logging
-import random
 from collections.abc import Generator
 from typing import Any
 
@@ -52,52 +51,27 @@ def _schema_format_instructions(output_schema: dict[str, Any]) -> str:
 
 
 def _build_prompt(
-    prompt: str,
-    examples: list[dict[str, Any]],
+    prompt: Prompt,
     output_schema: dict[str, Any] | None = None,
-) -> str:
-    """Combine base prompt with optional schema instructions and few-shot examples.
+) -> Prompt:
+    """Combine base prompt with optional schema instructions.
 
     Args:
-        prompt: The base instruction or prompt template.
-        examples: List of example dicts; each is formatted and appended.
+        prompt: A string or list of chat messages in OpenAI format.
         output_schema: If set, format instructions are appended so the model
             produces JSON matching the schema (same schema used by _parse_output).
 
     Returns:
-        Single string: prompt, then schema instructions (if any), then examples.
+        For string prompts: string with schema instructions appended.
+        For message lists: copy with an extra user message containing
+            schema instructions.
     """
-    parts = [prompt]
-    if output_schema is not None:
-        parts.append(_schema_format_instructions(output_schema))
-    for ex in examples:
-        if isinstance(ex, dict) and "text" in ex:
-            parts.append(str(ex["text"]))
-        else:
-            parts.append(str(ex))
-    return "\n\n".join(parts)
-
-
-def _sample_from_pool(
-    pool: list[dict[str, Any]] | None,
-    k: int,
-    rng: random.Random,
-) -> list[dict[str, Any]]:
-    """Randomly pick k examples from the pool without replacement.
-
-    Args:
-        pool: List of example dicts; may be None.
-        k: Number to sample.
-        rng: Random instance for reproducibility.
-
-    Returns:
-        List of up to k examples, or [] if pool is None or k is 0.
-    """
-    if not pool or k <= 0:
-        return []
-    if k >= len(pool):
-        return list(rng.sample(pool, len(pool)))
-    return list(rng.sample(pool, k))
+    if output_schema is None:
+        return prompt
+    schema_text = _schema_format_instructions(output_schema)
+    if isinstance(prompt, str):
+        return f"{prompt}\n\n{schema_text}"
+    return [*prompt, {"role": "user", "content": schema_text}]
 
 
 def _parse_output(
@@ -108,7 +82,6 @@ def _parse_output(
 
     If output_schema is None, returns {"text": raw_text}. Otherwise attempts
     JSON parse and lightweight validation (required keys present).
-    TODO: Full JSON Schema validation in future.
 
     Args:
         raw_text: Raw string from the model.
@@ -132,68 +105,36 @@ def _parse_output(
     return parsed
 
 
-def _per_call_seed(base_seed: int | None, prompt_idx: int) -> int | None:
-    """Compute a unique seed for a single generation request.
-
-    Ensures cache keys differ per request when Model adds caching.
-    """
-    if base_seed is not None:
-        return hash((base_seed, prompt_idx))
-    return prompt_idx
-
-
 def _build_batch(
-    prompt: str,
-    pool: list[dict[str, Any]] | None,
-    pool_sample_k: int,
+    prompt: Prompt,
     batch_size: int,
-    prompt_idx_start: int,
-    seed: int | None,
-    rng: random.Random,
     output_schema: dict[str, Any] | None = None,
-) -> tuple[list[Prompt], list[int | None], int]:
-    """Prepare a batch of prompt strings and their per-call seeds.
+) -> list[Prompt]:
+    """Prepare a batch of prompts.
 
-    Each prompt in the batch may have different few-shot examples (re-sampled
-    from pool per slot). When output_schema is set, schema format instructions
-    are injected into every prompt.
+    When output_schema is set, schema format instructions are injected into
+    the prompt once and replicated across the batch.
 
     Args:
-        prompt: Base prompt text.
-        pool: Optional list of example dicts for few-shot.
-        pool_sample_k: Number of examples to sample per prompt in the batch.
+        prompt: Base prompt (string or message list).
         batch_size: Number of prompts to build.
-        prompt_idx_start: Starting index for seed computation.
-        seed: Base seed; combined with index for per-call seed.
-        rng: Random instance for pool sampling.
         output_schema: Optional schema; when set, format instructions are appended.
 
     Returns:
-        (prompts_list, seeds_list, next_prompt_idx).
+        List of prompts ready for model.generate_batch().
     """
-    prompts_list: list[Prompt] = []
-    seeds_list: list[int | None] = []
-    for i in range(batch_size):
-        idx = prompt_idx_start + i
-        examples = _sample_from_pool(pool, pool_sample_k, rng)
-        full_prompt = _build_prompt(prompt, examples, output_schema)
-        prompts_list.append(full_prompt)
-        seeds_list.append(_per_call_seed(seed, idx))
-    return prompts_list, seeds_list, prompt_idx_start + batch_size
+    full_prompt = _build_prompt(prompt, output_schema)
+    return [full_prompt for _ in range(batch_size)]
 
 
 def _generation_loop(
-    prompt: str,
+    prompt: Prompt,
     model: Model,
     n: int,
     output_schema: dict[str, Any] | None,
-    pool: list[dict[str, Any]] | None,
-    pool_sample_k: int,
     temperature: float,
     max_retries: int,
-    seed: int | None,
     batch_size: int,
-    rng: random.Random,
 ) -> Generator[dict[str, Any], None, None]:
     """Yield accepted samples until *n* collected or retries exhausted.
 
@@ -202,24 +143,17 @@ def _generation_loop(
     consecutive_failed_rounds counts rounds where zero samples were accepted.
     """
     accepted: list[dict[str, Any]] = []
-    prompt_idx = 0
     consecutive_failed_rounds = 0
     log = _get_logger()
 
     while len(accepted) < n and consecutive_failed_rounds < max_retries:
         remaining = n - len(accepted)
         current_batch_size = min(batch_size, remaining)
-        prompts_list, seeds_list, next_idx = _build_batch(
+        prompts_list = _build_batch(
             prompt,
-            pool,
-            pool_sample_k,
             current_batch_size,
-            prompt_idx,
-            seed,
-            rng,
             output_schema=output_schema,
         )
-        prompt_idx = next_idx
 
         batch_results = model.generate_batch(
             prompts_list,
@@ -258,15 +192,12 @@ def _generation_loop(
 
 
 def sample_from_LLM(
-    prompt: str,
+    prompt: Prompt,
     model: Model,
     n: int = 100,
     output_schema: dict[str, Any] | None = None,
-    pool: list[dict[str, Any]] | None = None,
-    pool_sample_k: int = 0,
     temperature: float = 0.7,
     max_retries: int = 3,
-    seed: int | None = None,
     batch_size: int = 10,
     name: str = "sample_from_LLM",
 ) -> DataSpec:
@@ -274,19 +205,19 @@ def sample_from_LLM(
 
     This is a first-class building block: no inputs, no samples_per_input.
     Generation runs only when the DAG runner evaluates the node (lazy execution).
-    Uses batch generation and seed-per-index for cache-friendly, scalable runs.
 
     Args:
-        prompt: Base instruction or prompt (string; TODO: richer prompt/template types).
+        prompt: A string or list of chat messages in OpenAI format.
+            String prompts are wrapped as a single user message by Model.
+            Message lists support system prompts, few-shot examples, etc.
         model: Model instance (placeholder or real backend).
         n: Target number of accepted samples.
         output_schema: Optional dict of expected keys for structured output;
-            triggers JSON parse and key validation.
-        pool: Optional list of example dicts for few-shot prompting.
-        pool_sample_k: Number of examples sampled from pool per generation prompt.
+            triggers JSON parse and key validation. For string prompts,
+            schema instructions are appended to the text. For message
+            lists, an extra user message is added.
         temperature: Sampling temperature passed to the model.
         max_retries: Consecutive rounds with zero acceptances before stopping.
-        seed: Base seed; combined with prompt index for per-call seeds.
         batch_size: Prompts per round sent to model.generate_batch().
         name: Label for the DataSpec node.
 
@@ -299,20 +230,15 @@ def sample_from_LLM(
         raise ValueError("n must be positive")
 
     def _execute() -> list[dict]:
-        rng = random.Random(seed)
         return list(
             _generation_loop(
                 prompt=prompt,
                 model=model,
                 n=n,
                 output_schema=output_schema,
-                pool=pool,
-                pool_sample_k=pool_sample_k,
                 temperature=temperature,
                 max_retries=max_retries,
-                seed=seed,
                 batch_size=batch_size,
-                rng=rng,
             )
         )
 
