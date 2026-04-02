@@ -449,9 +449,7 @@ class TestErrorHandling:
     @patch("pyforger.acquire.model.litellm")
     def test_batch_failure(self, mock_litellm):
         """If batch_completion fails, exception propagates and usage is cleared."""
-        mock_litellm.batch_completion.side_effect = RuntimeError(
-            "API error on batch"
-        )
+        mock_litellm.batch_completion.side_effect = RuntimeError("API error on batch")
         model = Model("gpt-4o", api_key="sk-test")
         with pytest.raises(RuntimeError, match="API error on batch"):
             model.generate_batch(["Q1", "Q2"])
