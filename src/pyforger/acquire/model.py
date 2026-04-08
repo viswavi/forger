@@ -164,9 +164,8 @@ class Model:
             return all_results
 
         all_messages = [_to_messages(prompt) for prompt in prompts]
-        responses = litellm.batch_completion(
+        call_kwargs = dict(
             model=self._model_id,
-            messages=all_messages,
             n=n,
             temperature=temperature,
             max_tokens=max_tokens,
@@ -175,6 +174,10 @@ class Model:
             num_retries=self._num_retries,
             **self._kwargs,
         )
+        if len(all_messages) == 1:
+            responses = [litellm.completion(messages=all_messages[0], **call_kwargs)]
+        else:
+            responses = litellm.batch_completion(messages=all_messages, **call_kwargs)
 
         for response in responses:
             completions = [choice.message.content or "" for choice in response.choices]
