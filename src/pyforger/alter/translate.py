@@ -1,9 +1,7 @@
 """Translation alter operations for Forger.
 
-Uses an LLM (via pyforger.acquire.model.Model) to translate text fields on
-each item of a list[dict] into a target natural language. Each (item, field)
-pair is translated in its own LLM call; calls across items and fields are
-dispatched in a single generate_batch so litellm can run them in parallel.
+to_language translates text fields on each item of a list[dict] into a
+target natural language using a Model.
 """
 from __future__ import annotations
 
@@ -27,34 +25,30 @@ def to_language(
     model: Model,
     target_fields: list[str] | None = None,
 ) -> DataSpec:
-    """Translate text fields on each item into target_language using an LLM.
+    """Translate text fields on each item into target_language using a Model.
 
-    Each field on each item is translated in its own LLM call. All calls for
-    one pipeline run are dispatched as a single generate_batch so the
-    underlying LiteLLM backend can run them in parallel.
+    Each (item, field) pair is one LLM call, all dispatched through a single
+    generate_batch so they run in parallel.
 
     Args:
         source: Upstream DataSpec providing list[dict] data.
-        target_language: Free-form language name passed to the model
-            (e.g. "Spanish", "Brazilian Portuguese", "zh-Hans").
-        fields: Keys in each item whose values should be translated.
-        model: Caller-provided Model used for generation.
-        target_fields: Where to write translations. If None, translations
-            overwrite the source fields in place. If provided, must be the
-            same length as fields; source fields are left untouched.
+        target_language: Language name to translate into, passed through to
+            the model prompt (e.g. "Spanish", "Brazilian Portuguese", "zh-Hans").
+        fields: Keys whose values should be translated.
+        model: Model used for generation.
+        target_fields: Where to write translations. If None, overwrite the
+            source fields in place. If given, must match fields in length;
+            originals are left untouched.
 
     Returns:
         An ALTER DataSpec named "alter_translate_to_language".
 
     Raises:
-        ValueError: At call time if fields is empty, or if target_fields is
-            provided and its length does not match fields.
-
-    Note:
-        Run-time errors (missing source fields, wrong response count, empty
-        completions, wrong response shape) are raised from inside the node's
-        execute function and wrapped by pyforger.runner into a RuntimeError.
-        The original exception is available on ``RuntimeError.__cause__``.
+        ValueError: If fields is empty, or if target_fields is given and its
+            length does not match fields. Runtime errors (missing source
+            field, wrong response count, empty completions, wrong response
+            shape) are raised from _execute and surface through the runner
+            as a RuntimeError whose __cause__ is the original exception.
     """
     if not fields:
         raise ValueError(
