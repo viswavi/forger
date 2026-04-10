@@ -148,6 +148,27 @@ class TestSingleField:
         result = run(node)
         assert result == [{"instruction": "hola"}]
 
+    def test_markdown_fences_in_content_preserved(self):
+        """to_language must not strip code fences; only to_code does that."""
+        data = [{"doc": "explain a function"}]
+        source = make_source(data)
+        translated = (
+            "aqui esta la funcion:\n"
+            "```python\n"
+            "def foo():\n"
+            "    return 1\n"
+            "```"
+        )
+        model = FakeModel([translated])
+        node = translate.to_language(
+            source,
+            target_language="Spanish",
+            fields=["doc"],
+            model=model,
+        )
+        result = run(node)
+        assert result == [{"doc": translated}]
+
 
 class TestMultiField:
     """Translating more than one field per item, one LLM call per field."""
@@ -508,3 +529,334 @@ class TestEdgeCases:
         assert original == {"instruction": "hello", "id": 1}
         assert result[0] is not original
         assert result is not data
+
+
+class TestToCodeArgumentValidation:
+    """to_code validates its arguments at call time."""
+
+    def test_empty_fields_raises(self):
+        """Empty fields list is rejected at call time."""
+        source = make_source([{"prompt": "add two numbers"}])
+        model = FakeModel([])
+        with pytest.raises(ValueError, match="translate.to_code.*fields"):
+            translate.to_code(
+                source,
+                target_language="Python",
+                fields=[],
+                model=model,
+            )
+
+    def test_target_fields_length_mismatch_raises(self):
+        """target_fields must be the same length as fields."""
+        source = make_source([{"prompt": "x", "spec": "y"}])
+        model = FakeModel([])
+        with pytest.raises(ValueError, match="translate.to_code.*target_fields"):
+            translate.to_code(
+                source,
+                target_language="Python",
+                fields=["prompt", "spec"],
+                target_fields=["code"],
+                model=model,
+            )
+
+
+class TestToCodeSingleField:
+    """Translating a single description field into code."""
+
+    def test_overwrites_in_place(self):
+        """With no target_fields, the source field is replaced with code."""
+        data = [{"prompt": "add two numbers"}]
+        source = make_source(data)
+        model = FakeModel(["def add(a, b):\n    return a + b"])
+        node = translate.to_code(
+            source,
+            target_language="Python",
+            fields=["prompt"],
+            model=model,
+        )
+        result = run(node)
+        assert result == [{"prompt": "def add(a, b):\n    return a + b"}]
+
+    def test_target_fields_preserves_original(self):
+        """Original prompt is kept; generated code is written to target."""
+        data = [{"prompt": "reverse a string"}]
+        source = make_source(data)
+        model = FakeModel(["def reverse(s):\n    return s[::-1]"])
+        node = translate.to_code(
+            source,
+            target_language="Python",
+            fields=["prompt"],
+            target_fields=["code"],
+            model=model,
+        )
+        result = run(node)
+        assert result == [
+            {
+                "prompt": "reverse a string",
+                "code": "def reverse(s):\n    return s[::-1]",
+            }
+        ]
+
+    def test_other_keys_pass_through(self):
+        """Fields not in the translate list are copied through unchanged."""
+        data = [{"prompt": "hello world", "id": 7, "difficulty": "easy"}]
+        source = make_source(data)
+        model = FakeModel(["print('hello world')"])
+        node = translate.to_code(
+            source,
+            target_language="Python",
+            fields=["prompt"],
+            target_fields=["code"],
+            model=model,
+        )
+        result = run(node)
+        assert result == [
+            {
+                "prompt": "hello world",
+                "id": 7,
+                "difficulty": "easy",
+                "code": "print('hello world')",
+            }
+        ]
+
+
+class TestToCodeMultiField:
+    """Translating more than one field per item into code."""
+
+    def test_both_fields_replaced(self):
+        """Every named field gets its own generated code."""
+        data = [{"setup": "read input", "body": "sum the numbers"}]
+        source = make_source(data)
+        model = FakeModel(
+            [
+                "nums = [int(x) for x in input().split()]",
+                "print(sum(nums))",
+            ]
+        )
+        node = translate.to_code(
+            source,
+            target_language="Python",
+            fields=["setup", "body"],
+            model=model,
+        )
+        result = run(node)
+        assert result == [
+            {
+                "setup": "nums = [int(x) for x in input().split()]",
+                "body": "print(sum(nums))",
+            }
+        ]
+
+    def test_one_batch_call_for_all_items_and_fields(self):
+        """N items x M fields => one generate_batch with N*M prompts."""
+        data = [
+            {"setup": "a", "body": "b"},
+            {"setup": "c", "body": "d"},
+        ]
+        source = make_source(data)
+        model = FakeModel(["A", "B", "C", "D"])
+        node = translate.to_code(
+            source,
+            target_language="Rust",
+            fields=["setup", "body"],
+            model=model,
+        )
+        run(node)
+        assert len(model.batch_calls) == 1
+        assert len(model.batch_calls[0]) == 4
+
+
+class TestToCodePromptContent:
+    """System prompt reflects target_language and optional source_language."""
+
+    def test_target_language_in_system_prompt(self):
+        """The target programming language appears in the system message."""
+        data = [{"prompt": "hello"}]
+        source = make_source(data)
+        model = FakeModel(["console.log('hello')"])
+        node = translate.to_code(
+            source,
+            target_language="TypeScript",
+            fields=["prompt"],
+            model=model,
+        )
+        run(node)
+        prompt = model.batch_calls[0][0]
+        system = next(m for m in prompt if m["role"] == "system")
+        assert "TypeScript" in system["content"]
+
+    def test_source_language_included_when_given(self):
+        """source_language is woven into the system prompt when provided."""
+        data = [{"code": "def add(a, b): return a + b"}]
+        source = make_source(data)
+        model = FakeModel(["fn add(a: i32, b: i32) -> i32 { a + b }"])
+        node = translate.to_code(
+            source,
+            target_language="Rust",
+            fields=["code"],
+            source_language="Python",
+            model=model,
+        )
+        run(node)
+        prompt = model.batch_calls[0][0]
+        system = next(m for m in prompt if m["role"] == "system")
+        assert "Python" in system["content"]
+        assert "Rust" in system["content"]
+
+    def test_source_language_absent_when_not_given(self):
+        """Without source_language, no 'input is written in' phrase appears."""
+        data = [{"prompt": "hello"}]
+        source = make_source(data)
+        model = FakeModel(["print('hello')"])
+        node = translate.to_code(
+            source,
+            target_language="Python",
+            fields=["prompt"],
+            model=model,
+        )
+        run(node)
+        prompt = model.batch_calls[0][0]
+        system = next(m for m in prompt if m["role"] == "system")
+        assert "input is written in" not in system["content"]
+
+    def test_user_message_is_raw_field_value(self):
+        """The user message is the raw source field value, not wrapped."""
+        data = [{"prompt": "compute the factorial of n"}]
+        source = make_source(data)
+        model = FakeModel(["def fact(n): return 1 if n <= 1 else n * fact(n-1)"])
+        node = translate.to_code(
+            source,
+            target_language="Python",
+            fields=["prompt"],
+            model=model,
+        )
+        run(node)
+        prompt = model.batch_calls[0][0]
+        user = next(m for m in prompt if m["role"] == "user")
+        assert user["content"] == "compute the factorial of n"
+
+
+class TestToCodeFenceStripping:
+    """to_code strips outer markdown code fences the model adds unprompted."""
+
+    def test_fenced_with_language_tag_stripped(self):
+        """```python ... ``` wrapping is removed."""
+        data = [{"prompt": "add"}]
+        source = make_source(data)
+        model = FakeModel(["```python\ndef add(a, b):\n    return a + b\n```"])
+        node = translate.to_code(
+            source,
+            target_language="Python",
+            fields=["prompt"],
+            model=model,
+        )
+        result = run(node)
+        assert result == [{"prompt": "def add(a, b):\n    return a + b"}]
+
+    def test_fenced_without_language_tag_stripped(self):
+        """Plain ``` ... ``` wrapping is removed."""
+        data = [{"prompt": "hi"}]
+        source = make_source(data)
+        model = FakeModel(["```\nprint('hi')\n```"])
+        node = translate.to_code(
+            source,
+            target_language="Python",
+            fields=["prompt"],
+            model=model,
+        )
+        result = run(node)
+        assert result == [{"prompt": "print('hi')"}]
+
+    def test_unfenced_response_left_alone(self):
+        """A response without fences is returned (just stripped)."""
+        data = [{"prompt": "hi"}]
+        source = make_source(data)
+        model = FakeModel(["  print('hi')\n"])
+        node = translate.to_code(
+            source,
+            target_language="Python",
+            fields=["prompt"],
+            model=model,
+        )
+        result = run(node)
+        assert result == [{"prompt": "print('hi')"}]
+
+    def test_inner_fences_preserved(self):
+        """Fenced blocks nested inside the code are not touched."""
+        data = [{"prompt": "print a markdown example"}]
+        source = make_source(data)
+        inner = (
+            "```python\n"
+            "example = '''\n"
+            "```\n"
+            "code inside a string\n"
+            "```\n"
+            "'''\n"
+            "print(example)\n"
+            "```"
+        )
+        model = FakeModel([inner])
+        node = translate.to_code(
+            source,
+            target_language="Python",
+            fields=["prompt"],
+            model=model,
+        )
+        result = run(node)
+        expected = (
+            "example = '''\n"
+            "```\n"
+            "code inside a string\n"
+            "```\n"
+            "'''\n"
+            "print(example)"
+        )
+        assert result == [{"prompt": expected}]
+
+
+class TestToCodeMissingSourceField:
+    """Missing source fields raise KeyError via get_field, wrapped by the runner."""
+
+    def test_missing_field_raises(self):
+        """An item missing a listed field surfaces through get_field."""
+        data = [{"prompt": "hi"}]
+        source = make_source(data)
+        model = FakeModel([])
+        node = translate.to_code(
+            source,
+            target_language="Python",
+            fields=["prompt", "spec"],
+            model=model,
+        )
+        with pytest.raises(RuntimeError, match="missing required field 'spec'"):
+            run(node)
+
+
+class TestToCodeNodeMetadata:
+    """The returned DataSpec has the expected shape for to_code."""
+
+    def test_node_type_is_alter(self):
+        """The constructed node is an ALTER node."""
+        from pyforger.core import NodeType
+
+        source = make_source([])
+        model = FakeModel([])
+        node = translate.to_code(
+            source,
+            target_language="Python",
+            fields=["prompt"],
+            model=model,
+        )
+        assert node.node_type == NodeType.ALTER
+
+    def test_node_name(self):
+        """The constructed node has the documented debug name."""
+        source = make_source([])
+        model = FakeModel([])
+        node = translate.to_code(
+            source,
+            target_language="Python",
+            fields=["prompt"],
+            model=model,
+        )
+        assert node.name == "alter_translate_to_code"
