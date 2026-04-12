@@ -1,7 +1,10 @@
 """Tests for Forger acquire.retrieve and retrieval sources."""
 from __future__ import annotations
 
+import copy
 from typing import Any
+
+import pytest
 
 from pyforger import DataSpec, NodeType
 from pyforger.acquire import (
@@ -17,13 +20,13 @@ from pyforger.acquire import (
 
 
 class MockRetrievalSource(RetrievalSource):
-    """Returns fixed data for testing; ignores mode/query/n/seed."""
+    """Returns a deep copy of fixed data for testing; ignores mode/query/n/seed."""
 
     def __init__(self, data: list[dict[str, Any]]) -> None:
         """Store fixed data to return from fetch().
 
         Args:
-            data: List of dicts (e.g. [{"text": "a"}]); returned as-is by fetch().
+            data: List of dicts (e.g. [{"text": "a"}]); deep-copied by fetch().
         """
         self.data = data
 
@@ -36,8 +39,8 @@ class MockRetrievalSource(RetrievalSource):
         seed: int | None = None,
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
-        """Return the fixed data list; ignores mode/query/n/seed."""
-        return self.data
+        """Return a deep copy of the fixed data list."""
+        return copy.deepcopy(self.data)
 
 
 class TestRetrieve:
@@ -65,11 +68,11 @@ class TestRetrieve:
         assert not fetch_called
 
     def test_retrieve_execute_returns_source_result(self):
-        """Execute returns the list from source.fetch."""
+        """Execute returns the list from source.fetch with query stamped."""
         source = MockRetrievalSource([{"text": "a"}])
         spec = retrieve(source, mode=RetrieveMode.QUERY)
         result = spec.execute_fn()
-        assert result == [{"text": "a"}]
+        assert result == [{"text": "a", "query": None}]
 
     def test_retrieve_has_no_dependencies(self):
         """Retrieve node has no upstream dependencies."""
@@ -107,3 +110,82 @@ class TestRetrieve:
         spec = retrieve_from_s2(query="NLP", n=5)
         assert isinstance(spec, DataSpec)
         assert spec.get_dependencies() == []
+
+
+class TestMultiQueryRetrieve:
+    """Multi-query retrieval returns flat rows with a 'query' field."""
+
+    def test_multi_query_flat_output(self):
+        """Multiple queries produce a flat list with correct query tags."""
+        source = MockRetrievalSource([{"text": "x"}, {"text": "y"}])
+        spec = retrieve(
+            source, mode=RetrieveMode.QUERY, queries=["a", "b"], n=10
+        )
+        result = spec.execute_fn()
+        assert len(result) == 4
+        assert all(r["query"] == "a" for r in result[:2])
+        assert all(r["query"] == "b" for r in result[2:])
+        assert [r["text"] for r in result] == ["x", "y", "x", "y"]
+
+    def test_single_query_stamps_query_field(self):
+        """A single query string still stamps 'query' on every row."""
+        source = MockRetrievalSource([{"text": "t"}])
+        spec = retrieve(source, mode=RetrieveMode.QUERY, query="hello")
+        result = spec.execute_fn()
+        assert len(result) == 1
+        assert result[0]["query"] == "hello"
+
+    def test_no_query_stamps_none(self):
+        """When neither query nor queries is provided, query is None."""
+        source = MockRetrievalSource([{"text": "t"}])
+        spec = retrieve(source, mode=RetrieveMode.RANDOM)
+        result = spec.execute_fn()
+        assert result[0]["query"] is None
+
+    def test_query_and_queries_mutually_exclusive(self):
+        """Providing both query and queries raises ValueError."""
+        source = MockRetrievalSource([])
+        with pytest.raises(ValueError, match="not both"):
+            retrieve(source, query="a", queries=["b"])
+
+    def test_multi_query_no_execution_on_build(self):
+        """Building with queries does not call source.fetch."""
+        fetch_called = False
+
+        class TrackingSource(MockRetrievalSource):
+            def fetch(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+                nonlocal fetch_called
+                fetch_called = True
+                return super().fetch(*args, **kwargs)
+
+        source = TrackingSource([{"text": "a"}])
+        retrieve(source, queries=["q1", "q2"])
+        assert not fetch_called
+
+    def test_fetch_called_once_per_query(self):
+        """source.fetch is called exactly len(queries) times."""
+        call_count = 0
+
+        class CountingSource(MockRetrievalSource):
+            def fetch(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+                nonlocal call_count
+                call_count += 1
+                return super().fetch(*args, **kwargs)
+
+        source = CountingSource([{"text": "a"}])
+        spec = retrieve(source, queries=["q1", "q2", "q3"])
+        spec.execute_fn()
+        assert call_count == 3
+
+    def test_multi_query_preserves_original_fields(self):
+        """Source fields (text, id, etc.) are preserved alongside query."""
+        source = MockRetrievalSource([{"text": "hello", "id": "42"}])
+        spec = retrieve(source, queries=["a"])
+        result = spec.execute_fn()
+        assert result == [{"text": "hello", "id": "42", "query": "a"}]
+
+    def test_wrapper_forwards_queries(self):
+        """Convenience wrappers forward queries to retrieve()."""
+        spec = retrieve_from_web(queries=["q1", "q2"], n=3)
+        assert isinstance(spec, DataSpec)
+        assert spec.node_type == NodeType.ACQUIRE
