@@ -30,6 +30,7 @@ class MockModel(Model):
         n: int = 1,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        stop: list[str] | None = None,
     ) -> list[list[str]]:
         """Return canned responses, one per prompt."""
         self._call_count += 1
@@ -54,6 +55,7 @@ class RecordingMockModel(MockModel):
         n: int = 1,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        stop: list[str] | None = None,
     ) -> list[list[str]]:
         """Record prompts then delegate to parent."""
         self.prompts = prompts
