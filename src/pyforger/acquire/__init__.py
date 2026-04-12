@@ -35,4 +35,8 @@ __all__ = [
     "HFRetrievalSource",
     "ArxivRetrievalSource",
     "S2RetrievalSource",
+from pyforger.acquire.model import Model
+
+__all__ = [
+    "Model",
 ]
