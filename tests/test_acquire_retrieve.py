@@ -118,9 +118,7 @@ class TestMultiQueryRetrieve:
     def test_multi_query_flat_output(self):
         """Multiple queries produce a flat list with correct query tags."""
         source = MockRetrievalSource([{"text": "x"}, {"text": "y"}])
-        spec = retrieve(
-            source, mode=RetrieveMode.QUERY, queries=["a", "b"], n=10
-        )
+        spec = retrieve(source, mode=RetrieveMode.QUERY, queries=["a", "b"], n=10)
         result = spec.execute_fn()
         assert len(result) == 4
         assert all(r["query"] == "a" for r in result[:2])
