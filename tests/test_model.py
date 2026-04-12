@@ -138,7 +138,7 @@ class TestToMessages:
 
 
 class TestGenerateBatch:
-    """generate_batch calls litellm.completion for each prompt."""
+    """generate_batch calls litellm.batch_completion for parallel execution."""
 
     @patch("pyforger.acquire.model.litellm")
     def test_single_prompt_n1(self, mock_litellm):
@@ -161,7 +161,7 @@ class TestGenerateBatch:
     @patch("pyforger.acquire.model.litellm")
     def test_multiple_prompts(self, mock_litellm):
         """Multiple prompts each get their own response list."""
-        mock_litellm.completion.side_effect = [
+        mock_litellm.batch_completion.return_value = [
             make_litellm_response(["r1"]),
             make_litellm_response(["r2"]),
         ]
@@ -324,7 +324,7 @@ class TestLastUsage:
     @patch("pyforger.acquire.model.litellm")
     def test_sums_across_batch(self, mock_litellm):
         """last_usage sums tokens across all prompts in a batch."""
-        mock_litellm.completion.side_effect = [
+        mock_litellm.batch_completion.return_value = [
             make_litellm_response(["r1"], prompt_tokens=10, completion_tokens=20),
             make_litellm_response(["r2"], prompt_tokens=30, completion_tokens=40),
         ]
@@ -411,14 +411,11 @@ class TestErrorHandling:
         assert model.last_usage is None
 
     @patch("pyforger.acquire.model.litellm")
-    def test_partial_batch_failure(self, mock_litellm):
-        """If second prompt fails, exception propagates and usage is cleared."""
-        mock_litellm.completion.side_effect = [
-            make_litellm_response(["ok"]),
-            RuntimeError("API error on second prompt"),
-        ]
+    def test_batch_failure(self, mock_litellm):
+        """If batch_completion fails, exception propagates and usage is cleared."""
+        mock_litellm.batch_completion.side_effect = RuntimeError("API error on batch")
         model = Model("gpt-4o", api_key="sk-test")
-        with pytest.raises(RuntimeError, match="API error on second prompt"):
+        with pytest.raises(RuntimeError, match="API error on batch"):
             model.generate_batch(["Q1", "Q2"])
         assert model.last_usage is None
 
@@ -437,7 +434,7 @@ class TestEdgeCases:
             "completion_tokens": 0,
             "total_cost": 0.0,
         }
-        mock_litellm.completion.assert_not_called()
+        mock_litellm.batch_completion.assert_not_called()
 
     @patch("pyforger.acquire.model.litellm")
     def test_empty_choices_from_api(self, mock_litellm):
@@ -461,7 +458,7 @@ class TestEdgeCases:
     def test_none_content_replaced_with_empty_string(self, mock_litellm):
         """None content from a choice is replaced with empty string."""
         mock_litellm.completion.return_value = make_litellm_response(
-            [None, "valid", None],
+            [None, "valid", None]
         )
         model = Model("gpt-4o", api_key="sk-test")
         result = model.generate("Hi", n=3)
