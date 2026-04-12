@@ -21,7 +21,10 @@ from pyforger.acquire.sources import (
     WikiRetrievalSource,
 )
 
+from pyforger.acquire.model import Model
+
 __all__ = [
+    "Model",
     "retrieve",
     "retrieve_from_web",
     "retrieve_from_wiki",
@@ -35,8 +38,4 @@ __all__ = [
     "HFRetrievalSource",
     "ArxivRetrievalSource",
     "S2RetrievalSource",
-from pyforger.acquire.model import Model
-
-__all__ = [
-    "Model",
 ]
