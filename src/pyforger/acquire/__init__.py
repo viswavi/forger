@@ -3,6 +3,7 @@
 Acquire operations generate or retrieve new data.
 """
 
+from pyforger.acquire.model import Model
 from pyforger.acquire.retrieve import (
     retrieve,
     retrieve_from_arxiv,
@@ -20,8 +21,6 @@ from pyforger.acquire.sources import (
     WebRetrievalSource,
     WikiRetrievalSource,
 )
-
-from pyforger.acquire.model import Model
 
 __all__ = [
     "Model",
