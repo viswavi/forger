@@ -1,5 +1,7 @@
 """Reusable test fixtures for Forger tests."""
 
+from __future__ import annotations
+
 from typing import Any
 
 from pyforger.acquire.model import Model, Prompt
