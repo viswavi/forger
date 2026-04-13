@@ -61,19 +61,23 @@ class TestGenerateFromContextDataSpec:
     def test_returns_dataspec_with_alter_node_type(self):
         """Return value is a DataSpec with node_type ALTER."""
         source = _make_source([{"text": "a"}])
-        spec = generate_from_context(source, "prompt: {text}", MockModel())
+        spec = generate_from_context(
+            source, "prompt: {text}", MockModel(responses=["ok"])
+        )
         assert isinstance(spec, DataSpec)
         assert spec.node_type == NodeType.ALTER
 
     def test_has_upstream_dependency(self):
         """The upstream inputs DataSpec is registered as a dependency."""
         source = _make_source([{"text": "a"}])
-        spec = generate_from_context(source, "prompt: {text}", MockModel())
+        spec = generate_from_context(
+            source, "prompt: {text}", MockModel(responses=["ok"])
+        )
         assert spec.get_dependencies() == [source]
 
     def test_no_execution_on_build(self):
         """Building the node does not call model.generate_batch."""
-        model = MockModel()
+        model = MockModel(responses=["ok"])
         source = _make_source([{"text": "a"}])
         generate_from_context(source, "prompt: {text}", model)
         assert model._call_count == 0
@@ -82,20 +86,24 @@ class TestGenerateFromContextDataSpec:
         """batch_size <= 0 raises ValueError at build time."""
         source = _make_source([])
         with pytest.raises(ValueError, match="batch_size"):
-            generate_from_context(source, "p", MockModel(), batch_size=0)
+            generate_from_context(
+                source, "p", MockModel(responses=["ok"]), batch_size=0
+            )
 
     def test_invalid_samples_per_item_raises(self):
         """samples_per_item <= 0 raises ValueError at build time."""
         source = _make_source([])
         with pytest.raises(ValueError, match="samples_per_item"):
-            generate_from_context(source, "p", MockModel(), samples_per_item=0)
+            generate_from_context(
+                source, "p", MockModel(responses=["ok"]), samples_per_item=0
+            )
 
     def test_list_of_dataspecs_raises(self):
         """Passing a list of DataSpecs raises TypeError; use forger.zip to combine."""
         a = _make_source([{"x": 1}])
         b = _make_source([{"y": 2}])
         with pytest.raises(TypeError):
-            generate_from_context([a, b], "p", MockModel())
+            generate_from_context([a, b], "p", MockModel(responses=["ok"]))
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +142,7 @@ class TestGenerateFromContextExecution:
 
     def test_empty_inputs_returns_empty(self):
         """Empty upstream data produces no outputs and no model calls."""
-        model = MockModel()
+        model = MockModel(responses=["ok"])
         spec = generate_from_context(_make_source([]), "p", model)
         result = spec.execute_fn([])
         assert result == []
