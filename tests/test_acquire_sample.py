@@ -1,68 +1,11 @@
 """Tests for sample_from_LLM and related acquire building block."""
 from __future__ import annotations
 
-from typing import Any
+from fixtures import MockModel, RecordingMockModel
 
 from pyforger import DataSpec, NodeType
-from pyforger.acquire import Model, sample_from_LLM
-from pyforger.acquire.model import Prompt
+from pyforger.acquire import sample_from_LLM
 from pyforger.acquire.sample import _schema_format_instructions
-
-
-class MockModel(Model):
-    """Model that returns canned responses from generate_batch for testing."""
-
-    def __init__(
-        self,
-        responses: list[str] | None = None,
-        model_id: str = "test/model",
-        **kwargs: Any,
-    ) -> None:
-        """Initialize with canned responses."""
-        super().__init__(model_id=model_id, **kwargs)
-        self.responses = responses or ['{"text": "sample"}']
-        self._call_count = 0
-
-    def generate_batch(
-        self,
-        prompts: list[Prompt],
-        *,
-        n: int = 1,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-    ) -> list[list[str]]:
-        """Return canned responses, one per prompt."""
-        self._call_count += 1
-        out: list[list[str]] = []
-        for i in range(len(prompts)):
-            out.append([self.responses[i % len(self.responses)]])
-        return out
-
-
-class RecordingMockModel(MockModel):
-    """MockModel that records the prompts list passed to generate_batch."""
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        """Initialize and set up prompt recording."""
-        super().__init__(*args, **kwargs)
-        self.prompts: list[Prompt] = []
-
-    def generate_batch(
-        self,
-        prompts: list[Prompt],
-        *,
-        n: int = 1,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-    ) -> list[list[str]]:
-        """Record prompts then delegate to parent."""
-        self.prompts = prompts
-        return super().generate_batch(
-            prompts,
-            n=n,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
 
 
 class TestSchemaFormatInstructions:
@@ -102,8 +45,8 @@ class TestSchemaPromptInjection:
             output_schema={"answer": str},
         )
         list(spec.execute_fn())
-        assert len(model.prompts) == 1
-        prompt_text = model.prompts[0]
+        assert len(model.recorded_prompts[0]) == 1
+        prompt_text = model.recorded_prompts[0][0]
         assert isinstance(prompt_text, str)
         assert "Required keys" in prompt_text
         assert "answer" in prompt_text
@@ -123,8 +66,8 @@ class TestSchemaPromptInjection:
             output_schema={"answer": str},
         )
         list(spec.execute_fn())
-        assert len(model.prompts) == 1
-        recorded = model.prompts[0]
+        assert len(model.recorded_prompts[0]) == 1
+        recorded = model.recorded_prompts[0][0]
         assert isinstance(recorded, list)
         assert len(recorded) == 3
         assert recorded[0] == messages[0]
@@ -138,7 +81,7 @@ class TestSchemaPromptInjection:
         model = RecordingMockModel(responses=["hello"])
         spec = sample_from_LLM("Generate", model, n=1)
         list(spec.execute_fn())
-        assert model.prompts[0] == "Generate"
+        assert model.recorded_prompts[0][0] == "Generate"
 
     def test_no_schema_message_list_unchanged(self):
         """Without output_schema, message list is passed through as-is."""
@@ -146,7 +89,7 @@ class TestSchemaPromptInjection:
         messages = [{"role": "user", "content": "Hi"}]
         spec = sample_from_LLM(messages, model, n=1)
         list(spec.execute_fn())
-        assert model.prompts[0] == messages
+        assert model.recorded_prompts[0][0] == messages
 
 
 class TestSampleFromLLMReturnsDataSpec:
