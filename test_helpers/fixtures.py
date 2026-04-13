@@ -11,13 +11,13 @@ class MockModel(Model):
 
     def __init__(
         self,
-        responses: list[str] | None = None,
+        responses: list[str],
         model_id: str = "test/model",
         **kwargs: Any,
     ) -> None:
         """Initialize with canned responses cycled across prompts."""
         super().__init__(model_id=model_id, **kwargs)
-        self.responses = responses or ['{"text": "sample"}']
+        self.responses = responses
         self._call_count = 0
 
     def generate_batch(
