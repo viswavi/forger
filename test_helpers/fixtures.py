@@ -1,5 +1,7 @@
 """Reusable test fixtures for Forger tests."""
 
+from __future__ import annotations
+
 from typing import Any
 
 from pyforger.acquire.model import Model, Prompt
@@ -27,6 +29,7 @@ class MockModel(Model):
         n: int = 1,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        stop: list[str] | None = None,
     ) -> list[list[str]]:
         """Return one canned response per prompt, cycling through self.responses."""
         self._call_count += 1
@@ -48,6 +51,7 @@ class RecordingMockModel(MockModel):
         n: int = 1,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        stop: list[str] | None = None,
     ) -> list[list[str]]:
         """Append the current prompt batch to recorded_prompts, then delegate."""
         self.recorded_prompts.append(list(prompts))

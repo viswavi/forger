@@ -93,6 +93,7 @@ class Model:
         n: int = 1,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        stop: list[str] | None = None,
     ) -> list[str]:
         """Generate n responses for a single prompt.
 
@@ -106,6 +107,8 @@ class Model:
             temperature: Sampling temperature. Overrides the instance
                 default.
             max_tokens: Max tokens. Overrides the instance default.
+            stop: Stop sequences. Generation stops when any of these
+                strings is produced.
 
         Returns:
             List of n response strings.
@@ -115,6 +118,7 @@ class Model:
             n=n,
             temperature=temperature,
             max_tokens=max_tokens,
+            stop=stop,
         )[0]
 
     def generate_batch(
@@ -124,6 +128,7 @@ class Model:
         n: int = 1,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        stop: list[str] | None = None,
     ) -> list[list[str]]:
         """Generate n responses for each prompt in a batch.
 
@@ -133,6 +138,8 @@ class Model:
             n: Number of completions per prompt.
             temperature: Sampling temperature. Overrides the instance default.
             max_tokens: Max tokens. Overrides the instance default.
+            stop: Stop sequences. Generation stops when any of these
+                strings is produced.
 
         Returns:
             List of lists — one inner list of n responses per prompt.
@@ -147,18 +154,31 @@ class Model:
 
         self._last_usage = None
 
-        for prompt in prompts:
-            messages = _to_messages(prompt)
-            response = litellm.completion(
-                model=self._model_id,
-                messages=messages,
-                n=n,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                api_key=self._api_key,
-                num_retries=self._num_retries,
-                **self._kwargs,
-            )
+        if not prompts:
+            self._last_usage = {
+                "prompt_tokens": total_prompt_tokens,
+                "completion_tokens": total_completion_tokens,
+                "total_cost": total_cost,
+            }
+            return all_results
+
+        all_messages = [_to_messages(prompt) for prompt in prompts]
+        call_kwargs = dict(
+            model=self._model_id,
+            n=n,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stop=stop,
+            api_key=self._api_key,
+            num_retries=self._num_retries,
+            **self._kwargs,
+        )
+        if len(all_messages) == 1:
+            responses = [litellm.completion(messages=all_messages[0], **call_kwargs)]
+        else:
+            responses = litellm.batch_completion(messages=all_messages, **call_kwargs)
+
+        for response in responses:
             completions = [choice.message.content or "" for choice in response.choices]
             all_results.append(completions)
 
