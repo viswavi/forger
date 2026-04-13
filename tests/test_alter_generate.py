@@ -90,6 +90,13 @@ class TestGenerateFromContextDataSpec:
         with pytest.raises(ValueError, match="samples_per_item"):
             generate_from_context(source, "p", MockModel(), samples_per_item=0)
 
+    def test_list_of_dataspecs_raises(self):
+        """Passing a list of DataSpecs raises TypeError; use forger.zip to combine."""
+        a = _make_source([{"x": 1}])
+        b = _make_source([{"y": 2}])
+        with pytest.raises(TypeError):
+            generate_from_context([a, b], "p", MockModel())
+
 
 # ---------------------------------------------------------------------------
 # Execution — basic

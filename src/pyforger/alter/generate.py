@@ -1,4 +1,4 @@
-"""Building block for conditional LM generation (conditioned on upstream inputs)."""
+"""Building block for conditional LM generation (conditioned on upstream input)."""
 from __future__ import annotations
 
 import logging
@@ -31,7 +31,7 @@ def _resolve_prompt(template: PromptTemplate, item: dict) -> Prompt:
 
 
 def generate_from_context(
-    inputs: DataSpec,
+    input: DataSpec,
     prompt_fn: PromptTemplate,
     model: Model,
     samples_per_item: int = 1,
@@ -41,30 +41,38 @@ def generate_from_context(
     batch_size: int = 10,
     name: str = "generate_from_context",
 ) -> DataSpec:
-    """An ALTER node that generates LLM outputs conditioned on each upstream input item.
+    r"""An ALTER node that generates LLM outputs conditioned on upstream input.
 
-    `promptp_fn` wraps the input item in a prompt, and this is then passed to `model`
-    for generation.
+    ``prompt_fn`` wraps each input item in a prompt which is passed to ``model``
+    for generation. ``input`` must be a single DataSpec; to condition on multiple
+    upstream DataSpecs, combine them first with ``forger.zip`` (see example below).
 
-    Example (self-refine:)
+    Example — self-refine::
+
+        # forger.zip merges items from two DataSpecs into one dict per pair
+        prompt_response_pairs = forger.zip(prompts, responses)
         critiques = generate_from_context(
-            inputs=[questions, draft_responses],
-            prompt_fn='''Critique this response to a question:
-            Q: {question}
-            Response: {response}''',
+            input=prompt_response_pairs,
+            prompt_fn="Critique this response:\\nQ: {prompt}\\nA: {response}",
             model=model,
         )
+
+        prompt_response_critique_triples = forger.zip(prompts, responses, critiques)
         refined = generate_from_context(
-            inputs=[questions, draft_responses, critiques],
-            prompt_fn=lambda item: f'''Revise this draft response based on the critique:
-            Q: {item['questions']}
-            Response: {item['draft_responses']}
-            Critique: {item['critiques']}''',
+            input=prompt_response_critique_triples,
+            prompt_fn=lambda item: (
+                f"Revise the response given the critique:\\n"
+                f"Q: {item['prompt']}\\n"
+                f"A: {item['response']}\\n"
+                f"Critique: {item['critique']}"
+            ),
             model=model,
         )
 
     Args:
-        inputs: Upstream DataSpecs whose output items are passed to ``prompt_fn``.
+        input: A single upstream DataSpec whose output items are passed one-by-one
+            to ``prompt_fn``. To combine multiple upstream DataSpecs, use
+            ``forger.zip(a, b, ...)`` to merge their items before passing here.
         prompt_fn: A format string (keys filled from the input item dict) or a
             callable ``(dict) -> Prompt``. Callables may return a string or a
             list of chat messages in OpenAI format.
@@ -137,4 +145,4 @@ def generate_from_context(
 
         return results
 
-    return DataSpec(NodeType.ALTER, inputs, _execute, name)
+    return DataSpec(NodeType.ALTER, input, _execute, name)
