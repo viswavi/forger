@@ -53,7 +53,9 @@ def retrieve(
         DataSpec whose execute_fn returns a flat list of dicts, each with a
         ``"query"`` key set to the originating query string (or ``None``).
     """
-    resolved_queries: list[str | None] = list(queries) if queries is not None else [None]
+    resolved_queries: list[str | None] = (
+        list(queries) if queries is not None else [None]
+    )
 
     def _execute():
         all_rows: list[dict[str, Any]] = []
