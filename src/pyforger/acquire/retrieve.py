@@ -24,7 +24,6 @@ def retrieve(
     source: RetrievalSource,
     mode: RetrieveMode = RetrieveMode.QUERY,
     *,
-    query: str | None = None,
     queries: list[str] | None = None,
     n: int = 10,
     seed: int | None = None,
@@ -34,15 +33,17 @@ def retrieve(
     """Build an ACQUIRE node that, when run, calls source.fetch() and returns the list.
 
     Each returned row is stamped with a ``"query"`` field indicating which
-    query produced it.  When *queries* is provided, source.fetch() is called
-    once per query string and the results are concatenated into a single flat
-    ``list[dict]``.
+    query produced it.  source.fetch() is called once per query string and the
+    results are concatenated into a single flat ``list[dict]``.
+
+    For a single query, pass a one-element list: ``queries=["my query"]``.
 
     Args:
         source: The corpus or API wrapper; must implement fetch().
         mode: How to select segments (QUERY or RANDOM).
-        query: Single search/query string. Mutually exclusive with *queries*.
-        queries: List of query strings. Mutually exclusive with *query*.
+        queries: List of query strings.  Pass a single-element list for one
+            query.  ``None`` (default) means no query is used (e.g. random
+            sampling).
         n: Number of segments to return **per query**.
         seed: Random seed for reproducible sampling when mode is RANDOM.
         name: Human-readable label for the node (for debugging).
@@ -51,18 +52,8 @@ def retrieve(
     Returns:
         DataSpec whose execute_fn returns a flat list of dicts, each with a
         ``"query"`` key set to the originating query string (or ``None``).
-
-    Raises:
-        ValueError: If both *query* and *queries* are provided.
     """
-    if query is not None and queries is not None:
-        raise ValueError("Provide either 'query' or 'queries', not both.")
-
-    resolved_queries: list[str | None]
-    if queries is not None:
-        resolved_queries = list(queries)
-    else:
-        resolved_queries = [query]
+    resolved_queries: list[str | None] = list(queries) if queries is not None else [None]
 
     def _execute():
         all_rows: list[dict[str, Any]] = []
@@ -73,14 +64,12 @@ def retrieve(
             all_rows.extend(rows)
         return all_rows
 
-    # ACQUIRE nodes have no inputs; execute_fn is called at run().
     return DataSpec(NodeType.ACQUIRE, [], _execute, name)
 
 
 def retrieve_from_web(
     mode: RetrieveMode = RetrieveMode.QUERY,
     *,
-    query: str | None = None,
     queries: list[str] | None = None,
     n: int = 10,
     seed: int | None = None,
@@ -97,7 +86,6 @@ def retrieve_from_web(
     return retrieve(
         source,
         mode=mode,
-        query=query,
         queries=queries,
         n=n,
         seed=seed,
@@ -109,7 +97,6 @@ def retrieve_from_web(
 def retrieve_from_wiki(
     mode: RetrieveMode = RetrieveMode.QUERY,
     *,
-    query: str | None = None,
     queries: list[str] | None = None,
     n: int = 10,
     seed: int | None = None,
@@ -126,7 +113,6 @@ def retrieve_from_wiki(
     return retrieve(
         source,
         mode=mode,
-        query=query,
         queries=queries,
         n=n,
         seed=seed,
@@ -142,7 +128,6 @@ def retrieve_from_hf(
     text_column: str | None = None,
     mode: RetrieveMode = RetrieveMode.RANDOM,
     *,
-    query: str | None = None,
     queries: list[str] | None = None,
     n: int = 10,
     seed: int | None = None,
@@ -164,7 +149,6 @@ def retrieve_from_hf(
     return retrieve(
         source,
         mode=mode,
-        query=query,
         queries=queries,
         n=n,
         seed=seed,
@@ -176,7 +160,6 @@ def retrieve_from_hf(
 def retrieve_from_arxiv(
     mode: RetrieveMode = RetrieveMode.QUERY,
     *,
-    query: str | None = None,
     queries: list[str] | None = None,
     n: int = 10,
     seed: int | None = None,
@@ -192,7 +175,6 @@ def retrieve_from_arxiv(
     return retrieve(
         source,
         mode=mode,
-        query=query,
         queries=queries,
         n=n,
         seed=seed,
@@ -204,7 +186,6 @@ def retrieve_from_arxiv(
 def retrieve_from_s2(
     mode: RetrieveMode = RetrieveMode.QUERY,
     *,
-    query: str | None = None,
     queries: list[str] | None = None,
     n: int = 10,
     seed: int | None = None,
@@ -220,7 +201,6 @@ def retrieve_from_s2(
     return retrieve(
         source,
         mode=mode,
-        query=query,
         queries=queries,
         n=n,
         seed=seed,
