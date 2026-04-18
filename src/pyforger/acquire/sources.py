@@ -12,6 +12,7 @@ from enum import Enum, auto
 from typing import Any
 
 import arxiv
+from semanticscholar import SemanticScholar  # type: ignore[import-untyped]
 
 
 class RetrieveMode(Enum):
@@ -163,10 +164,10 @@ class HFRetrievalSource(RetrievalSource):
 class ArxivRetrievalSource(RetrievalSource):
     """Retrieval source that fetches papers from arXiv via the API.
 
-    Uses the arxiv Python package (Client and Search) to run queries in three
-    modes: QUERY (text search + n) and RANDOM (sample n from a
-    category with seed). Returns a list of item dicts with
-    "text", "id", "title", and "summary" per paper.
+    Uses the arxiv Python package (Client and Search) to run queries in two
+    modes: QUERY (text search + n) and RANDOM (sample n from a category with
+    seed). Returns a list of item dicts with "text", "id", "title", and
+    "summary" per paper.
 
     Attributes:
         _kwargs: Options passed at construction; used for Client config and
@@ -301,15 +302,89 @@ class ArxivRetrievalSource(RetrievalSource):
 
 
 class S2RetrievalSource(RetrievalSource):
-    """Semantic Scholar (semanticscholar library). Stub implementation."""
+    """Retrieval source that fetches papers from Semantic Scholar via the API.
 
-    def __init__(self, **kwargs: Any) -> None:
-        """Store options for Semantic Scholar retrieval. Stub does not call the API.
+    Uses the semanticscholar library (SemanticScholar.search_paper) in two
+    modes: QUERY (up to 1000) and RANDOM (pool up to 1000 or 1000+ with bulk).
+    Returns a list of item dicts with "text", "id", "title", and "summary"
+    per paper. QUERY is capped at 1000 results due to API limits.
+    """
+
+    # Default query when QUERY mode is called with empty query
+    _DEFAULT_QUERY = "machine learning"
+    # Relevance search returns at most 1000 results; 100 per request
+    _PAGE_LIMIT = 100
+    _RELEVANCE_CAP = 1000
+    _RANDOM_POOL_MAX_BULK = 10_000
+
+    def __init__(self, api_key: str | None = None, **kwargs: Any) -> None:
+        """Store options for Semantic Scholar retrieval.
 
         Args:
-            **kwargs: Passed through to fetch(); reserved for SemanticScholar options.
+            api_key: Optional API key for Semantic Scholar (forwarded to
+                SemanticScholar(api_key=...)). Without a key the client uses
+                unauthenticated access, which has lower rate limits.
+            **kwargs: Passed to SemanticScholar (timeout, api_url, retry)
+                and to fetch() overrides (e.g. fields_of_study for RANDOM).
         """
+        self._api_key = api_key
         self._kwargs = kwargs
+        self._client: SemanticScholar | None = None
+
+    @staticmethod
+    def _result_to_item(paper: Any) -> dict[str, Any]:
+        """Convert semanticscholar Paper to item dict (text, id, title, summary)."""
+        abstract = paper.abstract if getattr(paper, "abstract", None) else None
+        title = paper.title if getattr(paper, "title", None) else None
+        summary = " ".join(abstract.split()) if abstract else ""
+        text = f"{title}\n\n{summary}".strip() if title else summary
+        paper_id = getattr(paper, "paperId", None) or ""
+        return {
+            "text": text,
+            "id": paper_id,
+            "title": title or "",
+            "summary": abstract or "",
+        }
+
+    def _get_client(self) -> SemanticScholar:
+        """Return shared S2 client, creating once with client-safe kwargs."""
+        if self._client is None:
+            client_kwargs = {
+                k: v
+                for k, v in self._kwargs.items()
+                if k in ("timeout", "api_url", "debug", "retry")
+            }
+            api_key = self._kwargs.get("api_key", self._api_key)
+            if api_key is not None:
+                client_kwargs["api_key"] = api_key
+            self._client = SemanticScholar(**client_kwargs)
+        return self._client
+
+    def _collect_paginated(
+        self,
+        results: Any,
+        n: int,
+        cap: int | None = None,
+    ) -> list[Any]:
+        """Accumulate items from PaginatedResults via next_page() until n or cap."""
+        if cap is None:
+            cap = self._RELEVANCE_CAP
+        accumulated = list(results.items)
+        target_count = min(n, cap)
+        while len(accumulated) < target_count:
+            next_pos = results.next
+            total = results.total
+            if next_pos is None or (total is not None and next_pos >= total):
+                break
+            try:
+                results.next_page()
+            except Exception:
+                break
+            new_items = results.items
+            if len(new_items) <= len(accumulated):
+                break
+            accumulated = list(new_items)
+        return accumulated[:n]
 
     def fetch(
         self,
@@ -320,9 +395,63 @@ class S2RetrievalSource(RetrievalSource):
         seed: int | None = None,
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
-        """Return list of items; stub returns empty list.
+        """Return items from Semantic Scholar by mode (QUERY or RANDOM).
 
-        Would use SemanticScholar().search_paper() with
-        query or random mode.
+        QUERY: When query is empty, uses default "machine learning". Paginates
+        (100 per request) up to n or 1000. RANDOM: Builds pool via relevance
+        search (paginated, up to 1000) or bulk when requested pool size (n*10)
+        exceeds 1000; bulk pool is capped at 10,000. Then samples n with seed.
+        Effective max for QUERY: 1000.
+
+        Returns:
+            List of dicts; each has "text", "id", "title", "summary".
         """
+        merged = {**self._kwargs, **kwargs}
+        client = self._get_client()
+
+        if mode == RetrieveMode.QUERY:
+            if n > self._RELEVANCE_CAP:
+                raise ValueError(
+                    f"n={n} exceeds Semantic Scholar relevance search cap "
+                    f"of {self._RELEVANCE_CAP}. Use RANDOM mode for larger "
+                    f"result sets."
+                )
+            q = query or self._DEFAULT_QUERY
+            results = client.search_paper(q, limit=self._PAGE_LIMIT)
+            accumulated = self._collect_paginated(results, n)
+            return [self._result_to_item(p) for p in accumulated]
+
+        if mode == RetrieveMode.RANDOM:
+            use_bulk = (n * 10) > self._RELEVANCE_CAP
+            pool_size = (
+                min(n * 10, self._RANDOM_POOL_MAX_BULK)
+                if use_bulk
+                else min(n * 10, self._RELEVANCE_CAP)
+            )
+            default_query = merged.get("fields_of_study", ["Computer Science"])
+            if isinstance(default_query, list):
+                query_str = default_query[0] if default_query else "Computer Science"
+            else:
+                query_str = str(default_query)
+            if use_bulk:
+                results = client.search_paper(query_str, bulk=True)
+                accumulated = list(results.items)
+                while len(accumulated) < pool_size:
+                    try:
+                        results.next_page()
+                    except Exception:
+                        break
+                    new_items = list(results.items)
+                    if len(new_items) <= len(accumulated):
+                        break
+                    accumulated = new_items
+                pool = accumulated[:pool_size]
+            else:
+                results = client.search_paper(query_str, limit=self._PAGE_LIMIT)
+                pool = self._collect_paginated(results, pool_size)
+            rng = random.Random(seed)
+            sample_size = min(n, len(pool))
+            sampled = rng.sample(pool, sample_size)
+            return [self._result_to_item(p) for p in sampled]
+
         return []
