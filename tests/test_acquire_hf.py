@@ -198,8 +198,8 @@ class TestHFRetrievalSourceLoadAndSelect:
         source = HFRetrievalSource(token="hf_secret")
         source._load_and_select("test/ds", n=1)
 
-        call_kwargs = mock_load.call_args
-        assert call_kwargs[1]["token"] == "hf_secret"
+        call_args = mock_load.call_args
+        assert call_args[1]["token"] == "hf_secret"
 
     @patch("datasets.load_dataset")
     def test_config_and_split_forwarded(self, mock_load: MagicMock) -> None:

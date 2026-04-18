@@ -1,7 +1,6 @@
 """Retrieval sources for acquire.retrieve: abstract base and concrete backends.
 
-Concrete sources (web, Wikipedia, Hugging Face, ArXiv, Semantic Scholar) are stub
-implementations that can be replaced with real API calls.
+Concrete sources: web, Wikipedia, Hugging Face, ArXiv, Semantic Scholar.
 """
 
 from __future__ import annotations
