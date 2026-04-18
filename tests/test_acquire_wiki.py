@@ -146,9 +146,7 @@ class TestWikiRetrievalSourceFetch:
             mock_session.get.reset_mock()
 
     @patch("pyforger.acquire.sources.requests.Session")
-    def test_random_mode_returns_n_items(
-        self, mock_session_cls: MagicMock
-    ) -> None:
+    def test_random_mode_returns_n_items(self, mock_session_cls: MagicMock) -> None:
         """RANDOM mode returns n items and requests rnlimit=n from the API."""
         pool = [(f"Article {i}", 1000 + i) for i in range(5)]
         random_resp = _make_random_response(pool)
@@ -277,9 +275,7 @@ class TestWikiRetrievalSourceFetch:
         assert items[0]["id"] == "999"
 
     @patch("pyforger.acquire.sources.requests.Session")
-    def test_query_mode_caps_srlimit_at_500(
-        self, mock_session_cls: MagicMock
-    ) -> None:
+    def test_query_mode_caps_srlimit_at_500(self, mock_session_cls: MagicMock) -> None:
         """QUERY mode clamps srlimit to 500 when n exceeds the API maximum."""
         search_resp = _make_search_response([("Article", 1)])
         extracts_resp = _make_extracts_response(
@@ -303,9 +299,7 @@ class TestWikiRetrievalSourceFetch:
         assert search_params["srlimit"] == "500"
 
     @patch("pyforger.acquire.sources.requests.Session")
-    def test_random_mode_caps_rnlimit_at_500(
-        self, mock_session_cls: MagicMock
-    ) -> None:
+    def test_random_mode_caps_rnlimit_at_500(self, mock_session_cls: MagicMock) -> None:
         """RANDOM mode clamps rnlimit to 500 when n exceeds the API maximum."""
         random_resp = _make_random_response([("Article", 1)])
         extracts_resp = _make_extracts_response(
