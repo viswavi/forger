@@ -1,7 +1,6 @@
 """Retrieval sources for acquire.retrieve: abstract base and concrete backends.
 
-Concrete sources (web, Wikipedia, Hugging Face, ArXiv, Semantic Scholar) are stub
-implementations that can be replaced with real API calls.
+Concrete sources: web, Wikipedia, Hugging Face, ArXiv, Semantic Scholar.
 """
 
 from __future__ import annotations
@@ -116,34 +115,98 @@ class WikiRetrievalSource(RetrievalSource):
 
 
 class HFRetrievalSource(RetrievalSource):
-    """Hugging Face datasets (load_dataset + shuffle/select).
+    """Hugging Face dataset discovery and retrieval.
 
-    Stub implementation.
+    Two-stage pipeline:
+        1. **Discovery** -- ``HfApi.list_datasets(search=query)`` finds
+           datasets whose name or description match the query.
+        2. **Loading** -- ``datasets.load_dataset()`` loads the top match
+           and returns up to *n* rows.
+
+    When ``dataset`` is provided at construction, stage 1 is skipped and
+    the given dataset is loaded directly.
+
+    Both modes produce the same output shape: a list of flat dicts with
+    ``row_idx``, ``dataset_id``, and the dataset's column values.
     """
 
     def __init__(
         self,
-        dataset: str,
+        dataset: str | None = None,
         config: str | None = None,
         split: str = "train",
-        text_column: str | None = None,
+        *,
+        token: str | None = None,
         **kwargs: Any,
     ) -> None:
-        """Store config for HF dataset retrieval. Stub does not call the Hub.
+        """Configure the HF retrieval source.
 
         Args:
-            dataset: Hugging Face dataset name (e.g. "user/repo").
-            config: Optional dataset config name.
-            split: Split to use (e.g. "train", "validation").
-            text_column: Column name containing text; used when
-                normalizing rows to dicts.
-            **kwargs: Passed through to fetch(); reserved for load_dataset options.
+            dataset: Optional HF dataset identifier (e.g. "ibm/duorc").
+                When provided, Hub discovery is skipped and this dataset
+                is loaded directly.
+            config: Optional dataset config/subset name (e.g. "SelfRC").
+            split: Split to use (default "train").
+            token: HF auth token for gated datasets and API calls.
+            **kwargs: Forwarded to ``datasets.load_dataset()``.
         """
         self.dataset = dataset
         self.config = config
         self.split = split
-        self.text_column = text_column
+        self._token = token
         self._kwargs = kwargs
+
+    def _discover(self, query: str, limit: int = 1) -> list[Any]:
+        """Search the HF Hub for datasets matching *query*.
+
+        Args:
+            query: Text search string.
+            limit: Maximum number of dataset info objects to return.
+
+        Returns:
+            List of ``DatasetInfo`` objects from the Hub API.
+        """
+        from huggingface_hub import HfApi
+
+        api = HfApi(token=self._token)
+        return list(api.list_datasets(search=query, limit=limit))
+
+    def _load_and_select(
+        self,
+        dataset_id: str,
+        n: int,
+        seed: int | None = None,
+        shuffle: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Load a dataset and return up to *n* rows as flat dicts.
+
+        Args:
+            dataset_id: HF dataset identifier to load.
+            n: Maximum number of rows to return.
+            seed: Random seed passed to ``shuffle()`` when *shuffle* is True.
+            shuffle: Whether to shuffle before selecting rows.
+
+        Returns:
+            List of flat dicts with ``row_idx``, ``dataset_id``, and the
+            dataset's column values.
+        """
+        from datasets import load_dataset
+
+        ds = load_dataset(
+            dataset_id,
+            self.config,
+            split=self.split,
+            token=self._token,
+            **self._kwargs,
+        )
+        if shuffle:
+            ds = ds.shuffle(seed=seed)
+        count = min(n, len(ds))
+        selected = ds.select(range(count))
+        return [
+            {"row_idx": i, "dataset_id": dataset_id, **dict(selected[i])}
+            for i in range(count)
+        ]
 
     def fetch(
         self,
@@ -154,11 +217,44 @@ class HFRetrievalSource(RetrievalSource):
         seed: int | None = None,
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
-        """Return list of items; stub returns empty list.
+        """Return rows from a discovered or specified HF dataset.
 
-        Would use datasets.load_dataset(), shuffle(seed), select(range(n)).
+        Args:
+            mode: QUERY (discover + load in dataset order) or
+                RANDOM (discover + shuffle + sample).
+            query: Search string for Hub discovery; required when no
+                ``dataset`` was provided at construction.
+            n: Maximum number of rows to return.
+            seed: Random seed for reproducible sampling in RANDOM mode.
+            **kwargs: Reserved for future use.
+
+        Returns:
+            List of flat dicts, each containing ``row_idx``,
+            ``dataset_id``, and the dataset's raw column values.
+
+        Raises:
+            ValueError: If *query* is empty/None and no *dataset* was
+                provided at construction.
         """
-        return []
+        dataset_id = self.dataset
+        if dataset_id is None:
+            if not query:
+                raise ValueError(
+                    "HFRetrievalSource requires a non-empty 'query' "
+                    "when no 'dataset' was provided at construction."
+                )
+            results = self._discover(query, limit=1)
+            if not results:
+                return []
+            dataset_id = results[0].id
+
+        if mode == RetrieveMode.QUERY:
+            return self._load_and_select(dataset_id, n)
+
+        if mode == RetrieveMode.RANDOM:
+            return self._load_and_select(dataset_id, n, seed=seed, shuffle=True)
+
+        raise ValueError(f"Unsupported RetrieveMode: {mode}")
 
 
 class ArxivRetrievalSource(RetrievalSource):
