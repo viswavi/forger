@@ -24,7 +24,7 @@ def retrieve(
     source: RetrievalSource,
     mode: RetrieveMode = RetrieveMode.QUERY,
     *,
-    query: str | None = None,
+    queries: list[str] | None = None,
     n: int = 10,
     seed: int | None = None,
     name: str = "retrieve",
@@ -32,30 +32,47 @@ def retrieve(
 ) -> DataSpec:
     """Build an ACQUIRE node that, when run, calls source.fetch() and returns the list.
 
+    Each returned row is stamped with a ``"query"`` field indicating which
+    query produced it.  source.fetch() is called once per query string and the
+    results are concatenated into a single flat ``list[dict]``.
+
+    For a single query, pass a one-element list: ``queries=["my query"]``.
+
     Args:
         source: The corpus or API wrapper; must implement fetch().
         mode: How to select segments (QUERY or RANDOM).
-        query: Search or query string; used when mode is QUERY.
-        n: Number of segments to return.
+        queries: List of query strings.  Pass a single-element list for one
+            query.  ``None`` (default) means no query is used (e.g. random
+            sampling).
+        n: Number of segments to return **per query**.
         seed: Random seed for reproducible sampling when mode is RANDOM.
         name: Human-readable label for the node (for debugging).
         **kwargs: Passed through to source.fetch().
 
     Returns:
-        DataSpec whose execute_fn returns the list from source.fetch(...).
+        DataSpec whose execute_fn returns a flat list of dicts, each with a
+        ``"query"`` key set to the originating query string (or ``None``).
     """
+    resolved_queries: list[str | None] = (
+        list(queries) if queries is not None else [None]
+    )
 
     def _execute():
-        return source.fetch(mode, query=query, n=n, seed=seed, **kwargs)
+        all_rows: list[dict[str, Any]] = []
+        for q in resolved_queries:
+            rows = source.fetch(mode, query=q, n=n, seed=seed, **kwargs)
+            for row in rows:
+                row["query"] = q
+            all_rows.extend(rows)
+        return all_rows
 
-    # ACQUIRE nodes have no inputs; execute_fn is called at run().
     return DataSpec(NodeType.ACQUIRE, [], _execute, name)
 
 
 def retrieve_from_web(
     mode: RetrieveMode = RetrieveMode.QUERY,
     *,
-    query: str | None = None,
+    queries: list[str] | None = None,
     n: int = 10,
     seed: int | None = None,
     base_url: str | None = None,
@@ -71,7 +88,7 @@ def retrieve_from_web(
     return retrieve(
         source,
         mode=mode,
-        query=query,
+        queries=queries,
         n=n,
         seed=seed,
         name=name,
@@ -82,7 +99,7 @@ def retrieve_from_web(
 def retrieve_from_wiki(
     mode: RetrieveMode = RetrieveMode.QUERY,
     *,
-    query: str | None = None,
+    queries: list[str] | None = None,
     n: int = 10,
     seed: int | None = None,
     language: str = "en",
@@ -98,7 +115,7 @@ def retrieve_from_wiki(
     return retrieve(
         source,
         mode=mode,
-        query=query,
+        queries=queries,
         n=n,
         seed=seed,
         name=name,
@@ -107,68 +124,45 @@ def retrieve_from_wiki(
 
 
 def retrieve_from_hf(
-    mode: RetrieveMode = RetrieveMode.QUERY,
-    *,
-    query: str | None = None,
-    n: int = 10,
-    seed: int | None = None,
-    dataset: str | None = None,
+    dataset: str,
     config: str | None = None,
     split: str = "train",
-    token: str | None = None,
+    text_column: str | None = None,
+    mode: RetrieveMode = RetrieveMode.RANDOM,
+    *,
+    queries: list[str] | None = None,
+    n: int = 10,
+    seed: int | None = None,
     name: str = "retrieve_from_hf",
     **kwargs: Any,
 ) -> DataSpec:
-    """Discover a Hugging Face dataset and return raw rows.
-
-    Two-stage pipeline:
-        1. **Discovery** -- searches the HF Hub for datasets matching
-           *query* via ``HfApi.list_datasets(search=query)``.
-        2. **Loading** -- loads the top match with
-           ``datasets.load_dataset()`` and returns up to *n* rows.
-
-    When *dataset* is provided, stage 1 is skipped and the given
-    dataset is loaded directly.
-
-    Args:
-        mode: QUERY (load in dataset order) or RANDOM (shuffle first).
-        query: Search string for Hub discovery; required when *dataset*
-            is not provided.
-        n: Maximum number of rows to return.
-        seed: Random seed for reproducible sampling in RANDOM mode.
-        dataset: Optional HF dataset identifier (e.g. "ibm/duorc").
-            Skips Hub discovery when provided.
-        config: Optional dataset config/subset name (e.g. "SelfRC").
-        split: Dataset split (default "train").
-        token: HF auth token for gated datasets and API calls.
-        name: Label for the node.
-        **kwargs: Forwarded to ``datasets.load_dataset()``.
+    """Retrieve from Hugging Face datasets (load_dataset + shuffle/select).
 
     Returns:
-        DataSpec whose execute_fn returns a list of flat dicts with
-        ``row_idx``, ``dataset_id``, and the dataset's column values.
+        DataSpec whose execute_fn returns the fetched list.
     """
     source = HFRetrievalSource(
         dataset=dataset,
         config=config,
         split=split,
-        token=token,
+        text_column=text_column,
         **kwargs,
     )
     return retrieve(
         source,
         mode=mode,
-        query=query,
+        queries=queries,
         n=n,
         seed=seed,
         name=name,
+        **kwargs,
     )
 
 
 def retrieve_from_arxiv(
     mode: RetrieveMode = RetrieveMode.QUERY,
     *,
-    query: str | None = None,
+    queries: list[str] | None = None,
     n: int = 10,
     seed: int | None = None,
     name: str = "retrieve_from_arxiv",
@@ -193,7 +187,7 @@ def retrieve_from_arxiv(
     return retrieve(
         source,
         mode=mode,
-        query=query,
+        queries=queries,
         n=n,
         seed=seed,
         name=name,
@@ -204,22 +198,33 @@ def retrieve_from_arxiv(
 def retrieve_from_s2(
     mode: RetrieveMode = RetrieveMode.QUERY,
     *,
-    query: str | None = None,
+    queries: list[str] | None = None,
     n: int = 10,
     seed: int | None = None,
     name: str = "retrieve_from_s2",
     **kwargs: Any,
 ) -> DataSpec:
-    """Retrieve from Semantic Scholar.
+    """Build an ACQUIRE node that fetches papers from S2 when the graph runs.
+
+    Args:
+        mode: QUERY (text search) or RANDOM (sample from pool).
+        query: Search string for QUERY mode; default "machine learning" if empty.
+        n: Number of papers to return.
+        seed: Random seed for RANDOM mode (optional; for reproducibility).
+        name: Label for the node.
+        **kwargs: S2 client options: api_key, timeout, api_url, debug, retry.
+            For RANDOM mode: fields_of_study (e.g. ["Computer Science"]) to
+            build the search pool.
 
     Returns:
-        DataSpec whose execute_fn returns the fetched list.
+        DataSpec whose execute_fn returns list of dicts with text (title +
+        abstract), id, title, summary.
     """
     source = S2RetrievalSource(**kwargs)
     return retrieve(
         source,
         mode=mode,
-        query=query,
+        queries=queries,
         n=n,
         seed=seed,
         name=name,
