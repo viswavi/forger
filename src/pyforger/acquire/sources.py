@@ -322,7 +322,8 @@ class S2RetrievalSource(RetrievalSource):
 
         Args:
             api_key: Optional API key for Semantic Scholar (forwarded to
-                SemanticScholar(api_key=...)).
+                SemanticScholar(api_key=...)). Without a key the client uses
+                unauthenticated access, which has lower rate limits.
             **kwargs: Passed to SemanticScholar (timeout, api_url, retry)
                 and to fetch() overrides (e.g. fields_of_study for RANDOM).
         """
@@ -368,18 +369,18 @@ class S2RetrievalSource(RetrievalSource):
         """Accumulate items from PaginatedResults via next_page() until n or cap."""
         if cap is None:
             cap = self._RELEVANCE_CAP
-        accumulated = list(getattr(results, "items", []) or [])
+        accumulated = list(results.items)
         target_count = min(n, cap)
         while len(accumulated) < target_count:
-            next_pos = getattr(results, "next", None)
-            total = getattr(results, "total", None)
+            next_pos = results.next
+            total = results.total
             if next_pos is None or (total is not None and next_pos >= total):
                 break
             try:
                 results.next_page()
             except Exception:
                 break
-            new_items = getattr(results, "items", []) or []
+            new_items = results.items
             if len(new_items) <= len(accumulated):
                 break
             accumulated = list(new_items)
@@ -434,13 +435,13 @@ class S2RetrievalSource(RetrievalSource):
                 query_str = str(default_query)
             if use_bulk:
                 results = client.search_paper(query_str, bulk=True)
-                accumulated = list(getattr(results, "items", []) or [])
+                accumulated = list(results.items)
                 while len(accumulated) < pool_size:
                     try:
                         results.next_page()
                     except Exception:
                         break
-                    new_items = list(getattr(results, "items", []) or [])
+                    new_items = list(results.items)
                     if len(new_items) <= len(accumulated):
                         break
                     accumulated = new_items
