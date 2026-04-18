@@ -76,6 +76,73 @@ class TestByExactAgreement:
         with pytest.raises(RuntimeError, match="missing required field 'output_2'"):
             run(by_exact_agreement(source, field_a="output_1", field_b="output_2"))
 
+    def test_rejects_mixed_modes(self):
+        """Passing both within-item and group params raises ValueError."""
+        source = make_source([])
+        with pytest.raises(ValueError, match="within-item mode"):
+            by_exact_agreement(source, field_a="a", field_b="b", group_by="k")
+
+    def test_rejects_no_mode(self):
+        """Passing no params raises ValueError."""
+        source = make_source([])
+        with pytest.raises(ValueError, match="within-item mode"):
+            by_exact_agreement(source)
+
+
+class TestByExactAgreementGroupMode:
+    """by_exact_agreement group mode drops groups with conflicting agree_on values."""
+
+    def test_unanimous_group_keeps_one(self):
+        """A group whose agree_on values all match yields one representative."""
+        data = [
+            {"input": "x", "output": "42"},
+            {"input": "x", "output": "42"},
+        ]
+        source = make_source(data)
+        result = run(by_exact_agreement(source, group_by="input", agree_on="output"))
+        assert result == [data[0]]
+
+    def test_conflicting_group_is_dropped(self):
+        """A group with disagreeing agree_on values is dropped entirely."""
+        data = [
+            {"input": "x", "output": "42"},
+            {"input": "x", "output": "43"},
+        ]
+        source = make_source(data)
+        result = run(by_exact_agreement(source, group_by="input", agree_on="output"))
+        assert result == []
+
+    def test_mixed_groups(self):
+        """Unanimous groups are kept, conflicting ones dropped."""
+        data = [
+            {"input": "x", "output": "a"},
+            {"input": "x", "output": "a"},
+            {"input": "y", "output": "b"},
+            {"input": "y", "output": "c"},
+            {"input": "z", "output": "d"},
+        ]
+        source = make_source(data)
+        result = run(by_exact_agreement(source, group_by="input", agree_on="output"))
+        assert len(result) == 2
+        keys = {r["input"] for r in result}
+        assert keys == {"x", "z"}
+
+    def test_group_empty_input(self):
+        """Empty input returns empty list."""
+        source = make_source([])
+        result = run(by_exact_agreement(source, group_by="input", agree_on="output"))
+        assert result == []
+
+    def test_group_whitespace_ignored(self):
+        """Leading/trailing whitespace on agree_on values is stripped."""
+        data = [
+            {"input": "x", "output": "yes"},
+            {"input": "x", "output": " yes "},
+        ]
+        source = make_source(data)
+        result = run(by_exact_agreement(source, group_by="input", agree_on="output"))
+        assert len(result) == 1
+
 
 class TestByRougeLAgreement:
     """by_rouge_l_agreement keeps items where two fields are similar."""
