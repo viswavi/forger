@@ -146,11 +146,11 @@ class TestWikiRetrievalSourceFetch:
             mock_session.get.reset_mock()
 
     @patch("pyforger.acquire.sources.requests.Session")
-    def test_random_mode_returns_n_sampled_with_seed(
+    def test_random_mode_returns_n_items(
         self, mock_session_cls: MagicMock
     ) -> None:
-        """RANDOM mode samples n items using seed; same seed gives same order."""
-        pool = [(f"Article {i}", 1000 + i) for i in range(10)]
+        """RANDOM mode returns n items and requests rnlimit=n from the API."""
+        pool = [(f"Article {i}", 1000 + i) for i in range(5)]
         random_resp = _make_random_response(pool)
         extracts_resp = _make_extracts_response(
             [
@@ -159,30 +159,32 @@ class TestWikiRetrievalSourceFetch:
                     "title": f"Article {i}",
                     "extract": f"Content of article {i}.",
                 }
-                for i in range(10)
+                for i in range(5)
             ]
         )
 
         mock_session = MagicMock()
+        responses = [MagicMock(), MagicMock()]
+        responses[0].json.return_value = random_resp
+        responses[0].raise_for_status = MagicMock()
+        responses[1].json.return_value = extracts_resp
+        responses[1].raise_for_status = MagicMock()
+        mock_session.get.side_effect = responses
         mock_session_cls.return_value = mock_session
 
-        def run_random_fetch() -> list[dict]:
-            responses = [MagicMock(), MagicMock()]
-            responses[0].json.return_value = random_resp
-            responses[0].raise_for_status = MagicMock()
-            responses[1].json.return_value = extracts_resp
-            responses[1].raise_for_status = MagicMock()
-            mock_session.get.side_effect = responses
-            source = WikiRetrievalSource(language="en")
-            source._session = None
-            return source.fetch(RetrieveMode.RANDOM, n=3, seed=42)
+        source = WikiRetrievalSource(language="en")
+        items = source.fetch(RetrieveMode.RANDOM, n=5)
 
-        items1 = run_random_fetch()
-        items2 = run_random_fetch()
+        assert len(items) == 5
+        for item in items:
+            assert "text" in item
+            assert "id" in item
+            assert "title" in item
+            assert "summary" in item
 
-        assert len(items1) == 3
-        assert len(items2) == 3
-        assert [it["id"] for it in items1] == [it["id"] for it in items2]
+        random_call = mock_session.get.call_args_list[0]
+        random_params = random_call[1]["params"]
+        assert random_params["rnlimit"] == "5"
 
     @patch("pyforger.acquire.sources.requests.Session")
     def test_query_mode_redirect_resolves_requested_title(
@@ -273,6 +275,58 @@ class TestWikiRetrievalSourceFetch:
         assert items[0]["summary"] == ""
         assert items[0]["title"] == "Empty Page"
         assert items[0]["id"] == "999"
+
+    @patch("pyforger.acquire.sources.requests.Session")
+    def test_query_mode_caps_srlimit_at_500(
+        self, mock_session_cls: MagicMock
+    ) -> None:
+        """QUERY mode clamps srlimit to 500 when n exceeds the API maximum."""
+        search_resp = _make_search_response([("Article", 1)])
+        extracts_resp = _make_extracts_response(
+            [{"pageid": 1, "title": "Article", "extract": "Body."}]
+        )
+
+        mock_session = MagicMock()
+        responses = [MagicMock(), MagicMock()]
+        responses[0].json.return_value = search_resp
+        responses[0].raise_for_status = MagicMock()
+        responses[1].json.return_value = extracts_resp
+        responses[1].raise_for_status = MagicMock()
+        mock_session.get.side_effect = responses
+        mock_session_cls.return_value = mock_session
+
+        source = WikiRetrievalSource(language="en")
+        source.fetch(RetrieveMode.QUERY, query="test", n=600)
+
+        search_call = mock_session.get.call_args_list[0]
+        search_params = search_call[1]["params"]
+        assert search_params["srlimit"] == "500"
+
+    @patch("pyforger.acquire.sources.requests.Session")
+    def test_random_mode_caps_rnlimit_at_500(
+        self, mock_session_cls: MagicMock
+    ) -> None:
+        """RANDOM mode clamps rnlimit to 500 when n exceeds the API maximum."""
+        random_resp = _make_random_response([("Article", 1)])
+        extracts_resp = _make_extracts_response(
+            [{"pageid": 1, "title": "Article", "extract": "Body."}]
+        )
+
+        mock_session = MagicMock()
+        responses = [MagicMock(), MagicMock()]
+        responses[0].json.return_value = random_resp
+        responses[0].raise_for_status = MagicMock()
+        responses[1].json.return_value = extracts_resp
+        responses[1].raise_for_status = MagicMock()
+        mock_session.get.side_effect = responses
+        mock_session_cls.return_value = mock_session
+
+        source = WikiRetrievalSource(language="en")
+        source.fetch(RetrieveMode.RANDOM, n=600)
+
+        random_call = mock_session.get.call_args_list[0]
+        random_params = random_call[1]["params"]
+        assert random_params["rnlimit"] == "500"
 
     @pytest.mark.skipif(
         not os.environ.get("PYFORGER_WIKI_LIVE"),

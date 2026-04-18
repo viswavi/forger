@@ -91,9 +91,13 @@ class WikiRetrievalSource(RetrievalSource):
 
     Uses requests.Session to query the MediaWiki Action API for search results
     and page extracts. Supports QUERY (full-text search) and RANDOM (random
-    article sampling with seed). Returns item dicts in the DPR/BEIR standard
-    format: "id" (page ID), "title" (article title), "text" (intro extract),
-    and "summary" (same as text, for arXiv schema compatibility).
+    article sampling). Returns item dicts in the DPR/BEIR standard format:
+    "id" (page ID), "title" (article title), "text" (intro extract), and
+    "summary" (same as text, for arXiv schema compatibility).
+
+    Note: RANDOM mode is inherently non-deterministic because the MediaWiki
+    ``list=random`` endpoint does not support a seed parameter. The ``seed``
+    argument is accepted for interface compatibility but ignored.
 
     Attributes:
         language: Wikipedia language code (e.g. "en", "de").
@@ -102,7 +106,9 @@ class WikiRetrievalSource(RetrievalSource):
         _session: Lazy-initialized requests.Session, reused across fetch() calls.
     """
 
+    _API_LIMIT = 500
     _EXTRACT_BATCH_SIZE = 20
+    _DEFAULT_TIMEOUT = 30
 
     def __init__(self, language: str = "en", **kwargs: Any) -> None:
         """Store config for Wikipedia retrieval.
@@ -126,12 +132,9 @@ class WikiRetrievalSource(RetrievalSource):
 
     @staticmethod
     def _get_timeout_kw(merged: dict[str, Any]) -> dict[str, Any]:
-        """Build keyword args for requests.Session.get when timeout is set."""
-        # requests.Session has no session-level timeout; must pass per-call.
-        t = merged.get("timeout")
-        if t is not None:
-            return {"timeout": t}
-        return {}
+        """Build keyword args for requests.Session.get with timeout."""
+        t = merged.get("timeout", WikiRetrievalSource._DEFAULT_TIMEOUT)
+        return {"timeout": t}
 
     @staticmethod
     def _result_to_item(page: dict[str, Any]) -> dict[str, Any]:
@@ -234,9 +237,9 @@ class WikiRetrievalSource(RetrievalSource):
           then fetches intro extracts for each result. Empty or None query
           defaults to "Wikipedia". Redirects are resolved so search titles
           still match extracts.
-        - RANDOM: Fetches min(n*5, 500) random article titles from the main
-          namespace, fetches their extracts, then samples n with seed for
-          reproducibility.
+        - RANDOM: Fetches n random articles from the main namespace via
+          ``list=random`` and returns their intro extracts. The server
+          controls randomness; seed is ignored (see class docstring).
 
         Per-call **kwargs are merged with constructor kwargs (e.g. timeout for
         requests.get on every HTTP call).
@@ -260,7 +263,7 @@ class WikiRetrievalSource(RetrievalSource):
                     "format": "json",
                     "list": "search",
                     "srsearch": q,
-                    "srlimit": str(n),
+                    "srlimit": str(min(n, self._API_LIMIT)),
                 },
                 **timeout_kw,
             )
@@ -281,8 +284,6 @@ class WikiRetrievalSource(RetrievalSource):
             return items
 
         if mode == RetrieveMode.RANDOM:
-            # Fetch more than n so random.sample with seed is reproducible.
-            pool_size = min(n * 5, 500)
             resp = session.get(
                 base_url,
                 params={
@@ -290,7 +291,7 @@ class WikiRetrievalSource(RetrievalSource):
                     "format": "json",
                     "list": "random",
                     "rnnamespace": "0",
-                    "rnlimit": str(pool_size),
+                    "rnlimit": str(min(n, self._API_LIMIT)),
                 },
                 **timeout_kw,
             )
@@ -309,9 +310,7 @@ class WikiRetrievalSource(RetrievalSource):
                 if page is not None:
                     items.append(self._result_to_item(page))
 
-            rng = random.Random(seed)
-            sample_size = min(n, len(items))
-            return rng.sample(items, sample_size)
+            return items
 
         return []
 

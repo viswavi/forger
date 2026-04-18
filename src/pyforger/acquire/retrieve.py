@@ -95,7 +95,8 @@ def retrieve_from_wiki(
         mode: QUERY (full-text search) or RANDOM (random article sampling).
         query: Search string for QUERY mode; defaults to "Wikipedia" if empty.
         n: Number of articles to return.
-        seed: Random seed for RANDOM mode (optional; for reproducibility).
+        seed: Accepted for interface compatibility; ignored by Wikipedia
+            RANDOM mode (the MediaWiki API does not support seeded random).
         language: Wikipedia language code (e.g. "en", "de").
         name: Label for the node.
         **kwargs: Session options (e.g. timeout).
