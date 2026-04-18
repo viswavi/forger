@@ -92,6 +92,7 @@ class WebRetrievalSource(RetrievalSource):
     _BRAVE_MAX_COUNT = 20
     _BRAVE_MAX_OFFSET = 9
     _DEFAULT_MAX_CONTENT_LENGTH = 1_000_000  # 1 MB
+    _DEFAULT_TIMEOUT = 30  # seconds
 
     def __init__(
         self,
@@ -111,7 +112,8 @@ class WebRetrievalSource(RetrievalSource):
             fetch_full_content: When True, fetch full page text from each
                 result URL after search.  Default False (snippet only).
             **kwargs: Session / fetch overrides.  Recognised keys:
-                ``timeout`` (float) -- per-request timeout in seconds;
+                ``timeout`` (float) -- per-request timeout in seconds
+                (default 30);
                 ``max_content_length`` (int) -- max bytes to download per
                 page when *fetch_full_content* is True (default 1 MB).
         """
@@ -146,18 +148,15 @@ class WebRetrievalSource(RetrievalSource):
             )
         return self._content_session
 
-    @staticmethod
-    def _get_timeout_kw(merged: dict[str, Any]) -> dict[str, Any]:
-        """Build keyword args for requests.Session.get when timeout is set."""
-        t = merged.get("timeout")
-        if t is not None:
-            return {"timeout": t}
-        return {}
+    @classmethod
+    def _get_timeout_kw(cls, merged: dict[str, Any]) -> dict[str, Any]:
+        """Build keyword args for requests.Session.get with timeout."""
+        return {"timeout": merged.get("timeout", cls._DEFAULT_TIMEOUT)}
 
     # -- text extraction -----------------------------------------------------
 
     @staticmethod
-    def _extract_text(html: str) -> str:
+    def _extract_text(html: str) -> str | None:
         """Convert raw HTML to plaintext using trafilatura.
 
         Trafilatura handles boilerplate removal, navigation stripping,
@@ -167,10 +166,10 @@ class WebRetrievalSource(RetrievalSource):
             html: Raw HTML string.
 
         Returns:
-            Extracted plaintext, or empty string on failure.
+            Extracted plaintext (may be empty for pages with no body text),
+            or None if trafilatura could not parse the input at all.
         """
-        result = trafilatura.extract(html, include_comments=False, include_tables=True)
-        return result or ""
+        return trafilatura.extract(html, include_comments=False, include_tables=True)
 
     # -- result conversion ---------------------------------------------------
 
@@ -203,6 +202,8 @@ class WebRetrievalSource(RetrievalSource):
 
     # -- full-content fetching -----------------------------------------------
 
+    _STREAM_CHUNK_SIZE = 64 * 1024  # 64 KB
+
     def _fetch_page_content(
         self,
         urls: list[str],
@@ -228,17 +229,33 @@ class WebRetrievalSource(RetrievalSource):
 
         for url in urls:
             try:
-                resp = session.get(url, **timeout_kw)
+                resp = session.get(url, stream=True, **timeout_kw)
                 resp.raise_for_status()
+
                 length = resp.headers.get("Content-Length")
                 if length is not None and int(length) > max_len:
+                    resp.close()
                     continue
-                if len(resp.content) > max_len:
+
+                chunks: list[bytes] = []
+                downloaded = 0
+                for chunk in resp.iter_content(chunk_size=self._STREAM_CHUNK_SIZE):
+                    downloaded += len(chunk)
+                    if downloaded > max_len:
+                        break
+                    chunks.append(chunk)
+                resp.close()
+
+                if downloaded > max_len:
                     continue
-                text = self._extract_text(resp.text)
-                if text:
+
+                html = b"".join(chunks).decode(
+                    resp.apparent_encoding or "utf-8", errors="replace"
+                )
+                text = self._extract_text(html)
+                if text is not None:
                     content_map[url] = text
-            except Exception:
+            except (requests.exceptions.RequestException, ValueError):
                 continue
 
         return content_map

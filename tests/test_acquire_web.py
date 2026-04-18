@@ -5,6 +5,7 @@ import os
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
 from pyforger.acquire import RetrieveMode, WebRetrievalSource
 
@@ -185,6 +186,23 @@ class TestWebRetrievalSourceFetch:
         call_kw = mock_session.get.call_args[1]
         assert call_kw.get("timeout") == 15.0
 
+    @patch("pyforger.acquire.sources.requests.Session")
+    def test_fetch_uses_default_timeout(self, mock_session_cls: MagicMock) -> None:
+        """Default 30s timeout is applied when none is specified."""
+        brave_resp = _make_brave_search_response([_make_brave_result()])
+        mock_session = MagicMock()
+        resp_mock = MagicMock()
+        resp_mock.json.return_value = brave_resp
+        resp_mock.raise_for_status = MagicMock()
+        mock_session.get.return_value = resp_mock
+        mock_session_cls.return_value = mock_session
+
+        source = WebRetrievalSource(api_key="k")
+        source.fetch(RetrieveMode.QUERY, query="test", n=1)
+
+        call_kw = mock_session.get.call_args[1]
+        assert call_kw.get("timeout") == 30
+
 
 class TestWebRetrievalSourceFullContent:
     """WebRetrievalSource.fetch() full-content mode tests."""
@@ -206,16 +224,19 @@ class TestWebRetrievalSourceFullContent:
         brave_session.get.return_value = brave_resp_mock
 
         content_session = MagicMock()
+        page_a_html = "<html><body><p>Full article about A.</p></body></html>"
         page_a_resp = MagicMock()
-        page_a_resp.text = "<html><body><p>Full article about A.</p></body></html>"
-        page_a_resp.content = page_a_resp.text.encode()
         page_a_resp.headers = {}
         page_a_resp.raise_for_status = MagicMock()
+        page_a_resp.iter_content.return_value = [page_a_html.encode()]
+        page_a_resp.apparent_encoding = "utf-8"
+
+        page_b_html = "<html><body><p>Full article about B.</p></body></html>"
         page_b_resp = MagicMock()
-        page_b_resp.text = "<html><body><p>Full article about B.</p></body></html>"
-        page_b_resp.content = page_b_resp.text.encode()
         page_b_resp.headers = {}
         page_b_resp.raise_for_status = MagicMock()
+        page_b_resp.iter_content.return_value = [page_b_html.encode()]
+        page_b_resp.apparent_encoding = "utf-8"
 
         def content_get(url, **kwargs):
             if url == "https://a.com":
@@ -255,14 +276,17 @@ class TestWebRetrievalSourceFullContent:
         brave_session.get.return_value = brave_resp_mock
 
         content_session = MagicMock()
+        good_html = "<html><body><p>Full content here.</p></body></html>"
         good_resp = MagicMock()
-        good_resp.text = "<html><body><p>Full content here.</p></body></html>"
-        good_resp.content = good_resp.text.encode()
         good_resp.headers = {}
         good_resp.raise_for_status = MagicMock()
+        good_resp.iter_content.return_value = [good_html.encode()]
+        good_resp.apparent_encoding = "utf-8"
 
         bad_resp = MagicMock()
-        bad_resp.raise_for_status.side_effect = Exception("404 Not Found")
+        bad_resp.raise_for_status.side_effect = requests.exceptions.HTTPError(
+            "404 Not Found"
+        )
 
         def content_get(url, **kwargs):
             if url == "https://good.com":
@@ -280,10 +304,10 @@ class TestWebRetrievalSourceFullContent:
         assert items[1]["text"] == "Bad snippet"
 
     @patch("pyforger.acquire.sources.requests.Session")
-    def test_full_content_respects_max_content_length(
+    def test_full_content_respects_max_content_length_header(
         self, mock_session_cls: MagicMock
     ) -> None:
-        """Pages exceeding max_content_length fall back to snippet."""
+        """Pages with Content-Length exceeding limit fall back to snippet."""
         brave_resp = _make_brave_search_response(
             [_make_brave_result("Big", "https://big.com", "Big snippet")]
         )
@@ -308,6 +332,42 @@ class TestWebRetrievalSourceFullContent:
 
         assert len(items) == 1
         assert items[0]["text"] == "Big snippet"
+        big_resp.close.assert_called_once()
+
+    @patch("pyforger.acquire.sources.requests.Session")
+    def test_full_content_respects_max_content_length_streaming(
+        self, mock_session_cls: MagicMock
+    ) -> None:
+        """Pages exceeding limit during streaming (no Content-Length) fall back."""
+        brave_resp = _make_brave_search_response(
+            [_make_brave_result("Big", "https://big.com", "Big snippet")]
+        )
+
+        brave_session = MagicMock()
+        brave_resp_mock = MagicMock()
+        brave_resp_mock.json.return_value = brave_resp
+        brave_resp_mock.raise_for_status = MagicMock()
+        brave_session.get.return_value = brave_resp_mock
+
+        content_session = MagicMock()
+        big_resp = MagicMock()
+        big_resp.headers = {}
+        big_resp.raise_for_status = MagicMock()
+        big_resp.iter_content.return_value = [b"x" * 200]
+        big_resp.apparent_encoding = "utf-8"
+        content_session.get.return_value = big_resp
+        mock_session_cls.side_effect = [brave_session, content_session]
+
+        source = WebRetrievalSource(
+            api_key="k", fetch_full_content=True, max_content_length=100
+        )
+        items = source.fetch(RetrieveMode.QUERY, query="test", n=1)
+
+        assert len(items) == 1
+        assert items[0]["text"] == "Big snippet"
+        content_session.get.assert_called_once_with(
+            "https://big.com", stream=True, timeout=30
+        )
 
     @patch("pyforger.acquire.sources.trafilatura")
     def test_extract_text_calls_trafilatura(self, mock_traf: MagicMock) -> None:
@@ -319,12 +379,12 @@ class TestWebRetrievalSourceFullContent:
         mock_traf.extract.assert_called_once()
 
     @patch("pyforger.acquire.sources.trafilatura")
-    def test_extract_text_returns_empty_on_none(self, mock_traf: MagicMock) -> None:
-        """_extract_text returns empty string when trafilatura returns None."""
+    def test_extract_text_returns_none_on_failure(self, mock_traf: MagicMock) -> None:
+        """_extract_text returns None when trafilatura returns None."""
         mock_traf.extract.return_value = None
 
         result = WebRetrievalSource._extract_text("<html><body>raw</body></html>")
-        assert result == ""
+        assert result is None
 
     @pytest.mark.skipif(
         not os.environ.get("PYFORGER_WEB_LIVE"),
