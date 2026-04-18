@@ -14,30 +14,50 @@ def by_exact_match(
     *,
     field: str,
     max_count: int = 1,
+    agree_on: str | None = None,
 ) -> DataSpec:
     """Remove items with duplicate field values.
 
     Keeps up to max_count occurrences of each unique value and discards
-    the rest.
+    the rest. When agree_on is set, also drops items whose field-value
+    group contains disagreeing agree_on values (useful for filtering
+    (input, output) pairs where the same input has conflicting outputs).
 
     Args:
         source: Upstream DataSpec providing list[dict] data.
         field: Key in each dict to check for duplicates.
         max_count: Maximum number of items with the same field value
             to keep (e.g. 5 allows each value to appear up to 5 times).
+        agree_on: Optional key whose values must match within each group
+            sharing the same field value. Groups with disagreeing
+            agree_on values are dropped entirely.
 
     Returns:
         A FILTER DataSpec that keeps only items within the count limit.
     """
 
     def _execute(data: list[dict]) -> list[dict]:
-        counts: dict[str, int] = {}
-        result: list[dict] = []
+        if agree_on is None:
+            counts: dict[str, int] = {}
+            result: list[dict] = []
+            for item in data:
+                val = get_field(item, field, "by_exact_match")
+                counts[val] = counts.get(val, 0) + 1
+                if counts[val] <= max_count:
+                    result.append(item)
+            return result
+
+        groups: dict[str, list[dict]] = {}
         for item in data:
-            val = get_field(item, field, "by_exact_match")
-            counts[val] = counts.get(val, 0) + 1
-            if counts[val] <= max_count:
-                result.append(item)
+            key = str(get_field(item, field, "by_exact_match")).strip()
+            groups.setdefault(key, []).append(item)
+        result = []
+        for items in groups.values():
+            values = {
+                str(get_field(i, agree_on, "by_exact_match")).strip() for i in items
+            }
+            if len(values) == 1:
+                result.extend(items[:max_count])
         return result
 
     return DataSpec(NodeType.FILTER, source, _execute, "filter_by_exact_match")

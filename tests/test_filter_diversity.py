@@ -88,6 +88,69 @@ class TestByExactMatch:
         with pytest.raises(RuntimeError, match="missing required field 'instruction'"):
             run(by_exact_match(source, field="instruction"))
 
+    def test_agree_on_keeps_unanimous_group(self):
+        """With agree_on set, a group with matching agree_on values is kept."""
+        data = [
+            {"input": "x", "output": "42"},
+            {"input": "x", "output": "42"},
+        ]
+        source = make_source(data)
+        result = run(by_exact_match(source, field="input", agree_on="output"))
+        assert result == [data[0]]
+
+    def test_agree_on_drops_conflicting_group(self):
+        """With agree_on set, a group with disagreeing agree_on values is dropped."""
+        data = [
+            {"input": "x", "output": "42"},
+            {"input": "x", "output": "43"},
+        ]
+        source = make_source(data)
+        result = run(by_exact_match(source, field="input", agree_on="output"))
+        assert result == []
+
+    def test_agree_on_mixed_groups(self):
+        """Unanimous groups kept, conflicting groups dropped."""
+        data = [
+            {"input": "x", "output": "a"},
+            {"input": "x", "output": "a"},
+            {"input": "y", "output": "b"},
+            {"input": "y", "output": "c"},
+            {"input": "z", "output": "d"},
+        ]
+        source = make_source(data)
+        result = run(by_exact_match(source, field="input", agree_on="output"))
+        assert [r["input"] for r in result] == ["x", "z"]
+
+    def test_agree_on_with_max_count(self):
+        """max_count still caps kept items from unanimous groups."""
+        data = [
+            {"input": "x", "output": "a"},
+            {"input": "x", "output": "a"},
+            {"input": "x", "output": "a"},
+        ]
+        source = make_source(data)
+        result = run(
+            by_exact_match(source, field="input", max_count=2, agree_on="output")
+        )
+        assert len(result) == 2
+
+    def test_agree_on_whitespace_ignored(self):
+        """Leading/trailing whitespace is stripped for both field and agree_on."""
+        data = [
+            {"input": "x", "output": "yes"},
+            {"input": " x ", "output": " yes "},
+        ]
+        source = make_source(data)
+        result = run(by_exact_match(source, field="input", agree_on="output"))
+        assert len(result) == 1
+
+    def test_agree_on_missing_field_raises(self):
+        """Missing agree_on field raises an error."""
+        data = [{"input": "x"}]
+        source = make_source(data)
+        with pytest.raises(RuntimeError, match="missing required field 'output'"):
+            run(by_exact_match(source, field="input", agree_on="output"))
+
 
 class TestByRougeL:
     """by_rouge_l removes near-duplicates by ROUGE-L similarity."""
