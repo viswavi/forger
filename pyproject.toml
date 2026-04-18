@@ -12,6 +12,10 @@ dependencies = [
     "arxiv>=2.0",
     "requests>=2.20",
     "trafilatura>=1.6",
+    "datasets",
+    "huggingface_hub",
+    "semanticscholar>=0.11.0",
+    "litellm==1.83.0",
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
