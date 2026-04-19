@@ -95,8 +95,8 @@ class TestByLlmScore:
                 source,
                 model=_FakeJudge(),
                 threshold=1,
-                instruction_field="instruction",
-                response_field="response",
+                input_field="instruction",
+                output_field="response",
             )
         )
         assert len(result) == len(data)
@@ -114,8 +114,8 @@ class TestByLlmScore:
                 source,
                 model=_FakeJudge(),
                 threshold=5,
-                instruction_field="instruction",
-                response_field="response",
+                input_field="instruction",
+                output_field="response",
             )
         )
         assert len(result) < len(data)
@@ -133,8 +133,8 @@ class TestByLlmScore:
                 source,
                 model=_FakeJudge(),
                 threshold=5,
-                instruction_field="instruction",
-                response_field="response",
+                input_field="instruction",
+                output_field="response",
             )
         )
         lenient = run(
@@ -142,8 +142,8 @@ class TestByLlmScore:
                 source,
                 model=_FakeJudge(),
                 threshold=1,
-                instruction_field="instruction",
-                response_field="response",
+                input_field="instruction",
+                output_field="response",
             )
         )
         assert len(strict) <= len(lenient)
@@ -155,8 +155,8 @@ class TestByLlmScore:
             by_llm_score(
                 source,
                 model=_FakeJudge(),
-                instruction_field="instruction",
-                response_field="response",
+                input_field="instruction",
+                output_field="response",
             )
         )
         assert result == []
@@ -174,16 +174,16 @@ class TestByLlmScore:
             by_llm_score(
                 source1,
                 model=_FakeJudge(),
-                instruction_field="instruction",
-                response_field="response",
+                input_field="instruction",
+                output_field="response",
             )
         )
         result2 = run(
             by_llm_score(
                 source2,
                 model=_FakeJudge(),
-                instruction_field="instruction",
-                response_field="response",
+                input_field="instruction",
+                output_field="response",
             )
         )
         assert result1 == result2
@@ -197,8 +197,8 @@ class TestByLlmScore:
                 by_llm_score(
                     source,
                     model=_FakeJudge(),
-                    instruction_field="instruction",
-                    response_field="response",
+                    input_field="instruction",
+                    output_field="response",
                 )
             )
 
@@ -211,8 +211,8 @@ class TestByLlmScore:
                 model=_FakeJudge(),
                 threshold=6,
                 max_score=5,
-                instruction_field="instruction",
-                response_field="response",
+                input_field="instruction",
+                output_field="response",
             )
 
     def test_forwards_temperature(self):
@@ -226,8 +226,8 @@ class TestByLlmScore:
                 model=judge,
                 threshold=1,
                 temperature=0.0,
-                instruction_field="instruction",
-                response_field="response",
+                input_field="instruction",
+                output_field="response",
             )
         )
         assert judge.last_temperature == 0.0
@@ -249,8 +249,8 @@ class TestByLlmAgreement:
                 model=_FakeJudge(),
                 score_threshold=1,
                 agreement_threshold=0.01,
-                instruction_field="instruction",
-                response_field="response",
+                input_field="instruction",
+                output_field="response",
             )
         )
         assert len(result) == len(data)
@@ -267,8 +267,8 @@ class TestByLlmAgreement:
                 source,
                 model=_FakeJudge(),
                 score_threshold=5,
-                instruction_field="instruction",
-                response_field="response",
+                input_field="instruction",
+                output_field="response",
             )
         )
         assert len(result) < len(data)
@@ -280,8 +280,8 @@ class TestByLlmAgreement:
             by_llm_agreement(
                 source,
                 model=_FakeJudge(),
-                instruction_field="instruction",
-                response_field="response",
+                input_field="instruction",
+                output_field="response",
             )
         )
         assert result == []
@@ -299,16 +299,16 @@ class TestByLlmAgreement:
             by_llm_agreement(
                 source1,
                 model=_FakeJudge(),
-                instruction_field="instruction",
-                response_field="response",
+                input_field="instruction",
+                output_field="response",
             )
         )
         result2 = run(
             by_llm_agreement(
                 source2,
                 model=_FakeJudge(),
-                instruction_field="instruction",
-                response_field="response",
+                input_field="instruction",
+                output_field="response",
             )
         )
         assert result1 == result2
@@ -327,8 +327,8 @@ class TestByLlmAgreement:
                 num_judges=5,
                 score_threshold=1,
                 agreement_threshold=0.01,
-                instruction_field="instruction",
-                response_field="response",
+                input_field="instruction",
+                output_field="response",
             )
         )
         assert judge.last_n == 5
@@ -345,8 +345,8 @@ class TestByLlmAgreement:
                 score_threshold=1,
                 agreement_threshold=0.01,
                 temperature=0.7,
-                instruction_field="instruction",
-                response_field="response",
+                input_field="instruction",
+                output_field="response",
             )
         )
         assert judge.last_temperature == 0.7
@@ -359,8 +359,8 @@ class TestByLlmAgreement:
                 source,
                 model=_FakeJudge(),
                 num_judges=0,
-                instruction_field="instruction",
-                response_field="response",
+                input_field="instruction",
+                output_field="response",
             )
 
     def test_invalid_agreement_threshold_raises(self):
@@ -371,16 +371,16 @@ class TestByLlmAgreement:
                 source,
                 model=_FakeJudge(),
                 agreement_threshold=0.0,
-                instruction_field="instruction",
-                response_field="response",
+                input_field="instruction",
+                output_field="response",
             )
         with pytest.raises(ValueError, match="agreement_threshold"):
             by_llm_agreement(
                 source,
                 model=_FakeJudge(),
                 agreement_threshold=1.5,
-                instruction_field="instruction",
-                response_field="response",
+                input_field="instruction",
+                output_field="response",
             )
 
     def test_score_threshold_exceeding_max_score_raises(self):
@@ -394,8 +394,8 @@ class TestByLlmAgreement:
                 model=_FakeJudge(),
                 score_threshold=6,
                 max_score=5,
-                instruction_field="instruction",
-                response_field="response",
+                input_field="instruction",
+                output_field="response",
             )
 
     def test_missing_field_raises_error(self):
@@ -407,8 +407,8 @@ class TestByLlmAgreement:
                 by_llm_agreement(
                     source,
                     model=_FakeJudge(),
-                    instruction_field="instruction",
-                    response_field="response",
+                    input_field="instruction",
+                    output_field="response",
                 )
             )
 
@@ -426,8 +426,8 @@ class TestMalformedResponses:
                 source,
                 model=judge,
                 threshold=1,
-                instruction_field="instruction",
-                response_field="response",
+                input_field="instruction",
+                output_field="response",
             )
         )
         assert result == []
@@ -442,8 +442,8 @@ class TestMalformedResponses:
                 source,
                 model=judge,
                 threshold=1,
-                instruction_field="instruction",
-                response_field="response",
+                input_field="instruction",
+                output_field="response",
             )
         )
         assert result == []
@@ -458,8 +458,8 @@ class TestMalformedResponses:
                 source,
                 model=judge,
                 threshold=1,
-                instruction_field="instruction",
-                response_field="response",
+                input_field="instruction",
+                output_field="response",
             )
         )
         assert result == []
@@ -475,8 +475,8 @@ class TestMalformedResponses:
                 model=judge,
                 threshold=1,
                 max_score=5,
-                instruction_field="instruction",
-                response_field="response",
+                input_field="instruction",
+                output_field="response",
             )
         )
         assert result == []
@@ -491,8 +491,8 @@ class TestMalformedResponses:
                 source,
                 model=judge,
                 threshold=1,
-                instruction_field="instruction",
-                response_field="response",
+                input_field="instruction",
+                output_field="response",
             )
         )
         assert result == []
@@ -515,8 +515,8 @@ class TestMalformedResponses:
                 source,
                 model=judge,
                 threshold=1,
-                instruction_field="instruction",
-                response_field="response",
+                input_field="instruction",
+                output_field="response",
             )
         )
         assert len(result) == 1

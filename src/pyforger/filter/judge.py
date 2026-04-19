@@ -21,8 +21,8 @@ def by_llm_score(
     threshold: int = 3,
     max_score: int = 5,
     criteria: str = "overall quality, relevance, and correctness",
-    instruction_field: str,
-    response_field: str,
+    input_field: str,
+    output_field: str,
     temperature: float = 0.0,
 ) -> DataSpec:
     """Filter items by LLM judge score.
@@ -36,8 +36,8 @@ def by_llm_score(
         threshold: Minimum score to keep an item (inclusive).
         max_score: Maximum score the judge can assign.
         criteria: Description of evaluation criteria included in the prompt.
-        instruction_field: Key containing the instruction text.
-        response_field: Key containing the response text.
+        input_field: Key containing the input/prompt text.
+        output_field: Key containing the output/response text.
         temperature: Sampling temperature for judge calls. Defaults to 0.0
             for deterministic scoring.
 
@@ -57,7 +57,7 @@ def by_llm_score(
         parse_failures = 0
         for item in data:
             prompt = _build_judge_prompt(
-                item, instruction_field, response_field, criteria, max_score
+                item, input_field, output_field, criteria, max_score
             )
             raw = model.generate(prompt, n=1, temperature=temperature)[0]
             score = _parse_judge_response(raw, max_score)
@@ -86,8 +86,8 @@ def by_llm_agreement(
     score_threshold: int = 3,
     max_score: int = 5,
     criteria: str = "overall quality, relevance, and correctness",
-    instruction_field: str,
-    response_field: str,
+    input_field: str,
+    output_field: str,
     temperature: float = 0.7,
 ) -> DataSpec:
     """Filter items by multi-judge LLM agreement.
@@ -107,8 +107,8 @@ def by_llm_agreement(
         score_threshold: Minimum score for a judge to "approve" an item.
         max_score: Maximum score the judge can assign.
         criteria: Description of evaluation criteria included in the prompt.
-        instruction_field: Key containing the instruction text.
-        response_field: Key containing the response text.
+        input_field: Key containing the input/prompt text.
+        output_field: Key containing the output/response text.
         temperature: Sampling temperature for judge calls. Defaults to 0.7
             for diverse opinions across judges.
 
@@ -134,7 +134,7 @@ def by_llm_agreement(
         total_parse_failures = 0
         for item in data:
             prompt = _build_judge_prompt(
-                item, instruction_field, response_field, criteria, max_score
+                item, input_field, output_field, criteria, max_score
             )
             responses = model.generate(prompt, n=num_judges, temperature=temperature)
             approvals = 0
@@ -188,18 +188,18 @@ def _parse_judge_response(raw: str, max_score: int) -> int | None:
 
 def _build_judge_prompt(
     item: dict,
-    instruction_field: str,
-    response_field: str,
+    input_field: str,
+    output_field: str,
     criteria: str,
     max_score: int,
 ) -> str:
     """Build an evaluation prompt for the judge model."""
-    instruction = get_field(item, instruction_field, "_build_judge_prompt")
-    response = get_field(item, response_field, "_build_judge_prompt")
+    input_text = get_field(item, input_field, "_build_judge_prompt")
+    output_text = get_field(item, output_field, "_build_judge_prompt")
     return (
-        f"Rate the quality of the following response on a scale of 1 to {max_score}.\n"
+        f"Rate the quality of the following output on a scale of 1 to {max_score}.\n"
         f"Criteria: {criteria}\n\n"
-        f"Instruction: {instruction}\n\n"
-        f"Response: {response}\n\n"
+        f"Input: {input_text}\n\n"
+        f"Output: {output_text}\n\n"
         f'Respond with JSON: {{"score": <integer>, "explanation": "<text>"}}'
     )
