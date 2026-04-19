@@ -18,102 +18,41 @@ def by_llm_score(
     source: DataSpec,
     *,
     model: Model,
-    threshold: int = 3,
-    max_score: int = 5,
-    criteria: str = "overall quality, relevance, and correctness",
     input_field: str,
     output_field: str,
-    temperature: float = 0.0,
-) -> DataSpec:
-    """Filter items by LLM judge score.
-
-    Each item is evaluated by a single LLM call that produces a numeric
-    score. Items with a score below the threshold are removed.
-
-    Args:
-        source: Upstream DataSpec providing list[dict] data.
-        model: Model instance for judge evaluation.
-        threshold: Minimum score to keep an item (inclusive).
-        max_score: Maximum score the judge can assign.
-        criteria: Description of evaluation criteria included in the prompt.
-        input_field: Key containing the input/prompt text.
-        output_field: Key containing the output/response text.
-        temperature: Sampling temperature for judge calls. Defaults to 0.0
-            for deterministic scoring.
-
-    Returns:
-        A FILTER DataSpec that keeps only items scoring at or above threshold.
-
-    Raises:
-        ValueError: If threshold > max_score.
-    """
-    if threshold > max_score:
-        raise ValueError(
-            f"threshold ({threshold}) must not exceed max_score ({max_score})"
-        )
-
-    def _execute(data: list[dict]) -> list[dict]:
-        kept: list[dict] = []
-        parse_failures = 0
-        for item in data:
-            prompt = _build_judge_prompt(
-                item, input_field, output_field, criteria, max_score
-            )
-            raw = model.generate(prompt, n=1, temperature=temperature)[0]
-            score = _parse_judge_response(raw, max_score)
-            if score is None:
-                parse_failures += 1
-                continue
-            if score >= threshold:
-                kept.append(item)
-        if parse_failures > 0:
-            logger.warning(
-                "by_llm_score: %d/%d items dropped due to unparseable judge responses",
-                parse_failures,
-                len(data),
-            )
-        return kept
-
-    return DataSpec(NodeType.FILTER, source, _execute, "filter_by_llm_score")
-
-
-def by_llm_agreement(
-    source: DataSpec,
-    *,
-    model: Model,
-    num_judges: int = 3,
-    agreement_threshold: float = 0.5,
     score_threshold: int = 3,
     max_score: int = 5,
+    num_judges: int = 1,
+    agreement_threshold: float = 1.0,
     criteria: str = "overall quality, relevance, and correctness",
-    input_field: str,
-    output_field: str,
-    temperature: float = 0.7,
+    temperature: float = 0.0,
 ) -> DataSpec:
-    """Filter items by multi-judge LLM agreement.
+    """Filter items by LLM judge score, optionally requiring multi-judge agreement.
 
-    Each item is evaluated by multiple independent LLM calls. An item is
-    kept only if at least agreement_threshold fraction of judges score it
-    at or above score_threshold.
-
-    Uses temperature > 0 by default to get diverse judge opinions.
+    Each item is evaluated by ``num_judges`` independent LLM calls. An item
+    is kept only when at least ``agreement_threshold`` fraction of judges
+    score it at or above ``score_threshold``. The defaults
+    (``num_judges=1, agreement_threshold=1.0``) reduce to single-judge
+    scoring; pass ``num_judges>1`` (and consider raising ``temperature``)
+    for diverse multi-judge consensus.
 
     Args:
         source: Upstream DataSpec providing list[dict] data.
         model: Model instance for judge evaluation.
-        num_judges: Number of independent judge evaluations per item.
-        agreement_threshold: Fraction of judges that must score at or
-            above score_threshold for the item to be kept.
-        score_threshold: Minimum score for a judge to "approve" an item.
-        max_score: Maximum score the judge can assign.
-        criteria: Description of evaluation criteria included in the prompt.
         input_field: Key containing the input/prompt text.
         output_field: Key containing the output/response text.
-        temperature: Sampling temperature for judge calls. Defaults to 0.7
-            for diverse opinions across judges.
+        score_threshold: Minimum score for a judge to "approve" an item.
+        max_score: Maximum score the judge can assign.
+        num_judges: Number of independent judge evaluations per item.
+        agreement_threshold: Fraction of judges that must score at or
+            above ``score_threshold`` for the item to be kept.
+        criteria: Description of evaluation criteria included in the prompt.
+        temperature: Sampling temperature for judge calls. Defaults to 0.0
+            for deterministic single-judge scoring; raise for diverse
+            multi-judge opinions.
 
     Returns:
-        A FILTER DataSpec that keeps only items with sufficient judge agreement.
+        A FILTER DataSpec keeping only items with sufficient judge approval.
 
     Raises:
         ValueError: If num_judges < 1, agreement_threshold not in (0, 1],
@@ -145,17 +84,16 @@ def by_llm_agreement(
                     continue
                 if score >= score_threshold:
                     approvals += 1
-            fraction = approvals / num_judges
-            if fraction >= agreement_threshold:
+            if approvals / num_judges >= agreement_threshold:
                 kept.append(item)
         if total_parse_failures > 0:
             logger.warning(
-                "by_llm_agreement: %d judge responses were unparseable",
+                "by_llm_score: %d judge responses were unparseable",
                 total_parse_failures,
             )
         return kept
 
-    return DataSpec(NodeType.FILTER, source, _execute, "filter_by_llm_agreement")
+    return DataSpec(NodeType.FILTER, source, _execute, "filter_by_llm_score")
 
 
 def _parse_judge_response(raw: str, max_score: int) -> int | None:

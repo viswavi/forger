@@ -8,7 +8,7 @@ import pytest
 from fixtures import make_source
 
 from pyforger import run
-from pyforger.filter import by_llm_agreement, by_llm_score
+from pyforger.filter import by_llm_score
 
 
 class _FakeJudge:
@@ -94,7 +94,7 @@ class TestByLlmScore:
             by_llm_score(
                 source,
                 model=_FakeJudge(),
-                threshold=1,
+                score_threshold=1,
                 input_field="instruction",
                 output_field="response",
             )
@@ -113,7 +113,7 @@ class TestByLlmScore:
             by_llm_score(
                 source,
                 model=_FakeJudge(),
-                threshold=5,
+                score_threshold=5,
                 input_field="instruction",
                 output_field="response",
             )
@@ -132,7 +132,7 @@ class TestByLlmScore:
             by_llm_score(
                 source,
                 model=_FakeJudge(),
-                threshold=5,
+                score_threshold=5,
                 input_field="instruction",
                 output_field="response",
             )
@@ -141,7 +141,7 @@ class TestByLlmScore:
             by_llm_score(
                 source,
                 model=_FakeJudge(),
-                threshold=1,
+                score_threshold=1,
                 input_field="instruction",
                 output_field="response",
             )
@@ -209,7 +209,7 @@ class TestByLlmScore:
             by_llm_score(
                 source,
                 model=_FakeJudge(),
-                threshold=6,
+                score_threshold=6,
                 max_score=5,
                 input_field="instruction",
                 output_field="response",
@@ -224,7 +224,7 @@ class TestByLlmScore:
             by_llm_score(
                 source,
                 model=judge,
-                threshold=1,
+                score_threshold=1,
                 temperature=0.0,
                 input_field="instruction",
                 output_field="response",
@@ -233,8 +233,8 @@ class TestByLlmScore:
         assert judge.last_temperature == 0.0
 
 
-class TestByLlmAgreement:
-    """by_llm_agreement filters items by multi-judge LLM consensus."""
+class TestByLlmAgreementMode:
+    """by_llm_score filters items by multi-judge LLM consensus."""
 
     def test_keeps_items_with_sufficient_agreement(self):
         """Items where enough judges agree are kept."""
@@ -244,7 +244,7 @@ class TestByLlmAgreement:
         ]
         source = make_source(data)
         result = run(
-            by_llm_agreement(
+            by_llm_score(
                 source,
                 model=_FakeJudge(),
                 score_threshold=1,
@@ -263,7 +263,7 @@ class TestByLlmAgreement:
         ]
         source = make_source(data)
         result = run(
-            by_llm_agreement(
+            by_llm_score(
                 source,
                 model=_FakeJudge(),
                 score_threshold=5,
@@ -277,7 +277,7 @@ class TestByLlmAgreement:
         """Empty input returns empty list."""
         source = make_source([])
         result = run(
-            by_llm_agreement(
+            by_llm_score(
                 source,
                 model=_FakeJudge(),
                 input_field="instruction",
@@ -296,7 +296,7 @@ class TestByLlmAgreement:
         source1 = make_source(data)
         source2 = make_source(data)
         result1 = run(
-            by_llm_agreement(
+            by_llm_score(
                 source1,
                 model=_FakeJudge(),
                 input_field="instruction",
@@ -304,7 +304,7 @@ class TestByLlmAgreement:
             )
         )
         result2 = run(
-            by_llm_agreement(
+            by_llm_score(
                 source2,
                 model=_FakeJudge(),
                 input_field="instruction",
@@ -321,7 +321,7 @@ class TestByLlmAgreement:
         source = make_source(data)
         judge = _FakeJudge()
         run(
-            by_llm_agreement(
+            by_llm_score(
                 source,
                 model=judge,
                 num_judges=5,
@@ -339,7 +339,7 @@ class TestByLlmAgreement:
         source = make_source(data)
         judge = _FakeJudge()
         run(
-            by_llm_agreement(
+            by_llm_score(
                 source,
                 model=judge,
                 score_threshold=1,
@@ -355,7 +355,7 @@ class TestByLlmAgreement:
         """num_judges < 1 raises ValueError."""
         source = make_source([])
         with pytest.raises(ValueError, match="num_judges"):
-            by_llm_agreement(
+            by_llm_score(
                 source,
                 model=_FakeJudge(),
                 num_judges=0,
@@ -367,7 +367,7 @@ class TestByLlmAgreement:
         """agreement_threshold out of range raises ValueError."""
         source = make_source([])
         with pytest.raises(ValueError, match="agreement_threshold"):
-            by_llm_agreement(
+            by_llm_score(
                 source,
                 model=_FakeJudge(),
                 agreement_threshold=0.0,
@@ -375,7 +375,7 @@ class TestByLlmAgreement:
                 output_field="response",
             )
         with pytest.raises(ValueError, match="agreement_threshold"):
-            by_llm_agreement(
+            by_llm_score(
                 source,
                 model=_FakeJudge(),
                 agreement_threshold=1.5,
@@ -389,7 +389,7 @@ class TestByLlmAgreement:
         with pytest.raises(
             ValueError, match="score_threshold.*must not exceed.*max_score"
         ):
-            by_llm_agreement(
+            by_llm_score(
                 source,
                 model=_FakeJudge(),
                 score_threshold=6,
@@ -404,7 +404,7 @@ class TestByLlmAgreement:
         source = make_source(data)
         with pytest.raises(RuntimeError, match="missing required field 'response'"):
             run(
-                by_llm_agreement(
+                by_llm_score(
                     source,
                     model=_FakeJudge(),
                     input_field="instruction",
@@ -425,7 +425,7 @@ class TestMalformedResponses:
             by_llm_score(
                 source,
                 model=judge,
-                threshold=1,
+                score_threshold=1,
                 input_field="instruction",
                 output_field="response",
             )
@@ -441,7 +441,7 @@ class TestMalformedResponses:
             by_llm_score(
                 source,
                 model=judge,
-                threshold=1,
+                score_threshold=1,
                 input_field="instruction",
                 output_field="response",
             )
@@ -457,7 +457,7 @@ class TestMalformedResponses:
             by_llm_score(
                 source,
                 model=judge,
-                threshold=1,
+                score_threshold=1,
                 input_field="instruction",
                 output_field="response",
             )
@@ -473,7 +473,7 @@ class TestMalformedResponses:
             by_llm_score(
                 source,
                 model=judge,
-                threshold=1,
+                score_threshold=1,
                 max_score=5,
                 input_field="instruction",
                 output_field="response",
@@ -490,7 +490,7 @@ class TestMalformedResponses:
             by_llm_score(
                 source,
                 model=judge,
-                threshold=1,
+                score_threshold=1,
                 input_field="instruction",
                 output_field="response",
             )
@@ -514,7 +514,7 @@ class TestMalformedResponses:
             by_llm_score(
                 source,
                 model=judge,
-                threshold=1,
+                score_threshold=1,
                 input_field="instruction",
                 output_field="response",
             )
