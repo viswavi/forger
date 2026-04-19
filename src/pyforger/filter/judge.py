@@ -1,7 +1,7 @@
 """LLM-as-a-judge filter operations for Forger.
 
-Filters that use LLM evaluation to remove instruction-tuning examples
-based on quality scores or multi-judge consensus.
+Filters that use LLM evaluation to remove input-output pairs based on quality scores
+or multi-judge consensus.
 """
 from __future__ import annotations
 
