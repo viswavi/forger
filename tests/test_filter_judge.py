@@ -1,5 +1,6 @@
 """Tests for LLM-as-a-judge filter operations."""
 
+import hashlib
 import json
 import random
 
@@ -48,7 +49,9 @@ class _FakeJudge:
         self.last_n = n
         results = []
         for i in range(n):
-            rng = random.Random(hash((prompt, i)))
+            digest = hashlib.md5(f"{prompt}|{i}".encode()).digest()
+            seed = int.from_bytes(digest[:8], "big")
+            rng = random.Random(seed)
             score = rng.randint(1, 5)
             words = rng.choices(self._WORD_POOL, k=2)
             results.append(json.dumps({"score": score, "explanation": " ".join(words)}))
