@@ -5,9 +5,8 @@ import json
 import random
 
 import pytest
-from fixtures import make_source
-
 from pyforger import run
+from pyforger.acquire import from_list
 from pyforger.filter import by_llm_score
 
 
@@ -89,7 +88,7 @@ class TestByLlmScore:
             {"instruction": "What is 2+2?", "response": "The answer is 4."},
             {"instruction": "Write a poem", "response": "Roses are red..."},
         ]
-        source = make_source(data)
+        source = from_list(data)
         result = run(
             by_llm_score(
                 source,
@@ -108,7 +107,7 @@ class TestByLlmScore:
             {"instruction": "What is 2+2?", "response": "The answer is 4."},
             {"instruction": "Write a poem", "response": "Roses are red..."},
         ]
-        source = make_source(data)
+        source = from_list(data)
         result = run(
             by_llm_score(
                 source,
@@ -127,7 +126,7 @@ class TestByLlmScore:
             {"instruction": "What is 2+2?", "response": "The answer is 4."},
             {"instruction": "Write a poem", "response": "Roses are red..."},
         ]
-        source = make_source(data)
+        source = from_list(data)
         strict = run(
             by_llm_score(
                 source,
@@ -150,7 +149,7 @@ class TestByLlmScore:
 
     def test_empty_input(self):
         """Empty input returns empty list."""
-        source = make_source([])
+        source = from_list([])
         result = run(
             by_llm_score(
                 source,
@@ -168,8 +167,8 @@ class TestByLlmScore:
             {"instruction": "What is 2+2?", "response": "The answer is 4."},
             {"instruction": "Write a poem", "response": "Roses are red..."},
         ]
-        source1 = make_source(data)
-        source2 = make_source(data)
+        source1 = from_list(data)
+        source2 = from_list(data)
         result1 = run(
             by_llm_score(
                 source1,
@@ -191,7 +190,7 @@ class TestByLlmScore:
     def test_missing_field_raises_error(self):
         """Missing expected field raises an error."""
         data = [{"instruction": "Explain gravity"}]
-        source = make_source(data)
+        source = from_list(data)
         with pytest.raises(RuntimeError, match="missing required field 'response'"):
             run(
                 by_llm_score(
@@ -204,7 +203,7 @@ class TestByLlmScore:
 
     def test_threshold_exceeding_max_score_raises(self):
         """Threshold greater than max_score raises ValueError."""
-        source = make_source([])
+        source = from_list([])
         with pytest.raises(ValueError, match="threshold.*must not exceed.*max_score"):
             by_llm_score(
                 source,
@@ -218,7 +217,7 @@ class TestByLlmScore:
     def test_forwards_temperature(self):
         """Temperature is forwarded to the model."""
         data = [{"instruction": "Q", "response": "A"}]
-        source = make_source(data)
+        source = from_list(data)
         judge = _FakeJudge()
         run(
             by_llm_score(
@@ -242,7 +241,7 @@ class TestByLlmAgreementMode:
             {"instruction": "Explain gravity", "response": "Gravity is a force..."},
             {"instruction": "What is 2+2?", "response": "The answer is 4."},
         ]
-        source = make_source(data)
+        source = from_list(data)
         result = run(
             by_llm_score(
                 source,
@@ -261,7 +260,7 @@ class TestByLlmAgreementMode:
             {"instruction": "Explain gravity", "response": "Gravity is a force..."},
             {"instruction": "What is 2+2?", "response": "The answer is 4."},
         ]
-        source = make_source(data)
+        source = from_list(data)
         result = run(
             by_llm_score(
                 source,
@@ -275,7 +274,7 @@ class TestByLlmAgreementMode:
 
     def test_empty_input(self):
         """Empty input returns empty list."""
-        source = make_source([])
+        source = from_list([])
         result = run(
             by_llm_score(
                 source,
@@ -293,8 +292,8 @@ class TestByLlmAgreementMode:
             {"instruction": "What is 2+2?", "response": "The answer is 4."},
             {"instruction": "Write a poem", "response": "Roses are red..."},
         ]
-        source1 = make_source(data)
-        source2 = make_source(data)
+        source1 = from_list(data)
+        source2 = from_list(data)
         result1 = run(
             by_llm_score(
                 source1,
@@ -318,7 +317,7 @@ class TestByLlmAgreementMode:
         data = [
             {"instruction": "Explain gravity", "response": "Gravity is a force..."},
         ]
-        source = make_source(data)
+        source = from_list(data)
         judge = _FakeJudge()
         run(
             by_llm_score(
@@ -327,6 +326,7 @@ class TestByLlmAgreementMode:
                 num_judges=5,
                 score_threshold=1,
                 agreement_threshold=0.01,
+                temperature=0.7,
                 input_field="instruction",
                 output_field="response",
             )
@@ -336,7 +336,7 @@ class TestByLlmAgreementMode:
     def test_forwards_temperature(self):
         """Temperature is forwarded to the model."""
         data = [{"instruction": "Q", "response": "A"}]
-        source = make_source(data)
+        source = from_list(data)
         judge = _FakeJudge()
         run(
             by_llm_score(
@@ -353,7 +353,7 @@ class TestByLlmAgreementMode:
 
     def test_invalid_num_judges_raises(self):
         """num_judges < 1 raises ValueError."""
-        source = make_source([])
+        source = from_list([])
         with pytest.raises(ValueError, match="num_judges"):
             by_llm_score(
                 source,
@@ -365,7 +365,7 @@ class TestByLlmAgreementMode:
 
     def test_invalid_agreement_threshold_raises(self):
         """agreement_threshold out of range raises ValueError."""
-        source = make_source([])
+        source = from_list([])
         with pytest.raises(ValueError, match="agreement_threshold"):
             by_llm_score(
                 source,
@@ -385,7 +385,7 @@ class TestByLlmAgreementMode:
 
     def test_score_threshold_exceeding_max_score_raises(self):
         """score_threshold greater than max_score raises ValueError."""
-        source = make_source([])
+        source = from_list([])
         with pytest.raises(
             ValueError, match="score_threshold.*must not exceed.*max_score"
         ):
@@ -401,7 +401,7 @@ class TestByLlmAgreementMode:
     def test_missing_field_raises_error(self):
         """Missing expected field raises an error."""
         data = [{"instruction": "Explain gravity"}]
-        source = make_source(data)
+        source = from_list(data)
         with pytest.raises(RuntimeError, match="missing required field 'response'"):
             run(
                 by_llm_score(
@@ -419,7 +419,7 @@ class TestMalformedResponses:
     def test_plain_text_response_drops_item(self):
         """Non-JSON response causes the item to be dropped."""
         data = [{"instruction": "Q", "response": "A"}]
-        source = make_source(data)
+        source = from_list(data)
         judge = _BadJudge(["this is not json"])
         result = run(
             by_llm_score(
@@ -435,7 +435,7 @@ class TestMalformedResponses:
     def test_missing_score_key_drops_item(self):
         """JSON without a score key causes the item to be dropped."""
         data = [{"instruction": "Q", "response": "A"}]
-        source = make_source(data)
+        source = from_list(data)
         judge = _BadJudge([json.dumps({"explanation": "no score here"})])
         result = run(
             by_llm_score(
@@ -451,7 +451,7 @@ class TestMalformedResponses:
     def test_non_numeric_score_drops_item(self):
         """JSON with a non-numeric score causes the item to be dropped."""
         data = [{"instruction": "Q", "response": "A"}]
-        source = make_source(data)
+        source = from_list(data)
         judge = _BadJudge([json.dumps({"score": "high", "explanation": "good"})])
         result = run(
             by_llm_score(
@@ -467,7 +467,7 @@ class TestMalformedResponses:
     def test_out_of_range_score_drops_item(self):
         """Score outside [1, max_score] causes the item to be dropped."""
         data = [{"instruction": "Q", "response": "A"}]
-        source = make_source(data)
+        source = from_list(data)
         judge = _BadJudge([json.dumps({"score": 999, "explanation": "off scale"})])
         result = run(
             by_llm_score(
@@ -484,7 +484,7 @@ class TestMalformedResponses:
     def test_zero_score_drops_item(self):
         """Score of 0 (below minimum 1) causes the item to be dropped."""
         data = [{"instruction": "Q", "response": "A"}]
-        source = make_source(data)
+        source = from_list(data)
         judge = _BadJudge([json.dumps({"score": 0, "explanation": "zero"})])
         result = run(
             by_llm_score(
@@ -503,7 +503,7 @@ class TestMalformedResponses:
             {"instruction": "Q1", "response": "A1"},
             {"instruction": "Q2", "response": "A2"},
         ]
-        source = make_source(data)
+        source = from_list(data)
         judge = _BadJudge(
             [
                 "not json",
