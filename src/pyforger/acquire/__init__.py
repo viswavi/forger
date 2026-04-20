@@ -2,7 +2,6 @@
 
 Acquire operations generate or retrieve new data.
 """
-
 from pyforger.acquire.from_list import from_list
 from pyforger.acquire.model import Model
 from pyforger.acquire.retrieve import (
