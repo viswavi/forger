@@ -3,29 +3,6 @@
 from pyforger.core import DataSpec, NodeType
 
 
-class CallCounter:
-    """Tracks how many times an execute function is called."""
-
-    def __init__(self):
-        """Initialize call count to zero."""
-        self.count = 0
-
-    def reset(self):
-        """Reset call count to zero."""
-        self.count = 0
-
-
-def make_source(data: list, counter: CallCounter = None) -> DataSpec:
-    """Source node returning fixed data."""
-
-    def _execute():
-        if counter is not None:
-            counter.count += 1
-        return data
-
-    return DataSpec(NodeType.ACQUIRE, [], _execute, "test_source")
-
-
 def make_double_repetition_data(source: DataSpec) -> DataSpec:
     """Alter node that repeats its input list twice."""
 

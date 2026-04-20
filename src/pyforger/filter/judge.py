@@ -33,7 +33,7 @@ def by_llm_score(
     is kept only when at least ``agreement_threshold`` fraction of judges
     score it at or above ``score_threshold``. The defaults
     (``num_judges=1, agreement_threshold=1.0``) reduce to single-judge
-    scoring; pass ``num_judges>1`` (and consider raising ``temperature``)
+    scoring; pass ``num_judges>1`` (and raise ``temperature`` above zero)
     for diverse multi-judge consensus.
 
     Args:
@@ -56,7 +56,8 @@ def by_llm_score(
 
     Raises:
         ValueError: If num_judges < 1, agreement_threshold not in (0, 1],
-            or score_threshold > max_score.
+            score_threshold > max_score, or num_judges > 1 with
+            temperature == 0.0 (which would produce identical judges).
     """
     if num_judges < 1:
         raise ValueError("num_judges must be at least 1")
@@ -66,6 +67,12 @@ def by_llm_score(
         raise ValueError(
             f"score_threshold ({score_threshold}) must not exceed "
             f"max_score ({max_score})"
+        )
+    if num_judges > 1 and temperature == 0.0:
+        raise ValueError(
+            "temperature must be > 0.0 when num_judges > 1; "
+            "deterministic sampling produces identical judges and "
+            "defeats the purpose of multi-judge consensus"
         )
 
     def _execute(data: list[dict]) -> list[dict]:
