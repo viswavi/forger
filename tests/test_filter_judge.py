@@ -5,6 +5,7 @@ import json
 import random
 
 import pytest
+
 from pyforger import run
 from pyforger.acquire import from_list
 from pyforger.filter import by_llm_score
