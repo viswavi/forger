@@ -33,7 +33,9 @@ class MockModel(Model):
     ) -> list[list[str]]:
         """Return one canned response per prompt, cycling through self.responses."""
         self._call_count += 1
-        return [[self.responses[i % len(self.responses)]] for i in range(len(prompts))]
+        return [
+            [self.responses[i % len(self.responses)]] * n for i in range(len(prompts))
+        ]
 
 
 class RecordingMockModel(MockModel):
