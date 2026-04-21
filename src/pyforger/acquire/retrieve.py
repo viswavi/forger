@@ -106,21 +106,21 @@ def retrieve_from_wiki(
     name: str = "retrieve_from_wiki",
     **kwargs: Any,
 ) -> DataSpec:
-    """Build an ACQUIRE node that fetches articles from Wikipedia when the graph runs.
+    """Build an ACQUIRE node that fetches Wikipedia articles at run time.
 
     Args:
         mode: QUERY (full-text search) or RANDOM (random article sampling).
-        query: Search string for QUERY mode; defaults to "Wikipedia" if empty.
-        n: Number of articles to return.
-        seed: Accepted for interface compatibility; ignored by Wikipedia
-            RANDOM mode (the MediaWiki API does not support seeded random).
+        queries: Query strings for QUERY mode; ``None`` falls back to
+            ``"Wikipedia"``. ``n`` applies per query.
+        n: Number of articles per query.
+        seed: Ignored in RANDOM mode (MediaWiki has no seeded random).
         language: Wikipedia language code (e.g. "en", "de").
-        name: Label for the node.
+        name: Node label.
         **kwargs: Session options (e.g. timeout).
 
     Returns:
-        DataSpec whose execute_fn returns list of dicts in DPR/BEIR format
-        with text (intro extract), id (page ID), title, summary.
+        DataSpec producing DPR/BEIR dicts (``text`` intro, ``id``, ``title``,
+        ``summary``) with a ``"query"`` key per row.
     """
     source = WikiRetrievalSource(language=language, **kwargs)
     return retrieve(
@@ -147,10 +147,28 @@ def retrieve_from_hf(
     name: str = "retrieve_from_hf",
     **kwargs: Any,
 ) -> DataSpec:
-    """Retrieve from Hugging Face datasets (load_dataset + shuffle/select).
+    """Build an ACQUIRE node that loads rows from a Hugging Face dataset at run time.
+
+    Unlike the other wrappers, ``queries`` drives Hub discovery (not content
+    search) and is only used when ``dataset`` is ``None``; otherwise each query
+    just re-triggers a fetch from the same dataset.
+
+    Args:
+        dataset: Explicit HF dataset id; skips Hub discovery.
+        config: Dataset config name for ``load_dataset``.
+        split: Dataset split (default ``"train"``).
+        text_column: Reserved; unused.
+        mode: QUERY (in order) or RANDOM (shuffle + sample). Default RANDOM.
+        queries: Hub discovery strings; raises ``ValueError`` at run time if
+            ``dataset`` is also ``None``. ``n`` applies per query.
+        n: Max rows per query.
+        seed: Seed for RANDOM shuffling.
+        name: Node label.
+        **kwargs: Forwarded to ``HFRetrievalSource`` and ``load_dataset``.
 
     Returns:
-        DataSpec whose execute_fn returns the fetched list.
+        DataSpec producing dicts with ``row_idx``, ``dataset_id``, raw columns,
+        and a ``"query"`` key per row.
     """
     source = HFRetrievalSource(
         dataset=dataset,
@@ -179,20 +197,21 @@ def retrieve_from_arxiv(
     name: str = "retrieve_from_arxiv",
     **kwargs: Any,
 ) -> DataSpec:
-    """Build an ACQUIRE node that fetches papers from arXiv when the graph runs.
+    """Build an ACQUIRE node that fetches papers from arXiv at run time.
 
     Args:
         mode: QUERY (text search) or RANDOM (sample from category).
-        query: Search string for QUERY mode; default "all:*" if empty.
-        n: Number of papers to return.
-        seed: Random seed for RANDOM mode (optional; for reproducibility).
-        name: Label for the node.
-        **kwargs: Arxiv options: sort_by, sort_order, random_category (RANDOM),
-            page_size, delay_seconds, num_retries (Client).
+        queries: arXiv query strings (e.g. ``"all:quantum"``); ``None`` falls
+            back to ``"all:*"``. ``n`` applies per query.
+        n: Number of papers per query.
+        seed: Seed for RANDOM mode.
+        name: Node label.
+        **kwargs: arXiv options — sort_by, sort_order, random_category,
+            page_size, delay_seconds, num_retries.
 
     Returns:
-        DataSpec whose execute_fn returns list of dicts with text (title +
-        abstract), id, title, summary.
+        DataSpec producing dicts with ``text`` (title + abstract), ``id``,
+        ``title``, ``summary``, and a ``"query"`` key per row.
     """
     source = ArxivRetrievalSource(**kwargs)
     return retrieve(
@@ -215,21 +234,21 @@ def retrieve_from_s2(
     name: str = "retrieve_from_s2",
     **kwargs: Any,
 ) -> DataSpec:
-    """Build an ACQUIRE node that fetches papers from S2 when the graph runs.
+    """Build an ACQUIRE node that fetches papers from Semantic Scholar at run time.
 
     Args:
         mode: QUERY (text search) or RANDOM (sample from pool).
-        query: Search string for QUERY mode; default "machine learning" if empty.
-        n: Number of papers to return.
-        seed: Random seed for RANDOM mode (optional; for reproducibility).
-        name: Label for the node.
-        **kwargs: S2 client options: api_key, timeout, api_url, debug, retry.
-            For RANDOM mode: fields_of_study (e.g. ["Computer Science"]) to
-            build the search pool.
+        queries: Query strings; ``None`` falls back to ``"machine learning"``.
+            ``n`` applies per query.
+        n: Number of papers per query.
+        seed: Seed for RANDOM mode.
+        name: Node label.
+        **kwargs: S2 client options (api_key, timeout, api_url, debug, retry);
+            plus ``fields_of_study`` for RANDOM pool.
 
     Returns:
-        DataSpec whose execute_fn returns list of dicts with text (title +
-        abstract), id, title, summary.
+        DataSpec producing dicts with ``text`` (title + abstract), ``id``,
+        ``title``, ``summary``, and a ``"query"`` key per row.
     """
     source = S2RetrievalSource(**kwargs)
     return retrieve(

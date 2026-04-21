@@ -5,6 +5,7 @@ Concrete sources: web, Wikipedia, Hugging Face, ArXiv, Semantic Scholar.
 
 from __future__ import annotations
 
+import logging
 import random
 from abc import ABC, abstractmethod
 from enum import Enum, auto
@@ -13,6 +14,8 @@ from typing import Any
 import arxiv
 import requests
 from semanticscholar import SemanticScholar  # type: ignore[import-untyped]
+
+logger = logging.getLogger(__name__)
 
 
 class RetrieveMode(Enum):
@@ -108,7 +111,7 @@ class WikiRetrievalSource(RetrievalSource):
 
     _API_LIMIT = 500
     _EXTRACT_BATCH_SIZE = 20
-    _DEFAULT_TIMEOUT = 30
+    _DEFAULT_TIMEOUT = 5
 
     def __init__(self, language: str = "en", **kwargs: Any) -> None:
         """Store config for Wikipedia retrieval.
@@ -135,6 +138,31 @@ class WikiRetrievalSource(RetrievalSource):
         """Build keyword args for requests.Session.get with timeout."""
         t = merged.get("timeout", WikiRetrievalSource._DEFAULT_TIMEOUT)
         return {"timeout": t}
+
+    @classmethod
+    def _clamp_n(cls, n: int, param_name: str) -> int:
+        """Clamp ``n`` to the MediaWiki API maximum, warning once when exceeded.
+
+        Args:
+            n: Requested number of results.
+            param_name: MediaWiki parameter being clamped (e.g. ``"srlimit"``);
+                included in the warning for debuggability.
+
+        Returns:
+            ``min(n, cls._API_LIMIT)``.
+        """
+        if n > cls._API_LIMIT:
+            logger.warning(
+                "Requested n=%d exceeds Wikipedia API maximum of %d; "
+                "clamping %s to %d. Only the first %d results will be returned.",
+                n,
+                cls._API_LIMIT,
+                param_name,
+                cls._API_LIMIT,
+                cls._API_LIMIT,
+            )
+            return cls._API_LIMIT
+        return n
 
     @staticmethod
     def _result_to_item(page: dict[str, Any]) -> dict[str, Any]:
@@ -244,6 +272,9 @@ class WikiRetrievalSource(RetrievalSource):
         Per-call **kwargs are merged with constructor kwargs (e.g. timeout for
         requests.get on every HTTP call).
 
+        If ``n`` exceeds :attr:`_API_LIMIT` (500), the request is clamped to
+        ``_API_LIMIT`` and a warning is logged on ``pyforger.acquire.sources``.
+
         Returns:
             List of dicts in DPR/BEIR format; each has "text" (intro extract),
             "id" (page ID), "title", "summary" (same as text).
@@ -263,7 +294,7 @@ class WikiRetrievalSource(RetrievalSource):
                     "format": "json",
                     "list": "search",
                     "srsearch": q,
-                    "srlimit": str(min(n, self._API_LIMIT)),
+                    "srlimit": str(self._clamp_n(n, "srlimit")),
                 },
                 **timeout_kw,
             )
@@ -291,7 +322,7 @@ class WikiRetrievalSource(RetrievalSource):
                     "format": "json",
                     "list": "random",
                     "rnnamespace": "0",
-                    "rnlimit": str(min(n, self._API_LIMIT)),
+                    "rnlimit": str(self._clamp_n(n, "rnlimit")),
                 },
                 **timeout_kw,
             )
