@@ -1,6 +1,7 @@
 """Tests for WikiRetrievalSource.fetch() with mocked MediaWiki API."""
 from __future__ import annotations
 
+import logging
 import os
 from unittest.mock import MagicMock, patch
 
@@ -275,8 +276,10 @@ class TestWikiRetrievalSourceFetch:
         assert items[0]["id"] == "999"
 
     @patch("pyforger.acquire.sources.requests.Session")
-    def test_query_mode_caps_srlimit_at_500(self, mock_session_cls: MagicMock) -> None:
-        """QUERY mode clamps srlimit to 500 when n exceeds the API maximum."""
+    def test_query_mode_caps_srlimit_at_500(
+        self, mock_session_cls: MagicMock, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """QUERY mode clamps srlimit to 500 and warns when n exceeds the API max."""
         search_resp = _make_search_response([("Article", 1)])
         extracts_resp = _make_extracts_response(
             [{"pageid": 1, "title": "Article", "extract": "Body."}]
@@ -292,15 +295,23 @@ class TestWikiRetrievalSourceFetch:
         mock_session_cls.return_value = mock_session
 
         source = WikiRetrievalSource(language="en")
-        source.fetch(RetrieveMode.QUERY, query="test", n=600)
+        with caplog.at_level(logging.WARNING, logger="pyforger.acquire.sources"):
+            source.fetch(RetrieveMode.QUERY, query="test", n=600)
 
         search_call = mock_session.get.call_args_list[0]
         search_params = search_call[1]["params"]
         assert search_params["srlimit"] == "500"
+        assert any(
+            "n=600" in rec.getMessage() and "srlimit" in rec.getMessage()
+            for rec in caplog.records
+            if rec.levelno == logging.WARNING
+        )
 
     @patch("pyforger.acquire.sources.requests.Session")
-    def test_random_mode_caps_rnlimit_at_500(self, mock_session_cls: MagicMock) -> None:
-        """RANDOM mode clamps rnlimit to 500 when n exceeds the API maximum."""
+    def test_random_mode_caps_rnlimit_at_500(
+        self, mock_session_cls: MagicMock, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """RANDOM mode clamps rnlimit to 500 and warns when n exceeds the API max."""
         random_resp = _make_random_response([("Article", 1)])
         extracts_resp = _make_extracts_response(
             [{"pageid": 1, "title": "Article", "extract": "Body."}]
@@ -316,11 +327,42 @@ class TestWikiRetrievalSourceFetch:
         mock_session_cls.return_value = mock_session
 
         source = WikiRetrievalSource(language="en")
-        source.fetch(RetrieveMode.RANDOM, n=600)
+        with caplog.at_level(logging.WARNING, logger="pyforger.acquire.sources"):
+            source.fetch(RetrieveMode.RANDOM, n=600)
 
         random_call = mock_session.get.call_args_list[0]
         random_params = random_call[1]["params"]
         assert random_params["rnlimit"] == "500"
+        assert any(
+            "n=600" in rec.getMessage() and "rnlimit" in rec.getMessage()
+            for rec in caplog.records
+            if rec.levelno == logging.WARNING
+        )
+
+    @patch("pyforger.acquire.sources.requests.Session")
+    def test_fetch_does_not_warn_when_n_within_limit(
+        self, mock_session_cls: MagicMock, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """No warning is emitted when n is within the API maximum."""
+        search_resp = _make_search_response([("Article", 1)])
+        extracts_resp = _make_extracts_response(
+            [{"pageid": 1, "title": "Article", "extract": "Body."}]
+        )
+
+        mock_session = MagicMock()
+        responses = [MagicMock(), MagicMock()]
+        responses[0].json.return_value = search_resp
+        responses[0].raise_for_status = MagicMock()
+        responses[1].json.return_value = extracts_resp
+        responses[1].raise_for_status = MagicMock()
+        mock_session.get.side_effect = responses
+        mock_session_cls.return_value = mock_session
+
+        source = WikiRetrievalSource(language="en")
+        with caplog.at_level(logging.WARNING, logger="pyforger.acquire.sources"):
+            source.fetch(RetrieveMode.QUERY, query="test", n=10)
+
+        assert not any(rec.levelno == logging.WARNING for rec in caplog.records)
 
     @pytest.mark.skipif(
         not os.environ.get("PYFORGER_WIKI_LIVE"),

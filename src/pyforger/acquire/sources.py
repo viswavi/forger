@@ -5,7 +5,11 @@ Concrete sources: web, Wikipedia, Hugging Face, ArXiv, Semantic Scholar.
 
 from __future__ import annotations
 
+<<<<<<< rishith_implement_web_retrieve
 import math
+=======
+import logging
+>>>>>>> main
 import random
 from abc import ABC, abstractmethod
 from enum import Enum, auto
@@ -13,8 +17,13 @@ from typing import Any
 
 import arxiv
 import requests
+<<<<<<< rishith_implement_web_retrieve
 import trafilatura
+=======
+>>>>>>> main
 from semanticscholar import SemanticScholar  # type: ignore[import-untyped]
+
+logger = logging.getLogger(__name__)
 
 
 class RetrieveMode(Enum):
@@ -380,7 +389,11 @@ class WikiRetrievalSource(RetrievalSource):
 
     _API_LIMIT = 500
     _EXTRACT_BATCH_SIZE = 20
+<<<<<<< rishith_implement_web_retrieve
     _DEFAULT_TIMEOUT = 30
+=======
+    _DEFAULT_TIMEOUT = 5
+>>>>>>> main
 
     def __init__(self, language: str = "en", **kwargs: Any) -> None:
         """Store config for Wikipedia retrieval.
@@ -408,6 +421,34 @@ class WikiRetrievalSource(RetrievalSource):
         t = merged.get("timeout", WikiRetrievalSource._DEFAULT_TIMEOUT)
         return {"timeout": t}
 
+<<<<<<< rishith_implement_web_retrieve
+=======
+    @classmethod
+    def _clamp_n(cls, n: int, param_name: str) -> int:
+        """Clamp ``n`` to the MediaWiki API maximum, warning once when exceeded.
+
+        Args:
+            n: Requested number of results.
+            param_name: MediaWiki parameter being clamped (e.g. ``"srlimit"``);
+                included in the warning for debuggability.
+
+        Returns:
+            ``min(n, cls._API_LIMIT)``.
+        """
+        if n > cls._API_LIMIT:
+            logger.warning(
+                "Requested n=%d exceeds Wikipedia API maximum of %d; "
+                "clamping %s to %d. Only the first %d results will be returned.",
+                n,
+                cls._API_LIMIT,
+                param_name,
+                cls._API_LIMIT,
+                cls._API_LIMIT,
+            )
+            return cls._API_LIMIT
+        return n
+
+>>>>>>> main
     @staticmethod
     def _result_to_item(page: dict[str, Any]) -> dict[str, Any]:
         """Convert a MediaWiki page dict to DPR/BEIR-standard item dict.
@@ -503,6 +544,7 @@ class WikiRetrievalSource(RetrievalSource):
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
         """Return items from Wikipedia by mode (QUERY or RANDOM).
+<<<<<<< rishith_implement_web_retrieve
 
         Mode behavior:
         - QUERY: Searches Wikipedia with srsearch={query} and srlimit={n},
@@ -515,6 +557,17 @@ class WikiRetrievalSource(RetrievalSource):
 
         Per-call **kwargs are merged with constructor kwargs (e.g. timeout for
         requests.get on every HTTP call).
+=======
+
+        Mode behavior:
+        - QUERY: Searches Wikipedia with srsearch={query} and srlimit={n},
+          then fetches intro extracts for each result. Empty or None query
+          defaults to "Wikipedia". Redirects are resolved so search titles
+          still match extracts.
+        - RANDOM: Fetches n random articles from the main namespace via
+          ``list=random`` and returns their intro extracts. The server
+          controls randomness; seed is ignored (see class docstring).
+>>>>>>> main
 
         Returns:
             List of dicts in DPR/BEIR format; each has "text" (intro extract),
@@ -535,7 +588,11 @@ class WikiRetrievalSource(RetrievalSource):
                     "format": "json",
                     "list": "search",
                     "srsearch": q,
+<<<<<<< rishith_implement_web_retrieve
                     "srlimit": str(min(n, self._API_LIMIT)),
+=======
+                    "srlimit": str(self._clamp_n(n, "srlimit")),
+>>>>>>> main
                 },
                 **timeout_kw,
             )
@@ -563,7 +620,11 @@ class WikiRetrievalSource(RetrievalSource):
                     "format": "json",
                     "list": "random",
                     "rnnamespace": "0",
+<<<<<<< rishith_implement_web_retrieve
                     "rnlimit": str(min(n, self._API_LIMIT)),
+=======
+                    "rnlimit": str(self._clamp_n(n, "rnlimit")),
+>>>>>>> main
                 },
                 **timeout_kw,
             )
