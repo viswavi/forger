@@ -116,7 +116,7 @@ class WebRetrievalSource(RetrievalSource):
                 result URL after search.  Default False (snippet only).
             **kwargs: Session / fetch overrides.  Recognised keys:
                 ``timeout`` (float) -- per-request timeout in seconds
-                (default 30);
+                (default 5);
                 ``max_content_length`` (int) -- max bytes to download per
                 page when *fetch_full_content* is True (default 1 MB).
         """

@@ -188,7 +188,7 @@ class TestWebRetrievalSourceFetch:
 
     @patch("pyforger.acquire.sources.requests.Session")
     def test_fetch_uses_default_timeout(self, mock_session_cls: MagicMock) -> None:
-        """Default 30s timeout is applied when none is specified."""
+        """Default 5s timeout is applied when none is specified."""
         brave_resp = _make_brave_search_response([_make_brave_result()])
         mock_session = MagicMock()
         resp_mock = MagicMock()
@@ -201,7 +201,7 @@ class TestWebRetrievalSourceFetch:
         source.fetch(RetrieveMode.QUERY, query="test", n=1)
 
         call_kw = mock_session.get.call_args[1]
-        assert call_kw.get("timeout") == 30
+        assert call_kw.get("timeout") == 5
 
 
 class TestWebRetrievalSourceFullContent:
@@ -366,7 +366,7 @@ class TestWebRetrievalSourceFullContent:
         assert len(items) == 1
         assert items[0]["text"] == "Big snippet"
         content_session.get.assert_called_once_with(
-            "https://big.com", stream=True, timeout=30
+            "https://big.com", stream=True, timeout=5
         )
 
     @patch("pyforger.acquire.sources.trafilatura")
