@@ -55,9 +55,9 @@ class RecordingMockModel(MockModel):
     ) -> list[list[str]]:
         """Append the current prompt batch to recorded_prompts, then delegate."""
         self.recorded_prompts.append(list(prompts))
-        return super().generate_batch(
-            prompts, n=n, temperature=temperature, max_tokens=max_tokens
-        )
+       return super().generate_batch(
+           prompts, n=n, temperature=temperature, max_tokens=max_tokens, stop=stop
+       )
 
 
 class CallCounter:
