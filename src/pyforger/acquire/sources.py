@@ -269,12 +269,6 @@ class WikiRetrievalSource(RetrievalSource):
           ``list=random`` and returns their intro extracts. The server
           controls randomness; seed is ignored (see class docstring).
 
-        Per-call **kwargs are merged with constructor kwargs (e.g. timeout for
-        requests.get on every HTTP call).
-
-        If ``n`` exceeds :attr:`_API_LIMIT` (500), the request is clamped to
-        ``_API_LIMIT`` and a warning is logged on ``pyforger.acquire.sources``.
-
         Returns:
             List of dicts in DPR/BEIR format; each has "text" (intro extract),
             "id" (page ID), "title", "summary" (same as text).
