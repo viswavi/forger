@@ -92,7 +92,7 @@ class WebRetrievalSource(RetrievalSource):
     _BRAVE_MAX_COUNT = 20
     _BRAVE_MAX_OFFSET = 9
     _DEFAULT_MAX_CONTENT_LENGTH = 1_000_000  # 1 MB
-    _DEFAULT_TIMEOUT = 30  # seconds
+    _DEFAULT_TIMEOUT = 5  # seconds
 
     def __init__(
         self,
@@ -239,6 +239,8 @@ class WebRetrievalSource(RetrievalSource):
 
                 chunks: list[bytes] = []
                 downloaded = 0
+                # Stream in chunks and discard pages whose body exceeds
+                # max_len (servers may omit Content-Length or lie about it).
                 for chunk in resp.iter_content(chunk_size=self._STREAM_CHUNK_SIZE):
                     downloaded += len(chunk)
                     if downloaded > max_len:
