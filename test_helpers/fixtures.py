@@ -33,7 +33,9 @@ class MockModel(Model):
     ) -> list[list[str]]:
         """Return one canned response per prompt, cycling through self.responses."""
         self._call_count += 1
-        return [[self.responses[i % len(self.responses)]] for i in range(len(prompts))]
+        return [
+            [self.responses[i % len(self.responses)]] * n for i in range(len(prompts))
+        ]
 
 
 class RecordingMockModel(MockModel):
@@ -56,7 +58,7 @@ class RecordingMockModel(MockModel):
         """Append the current prompt batch to recorded_prompts, then delegate."""
         self.recorded_prompts.append(list(prompts))
         return super().generate_batch(
-            prompts, n=n, temperature=temperature, max_tokens=max_tokens
+            prompts, n=n, temperature=temperature, max_tokens=max_tokens, stop=stop
         )
 
 

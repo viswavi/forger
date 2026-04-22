@@ -9,6 +9,7 @@ from typing import Any, Union
 
 import litellm
 
+# Type aliases
 Message = dict[str, str]
 Prompt = Union[str, list[Message]]
 
