@@ -7,19 +7,14 @@ parsing.
 from __future__ import annotations
 
 import json
-import logging
 from collections.abc import Generator
 from typing import Any
 
 from pyforger.acquire.model import Model, Prompt
 from pyforger.core import DataSpec, NodeType
+from pyforger.utils import get_formatted_logger
 
-
-def _get_logger() -> logging.Logger:
-    """Lazy logger to avoid circular import with utils."""
-    from pyforger.utils import get_formatted_logger as _gf
-
-    return _gf(__name__)
+logger = get_formatted_logger(__name__)
 
 
 def _schema_format_instructions(output_schema: dict[str, Any]) -> str:
@@ -144,7 +139,6 @@ def _generation_loop(
     """
     accepted: list[dict[str, Any]] = []
     consecutive_failed_rounds = 0
-    log = _get_logger()
 
     while len(accepted) < n and consecutive_failed_rounds < max_retries:
         remaining = n - len(accepted)
@@ -162,7 +156,7 @@ def _generation_loop(
         raw_responses = [r[0] for r in batch_results]
 
         if len(raw_responses) != len(prompts_list):
-            log.warning(
+            logger.warning(
                 "generate_batch returned %d responses for %d prompts; skipping round",
                 len(raw_responses),
                 len(prompts_list),
@@ -174,7 +168,7 @@ def _generation_loop(
         for raw_text in raw_responses:
             parsed = _parse_output(raw_text, output_schema)
             if parsed is None:
-                log.debug(
+                logger.debug(
                     "Parse failed for output (schema=%s)",
                     output_schema is not None,
                 )

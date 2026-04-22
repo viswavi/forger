@@ -9,6 +9,11 @@ readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
     "rouge-score",
+    "arxiv>=2.0",
+    "requests>=2.20",
+    "datasets",
+    "huggingface_hub",
+    "semanticscholar>=0.11.0",
     "litellm==1.83.0",
 ]
 classifiers = [
