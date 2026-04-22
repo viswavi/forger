@@ -12,6 +12,7 @@ dependencies = [
     "arxiv>=2.0",
     "requests>=2.20",
     "trafilatura>=1.6",
+    "lxml_html_clean",
     "datasets",
     "huggingface_hub",
     "semanticscholar>=0.11.0",
