@@ -22,6 +22,10 @@ class NodeType(Enum):
     FILTER = auto()  # Removes data based on criteria
     DECOMPOSE = auto()  # Generates new sub-pipelines
     RAW = auto()  # Literal/raw data node
+    ITEM = auto()  # Symbolic per-row placeholder used inside FOREACH bodies
+    EXPR = auto()  # Sub-expression node (subscript, attr, compare, call) on symbolic row
+    FOREACH = auto()  # Map a body-subgraph over each row of a source DataSpec
+    COND = auto()  # Per-row if/else between two sub-DAGs
 
 
 ExecuteFn = Callable[..., list[dict]]

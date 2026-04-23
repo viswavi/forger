@@ -1,135 +1,183 @@
 """Execution engine for Forger computation graphs.
 
-The run() function executes a Forger pipeline.
+Handles:
+- Regular DAG execution with topological sort + caching
+- FOREACH / COND / ITEM / EXPR nodes via a recursive per-row evaluator
+  with a frame stack (ContextVar-based, thread- and asyncio-safe) that
+  gives ItemSpecs their current-row values
+- Auto-compilation of plain Python functions with symbolic for/if
+
+The ``persistent`` flag in ``_evaluate`` is load-bearing:
+    persistent=True   — outside a foreach frame; results may be written
+                        to node._cached_result for cross-run reuse.
+    persistent=False  — inside a foreach body; per-row results stay in
+                        the fresh sub-cache only, never on the node.
+Never flip this flag on a single node mid-evaluation; do not write
+_cached_result from within a FOREACH body.
 """
 from __future__ import annotations
 
-from collections import deque
+import contextvars
 from collections.abc import Callable
 from typing import Any
 
-from pyforger.core import DataSpec, ExecutionStatus
+from pyforger.core import DataSpec, ExecutionStatus, NodeType
 from pyforger.utils import get_formatted_logger
 
 logger = get_formatted_logger("Runner")
+
+
+# --- frame stack (thread-/asyncio-safe) ---------------------------------------
+
+_frame_stack_var: contextvars.ContextVar[tuple[dict[int, Any], ...]] = (
+    contextvars.ContextVar("_pyforger_frame_stack", default=())
+)
+
+
+def _push_frame(frame: dict[int, Any]) -> contextvars.Token:
+    return _frame_stack_var.set(_frame_stack_var.get() + (frame,))
+
+
+def _pop_frame(token: contextvars.Token) -> None:
+    _frame_stack_var.reset(token)
+
+
+def current_frame_value(uid: int) -> Any:
+    """Return the current-row binding for an ItemSpec's uid."""
+    for frame in reversed(_frame_stack_var.get()):
+        if uid in frame:
+            return frame[uid]
+    raise RuntimeError(
+        f"ItemSpec uid={uid} accessed with no active FOREACH frame. "
+        "Did you use an ItemSpec outside its foreach()?"
+    )
+
+
+# --- public entry point -------------------------------------------------------
+
+# Only NotImplementedError (compiler doesn't handle this AST shape, but the
+# code is safe to eager) triggers fallback. TracingScopeError means the
+# compiler recognized the shape AND knows eager execution would produce a
+# different result — must propagate.
+_COMPILE_SUPPORT_ERRORS = (NotImplementedError,)
 
 
 def run(
     pipeline: DataSpec | Callable[..., DataSpec],
     cache: dict[int, Any] | None = None,
 ) -> Any:
-    """Execute a dataset creation pipeline (expressing a DAG of data operations).
+    """Execute a Forger pipeline.
 
-    Accepts either a DataSpec node or a callable that returns one.
-    Executes the DAG in topological order with caching.
-
-    Args:
-        pipeline: A DataSpec node, or a function that builds and returns one.
-                  Passing a function lets you define pipelines as plain Python
-                  functions and pass them directly to run(). If a function is passed,
-                  it must return a DataSpec.
-        cache: Optional shared cache (for advanced use / testing).
-
-    Returns:
-        The computed data (typically List[dict])
-
-    Example:
-        >>> def my_pipeline():
-        ...     data = forger.acquire.retrieve_from_hf(description="math", max_n=100)
-        ...     return forger.filter.by_diversity(data, threshold=0.8)
-        >>> result = forger.run(my_pipeline)
+    If ``pipeline`` is a plain ``def``-function (not a lambda), it's compiled
+    via ``pyforger.graph.compile_function``. Compilation-support gaps fall
+    back to eager call; any other exception propagates unchanged so real
+    bugs aren't masked.
     """
     if callable(pipeline) and not isinstance(pipeline, DataSpec):
-        resolved = pipeline()
+        if _is_lambda(pipeline):
+            raise TypeError(
+                "pyforger.run cannot AST-compile a lambda. Pass a `def` "
+                "function — lambdas can't express lazy for/if."
+            )
+        from pyforger.graph.compiler import compile_function
+        try:
+            resolved = compile_function(pipeline)
+        except _COMPILE_SUPPORT_ERRORS as e:
+            logger.warning(
+                "pyforger.graph.compile_function fell back to eager for %s: %s",
+                getattr(pipeline, "__name__", "<fn>"), e,
+            )
+            resolved = pipeline()
     else:
         resolved = pipeline
 
     dataset: DataSpec = resolved
-
     if cache is None:
         cache = {}
+    return _evaluate(dataset, cache)
 
-    node_id = id(dataset)
+
+def _is_lambda(fn) -> bool:
+    return getattr(fn, "__name__", "") == "<lambda>"
+
+
+# --- evaluator ----------------------------------------------------------------
+
+def _evaluate(node: DataSpec, cache: dict[int, Any], persistent: bool = True) -> Any:
+    """Recursively evaluate a node; handles all NodeTypes.
+
+    Caching rules:
+      - ``cache`` dedupes within a single run() call.
+      - ``persistent=True`` also writes ``node._cached_result`` for reuse.
+      - ``persistent=False`` (inside foreach body) NEVER reads or writes
+        ``node._cached_result`` — the sub_cache is fresh per row.
+    """
+    node_id = id(node)
+    nt = node.node_type
+
+    if nt == NodeType.ITEM:
+        return node.execute_fn()
+
+    if nt == NodeType.EXPR:
+        child_vals = [_evaluate(dep, cache, persistent=persistent) for dep in node.inputs]
+        return node.execute_fn(*child_vals)
+
+    if nt == NodeType.COND:
+        pred = node._cond_pred
+        pred_val = (_evaluate(pred, cache, persistent=persistent)
+                    if isinstance(pred, DataSpec) else pred)
+        branch = node._cond_then if pred_val else node._cond_else
+        return _evaluate(branch, cache, persistent=persistent)
+
+    if nt == NodeType.FOREACH:
+        if persistent and node_id in cache:
+            return cache[node_id]
+        source_rows = _evaluate(node._foreach_source, cache, persistent=persistent)
+        if source_rows is None:
+            source_rows = []
+        uid = node._foreach_item_uid
+        body = node._foreach_body
+        out: list[Any] = []
+        for row in source_rows:
+            token = _push_frame({uid: row})
+            try:
+                sub_cache: dict[int, Any] = {}
+                per_row = _evaluate(body, sub_cache, persistent=False)
+            finally:
+                _pop_frame(token)
+            if isinstance(per_row, list):
+                out.extend(per_row)
+            elif per_row is not None:
+                out.append(per_row)
+        cache[node_id] = out
+        if persistent:
+            node._cached_result = out
+            node._status = ExecutionStatus.COMPLETED
+        return out
+
+    # Regular nodes.
     if node_id in cache:
         return cache[node_id]
-
-    if dataset.is_completed:
-        return dataset.result
-
-    execution_order = _topological_sort(dataset)
-
-    for node in execution_order:
-        _execute_node(node, cache)
-
-    return cache[id(dataset)]
-
-
-def _topological_sort(root: DataSpec) -> list[DataSpec]:
-    """Compute topological execution order via Kahn's algorithm."""
-    all_nodes: set[int] = set()
-    node_map: dict[int, DataSpec] = {}
-
-    def collect_nodes(node: DataSpec) -> None:
-        node_id = id(node)
-        if node_id in all_nodes:
-            return
-        all_nodes.add(node_id)
-        node_map[node_id] = node
-        for dep in node.inputs:
-            collect_nodes(dep)
-
-    collect_nodes(root)
-
-    in_degree: dict[int, int] = {nid: 0 for nid in all_nodes}
-    dependents: dict[int, list[int]] = {nid: [] for nid in all_nodes}
-
-    for node_id in all_nodes:
-        node = node_map[node_id]
-        for dep in node.inputs:
-            dep_id = id(dep)
-            in_degree[node_id] += 1
-            dependents[dep_id].append(node_id)
-
-    queue = deque([nid for nid, deg in in_degree.items() if deg == 0])
-    result: list[DataSpec] = []
-
-    while queue:
-        node_id = queue.popleft()
-        result.append(node_map[node_id])
-        for dependent_id in dependents[node_id]:
-            in_degree[dependent_id] -= 1
-            if in_degree[dependent_id] == 0:
-                queue.append(dependent_id)
-
-    assert len(result) == len(all_nodes), "Cycle detected in computation graph"
-    return result
-
-
-def _execute_node(node: DataSpec, cache: dict[int, Any]) -> None:
-    """Execute a single node, storing result in cache."""
-    node_id = id(node)
-
-    if node_id in cache:
-        return
-
-    if node.is_completed:
+    if persistent and node.is_completed:
         cache[node_id] = node.result
-        return
+        return node.result
 
-    input_data = [cache[id(dep)] for dep in node.inputs]
-    node._status = ExecutionStatus.RUNNING
-
+    input_vals = [_evaluate(dep, cache, persistent=persistent) for dep in node.inputs]
+    if persistent:
+        node._status = ExecutionStatus.RUNNING
     try:
-        result = node.execute_fn(*input_data)
-        cache[node_id] = result
+        result = node.execute_fn(*input_vals)
+    except NotImplementedError:
+        if persistent:
+            node._status = ExecutionStatus.FAILED
+        raise
+    except Exception as e:
+        if persistent:
+            node._status = ExecutionStatus.FAILED
+        raise RuntimeError(f"Error executing '{node.name}': {e}") from e
 
+    cache[node_id] = result
+    if persistent:
         node._cached_result = result
         node._status = ExecutionStatus.COMPLETED
-
-    except NotImplementedError:
-        node._status = ExecutionStatus.FAILED
-        raise
-
-    except Exception as e:
-        node._status = ExecutionStatus.FAILED
-        raise RuntimeError(f"Error executing '{node.name}': {e}") from e
+    return result
