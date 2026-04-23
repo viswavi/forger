@@ -1,6 +1,65 @@
 """Reusable test fixtures for Forger tests."""
 
+from __future__ import annotations
+
+from typing import Any
+
+from pyforger.acquire.model import Model, Prompt
 from pyforger.core import DataSpec, NodeType
+
+
+class MockModel(Model):
+    """Model that returns canned responses from generate_batch for testing."""
+
+    def __init__(
+        self,
+        responses: list[str],
+        model_id: str = "test/model",
+        **kwargs: Any,
+    ) -> None:
+        """Initialize with canned responses cycled across prompts."""
+        super().__init__(model_id=model_id, **kwargs)
+        self.responses = responses
+        self._call_count = 0
+
+    def generate_batch(
+        self,
+        prompts: list[Prompt],
+        *,
+        n: int = 1,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        stop: list[str] | None = None,
+    ) -> list[list[str]]:
+        """Return one canned response per prompt, cycling through self.responses."""
+        self._call_count += 1
+        return [
+            [self.responses[i % len(self.responses)]] * n for i in range(len(prompts))
+        ]
+
+
+class RecordingMockModel(MockModel):
+    """MockModel that records every batch of prompts passed to generate_batch."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Initialize and set up prompt recording."""
+        super().__init__(*args, **kwargs)
+        self.recorded_prompts: list[list[Prompt]] = []
+
+    def generate_batch(
+        self,
+        prompts: list[Prompt],
+        *,
+        n: int = 1,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        stop: list[str] | None = None,
+    ) -> list[list[str]]:
+        """Append the current prompt batch to recorded_prompts, then delegate."""
+        self.recorded_prompts.append(list(prompts))
+        return super().generate_batch(
+            prompts, n=n, temperature=temperature, max_tokens=max_tokens, stop=stop
+        )
 
 
 class CallCounter:

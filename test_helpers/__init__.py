@@ -1,17 +1,9 @@
 """Test helpers for Forger."""
 
-from fixtures import (
-    CallCounter,
-    make_concat,
-    make_double_repetition_data,
-    make_empty_filter,
-    make_source,
-)
+from fixtures import make_concat, make_double_repetition_data, make_empty_filter
 
 __all__ = [
-    "CallCounter",
     "make_concat",
     "make_double_repetition_data",
     "make_empty_filter",
-    "make_source",
 ]

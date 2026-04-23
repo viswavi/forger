@@ -1,9 +1,9 @@
 """Tests for agreement-based filter operations."""
 
 import pytest
-from fixtures import make_source
 
 from pyforger import run
+from pyforger.acquire import from_list
 from pyforger.filter import by_exact_agreement, by_rouge_l_agreement
 
 
@@ -16,7 +16,7 @@ class TestByExactAgreement:
             {"output_1": "42", "output_2": "42"},
             {"output_1": "yes", "output_2": "no"},
         ]
-        source = make_source(data)
+        source = from_list(data)
         result = run(by_exact_agreement(source, field_a="output_1", field_b="output_2"))
         assert result == [data[0]]
 
@@ -26,7 +26,7 @@ class TestByExactAgreement:
             {"output_1": "cat", "output_2": "dog"},
             {"output_1": "red", "output_2": "blue"},
         ]
-        source = make_source(data)
+        source = from_list(data)
         result = run(by_exact_agreement(source, field_a="output_1", field_b="output_2"))
         assert result == []
 
@@ -36,20 +36,20 @@ class TestByExactAgreement:
             {"output_1": "yes", "output_2": "yes"},
             {"output_1": "no", "output_2": "no"},
         ]
-        source = make_source(data)
+        source = from_list(data)
         result = run(by_exact_agreement(source, field_a="output_1", field_b="output_2"))
         assert result == data
 
     def test_empty_input(self):
         """Empty input returns empty list."""
-        source = make_source([])
+        source = from_list([])
         result = run(by_exact_agreement(source, field_a="a", field_b="b"))
         assert result == []
 
     def test_case_sensitive(self):
         """Comparison is case-sensitive."""
         data = [{"output_1": "Yes", "output_2": "yes"}]
-        source = make_source(data)
+        source = from_list(data)
         result = run(by_exact_agreement(source, field_a="output_1", field_b="output_2"))
         assert result == []
 
@@ -63,7 +63,7 @@ class TestByExactAgreement:
             {"output_1": "hello.", "output_2": "hello"},
             {"output_1": "hello", "output_2": "hello."},
         ]
-        source = make_source(data)
+        source = from_list(data)
         result = run(by_exact_agreement(source, field_a="output_1", field_b="output_2"))
         assert len(result) == 4
         assert data[4] not in result
@@ -72,7 +72,7 @@ class TestByExactAgreement:
     def test_missing_field_raises_error(self):
         """Missing expected field raises an error."""
         data = [{"output_1": "a"}]
-        source = make_source(data)
+        source = from_list(data)
         with pytest.raises(RuntimeError, match="missing required field 'output_2'"):
             run(by_exact_agreement(source, field_a="output_1", field_b="output_2"))
 
@@ -142,7 +142,7 @@ class TestByRougeLAgreement:
                 "out_b": "the cat sat on a mat",
             },
         ]
-        source = make_source(data)
+        source = from_list(data)
         result = run(
             by_rouge_l_agreement(
                 source, threshold=0.7, field_a="out_a", field_b="out_b"
@@ -158,7 +158,7 @@ class TestByRougeLAgreement:
                 "out_b": "a quick brown fox jumped",
             },
         ]
-        source = make_source(data)
+        source = from_list(data)
         result = run(
             by_rouge_l_agreement(
                 source, threshold=0.7, field_a="out_a", field_b="out_b"
@@ -169,7 +169,7 @@ class TestByRougeLAgreement:
     def test_exact_match_always_kept(self):
         """Identical fields have ROUGE-L of 1.0 and are always kept."""
         data = [{"out_a": "hello world", "out_b": "hello world"}]
-        source = make_source(data)
+        source = from_list(data)
         result = run(
             by_rouge_l_agreement(
                 source, threshold=0.99, field_a="out_a", field_b="out_b"
@@ -185,7 +185,7 @@ class TestByRougeLAgreement:
                 "out_b": "the cat sat on a mat",
             },
         ]
-        source = make_source(data)
+        source = from_list(data)
         strict = run(
             by_rouge_l_agreement(
                 source, threshold=0.99, field_a="out_a", field_b="out_b"
@@ -204,7 +204,7 @@ class TestByRougeLAgreement:
             {"out_a": "the cat sat on the mat", "out_b": "the cat sat on the mat"},
             {"out_a": "hello world", "out_b": "completely different text"},
         ]
-        source = make_source(data)
+        source = from_list(data)
         result = run(
             by_rouge_l_agreement(
                 source, threshold=0.7, field_a="out_a", field_b="out_b"
@@ -214,21 +214,21 @@ class TestByRougeLAgreement:
 
     def test_empty_input(self):
         """Empty input returns empty list."""
-        source = make_source([])
+        source = from_list([])
         result = run(by_rouge_l_agreement(source, field_a="a", field_b="b"))
         assert result == []
 
     def test_single_item_agreeing(self):
         """Single agreeing item is kept."""
         data = [{"out_a": "hello world", "out_b": "hello world"}]
-        source = make_source(data)
+        source = from_list(data)
         result = run(by_rouge_l_agreement(source, field_a="out_a", field_b="out_b"))
         assert result == data
 
     def test_missing_field_raises_error(self):
         """Missing expected field raises an error."""
         data = [{"out_a": "hello"}]
-        source = make_source(data)
+        source = from_list(data)
         with pytest.raises(RuntimeError, match="missing required field 'out_b'"):
             run(by_rouge_l_agreement(source, field_a="out_a", field_b="out_b"))
 
