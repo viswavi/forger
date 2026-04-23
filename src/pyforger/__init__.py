@@ -7,6 +7,7 @@ import pyforger.alter as alter
 import pyforger.decompose as decompose
 import pyforger.filter as filter  # noqa: A001
 import pyforger.graph as graph
+import pyforger.viz as viz
 from pyforger.core import DataSpec, ExecutionStatus, NodeType
 from pyforger.runner import run
 
@@ -20,4 +21,5 @@ __all__ = [
     "decompose",
     "filter",
     "graph",
+    "viz",
 ]
