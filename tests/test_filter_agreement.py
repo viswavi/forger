@@ -86,7 +86,7 @@ class TestByExactDisagreement:
             {"output_1": "42", "output_2": "42"},
             {"output_1": "yes", "output_2": "no"},
         ]
-        source = make_source(data)
+        source = from_list(data)
         result = run(
             by_exact_agreement(
                 source, field_a="output_1", field_b="output_2", disagree=True
@@ -100,7 +100,7 @@ class TestByExactDisagreement:
             {"output_1": "yes", "output_2": "yes"},
             {"output_1": "no", "output_2": "no"},
         ]
-        source = make_source(data)
+        source = from_list(data)
         result = run(
             by_exact_agreement(
                 source, field_a="output_1", field_b="output_2", disagree=True
@@ -114,7 +114,7 @@ class TestByExactDisagreement:
             {"output_1": "cat", "output_2": "dog"},
             {"output_1": "red", "output_2": "blue"},
         ]
-        source = make_source(data)
+        source = from_list(data)
         result = run(
             by_exact_agreement(
                 source, field_a="output_1", field_b="output_2", disagree=True
@@ -124,7 +124,7 @@ class TestByExactDisagreement:
 
     def test_empty_input(self):
         """Empty input returns empty list."""
-        source = make_source([])
+        source = from_list([])
         result = run(
             by_exact_agreement(source, field_a="a", field_b="b", disagree=True)
         )
@@ -244,7 +244,7 @@ class TestByRougeLDisagreement:
                 "out_b": "a quick brown fox jumped",
             },
         ]
-        source = make_source(data)
+        source = from_list(data)
         result = run(
             by_rouge_l_agreement(
                 source,
@@ -264,7 +264,7 @@ class TestByRougeLDisagreement:
                 "out_b": "the cat sat on a mat",
             },
         ]
-        source = make_source(data)
+        source = from_list(data)
         result = run(
             by_rouge_l_agreement(
                 source,
@@ -282,7 +282,7 @@ class TestByRougeLDisagreement:
             {"out_a": "the cat sat on the mat", "out_b": "the cat sat on the mat"},
             {"out_a": "hello world", "out_b": "completely different text"},
         ]
-        source = make_source(data)
+        source = from_list(data)
         result = run(
             by_rouge_l_agreement(
                 source,
@@ -296,7 +296,7 @@ class TestByRougeLDisagreement:
 
     def test_empty_input(self):
         """Empty input returns empty list."""
-        source = make_source([])
+        source = from_list([])
         result = run(
             by_rouge_l_agreement(source, field_a="a", field_b="b", disagree=True)
         )
