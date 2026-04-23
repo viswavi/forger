@@ -77,6 +77,60 @@ class TestByExactAgreement:
             run(by_exact_agreement(source, field_a="output_1", field_b="output_2"))
 
 
+class TestByExactDisagreement:
+    """by_exact_agreement with keep='disagree' keeps items that differ."""
+
+    def test_keeps_disagreeing_items(self):
+        """Items where field_a != field_b are kept."""
+        data = [
+            {"output_1": "42", "output_2": "42"},
+            {"output_1": "yes", "output_2": "no"},
+        ]
+        source = from_list(data)
+        result = run(
+            by_exact_agreement(
+                source, field_a="output_1", field_b="output_2", disagree=True
+            )
+        )
+        assert result == [data[1]]
+
+    def test_removes_agreeing_items(self):
+        """Items where field_a == field_b are removed."""
+        data = [
+            {"output_1": "yes", "output_2": "yes"},
+            {"output_1": "no", "output_2": "no"},
+        ]
+        source = from_list(data)
+        result = run(
+            by_exact_agreement(
+                source, field_a="output_1", field_b="output_2", disagree=True
+            )
+        )
+        assert result == []
+
+    def test_all_disagree(self):
+        """When all items disagree, none are removed."""
+        data = [
+            {"output_1": "cat", "output_2": "dog"},
+            {"output_1": "red", "output_2": "blue"},
+        ]
+        source = from_list(data)
+        result = run(
+            by_exact_agreement(
+                source, field_a="output_1", field_b="output_2", disagree=True
+            )
+        )
+        assert result == data
+
+    def test_empty_input(self):
+        """Empty input returns empty list."""
+        source = from_list([])
+        result = run(
+            by_exact_agreement(source, field_a="a", field_b="b", disagree=True)
+        )
+        assert result == []
+
+
 class TestByRougeLAgreement:
     """by_rouge_l_agreement keeps items where two fields are similar."""
 
@@ -177,3 +231,73 @@ class TestByRougeLAgreement:
         source = from_list(data)
         with pytest.raises(RuntimeError, match="missing required field 'out_b'"):
             run(by_rouge_l_agreement(source, field_a="out_a", field_b="out_b"))
+
+
+class TestByRougeLDisagreement:
+    """by_rouge_l_agreement with keep='disagree' keeps dissimilar items."""
+
+    def test_keeps_dissimilar_items(self):
+        """Items with ROUGE-L below threshold are kept."""
+        data = [
+            {
+                "out_a": "the cat sat on the mat",
+                "out_b": "a quick brown fox jumped",
+            },
+        ]
+        source = from_list(data)
+        result = run(
+            by_rouge_l_agreement(
+                source,
+                threshold=0.7,
+                field_a="out_a",
+                field_b="out_b",
+                disagree=True,
+            )
+        )
+        assert result == data
+
+    def test_removes_similar_items(self):
+        """Items with ROUGE-L at or above threshold are removed."""
+        data = [
+            {
+                "out_a": "the cat sat on the mat",
+                "out_b": "the cat sat on a mat",
+            },
+        ]
+        source = from_list(data)
+        result = run(
+            by_rouge_l_agreement(
+                source,
+                threshold=0.7,
+                field_a="out_a",
+                field_b="out_b",
+                disagree=True,
+            )
+        )
+        assert result == []
+
+    def test_mixed_keeps_only_disagreeing(self):
+        """From a mix, only items below threshold survive."""
+        data = [
+            {"out_a": "the cat sat on the mat", "out_b": "the cat sat on the mat"},
+            {"out_a": "hello world", "out_b": "completely different text"},
+        ]
+        source = from_list(data)
+        result = run(
+            by_rouge_l_agreement(
+                source,
+                threshold=0.7,
+                field_a="out_a",
+                field_b="out_b",
+                disagree=True,
+            )
+        )
+        assert result == [data[1]]
+
+    def test_empty_input(self):
+        """Empty input returns empty list."""
+        source = from_list([])
+        result = run(
+            by_rouge_l_agreement(source, field_a="a", field_b="b", disagree=True)
+        )
+        assert result == []
