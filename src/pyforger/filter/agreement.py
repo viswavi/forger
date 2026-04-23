@@ -68,8 +68,8 @@ def by_rouge_l_agreement(
         field_b: Key for the second text to compare.
         threshold: ROUGE-L F1 threshold. Items scoring at or above are
             considered "in agreement".
-        disagree: If False (default), keep items that meet the threshold.
-            If True, keep items that fall below it.
+        disagree: If False (default), keep only items that meet the threshold.
+            If True, keep only the items that fall below it.
 
     Returns:
         A FILTER DataSpec that keeps only the selected items.
