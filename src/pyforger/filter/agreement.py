@@ -28,8 +28,8 @@ def by_exact_agreement(
         source: Upstream DataSpec providing list[dict] data.
         field_a: Key for the first value to compare.
         field_b: Key for the second value to compare.
-        disagree: If False (default), keep items where the fields match.
-            If True, keep items where they differ.
+        disagree: If False (default), keep only items where the fields match.
+            If True, keep only items where they differ.
 
     Returns:
         A FILTER DataSpec that keeps only the selected items.
