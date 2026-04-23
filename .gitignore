@@ -65,3 +65,11 @@ env/
 # OS
 .DS_Store
 Thumbs.db
+
+# Secrets
+.env
+
+# Generated viz artifacts
+examples/**/graph.mmd
+examples/**/graph.dot
+examples/**/graph.png
