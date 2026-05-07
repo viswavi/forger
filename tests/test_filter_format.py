@@ -2,8 +2,6 @@
 
 import pytest
 
-from pyforger import run
-from pyforger.acquire import from_list
 from pyforger.filter import by_invalid_response, by_keyword_blocklist, by_length
 
 
@@ -17,24 +15,24 @@ class TestByLength:
             {"instruction": " ".join(["word"] * 5), "response": "ok"},  # 5 words
             {"instruction": " ".join(["word"] * 15), "response": "ok"},  # 15 words
         ]
-        source = from_list(data)
-        result = run(
-            by_length(source, instruction_field="instruction", min_len=3, max_len=10)
+        source = data
+        result = by_length(
+            source, instruction_field="instruction", min_len=3, max_len=10
         )
         assert result == [data[1]]
 
     def test_removes_too_short(self):
         """Items with fewer words than min_len are removed."""
         data = [{"instruction": "hi", "response": "ok"}]
-        source = from_list(data)
-        result = run(by_length(source, instruction_field="instruction", min_len=5))
+        source = data
+        result = by_length(source, instruction_field="instruction", min_len=5)
         assert result == []
 
     def test_removes_too_long(self):
         """Items with more words than max_len are removed."""
         data = [{"instruction": " ".join(["word"] * 20), "response": "ok"}]
-        source = from_list(data)
-        result = run(by_length(source, instruction_field="instruction", max_len=10))
+        source = data
+        result = by_length(source, instruction_field="instruction", max_len=10)
         assert result == []
 
     def test_inclusive_bounds(self):
@@ -43,24 +41,24 @@ class TestByLength:
             {"instruction": " ".join(["word"] * 3), "response": "ok"},
             {"instruction": " ".join(["word"] * 7), "response": "ok"},
         ]
-        source = from_list(data)
-        result = run(
-            by_length(source, instruction_field="instruction", min_len=3, max_len=7)
+        source = data
+        result = by_length(
+            source, instruction_field="instruction", min_len=3, max_len=7
         )
         assert len(result) == 2
 
     def test_empty_input(self):
         """Empty input returns empty list."""
-        source = from_list([])
-        result = run(by_length(source, instruction_field="instruction"))
+        source = []
+        result = by_length(source, instruction_field="instruction")
         assert result == []
 
     def test_missing_field_raises_key_error(self):
         """Missing expected field raises KeyError."""
         data = [{"response": "ok"}]
-        source = from_list(data)
-        with pytest.raises(RuntimeError, match="missing required field 'instruction'"):
-            run(by_length(source, instruction_field="instruction"))
+        source = data
+        with pytest.raises(KeyError, match="missing required field 'instruction'"):
+            by_length(source, instruction_field="instruction")
 
 
 class TestByInvalidResponse:
@@ -69,55 +67,45 @@ class TestByInvalidResponse:
     def test_removes_exact_copy(self):
         """Items where response exactly matches instruction are removed."""
         data = [{"instruction": "Tell me a joke", "response": "Tell me a joke"}]
-        source = from_list(data)
-        result = run(
-            by_invalid_response(
-                source, instruction_field="instruction", response_field="response"
-            )
+        source = data
+        result = by_invalid_response(
+            source, instruction_field="instruction", response_field="response"
         )
         assert result == []
 
     def test_removes_empty_response(self):
         """Items with empty response are removed."""
         data = [{"instruction": "Tell me a joke", "response": ""}]
-        source = from_list(data)
-        result = run(
-            by_invalid_response(
-                source, instruction_field="instruction", response_field="response"
-            )
+        source = data
+        result = by_invalid_response(
+            source, instruction_field="instruction", response_field="response"
         )
         assert result == []
 
     def test_removes_whitespace_only_response(self):
         """Items with whitespace-only response are removed."""
         data = [{"instruction": "Tell me a joke", "response": "   \n\t  "}]
-        source = from_list(data)
-        result = run(
-            by_invalid_response(
-                source, instruction_field="instruction", response_field="response"
-            )
+        source = data
+        result = by_invalid_response(
+            source, instruction_field="instruction", response_field="response"
         )
         assert result == []
 
     def test_removes_response_substring_of_instruction(self):
         """Response that is a substring of instruction is removed."""
         data = [{"instruction": "Tell me a funny joke", "response": "me a funny joke"}]
-        source = from_list(data)
-        result = run(
-            by_invalid_response(
-                source, instruction_field="instruction", response_field="response"
-            )
+        source = data
+        result = by_invalid_response(
+            source, instruction_field="instruction", response_field="response"
         )
         assert result == []
 
     def test_removes_similar_length_substring(self):
         """Instruction that is a substring of response is removed."""
         data = [{"instruction": "Tell me a funny joke", "response": "Tell me a funny"}]
-        source = from_list(data)
-        result = run(
-            by_invalid_response(
-                source, instruction_field="instruction", response_field="response"
-            )
+        source = data
+        result = by_invalid_response(
+            source, instruction_field="instruction", response_field="response"
         )
         assert result == []
 
@@ -129,11 +117,9 @@ class TestByInvalidResponse:
                 "response": "Hi there! Here is a detailed explanation of the topic.",
             }
         ]
-        source = from_list(data)
-        result = run(
-            by_invalid_response(
-                source, instruction_field="instruction", response_field="response"
-            )
+        source = data
+        result = by_invalid_response(
+            source, instruction_field="instruction", response_field="response"
         )
         assert result == data
 
@@ -145,14 +131,12 @@ class TestByInvalidResponse:
                 "response": "Tell me a joke about dogs",
             }
         ]
-        source = from_list(data)
-        result = run(
-            by_invalid_response(
-                source,
-                instruction_field="instruction",
-                response_field="response",
-                similarity_threshold=0.8,
-            )
+        source = data
+        result = by_invalid_response(
+            source,
+            instruction_field="instruction",
+            response_field="response",
+            similarity_threshold=0.8,
         )
         assert result == []
 
@@ -164,11 +148,9 @@ class TestByInvalidResponse:
                 "response": "Why did the chicken cross the road?",
             }
         ]
-        source = from_list(data)
-        result = run(
-            by_invalid_response(
-                source, instruction_field="instruction", response_field="response"
-            )
+        source = data
+        result = by_invalid_response(
+            source, instruction_field="instruction", response_field="response"
         )
         assert result == data
 
@@ -178,44 +160,36 @@ class TestByInvalidResponse:
             {"instruction": "What is 2+2?", "response": "4"},
             {"instruction": "Name a color", "response": "Blue"},
         ]
-        source = from_list(data)
-        result = run(
-            by_invalid_response(
-                source, instruction_field="instruction", response_field="response"
-            )
+        source = data
+        result = by_invalid_response(
+            source, instruction_field="instruction", response_field="response"
         )
         assert result == data
 
     def test_empty_input(self):
         """Empty input returns empty list."""
-        source = from_list([])
-        result = run(
-            by_invalid_response(
-                source, instruction_field="instruction", response_field="response"
-            )
+        source = []
+        result = by_invalid_response(
+            source, instruction_field="instruction", response_field="response"
         )
         assert result == []
 
     def test_removes_none_response(self):
         """Items with None response are removed."""
         data = [{"instruction": "Tell me a joke", "response": None}]
-        source = from_list(data)
-        result = run(
-            by_invalid_response(
-                source, instruction_field="instruction", response_field="response"
-            )
+        source = data
+        result = by_invalid_response(
+            source, instruction_field="instruction", response_field="response"
         )
         assert result == []
 
     def test_missing_field_raises_key_error(self):
         """Missing expected field raises KeyError."""
         data = [{"instruction": "Tell me a joke"}]
-        source = from_list(data)
-        with pytest.raises(RuntimeError, match="missing required field 'response'"):
-            run(
-                by_invalid_response(
-                    source, instruction_field="instruction", response_field="response"
-                )
+        source = data
+        with pytest.raises(KeyError, match="missing required field 'response'"):
+            by_invalid_response(
+                source, instruction_field="instruction", response_field="response"
             )
 
 
@@ -234,15 +208,15 @@ class TestByKeywordBlocklist:
                 "response": "Why did the chicken cross the road?",
             },
         ]
-        source = from_list(data)
-        result = run(by_keyword_blocklist(source, response_field="response"))
+        source = data
+        result = by_keyword_blocklist(source, response_field="response")
         assert result == [data[1]]
 
     def test_case_insensitive_by_default(self):
         """Matching is case-insensitive by default."""
         data = [{"instruction": "test", "response": "AS AN AI, I refuse."}]
-        source = from_list(data)
-        result = run(by_keyword_blocklist(source, response_field="response"))
+        source = data
+        result = by_keyword_blocklist(source, response_field="response")
         assert result == []
 
     def test_case_sensitive_when_enabled(self):
@@ -251,9 +225,9 @@ class TestByKeywordBlocklist:
             {"instruction": "test", "response": "AS AN AI, I refuse."},
             {"instruction": "test", "response": "as an ai, I refuse."},
         ]
-        source = from_list(data)
-        result = run(
-            by_keyword_blocklist(source, response_field="response", case_sensitive=True)
+        source = data
+        result = by_keyword_blocklist(
+            source, response_field="response", case_sensitive=True
         )
         assert result == [data[0]]
 
@@ -263,9 +237,9 @@ class TestByKeywordBlocklist:
             {"instruction": "test", "response": "This contains foo in it."},
             {"instruction": "test", "response": "This is clean."},
         ]
-        source = from_list(data)
-        result = run(
-            by_keyword_blocklist(source, response_field="response", blocklist=["foo"])
+        source = data
+        result = by_keyword_blocklist(
+            source, response_field="response", blocklist=["foo"]
         )
         assert result == [data[1]]
 
@@ -275,8 +249,8 @@ class TestByKeywordBlocklist:
             {"instruction": "test", "response": "Perfectly fine answer."},
             {"instruction": "test", "response": "Another good response."},
         ]
-        source = from_list(data)
-        result = run(by_keyword_blocklist(source, response_field="response"))
+        source = data
+        result = by_keyword_blocklist(source, response_field="response")
         assert result == data
 
     def test_all_filtered_returns_empty(self):
@@ -285,12 +259,12 @@ class TestByKeywordBlocklist:
             {"instruction": "test", "response": "I cannot fulfill your request."},
             {"instruction": "test", "response": "I'm sorry, I cannot help."},
         ]
-        source = from_list(data)
-        result = run(by_keyword_blocklist(source, response_field="response"))
+        source = data
+        result = by_keyword_blocklist(source, response_field="response")
         assert result == []
 
     def test_empty_input(self):
         """Empty input returns empty list."""
-        source = from_list([])
-        result = run(by_keyword_blocklist(source, response_field="response"))
+        source = []
+        result = by_keyword_blocklist(source, response_field="response")
         assert result == []

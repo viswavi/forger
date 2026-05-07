@@ -6,8 +6,6 @@ import random
 
 import pytest
 
-from pyforger import run
-from pyforger.acquire import from_list
 from pyforger.filter import by_llm_score
 
 
@@ -89,15 +87,13 @@ class TestByLlmScore:
             {"instruction": "What is 2+2?", "response": "The answer is 4."},
             {"instruction": "Write a poem", "response": "Roses are red..."},
         ]
-        source = from_list(data)
-        result = run(
-            by_llm_score(
-                source,
-                model=_FakeJudge(),
-                score_threshold=1,
-                input_field="instruction",
-                output_field="response",
-            )
+        source = data
+        result = by_llm_score(
+            source,
+            model=_FakeJudge(),
+            score_threshold=1,
+            input_field="instruction",
+            output_field="response",
         )
         assert len(result) == len(data)
 
@@ -108,15 +104,13 @@ class TestByLlmScore:
             {"instruction": "What is 2+2?", "response": "The answer is 4."},
             {"instruction": "Write a poem", "response": "Roses are red..."},
         ]
-        source = from_list(data)
-        result = run(
-            by_llm_score(
-                source,
-                model=_FakeJudge(),
-                score_threshold=5,
-                input_field="instruction",
-                output_field="response",
-            )
+        source = data
+        result = by_llm_score(
+            source,
+            model=_FakeJudge(),
+            score_threshold=5,
+            input_field="instruction",
+            output_field="response",
         )
         assert len(result) < len(data)
 
@@ -127,37 +121,31 @@ class TestByLlmScore:
             {"instruction": "What is 2+2?", "response": "The answer is 4."},
             {"instruction": "Write a poem", "response": "Roses are red..."},
         ]
-        source = from_list(data)
-        strict = run(
-            by_llm_score(
-                source,
-                model=_FakeJudge(),
-                score_threshold=5,
-                input_field="instruction",
-                output_field="response",
-            )
+        source = data
+        strict = by_llm_score(
+            source,
+            model=_FakeJudge(),
+            score_threshold=5,
+            input_field="instruction",
+            output_field="response",
         )
-        lenient = run(
-            by_llm_score(
-                source,
-                model=_FakeJudge(),
-                score_threshold=1,
-                input_field="instruction",
-                output_field="response",
-            )
+        lenient = by_llm_score(
+            source,
+            model=_FakeJudge(),
+            score_threshold=1,
+            input_field="instruction",
+            output_field="response",
         )
         assert len(strict) <= len(lenient)
 
     def test_empty_input(self):
         """Empty input returns empty list."""
-        source = from_list([])
-        result = run(
-            by_llm_score(
-                source,
-                model=_FakeJudge(),
-                input_field="instruction",
-                output_field="response",
-            )
+        source = []
+        result = by_llm_score(
+            source,
+            model=_FakeJudge(),
+            input_field="instruction",
+            output_field="response",
         )
         assert result == []
 
@@ -168,43 +156,37 @@ class TestByLlmScore:
             {"instruction": "What is 2+2?", "response": "The answer is 4."},
             {"instruction": "Write a poem", "response": "Roses are red..."},
         ]
-        source1 = from_list(data)
-        source2 = from_list(data)
-        result1 = run(
-            by_llm_score(
-                source1,
-                model=_FakeJudge(),
-                input_field="instruction",
-                output_field="response",
-            )
+        source1 = data
+        source2 = data
+        result1 = by_llm_score(
+            source1,
+            model=_FakeJudge(),
+            input_field="instruction",
+            output_field="response",
         )
-        result2 = run(
-            by_llm_score(
-                source2,
-                model=_FakeJudge(),
-                input_field="instruction",
-                output_field="response",
-            )
+        result2 = by_llm_score(
+            source2,
+            model=_FakeJudge(),
+            input_field="instruction",
+            output_field="response",
         )
         assert result1 == result2
 
     def test_missing_field_raises_error(self):
         """Missing expected field raises an error."""
         data = [{"instruction": "Explain gravity"}]
-        source = from_list(data)
-        with pytest.raises(RuntimeError, match="missing required field 'response'"):
-            run(
-                by_llm_score(
-                    source,
-                    model=_FakeJudge(),
-                    input_field="instruction",
-                    output_field="response",
-                )
+        source = data
+        with pytest.raises(KeyError, match="missing required field 'response'"):
+            by_llm_score(
+                source,
+                model=_FakeJudge(),
+                input_field="instruction",
+                output_field="response",
             )
 
     def test_threshold_exceeding_max_score_raises(self):
         """Threshold greater than max_score raises ValueError."""
-        source = from_list([])
+        source = []
         with pytest.raises(ValueError, match="threshold.*must not exceed.*max_score"):
             by_llm_score(
                 source,
@@ -218,17 +200,15 @@ class TestByLlmScore:
     def test_forwards_temperature(self):
         """Temperature is forwarded to the model."""
         data = [{"instruction": "Q", "response": "A"}]
-        source = from_list(data)
+        source = data
         judge = _FakeJudge()
-        run(
-            by_llm_score(
-                source,
-                model=judge,
-                score_threshold=1,
-                temperature=0.0,
-                input_field="instruction",
-                output_field="response",
-            )
+        by_llm_score(
+            source,
+            model=judge,
+            score_threshold=1,
+            temperature=0.0,
+            input_field="instruction",
+            output_field="response",
         )
         assert judge.last_temperature == 0.0
 
@@ -242,16 +222,14 @@ class TestByLlmAgreementMode:
             {"instruction": "Explain gravity", "response": "Gravity is a force..."},
             {"instruction": "What is 2+2?", "response": "The answer is 4."},
         ]
-        source = from_list(data)
-        result = run(
-            by_llm_score(
-                source,
-                model=_FakeJudge(),
-                score_threshold=1,
-                agreement_threshold=0.01,
-                input_field="instruction",
-                output_field="response",
-            )
+        source = data
+        result = by_llm_score(
+            source,
+            model=_FakeJudge(),
+            score_threshold=1,
+            agreement_threshold=0.01,
+            input_field="instruction",
+            output_field="response",
         )
         assert len(result) == len(data)
 
@@ -261,28 +239,24 @@ class TestByLlmAgreementMode:
             {"instruction": "Explain gravity", "response": "Gravity is a force..."},
             {"instruction": "What is 2+2?", "response": "The answer is 4."},
         ]
-        source = from_list(data)
-        result = run(
-            by_llm_score(
-                source,
-                model=_FakeJudge(),
-                score_threshold=5,
-                input_field="instruction",
-                output_field="response",
-            )
+        source = data
+        result = by_llm_score(
+            source,
+            model=_FakeJudge(),
+            score_threshold=5,
+            input_field="instruction",
+            output_field="response",
         )
         assert len(result) < len(data)
 
     def test_empty_input(self):
         """Empty input returns empty list."""
-        source = from_list([])
-        result = run(
-            by_llm_score(
-                source,
-                model=_FakeJudge(),
-                input_field="instruction",
-                output_field="response",
-            )
+        source = []
+        result = by_llm_score(
+            source,
+            model=_FakeJudge(),
+            input_field="instruction",
+            output_field="response",
         )
         assert result == []
 
@@ -293,23 +267,19 @@ class TestByLlmAgreementMode:
             {"instruction": "What is 2+2?", "response": "The answer is 4."},
             {"instruction": "Write a poem", "response": "Roses are red..."},
         ]
-        source1 = from_list(data)
-        source2 = from_list(data)
-        result1 = run(
-            by_llm_score(
-                source1,
-                model=_FakeJudge(),
-                input_field="instruction",
-                output_field="response",
-            )
+        source1 = data
+        source2 = data
+        result1 = by_llm_score(
+            source1,
+            model=_FakeJudge(),
+            input_field="instruction",
+            output_field="response",
         )
-        result2 = run(
-            by_llm_score(
-                source2,
-                model=_FakeJudge(),
-                input_field="instruction",
-                output_field="response",
-            )
+        result2 = by_llm_score(
+            source2,
+            model=_FakeJudge(),
+            input_field="instruction",
+            output_field="response",
         )
         assert result1 == result2
 
@@ -318,43 +288,39 @@ class TestByLlmAgreementMode:
         data = [
             {"instruction": "Explain gravity", "response": "Gravity is a force..."},
         ]
-        source = from_list(data)
+        source = data
         judge = _FakeJudge()
-        run(
-            by_llm_score(
-                source,
-                model=judge,
-                num_judges=5,
-                score_threshold=1,
-                agreement_threshold=0.01,
-                temperature=0.7,
-                input_field="instruction",
-                output_field="response",
-            )
+        by_llm_score(
+            source,
+            model=judge,
+            num_judges=5,
+            score_threshold=1,
+            agreement_threshold=0.01,
+            temperature=0.7,
+            input_field="instruction",
+            output_field="response",
         )
         assert judge.last_n == 5
 
     def test_forwards_temperature(self):
         """Temperature is forwarded to the model."""
         data = [{"instruction": "Q", "response": "A"}]
-        source = from_list(data)
+        source = data
         judge = _FakeJudge()
-        run(
-            by_llm_score(
-                source,
-                model=judge,
-                score_threshold=1,
-                agreement_threshold=0.01,
-                temperature=0.7,
-                input_field="instruction",
-                output_field="response",
-            )
+        by_llm_score(
+            source,
+            model=judge,
+            score_threshold=1,
+            agreement_threshold=0.01,
+            temperature=0.7,
+            input_field="instruction",
+            output_field="response",
         )
         assert judge.last_temperature == 0.7
 
     def test_invalid_num_judges_raises(self):
         """num_judges < 1 raises ValueError."""
-        source = from_list([])
+        source = []
         with pytest.raises(ValueError, match="num_judges"):
             by_llm_score(
                 source,
@@ -366,7 +332,7 @@ class TestByLlmAgreementMode:
 
     def test_invalid_agreement_threshold_raises(self):
         """agreement_threshold out of range raises ValueError."""
-        source = from_list([])
+        source = []
         with pytest.raises(ValueError, match="agreement_threshold"):
             by_llm_score(
                 source,
@@ -386,7 +352,7 @@ class TestByLlmAgreementMode:
 
     def test_score_threshold_exceeding_max_score_raises(self):
         """score_threshold greater than max_score raises ValueError."""
-        source = from_list([])
+        source = []
         with pytest.raises(
             ValueError, match="score_threshold.*must not exceed.*max_score"
         ):
@@ -402,15 +368,13 @@ class TestByLlmAgreementMode:
     def test_missing_field_raises_error(self):
         """Missing expected field raises an error."""
         data = [{"instruction": "Explain gravity"}]
-        source = from_list(data)
-        with pytest.raises(RuntimeError, match="missing required field 'response'"):
-            run(
-                by_llm_score(
-                    source,
-                    model=_FakeJudge(),
-                    input_field="instruction",
-                    output_field="response",
-                )
+        source = data
+        with pytest.raises(KeyError, match="missing required field 'response'"):
+            by_llm_score(
+                source,
+                model=_FakeJudge(),
+                input_field="instruction",
+                output_field="response",
             )
 
 
@@ -420,81 +384,71 @@ class TestMalformedResponses:
     def test_plain_text_response_drops_item(self):
         """Non-JSON response causes the item to be dropped."""
         data = [{"instruction": "Q", "response": "A"}]
-        source = from_list(data)
+        source = data
         judge = _BadJudge(["this is not json"])
-        result = run(
-            by_llm_score(
-                source,
-                model=judge,
-                score_threshold=1,
-                input_field="instruction",
-                output_field="response",
-            )
+        result = by_llm_score(
+            source,
+            model=judge,
+            score_threshold=1,
+            input_field="instruction",
+            output_field="response",
         )
         assert result == []
 
     def test_missing_score_key_drops_item(self):
         """JSON without a score key causes the item to be dropped."""
         data = [{"instruction": "Q", "response": "A"}]
-        source = from_list(data)
+        source = data
         judge = _BadJudge([json.dumps({"explanation": "no score here"})])
-        result = run(
-            by_llm_score(
-                source,
-                model=judge,
-                score_threshold=1,
-                input_field="instruction",
-                output_field="response",
-            )
+        result = by_llm_score(
+            source,
+            model=judge,
+            score_threshold=1,
+            input_field="instruction",
+            output_field="response",
         )
         assert result == []
 
     def test_non_numeric_score_drops_item(self):
         """JSON with a non-numeric score causes the item to be dropped."""
         data = [{"instruction": "Q", "response": "A"}]
-        source = from_list(data)
+        source = data
         judge = _BadJudge([json.dumps({"score": "high", "explanation": "good"})])
-        result = run(
-            by_llm_score(
-                source,
-                model=judge,
-                score_threshold=1,
-                input_field="instruction",
-                output_field="response",
-            )
+        result = by_llm_score(
+            source,
+            model=judge,
+            score_threshold=1,
+            input_field="instruction",
+            output_field="response",
         )
         assert result == []
 
     def test_out_of_range_score_drops_item(self):
         """Score outside [1, max_score] causes the item to be dropped."""
         data = [{"instruction": "Q", "response": "A"}]
-        source = from_list(data)
+        source = data
         judge = _BadJudge([json.dumps({"score": 999, "explanation": "off scale"})])
-        result = run(
-            by_llm_score(
-                source,
-                model=judge,
-                score_threshold=1,
-                max_score=5,
-                input_field="instruction",
-                output_field="response",
-            )
+        result = by_llm_score(
+            source,
+            model=judge,
+            score_threshold=1,
+            max_score=5,
+            input_field="instruction",
+            output_field="response",
         )
         assert result == []
 
     def test_zero_score_drops_item(self):
         """Score of 0 (below minimum 1) causes the item to be dropped."""
         data = [{"instruction": "Q", "response": "A"}]
-        source = from_list(data)
+        source = data
         judge = _BadJudge([json.dumps({"score": 0, "explanation": "zero"})])
-        result = run(
-            by_llm_score(
-                source,
-                model=judge,
-                score_threshold=1,
-                input_field="instruction",
-                output_field="response",
-            )
+        result = by_llm_score(
+            source,
+            model=judge,
+            score_threshold=1,
+            input_field="instruction",
+            output_field="response",
         )
         assert result == []
 
@@ -504,21 +458,19 @@ class TestMalformedResponses:
             {"instruction": "Q1", "response": "A1"},
             {"instruction": "Q2", "response": "A2"},
         ]
-        source = from_list(data)
+        source = data
         judge = _BadJudge(
             [
                 "not json",
                 json.dumps({"score": 5, "explanation": "great"}),
             ]
         )
-        result = run(
-            by_llm_score(
-                source,
-                model=judge,
-                score_threshold=1,
-                input_field="instruction",
-                output_field="response",
-            )
+        result = by_llm_score(
+            source,
+            model=judge,
+            score_threshold=1,
+            input_field="instruction",
+            output_field="response",
         )
         assert len(result) == 1
         assert result[0]["instruction"] == "Q2"

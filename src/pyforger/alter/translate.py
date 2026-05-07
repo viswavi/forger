@@ -10,7 +10,6 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from pyforger.acquire.model import Message, Model, Prompt
-from pyforger.core import DataSpec, NodeType
 from pyforger.utils import get_field
 
 SYSTEM_PROMPT_LANGUAGE = (
@@ -28,20 +27,20 @@ SYSTEM_PROMPT_CODE = (
 
 
 def to_language(
-    source: DataSpec,
+    source: list[dict],
     *,
     target_language: str,
     fields: list[str],
     model: Model,
     target_fields: list[str] | None = None,
-) -> DataSpec:
+) -> list[dict]:
     """Translate text fields on each item into target_language using a Model.
 
     Each (item, field) pair is one LLM call, all dispatched through a single
     generate_batch so they run in parallel.
 
     Args:
-        source: Upstream DataSpec providing list[dict] data.
+        source: Upstream list of dictioanries
         target_language: Language name to translate into, passed through to
             the model prompt (e.g. "Spanish", "Brazilian Portuguese", "zh-Hans").
         fields: Keys whose values should be translated.

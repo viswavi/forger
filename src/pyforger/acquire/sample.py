@@ -1,8 +1,7 @@
 """LLM-based data generation building block.
 
-sample_from_LLM is a first-class acquire building block that generates data from
-an LLM until n accepted samples are collected, with optional structured output
-parsing.
+``sample_from_LLM`` calls a model in batches, parsing each response,
+until ``n`` accepted samples are collected (or retries exhausted).
 """
 from __future__ import annotations
 
@@ -11,24 +10,14 @@ from collections.abc import Generator
 from typing import Any
 
 from pyforger.acquire.model import Model, Prompt
-from pyforger.core import DataSpec, NodeType
+from pyforger.op import op
 from pyforger.utils import get_formatted_logger
 
 logger = get_formatted_logger(__name__)
 
 
 def _schema_format_instructions(output_schema: dict[str, Any]) -> str:
-    """Turn output_schema into a short instruction string for prompt injection.
-
-    Instructs the model to produce JSON with the required keys. Used both to
-    tell the model what to emit (prompt) and aligned with _parse_output validation.
-
-    Args:
-        output_schema: Dict of key -> type or description (e.g. {"answer": str}).
-
-    Returns:
-        A string to append to the prompt, e.g. "Respond with a JSON object only..."
-    """
+    """Build a short JSON-format instruction for the prompt."""
     keys = list(output_schema.keys())
     placeholders: dict[str, str] = {}
     for k, v in output_schema.items():
@@ -49,18 +38,6 @@ def _build_prompt(
     prompt: Prompt,
     output_schema: dict[str, Any] | None = None,
 ) -> Prompt:
-    """Combine base prompt with optional schema instructions.
-
-    Args:
-        prompt: A string or list of chat messages in OpenAI format.
-        output_schema: If set, format instructions are appended so the model
-            produces JSON matching the schema (same schema used by _parse_output).
-
-    Returns:
-        For string prompts: string with schema instructions appended.
-        For message lists: copy with an extra user message containing
-            schema instructions.
-    """
     if output_schema is None:
         return prompt
     schema_text = _schema_format_instructions(output_schema)
@@ -73,19 +50,6 @@ def _parse_output(
     raw_text: str,
     output_schema: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
-    """Parse raw model output into a dict; validate against schema if provided.
-
-    If output_schema is None, returns {"text": raw_text}. Otherwise attempts
-    JSON parse and lightweight validation (required keys present).
-
-    Args:
-        raw_text: Raw string from the model.
-        output_schema: Optional dict describing expected keys (e.g. {"answer": str}).
-            Used only to check presence of keys in parsed JSON.
-
-    Returns:
-        Parsed dict on success, None on parse or validation failure.
-    """
     if output_schema is None:
         return {"text": raw_text}
     try:
@@ -105,19 +69,6 @@ def _build_batch(
     batch_size: int,
     output_schema: dict[str, Any] | None = None,
 ) -> list[Prompt]:
-    """Prepare a batch of prompts.
-
-    When output_schema is set, schema format instructions are injected into
-    the prompt once and replicated across the batch.
-
-    Args:
-        prompt: Base prompt (string or message list).
-        batch_size: Number of prompts to build.
-        output_schema: Optional schema; when set, format instructions are appended.
-
-    Returns:
-        List of prompts ready for model.generate_batch().
-    """
     full_prompt = _build_prompt(prompt, output_schema)
     return [full_prompt for _ in range(batch_size)]
 
@@ -131,12 +82,7 @@ def _generation_loop(
     max_retries: int,
     batch_size: int,
 ) -> Generator[dict[str, Any], None, None]:
-    """Yield accepted samples until *n* collected or retries exhausted.
-
-    Works in batched rounds: each round builds a batch of prompts, calls
-    model.generate_batch(), then parses each result and accepts on success.
-    consecutive_failed_rounds counts rounds where zero samples were accepted.
-    """
+    """Yield accepted samples until ``n`` collected or retries exhausted."""
     accepted: list[dict[str, Any]] = []
     consecutive_failed_rounds = 0
 
@@ -144,15 +90,10 @@ def _generation_loop(
         remaining = n - len(accepted)
         current_batch_size = min(batch_size, remaining)
         prompts_list = _build_batch(
-            prompt,
-            current_batch_size,
-            output_schema=output_schema,
+            prompt, current_batch_size, output_schema=output_schema
         )
 
-        batch_results = model.generate_batch(
-            prompts_list,
-            temperature=temperature,
-        )
+        batch_results = model.generate_batch(prompts_list, temperature=temperature)
         raw_responses = [r[0] for r in batch_results]
 
         if len(raw_responses) != len(prompts_list):
@@ -185,55 +126,44 @@ def _generation_loop(
             consecutive_failed_rounds = 0
 
 
+@op(name="acquire.sample_from_LLM")
 def sample_from_LLM(
     prompt: Prompt,
     model: Model,
+    *,
     n: int = 100,
     output_schema: dict[str, Any] | None = None,
     temperature: float = 0.7,
     max_retries: int = 3,
     batch_size: int = 10,
-    name: str = "sample_from_LLM",
-) -> DataSpec:
-    """Build an ACQUIRE node that generates data from an LLM until n accepted samples.
-
-    This is a first-class building block: no inputs, no samples_per_input.
-    Generation runs only when the DAG runner evaluates the node (lazy execution).
+) -> list[dict]:
+    """Generate from ``model`` until ``n`` samples are accepted.
 
     Args:
-        prompt: A string or list of chat messages in OpenAI format.
-            String prompts are wrapped as a single user message by Model.
-            Message lists support system prompts, few-shot examples, etc.
-        model: Model instance (placeholder or real backend).
+        prompt: A string or chat-message list (OpenAI format).
+        model: Model to call.
         n: Target number of accepted samples.
-        output_schema: Optional dict of expected keys for structured output;
-            triggers JSON parse and key validation. For string prompts,
-            schema instructions are appended to the text. For message
-            lists, an extra user message is added.
-        temperature: Sampling temperature passed to the model.
-        max_retries: Consecutive rounds with zero acceptances before stopping.
-        batch_size: Prompts per round sent to model.generate_batch().
-        name: Label for the DataSpec node.
+        output_schema: Optional dict of expected keys; triggers JSON parse + validation.
+        temperature: Sampling temperature.
+        max_retries: Consecutive zero-acceptance rounds before stopping.
+        batch_size: Prompts per ``generate_batch`` call.
 
     Returns:
-        DataSpec whose execute_fn is a generator yielding accepted samples.
+        List of accepted sample dicts. ``{"text": <raw>}`` when no schema;
+        otherwise the parsed JSON objects.
     """
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
     if n <= 0:
         raise ValueError("n must be positive")
-
-    def _execute() -> list[dict]:
-        return list(
-            _generation_loop(
-                prompt=prompt,
-                model=model,
-                n=n,
-                output_schema=output_schema,
-                temperature=temperature,
-                max_retries=max_retries,
-                batch_size=batch_size,
-            )
+    return list(
+        _generation_loop(
+            prompt=prompt,
+            model=model,
+            n=n,
+            output_schema=output_schema,
+            temperature=temperature,
+            max_retries=max_retries,
+            batch_size=batch_size,
         )
-
-    return DataSpec(NodeType.ACQUIRE, [], _execute, name)
+    )
