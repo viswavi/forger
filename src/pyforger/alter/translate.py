@@ -1,15 +1,16 @@
-"""Translation alter operations for Forger.
+"""Translation alter operations.
 
-to_language translates text fields on each item of a list[dict] into a
-target natural language. to_code converts natural language descriptions
-(or source code in another programming language) into code in a target
-programming language. Both use a Model for generation.
+``to_language`` translates text fields on each item into a target natural
+language. ``to_code`` converts natural-language descriptions (or source
+code in another programming language) into code in a target programming
+language. Both use a Model for generation.
 """
 from __future__ import annotations
 
 from collections.abc import Callable
 
 from pyforger.acquire.model import Message, Model, Prompt
+from pyforger.op import op
 from pyforger.utils import get_field
 
 SYSTEM_PROMPT_LANGUAGE = (
@@ -26,95 +27,86 @@ SYSTEM_PROMPT_CODE = (
 )
 
 
+@op(name="alter.translate.to_language")
 def to_language(
-    source: list[dict],
+    items: list[dict],
     *,
     target_language: str,
     fields: list[str],
     model: Model,
     target_fields: list[str] | None = None,
 ) -> list[dict]:
-    """Translate text fields on each item into target_language using a Model.
+    """Translate text fields on each item into ``target_language`` using a Model.
 
-    Each (item, field) pair is one LLM call, all dispatched through a single
-    generate_batch so they run in parallel.
+    Each (item, field) pair is one LLM call, all dispatched through a
+    single ``generate_batch`` so they run in parallel.
 
     Args:
-        source: Upstream list of dictioanries
-        target_language: Language name to translate into, passed through to
-            the model prompt (e.g. "Spanish", "Brazilian Portuguese", "zh-Hans").
+        items: Input rows.
+        target_language: Language name to translate into (e.g. "Spanish",
+            "Brazilian Portuguese", "zh-Hans"). Passed through to the prompt.
         fields: Keys whose values should be translated.
         model: Model used for generation.
         target_fields: Where to write translations. If None, overwrite the
-            source fields in place. If given, must match fields in length;
+            source fields in place. If given, must match ``fields`` in length;
             originals are left untouched.
 
     Returns:
-        An ALTER DataSpec named "alter_translate_to_language".
+        New list of dicts with translations written to ``target_fields``
+        (or back into ``fields`` when ``target_fields`` is None).
 
     Raises:
-        ValueError: If fields is empty, or if target_fields is given and its
-            length does not match fields. Runtime errors (missing source
-            field, wrong response count, empty completions, wrong response
-            shape) are raised from _execute and surface through the runner
-            as a RuntimeError whose __cause__ is the original exception.
+        ValueError: If ``fields`` is empty, or if ``target_fields`` is given
+            and its length does not match ``fields``. Per-item errors
+            (missing field, wrong response shape) are also ValueError.
     """
     _validate_args("translate.to_language", fields, target_fields)
     system_message: Message = {
         "role": "system",
         "content": SYSTEM_PROMPT_LANGUAGE.format(target_language=target_language),
     }
-    return _make_translate_node(
-        source,
+    return _translate(
+        items,
         fields=fields,
         model=model,
         target_fields=target_fields,
         system_message=system_message,
-        node_name="alter_translate_to_language",
         caller_name="translate.to_language",
         transform=str.strip,
     )
 
 
+@op(name="alter.translate.to_code")
 def to_code(
-    source: DataSpec,
+    items: list[dict],
     *,
     target_language: str,
     fields: list[str],
     model: Model,
     source_language: str | None = None,
     target_fields: list[str] | None = None,
-) -> DataSpec:
-    """Translate text fields on each item into code in target_language.
+) -> list[dict]:
+    """Translate text fields on each item into code in ``target_language``.
 
-    Each source field can be either a natural-language description of what
-    the code should do, or existing source code in another language that
-    should be ported. Each (item, field) pair is one LLM call, all dispatched
-    through a single generate_batch so they run in parallel.
+    Each source field can be a natural-language description of what the
+    code should do, or existing source code in another language to port.
+    Each (item, field) pair is one LLM call, all dispatched through a
+    single ``generate_batch`` so they run in parallel.
 
     Args:
-        source: Upstream DataSpec providing list[dict] data.
-        target_language: Programming language to emit (e.g. "Python", "Rust",
-            "TypeScript").
+        items: Input rows.
+        target_language: Programming language to emit (e.g. "Python", "Rust").
         fields: Keys whose values should be converted to code.
         model: Model used for generation.
-        source_language: Optional hint describing the input. When provided,
-            the model is told the input is written in this language (e.g.
-            "Python", "pseudocode", "natural language"). When None, the
-            model infers.
+        source_language: Optional hint describing the input. When set, the
+            model is told the input is in this language (e.g. "pseudocode",
+            "Python"). When None, the model infers.
         target_fields: Where to write the generated code. If None, overwrite
-            the source fields in place. If given, must match fields in length;
-            originals are left untouched.
+            the source fields in place; otherwise must match ``fields``.
 
     Returns:
-        An ALTER DataSpec named "alter_translate_to_code".
-
-    Raises:
-        ValueError: If fields is empty, or if target_fields is given and its
-            length does not match fields. Runtime errors (missing source
-            field, wrong response count, empty completions, wrong response
-            shape) are raised from _execute and surface through the runner
-            as a RuntimeError whose __cause__ is the original exception.
+        New list of dicts with generated code written to ``target_fields``
+        (or back into ``fields`` when ``target_fields`` is None).
     """
     _validate_args("translate.to_code", fields, target_fields)
     source_hint = (
@@ -129,13 +121,12 @@ def to_code(
             source_hint=source_hint,
         ),
     }
-    return _make_translate_node(
-        source,
+    return _translate(
+        items,
         fields=fields,
         model=model,
         target_fields=target_fields,
         system_message=system_message,
-        node_name="alter_translate_to_code",
         caller_name="translate.to_code",
         transform=_strip_code_fences,
     )
@@ -161,15 +152,13 @@ def _validate_args(
 def _strip_code_fences(text: str) -> str:
     """Strip an outer markdown code fence from a model response.
 
-    Many code models wrap their output in ```lang ... ``` even when told
-    not to. This removes the outer fence (with or without a language tag)
-    and returns the inner code with surrounding whitespace trimmed. If the
-    text has no outer fence it is returned stripped.
+    Many code models wrap output in ``` even when told not to. This drops
+    the outer fence (with or without a language tag) and returns the
+    inner code with surrounding whitespace trimmed.
     """
     stripped = text.strip()
     if not stripped.startswith("```"):
         return stripped
-    # Drop the opening fence line (```lang or just ```).
     first_newline = stripped.find("\n")
     if first_newline == -1:
         return stripped
@@ -179,64 +168,54 @@ def _strip_code_fences(text: str) -> str:
     return body.strip()
 
 
-def _make_translate_node(
-    source: DataSpec,
+def _translate(
+    items: list[dict],
     *,
     fields: list[str],
     model: Model,
     target_fields: list[str] | None,
     system_message: Message,
-    node_name: str,
     caller_name: str,
     transform: Callable[[str], str],
-) -> DataSpec:
-    """Build the ALTER node that does the per-(item, field) generate_batch.
-
-    Shared by to_language and to_code. The system_message, node_name,
-    caller_name, and transform change between them; the batching and
-    error-handling logic does not.
-    """
+) -> list[dict]:
+    """Per-(item, field) generate_batch shared by to_language and to_code."""
+    if not items:
+        return []
     write_fields = target_fields if target_fields is not None else fields
 
-    def _execute(data: list[dict]) -> list[dict]:
-        if not data:
-            return []
+    prompts: list[Prompt] = []
+    for item in items:
+        for field in fields:
+            value = get_field(item, field, caller_name)
+            user_message: Message = {"role": "user", "content": value}
+            prompts.append([system_message, user_message])
 
-        prompts: list[Prompt] = []
-        for item in data:
-            for field in fields:
-                value = get_field(item, field, caller_name)
-                user_message: Message = {"role": "user", "content": value}
-                prompts.append([system_message, user_message])
+    responses = model.generate_batch(prompts, n=1)
 
-        responses = model.generate_batch(prompts, n=1)
+    if len(responses) != len(prompts):
+        raise ValueError(
+            f"{caller_name}: model returned {len(responses)} "
+            f"completions for {len(prompts)} prompts"
+        )
 
-        if len(responses) != len(prompts):
-            raise ValueError(
-                f"{caller_name}: model returned {len(responses)} "
-                f"completions for {len(prompts)} prompts"
-            )
-
-        results: list[dict] = []
-        idx = 0
-        for item_idx, item in enumerate(data):
-            new_item = dict(item)
-            for field, write_key in zip(fields, write_fields):
-                choices = responses[idx]
-                if not isinstance(choices, list):
-                    raise ValueError(
-                        f"{caller_name}: expected list of completions "
-                        f"for item {item_idx} field {field!r}, got "
-                        f"{type(choices).__name__}"
-                    )
-                if not choices:
-                    raise ValueError(
-                        f"{caller_name}: model returned no completions "
-                        f"for item {item_idx} field {field!r}"
-                    )
-                new_item[write_key] = transform(choices[0])
-                idx += 1
-            results.append(new_item)
-        return results
-
-    return DataSpec(NodeType.ALTER, source, _execute, node_name)
+    results: list[dict] = []
+    idx = 0
+    for item_idx, item in enumerate(items):
+        new_item = dict(item)
+        for field, write_key in zip(fields, write_fields):
+            choices = responses[idx]
+            if not isinstance(choices, list):
+                raise ValueError(
+                    f"{caller_name}: expected list of completions for "
+                    f"item {item_idx} field {field!r}, got "
+                    f"{type(choices).__name__}"
+                )
+            if not choices:
+                raise ValueError(
+                    f"{caller_name}: model returned no completions "
+                    f"for item {item_idx} field {field!r}"
+                )
+            new_item[write_key] = transform(choices[0])
+            idx += 1
+        results.append(new_item)
+    return results

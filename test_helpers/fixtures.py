@@ -16,6 +16,7 @@ class MockModel(Model):
         model_id: str = "test/model",
         **kwargs: Any,
     ) -> None:
+        """Build a MockModel that cycles ``responses`` across prompts."""
         super().__init__(model_id=model_id, **kwargs)
         self.responses = responses
         self._call_count = 0
@@ -33,6 +34,7 @@ class MockModel(Model):
         max_tokens: int | None = None,
         stop: list[str] | None = None,
     ) -> list[list[str]]:
+        """Return one canned response per prompt, cycling through self.responses."""
         self._call_count += 1
         return [
             [self.responses[i % len(self.responses)]] * n for i in range(len(prompts))
@@ -43,6 +45,7 @@ class RecordingMockModel(MockModel):
     """MockModel that records every batch of prompts passed to generate_batch."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Build a RecordingMockModel and initialize the recording buffer."""
         super().__init__(*args, **kwargs)
         self.recorded_prompts: list[list[Prompt]] = []
 
@@ -55,6 +58,7 @@ class RecordingMockModel(MockModel):
         max_tokens: int | None = None,
         stop: list[str] | None = None,
     ) -> list[list[str]]:
+        """Append the current prompt batch to recorded_prompts, then delegate."""
         self.recorded_prompts.append(list(prompts))
         return super().generate_batch(
             prompts, n=n, temperature=temperature, max_tokens=max_tokens, stop=stop
@@ -65,7 +69,9 @@ class CallCounter:
     """Tracks how many times a function is called. Used to assert call counts."""
 
     def __init__(self):
+        """Initialize call count to zero."""
         self.count = 0
 
     def reset(self):
+        """Reset call count to zero."""
         self.count = 0

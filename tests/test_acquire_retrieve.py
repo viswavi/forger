@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 from typing import Any
+from unittest.mock import patch
 
 from pyforger.acquire import (
     RetrievalSource,
@@ -48,22 +49,8 @@ class TestRetrieve:
         source = MockRetrievalSource([{"text": "a"}, {"text": "b"}])
         spec = retrieve(source, mode=RetrieveMode.QUERY, queries=["x"])
         assert isinstance(spec, list)
-        assert len(spec) == 1
+        assert len(spec) == 2
         assert isinstance(spec[0], dict)
-
-    def test_retrieve_no_execution_on_build(self):
-        """Building retrieve(...) does not call source.fetch."""
-        fetch_called = False
-
-        class TrackingSource(MockRetrievalSource):
-            def fetch(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
-                nonlocal fetch_called
-                fetch_called = True
-                return super().fetch(*args, **kwargs)
-
-        source = TrackingSource([{"text": "a"}])
-        retrieve(source, mode=RetrieveMode.RANDOM, n=5)
-        assert not fetch_called
 
     def test_retrieve_execute_returns_source_result(self):
         """retrieve() returns the list from source.fetch with query stamped."""
@@ -71,15 +58,30 @@ class TestRetrieve:
         results = retrieve(source, mode=RetrieveMode.QUERY)
         assert results == [{"text": "a", "query": None}]
 
-    def test_retrieve_from_hf_returns_list(self):
+    @patch("pyforger.acquire.sources.HFRetrievalSource.fetch")
+    def test_retrieve_from_hf_returns_list(self, mock_fetch):
         """Return a retrieve function from retrieve_from_web."""
+        mock_fetch.return_value = [
+            {"row_idx": i, "dataset_id": "some/dataset", "text": f"row{i}"}
+            for i in range(5)
+        ]
         results = retrieve_from_hf("some/dataset", n=5)
         assert isinstance(results, list)
         assert len(results) == 5
         assert all(isinstance(r, dict) for r in results)
 
-    def test_retrieve_from_web_returns_list(self):
+    @patch("pyforger.acquire.sources.WebRetrievalSource.fetch")
+    def test_retrieve_from_web_returns_list(self, mock_fetch):
         """Return search results from retrieve_from_web."""
+        mock_fetch.return_value = [
+            {
+                "text": f"snippet {i}",
+                "id": f"http://source/{i}",
+                "title": f"t{i}",
+                "url": f"http://source/{i}",
+            }
+            for i in range(5)
+        ]
         results = retrieve_from_web(queries=["test"], n=5)
         assert isinstance(results, list)
         assert len(results) == 5
@@ -99,8 +101,18 @@ class TestRetrieve:
         assert len(results) == 5
         assert all(isinstance(r, dict) for r in results)
 
-    def test_retrieve_from_s2_returns_list(self):
+    @patch("pyforger.acquire.sources.S2RetrievalSource.fetch")
+    def test_retrieve_from_s2_returns_list(self, mock_fetch):
         """Return search results from retrieve_from_s2."""
+        mock_fetch.return_value = [
+            {
+                "text": f"abstract {i}",
+                "id": f"s2:{i}",
+                "title": f"paper {i}",
+                "summary": f"summary {i}",
+            }
+            for i in range(5)
+        ]
         results = retrieve_from_s2(queries=["NLP"], n=5)
         assert isinstance(results, list)
         assert len(results) == 5

@@ -57,7 +57,15 @@ def by_invalid_response(
     response_field: str,
     similarity_threshold: float = 0.85,
 ) -> list[dict]:
-    """Drop items whose response is empty, identical to the instruction, or near-duplicate."""
+    """Filter items with invalid responses (copies of instruction or empty).
+
+    Removes items where:
+    - The response is None, empty, or whitespace-only.
+    - The response exactly matches the instruction.
+    - One string is a substring of the other and their lengths are within
+      a factor of two (avoids false positives for short instructions).
+    - The normalized string similarity exceeds the threshold.
+    """
 
     def _is_invalid(item: dict) -> bool:
         response = get_field(item, response_field, "by_invalid_response")
