@@ -16,6 +16,7 @@ def by_exact_agreement(
     *,
     field_a: str,
     field_b: str,
+    disagree: bool = False,
 ) -> list[dict]:
     """Keep items where two fields agree or disagree, by exact match.
 
@@ -36,8 +37,11 @@ def by_exact_agreement(
     return [
         item
         for item in items
-        if str(get_field(item, field_a, "by_exact_agreement")).strip()
-        == str(get_field(item, field_b, "by_exact_agreement")).strip()
+        if (
+            str(get_field(item, field_a, "by_exact_agreement")).strip()
+            != str(get_field(item, field_b, "by_exact_agreement")).strip()
+        )
+        == disagree
     ]
 
 
@@ -48,6 +52,7 @@ def by_rouge_l_agreement(
     field_a: str,
     field_b: str,
     threshold: float = 0.7,
+    disagree: bool = False,
 ) -> list[dict]:
     """Keep items where ROUGE-L F1 between two fields meets or misses threshold.
 
@@ -70,9 +75,12 @@ def by_rouge_l_agreement(
     return [
         item
         for item in items
-        if scorer.score(
-            get_field(item, field_a, "by_rouge_l_agreement"),
-            get_field(item, field_b, "by_rouge_l_agreement"),
-        )["rougeL"].fmeasure
-        >= threshold
+        if (
+            scorer.score(
+                get_field(item, field_a, "by_rouge_l_agreement"),
+                get_field(item, field_b, "by_rouge_l_agreement"),
+            )["rougeL"].fmeasure
+            < threshold
+        )
+        == disagree
     ]

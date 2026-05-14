@@ -41,7 +41,7 @@ class MockRetrievalSource(RetrievalSource):
 
 
 class TestRetrieve:
-    """Retrieve() and wrappers return Datretrieve functionsaSpec and behave as specified."""
+    """Retrieve() and wrappers return list with specified length and format."""
 
     def test_retrieve_returns_list(self):
         """Retrieve with a mock source returns retrieval results."""
@@ -74,6 +74,13 @@ class TestRetrieve:
     def test_retrieve_from_hf_returns_list(self):
         """Return a retrieve function from retrieve_from_web."""
         results = retrieve_from_hf("some/dataset", n=5)
+        assert isinstance(results, list)
+        assert len(results) == 5
+        assert all(isinstance(r, dict) for r in results)
+
+    def test_retrieve_from_web_returns_list(self):
+        """Return search results from retrieve_from_web."""
+        results = retrieve_from_web(queries=["test"], n=5)
         assert isinstance(results, list)
         assert len(results) == 5
         assert all(isinstance(r, dict) for r in results)
