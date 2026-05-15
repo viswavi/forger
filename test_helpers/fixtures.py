@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any
 
 from pyforger.acquire.model import Model, Prompt
-from pyforger.core import DataSpec, NodeType
 
 
 class MockModel(Model):
@@ -17,10 +16,14 @@ class MockModel(Model):
         model_id: str = "test/model",
         **kwargs: Any,
     ) -> None:
-        """Initialize with canned responses cycled across prompts."""
+        """Build a MockModel that cycles ``responses`` across prompts."""
         super().__init__(model_id=model_id, **kwargs)
         self.responses = responses
         self._call_count = 0
+
+    def cache_key(self) -> tuple:
+        """Stable hash key for @op caching. Excludes mutable _call_count."""
+        return (type(self).__name__, self._model_id, tuple(self.responses))
 
     def generate_batch(
         self,
@@ -42,7 +45,7 @@ class RecordingMockModel(MockModel):
     """MockModel that records every batch of prompts passed to generate_batch."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        """Initialize and set up prompt recording."""
+        """Build a RecordingMockModel and initialize the recording buffer."""
         super().__init__(*args, **kwargs)
         self.recorded_prompts: list[list[Prompt]] = []
 
@@ -63,7 +66,7 @@ class RecordingMockModel(MockModel):
 
 
 class CallCounter:
-    """Tracks how many times an execute function is called."""
+    """Tracks how many times a function is called. Used to assert call counts."""
 
     def __init__(self):
         """Initialize call count to zero."""
@@ -72,45 +75,3 @@ class CallCounter:
     def reset(self):
         """Reset call count to zero."""
         self.count = 0
-
-
-def make_source(data: list, counter: CallCounter = None) -> DataSpec:
-    """Source node returning fixed data."""
-
-    def _execute():
-        if counter is not None:
-            counter.count += 1
-        return data
-
-    return DataSpec(NodeType.ACQUIRE, [], _execute, "test_source")
-
-
-def make_double_repetition_data(source: DataSpec) -> DataSpec:
-    """Alter node that repeats its input list twice."""
-
-    def _execute(data):
-        return data + data
-
-    return DataSpec(NodeType.ALTER, source, _execute, "test_duplicate")
-
-
-def make_empty_filter(source: DataSpec) -> DataSpec:
-    """Filter node that always returns empty."""
-
-    def _execute(_data):
-        # _data is unused -- this is just here to match the expected signature.
-        return []
-
-    return DataSpec(NodeType.FILTER, [source], _execute, "test_empty_filter")
-
-
-def make_concat(*sources: DataSpec) -> DataSpec:
-    """Alter node that concatenates multiple inputs."""
-
-    def _execute(*input_data):
-        result = []
-        for data in input_data:
-            result.extend(data)
-        return result
-
-    return DataSpec(NodeType.ALTER, list(sources), _execute, "test_concat")

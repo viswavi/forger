@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from fixtures import MockModel, RecordingMockModel
 
-from pyforger import DataSpec, NodeType
 from pyforger.acquire import sample_from_LLM
 from pyforger.acquire.sample import _schema_format_instructions
 
@@ -44,7 +43,7 @@ class TestSchemaPromptInjection:
             n=1,
             output_schema={"answer": str},
         )
-        list(spec.execute_fn())
+        list(spec)
         assert len(model.recorded_prompts[0]) == 1
         prompt_text = model.recorded_prompts[0][0]
         assert isinstance(prompt_text, str)
@@ -65,7 +64,7 @@ class TestSchemaPromptInjection:
             n=1,
             output_schema={"answer": str},
         )
-        list(spec.execute_fn())
+        list(spec)
         assert len(model.recorded_prompts[0]) == 1
         recorded = model.recorded_prompts[0][0]
         assert isinstance(recorded, list)
@@ -80,7 +79,7 @@ class TestSchemaPromptInjection:
         """Without output_schema, string prompt is passed through as-is."""
         model = RecordingMockModel(responses=["hello"])
         spec = sample_from_LLM("Generate", model, n=1)
-        list(spec.execute_fn())
+        list(spec)
         assert model.recorded_prompts[0][0] == "Generate"
 
     def test_no_schema_message_list_unchanged(self):
@@ -88,36 +87,8 @@ class TestSchemaPromptInjection:
         model = RecordingMockModel(responses=["hello"])
         messages = [{"role": "user", "content": "Hi"}]
         spec = sample_from_LLM(messages, model, n=1)
-        list(spec.execute_fn())
+        list(spec)
         assert model.recorded_prompts[0][0] == messages
-
-
-class TestSampleFromLLMReturnsDataSpec:
-    """sample_from_LLM returns a DataSpec with node_type ACQUIRE."""
-
-    def test_returns_dataspec(self):
-        """Return value is a DataSpec with ACQUIRE node type."""
-        model = MockModel(responses=['{"answer": "x"}'])
-        spec = sample_from_LLM(
-            "Generate something",
-            model,
-            n=2,
-            output_schema={"answer": str},
-        )
-        assert isinstance(spec, DataSpec)
-        assert spec.node_type == NodeType.ACQUIRE
-
-    def test_no_execution_on_build(self):
-        """Building sample_from_LLM does not call model.generate_batch."""
-        model = MockModel(responses=['{"text": "a"}'])
-        sample_from_LLM("Hi", model, n=1)
-        assert model._call_count == 0
-
-    def test_has_no_dependencies(self):
-        """Sample-from-LLM node has no upstream dependencies."""
-        model = MockModel(responses=['{"text": "a"}'])
-        spec = sample_from_LLM("Hi", model, n=1)
-        assert spec.get_dependencies() == []
 
 
 class TestSampleFromLLMExecution:
@@ -133,7 +104,7 @@ class TestSampleFromLLMExecution:
             batch_size=2,
             output_schema={"text": str},
         )
-        gen = spec.execute_fn()
+        gen = spec
         items = list(gen)
         assert len(items) == 2
         assert items[0]["text"] == "one"
@@ -144,7 +115,7 @@ class TestSampleFromLLMExecution:
         """Stops after n samples even if batch could return more."""
         model = MockModel(responses=['{"text": "x"}'])
         spec = sample_from_LLM("Generate", model, n=3, batch_size=10)
-        items = list(spec.execute_fn())
+        items = list(spec)
         assert len(items) == 3
         assert model._call_count == 1
 
@@ -152,7 +123,7 @@ class TestSampleFromLLMExecution:
         """Without output_schema, each sample is {"text": raw_response}."""
         model = MockModel(responses=["plain text"])
         spec = sample_from_LLM("Generate", model, n=1)
-        items = list(spec.execute_fn())
+        items = list(spec)
         assert items == [{"text": "plain text"}]
 
     def test_message_list_prompt_executes(self):
@@ -163,7 +134,7 @@ class TestSampleFromLLMExecution:
             {"role": "user", "content": "Generate data"},
         ]
         spec = sample_from_LLM(messages, model, n=2, batch_size=2)
-        items = list(spec.execute_fn())
+        items = list(spec)
         assert len(items) == 2
         assert model._call_count == 1
 
@@ -177,7 +148,7 @@ class TestSampleFromLLMExecution:
             n=1,
             output_schema={"answer": str},
         )
-        items = list(spec.execute_fn())
+        items = list(spec)
         assert len(items) == 1
         assert items[0]["answer"] == "42"
 
@@ -194,7 +165,7 @@ class TestParseAndSchema:
             n=1,
             output_schema={"answer": str, "reason": str},
         )
-        items = list(spec.execute_fn())
+        items = list(spec)
         assert len(items) == 1
         assert items[0]["answer"] == "42"
         assert items[0]["reason"] == "math"
@@ -209,7 +180,7 @@ class TestParseAndSchema:
             output_schema={"answer": str, "reason": str},
             max_retries=1,
         )
-        items = list(spec.execute_fn())
+        items = list(spec)
         assert len(items) == 0
 
     def test_invalid_json_rejected(self):
@@ -222,7 +193,7 @@ class TestParseAndSchema:
             output_schema={"x": str},
             max_retries=1,
         )
-        items = list(spec.execute_fn())
+        items = list(spec)
         assert len(items) == 0
 
 
@@ -253,7 +224,7 @@ class TestRetriesAndBatch:
         """Multiple rounds when n > batch_size."""
         model = MockModel(responses=['{"text": "x"}'])
         spec = sample_from_LLM("Generate", model, n=5, batch_size=2)
-        items = list(spec.execute_fn())
+        items = list(spec)
         assert len(items) == 5
         # 3 rounds: 2 + 2 + 1
         assert model._call_count == 3
