@@ -4,19 +4,8 @@ from __future__ import annotations
 import pytest
 from fixtures import MockModel, RecordingMockModel
 
-from pyforger import DataSpec, NodeType
 from pyforger.alter import generate_from_context
 from pyforger.alter.generate import _resolve_prompt
-
-# ---------------------------------------------------------------------------
-# Test helpers
-# ---------------------------------------------------------------------------
-
-
-def _make_source(items: list[dict]) -> DataSpec:
-    """Build a minimal upstream DataSpec with fixed output."""
-    return DataSpec(NodeType.ACQUIRE, [], lambda: items, "source")
-
 
 # ---------------------------------------------------------------------------
 # _resolve_prompt
@@ -51,59 +40,24 @@ class TestResolvePrompt:
 
 
 # ---------------------------------------------------------------------------
-# DataSpec structure
+# Argument validation
 # ---------------------------------------------------------------------------
 
 
-class TestGenerateFromContextDataSpec:
-    """generate_from_context builds a well-formed ALTER DataSpec."""
-
-    def test_returns_dataspec_with_alter_node_type(self):
-        """Return value is a DataSpec with node_type ALTER."""
-        source = _make_source([{"text": "a"}])
-        spec = generate_from_context(
-            source, "prompt: {text}", MockModel(responses=["ok"])
-        )
-        assert isinstance(spec, DataSpec)
-        assert spec.node_type == NodeType.ALTER
-
-    def test_has_upstream_dependency(self):
-        """The upstream inputs DataSpec is registered as a dependency."""
-        source = _make_source([{"text": "a"}])
-        spec = generate_from_context(
-            source, "prompt: {text}", MockModel(responses=["ok"])
-        )
-        assert spec.get_dependencies() == [source]
-
-    def test_no_execution_on_build(self):
-        """Building the node does not call model.generate_batch."""
-        model = MockModel(responses=["ok"])
-        source = _make_source([{"text": "a"}])
-        generate_from_context(source, "prompt: {text}", model)
-        assert model._call_count == 0
+class TestGenerateFromContextValidation:
+    """generate_from_context validates its arguments before calling the model."""
 
     def test_invalid_batch_size_raises(self):
-        """batch_size <= 0 raises ValueError at build time."""
-        source = _make_source([])
+        """batch_size <= 0 raises ValueError."""
         with pytest.raises(ValueError, match="batch_size"):
-            generate_from_context(
-                source, "p", MockModel(responses=["ok"]), batch_size=0
-            )
+            generate_from_context([], "p", MockModel(responses=["ok"]), batch_size=0)
 
     def test_invalid_samples_per_item_raises(self):
-        """samples_per_item <= 0 raises ValueError at build time."""
-        source = _make_source([])
+        """samples_per_item <= 0 raises ValueError."""
         with pytest.raises(ValueError, match="samples_per_item"):
             generate_from_context(
-                source, "p", MockModel(responses=["ok"]), samples_per_item=0
+                [], "p", MockModel(responses=["ok"]), samples_per_item=0
             )
-
-    def test_list_of_dataspecs_raises(self):
-        """Passing a list of DataSpecs raises TypeError; use forger.zip to combine."""
-        a = _make_source([{"x": 1}])
-        b = _make_source([{"y": 2}])
-        with pytest.raises(TypeError):
-            generate_from_context([a, b], "p", MockModel(responses=["ok"]))
 
 
 # ---------------------------------------------------------------------------
@@ -112,39 +66,32 @@ class TestGenerateFromContextDataSpec:
 
 
 class TestGenerateFromContextExecution:
-    """execute_fn produces output dicts from the upstream input items."""
+    """generate_from_context returns a list of output dicts derived from inputs."""
 
     def test_no_schema_returns_text_key(self):
         """Without output_schema each response is stored as {"text": raw_response}."""
-        source = _make_source([{"text": "hello"}])
         model = MockModel(responses=["world"])
-        spec = generate_from_context(source, "prompt: {text}", model)
-        result = spec.execute_fn([{"text": "hello"}])
+        result = generate_from_context([{"text": "hello"}], "prompt: {text}", model)
         assert result == [{"text": "world"}]
 
     def test_one_output_per_input_item_by_default(self):
         """With samples_per_item=1 (default), output length equals input length."""
         items = [{"text": "a"}, {"text": "b"}, {"text": "c"}]
         model = MockModel(responses=["ok"])
-        spec = generate_from_context(_make_source(items), "p: {text}", model)
-        result = spec.execute_fn(items)
+        result = generate_from_context(items, "p: {text}", model)
         assert len(result) == 3
 
     def test_samples_per_item_multiplies_output(self):
         """Total outputs equal len(inputs) * samples_per_item."""
         items = [{"text": "a"}, {"text": "b"}]
         model = MockModel(responses=["ok"])
-        spec = generate_from_context(
-            _make_source(items), "p: {text}", model, samples_per_item=3
-        )
-        result = spec.execute_fn(items)
+        result = generate_from_context(items, "p: {text}", model, samples_per_item=3)
         assert len(result) == 6
 
     def test_empty_inputs_returns_empty(self):
-        """Empty upstream data produces no outputs and no model calls."""
+        """Empty input produces no outputs and no model calls."""
         model = MockModel(responses=["ok"])
-        spec = generate_from_context(_make_source([]), "p", model)
-        result = spec.execute_fn([])
+        result = generate_from_context([], "p", model)
         assert result == []
         assert model._call_count == 0
 
@@ -161,8 +108,7 @@ class TestPromptBuilding:
         """Each input item fills the format string to produce a distinct prompt."""
         items = [{"topic": "gravity"}, {"topic": "photosynthesis"}]
         model = RecordingMockModel(responses=["ok"])
-        spec = generate_from_context(_make_source(items), "Explain {topic}.", model)
-        spec.execute_fn(items)
+        generate_from_context(items, "Explain {topic}.", model)
         all_prompts = [p for batch in model.recorded_prompts for p in batch]
         assert "Explain gravity." in all_prompts
         assert "Explain photosynthesis." in all_prompts
@@ -171,12 +117,11 @@ class TestPromptBuilding:
         """Callable prompt_fn is invoked once per input item."""
         items = [{"q": "Q1"}, {"q": "Q2"}]
         model = RecordingMockModel(responses=["ok"])
-        spec = generate_from_context(
-            _make_source(items),
+        generate_from_context(
+            items,
             lambda item: f"Answer: {item['q']}",
             model,
         )
-        spec.execute_fn(items)
         all_prompts = [p for batch in model.recorded_prompts for p in batch]
         assert "Answer: Q1" in all_prompts
         assert "Answer: Q2" in all_prompts
@@ -185,13 +130,12 @@ class TestPromptBuilding:
         """When output_schema is set, schema instructions are baked into prompt."""
         items = [{"text": "hi"}]
         model = RecordingMockModel(responses=['{"answer": "yes"}'])
-        spec = generate_from_context(
-            _make_source(items),
+        generate_from_context(
+            items,
             "Question: {text}",
             model,
             output_schema={"answer": str},
         )
-        spec.execute_fn(items)
         sent_prompt = model.recorded_prompts[0][0]
         assert isinstance(sent_prompt, str)
         # Check that the final prompt sent to the model includes schema instructions.
@@ -202,10 +146,7 @@ class TestPromptBuilding:
         """samples_per_item copies of the same filled prompt are sent to the model."""
         items = [{"text": "x"}]
         model = RecordingMockModel(responses=["ok"])
-        spec = generate_from_context(
-            _make_source(items), "p: {text}", model, samples_per_item=4
-        )
-        spec.execute_fn(items)
+        generate_from_context(items, "p: {text}", model, samples_per_item=4)
         all_prompts = [p for batch in model.recorded_prompts for p in batch]
         assert len(all_prompts) == 4
         assert all(p == "p: x" for p in all_prompts)
@@ -223,13 +164,12 @@ class TestOutputSchemaHandling:
         """Valid JSON with all required keys is accepted and returned as a dict."""
         items = [{"text": "a"}]
         model = MockModel(responses=['{"answer": "42", "reason": "math"}'])
-        spec = generate_from_context(
-            _make_source(items),
+        result = generate_from_context(
+            items,
             "p: {text}",
             model,
             output_schema={"answer": str, "reason": str},
         )
-        result = spec.execute_fn(items)
         assert len(result) == 1
         assert result[0]["answer"] == "42"
         assert result[0]["reason"] == "math"
@@ -238,28 +178,26 @@ class TestOutputSchemaHandling:
         """Non-JSON responses are rejected and dropped once retries are exhausted."""
         items = [{"text": "a"}]
         model = MockModel(responses=["not json"])
-        spec = generate_from_context(
-            _make_source(items),
+        result = generate_from_context(
+            items,
             "p: {text}",
             model,
             output_schema={"answer": str},
             max_retries=1,
         )
-        result = spec.execute_fn(items)
         assert result == []
 
     def test_json_missing_required_key_is_dropped(self):
         """JSON that omits a required schema key is rejected."""
         items = [{"text": "a"}]
         model = MockModel(responses=['{"answer": "42"}'])  # missing "reason"
-        spec = generate_from_context(
-            _make_source(items),
+        result = generate_from_context(
+            items,
             "p: {text}",
             model,
             output_schema={"answer": str, "reason": str},
             max_retries=0,
         )
-        result = spec.execute_fn(items)
         assert result == []
 
 
@@ -275,14 +213,13 @@ class TestRetries:
         """A prompt that always fails is attempted 1 + max_retries times."""
         items = [{"text": "a"}]
         model = MockModel(responses=["bad json"])
-        spec = generate_from_context(
-            _make_source(items),
+        generate_from_context(
+            items,
             "p: {text}",
             model,
             output_schema={"key": str},
             max_retries=2,
         )
-        spec.execute_fn(items)
         # 1 initial attempt + 2 retries = 3 calls (each with 1 prompt)
         assert model._call_count == 3
 
@@ -290,14 +227,13 @@ class TestRetries:
         """If a prompt parses successfully, it is not retried."""
         items = [{"text": "a"}]
         model = MockModel(responses=['{"key": "val"}'])
-        spec = generate_from_context(
-            _make_source(items),
+        result = generate_from_context(
+            items,
             "p: {text}",
             model,
             output_schema={"key": str},
             max_retries=3,
         )
-        result = spec.execute_fn(items)
         assert len(result) == 1
         assert model._call_count == 1
 
@@ -305,14 +241,13 @@ class TestRetries:
         """No retries are allowed if max_retries=0 is provided."""
         items = [{"text": "a"}]
         model = MockModel(responses=["bad json"])
-        spec = generate_from_context(
-            _make_source(items),
+        generate_from_context(
+            items,
             "p: {text}",
             model,
             output_schema={"key": str},
             max_retries=0,
         )
-        spec.execute_fn(items)
         assert model._call_count == 1
 
 
@@ -328,8 +263,5 @@ class TestBatching:
         """If there are 5 prompts with batch_size of 2, 3 batched calls are made."""
         items = [{"text": str(i)} for i in range(5)]
         model = MockModel(responses=["ok"])
-        spec = generate_from_context(
-            _make_source(items), "p: {text}", model, batch_size=2
-        )
-        spec.execute_fn(items)
+        generate_from_context(items, "p: {text}", model, batch_size=2)
         assert model._call_count == 3  # ceil(5/2) = 3
