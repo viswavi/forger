@@ -41,7 +41,7 @@ def generate_from_context(
     temperature: float = 0.7,
     max_retries: int = 3,
     batch_size: int = 10,
-) -> list[dict]:
+) -> list[dict | None]:
     r"""Generate LLM outputs conditioned on upstream input items.
 
     ``prompt_fn`` wraps each input item in a prompt which is passed to ``model``
@@ -87,9 +87,10 @@ def generate_from_context(
         batch_size: Number of prompts per ``model.generate_batch()`` call.
 
     Returns:
-        Flat list of parsed output dicts. Length is at most
-        ``len(items) * samples_per_item``; prompts whose output fails to parse
-        after ``max_retries`` are dropped with a warning.
+        List of length ``len(items) * samples_per_item`` in input order, grouped
+        by item (item ``i``'s samples occupy slots ``i * samples_per_item`` to
+        ``(i + 1) * samples_per_item``). Each slot holds the parsed output dict,
+        or ``None`` if the prompt failed to parse after ``max_retries``.
     """
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
@@ -103,16 +104,17 @@ def generate_from_context(
         full_prompt = _build_prompt(_resolve_prompt(prompt_fn, item), output_schema)
         all_prompts.extend([full_prompt] * samples_per_item)
 
-    results: list[dict] = []
-    pending = all_prompts
+    results: list[dict | None] = [None] * len(all_prompts)
+    pending: list[tuple[int, Prompt]] = list(enumerate(all_prompts))
 
     for attempt in range(1 + max_retries):
         if not pending:
             break
-        next_pending: list[Prompt] = []
+        next_pending: list[tuple[int, Prompt]] = []
         for start in range(0, len(pending), batch_size):
             batch = pending[start : start + batch_size]
-            batch_results = model.generate_batch(batch, temperature=temperature)
+            batch_prompts = [p for _, p in batch]
+            batch_results = model.generate_batch(batch_prompts, temperature=temperature)
             if len(batch_results) != len(batch):
                 log.warning(
                     "generate_batch returned %d results for %d prompts; will retry",
@@ -121,19 +123,19 @@ def generate_from_context(
                 )
                 next_pending.extend(batch)
                 continue
-            for prompt, responses in zip(batch, batch_results):
+            for (idx, prompt), responses in zip(batch, batch_results):
                 raw_text = responses[0]
                 parsed = _parse_output(raw_text, output_schema)
                 if parsed is None:
                     log.debug("Parse failed (attempt %d); will retry", attempt + 1)
-                    next_pending.append(prompt)
+                    next_pending.append((idx, prompt))
                 else:
-                    results.append(parsed)
+                    results[idx] = parsed
         pending = next_pending
 
     if pending:
         log.warning(
-            "%d prompt(s) exhausted %d retries and were dropped",
+            "%d prompt(s) exhausted %d retries; returning None for failed prompts",
             len(pending),
             max_retries,
         )

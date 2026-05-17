@@ -174,8 +174,8 @@ class TestOutputSchemaHandling:
         assert result[0]["answer"] == "42"
         assert result[0]["reason"] == "math"
 
-    def test_invalid_json_is_dropped_after_retries(self):
-        """Non-JSON responses are rejected and dropped once retries are exhausted."""
+    def test_invalid_json_yields_none_slot_after_retries(self):
+        """Non-JSON responses leave a None slot once retries are exhausted."""
         items = [{"text": "a"}]
         model = MockModel(responses=["not json"])
         result = generate_from_context(
@@ -185,10 +185,10 @@ class TestOutputSchemaHandling:
             output_schema={"answer": str},
             max_retries=1,
         )
-        assert result == []
+        assert result == [None]
 
-    def test_json_missing_required_key_is_dropped(self):
-        """JSON that omits a required schema key is rejected."""
+    def test_json_missing_required_key_yields_none_slot(self):
+        """JSON that omits a required schema key leaves a None slot."""
         items = [{"text": "a"}]
         model = MockModel(responses=['{"answer": "42"}'])  # missing "reason"
         result = generate_from_context(
@@ -198,7 +198,7 @@ class TestOutputSchemaHandling:
             output_schema={"answer": str, "reason": str},
             max_retries=0,
         )
-        assert result == []
+        assert result == [None]
 
 
 # ---------------------------------------------------------------------------
