@@ -96,6 +96,8 @@ def generate_from_context(
         raise ValueError("batch_size must be positive")
     if samples_per_item <= 0:
         raise ValueError("samples_per_item must be positive")
+    if max_retries < 0:
+        raise ValueError("max_retries must be non-negative")
 
     log = _get_logger()
 
