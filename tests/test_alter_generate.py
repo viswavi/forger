@@ -142,6 +142,28 @@ class TestPromptBuilding:
         assert "Required keys" in sent_prompt
         assert "answer" in sent_prompt
 
+    def test_schema_instructions_appended_to_message_list_prompt(self):
+        """Schema instructions are still added when prompt is a list of messages."""
+        items = [{"text": "hi"}]
+        model = RecordingMockModel(responses=['{"answer": "yes"}'])
+        generate_from_context(
+            items,
+            lambda item: [
+                {"role": "system", "content": "Generate an answer to the question."},
+                {"role": "user", "content": f"Question: {item['text']}"},
+            ],
+            model,
+            output_schema={"answer": str},
+        )
+        sent_prompt = model.recorded_prompts[0][0]
+        assert isinstance(sent_prompt, list)
+        assert len(sent_prompt) > 2  # Original messages + schema instructions
+        # Last message should be a user message with schema instructions
+        last_message = sent_prompt[-1]
+        assert last_message["role"] == "user"
+        assert "Required keys" in last_message["content"]
+        assert "answer" in last_message["content"]
+
     def test_samples_per_item_sends_duplicate_prompts(self):
         """samples_per_item copies of the same filled prompt are sent to the model."""
         items = [{"text": "x"}]
