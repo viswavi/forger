@@ -127,7 +127,12 @@ def generate_from_context(
                 raw_text = responses[0]
                 parsed = _parse_output(raw_text, output_schema)
                 if parsed is None:
-                    log.debug("Parse failed (attempt %d); will retry", attempt + 1)
+                    if attempt < max_retries:
+                        log.debug("Parse failed (attempt %d); will retry", attempt + 1)
+                    else:
+                        log.warning(
+                            "Parse failed after %d attempts; giving up", attempt + 1
+                        )
                     next_pending.append((idx, prompt))
                 else:
                     results[idx] = parsed
