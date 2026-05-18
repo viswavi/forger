@@ -159,10 +159,16 @@ def op(
                     with cache_path.open("rb") as f:
                         result = pickle.load(f)
                     cache_hit = True
-                except (EOFError, pickle.UnpicklingError):
-                    # Cache file is corrupted; fall through to executing op directly.
+                except Exception as exc:
+                    # Cache file is unreadable or incompatible with the current
+                    # code version; fall through to executing the op directly.
                     # The cache will be overwritten with a new result.
-                    pass
+                    logger.debug(
+                        "cache read failed for %s: %s: %s",
+                        cache_path,
+                        type(exc).__name__,
+                        exc,
+                    )
 
             if not cache_hit:
                 result = fn(*args, **kwargs)
