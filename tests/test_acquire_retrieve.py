@@ -60,7 +60,7 @@ class TestRetrieve:
 
     @patch("pyforger.acquire.sources.HFRetrievalSource.fetch")
     def test_retrieve_from_hf_returns_list(self, mock_fetch):
-        """Return a retrieve function from retrieve_from_web."""
+        """Return a list of datasets from retrieve_from_hf."""
         mock_fetch.return_value = [
             {"row_idx": i, "dataset_id": "some/dataset", "text": f"row{i}"}
             for i in range(5)
