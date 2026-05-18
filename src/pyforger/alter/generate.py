@@ -5,8 +5,8 @@ import logging
 from collections.abc import Callable
 from typing import Any, Union
 
+from pyforger.acquire._model_utils import _build_prompt, _parse_output
 from pyforger.acquire.model import Model, Prompt
-from pyforger.acquire.sample import _build_prompt, _parse_output
 from pyforger.op import op
 
 PromptTemplate = Union[str, Callable[[dict], Prompt]]
