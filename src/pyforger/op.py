@@ -15,6 +15,7 @@ import inspect
 import logging
 import os
 import pickle
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -48,16 +49,19 @@ class CallRecord:
 
 
 _TRACE: list[CallRecord] = []
+_TRACE_LOCK = threading.Lock()
 
 
 def trace() -> list[CallRecord]:
     """Return a copy of the in-memory trace of @op calls."""
-    return list(_TRACE)
+    with _TRACE_LOCK:
+        return list(_TRACE)
 
 
 def clear_trace() -> None:
     """Drop all trace records. Does not affect the disk cache."""
-    _TRACE.clear()
+    with _TRACE_LOCK:
+        _TRACE.clear()
 
 
 _CODE_T = type((lambda: None).__code__)
@@ -147,43 +151,51 @@ def op(
             cache_path = _cache_dir() / op_name / f"{input_hash}.pkl"
 
             use_cache = cache and not _no_cache
+            cache_hit = False
+
             if use_cache and cache_path.exists():
-                with cache_path.open("rb") as f:
-                    result = pickle.load(f)
+                try:
+                    with cache_path.open("rb") as f:
+                        result = pickle.load(f)
+                    cache_hit = True
+                except (EOFError, pickle.UnpicklingError):
+                    # Cache file is corrupted; fall through to executing op directly.
+                    # The cache will be overwritten with a new result.
+                    pass
+
+            if not cache_hit:
+                result = fn(*args, **kwargs)
+
+                if use_cache:
+                    # Atomic write to prevent corruption from concurrent threads
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    tmp_path = cache_path.with_suffix(f".tmp.{threading.get_ident()}")
+                    with tmp_path.open("wb") as f:
+                        pickle.dump(result, f, protocol=4)
+                    os.replace(tmp_path, cache_path)
+
+            duration = time.time() - start
+            with _TRACE_LOCK:
                 _TRACE.append(
                     CallRecord(
                         op_name=op_name,
                         input_hash=input_hash,
                         output_hash=_hash(result),
-                        cache_hit=True,
-                        duration_s=time.time() - start,
+                        cache_hit=cache_hit,
+                        duration_s=duration,
                     )
                 )
+
+            if cache_hit:
                 logger.debug("cache HIT %s %s", op_name, input_hash[:8])
-                return result
-
-            result = fn(*args, **kwargs)
-
-            if use_cache:
-                cache_path.parent.mkdir(parents=True, exist_ok=True)
-                with cache_path.open("wb") as f:
-                    pickle.dump(result, f, protocol=4)
-
-            _TRACE.append(
-                CallRecord(
-                    op_name=op_name,
-                    input_hash=input_hash,
-                    output_hash=_hash(result),
-                    cache_hit=False,
-                    duration_s=time.time() - start,
+            else:
+                logger.debug(
+                    "cache MISS %s %s (%.2fs)",
+                    op_name,
+                    input_hash[:8],
+                    duration,
                 )
-            )
-            logger.debug(
-                "cache MISS %s %s (%.2fs)",
-                op_name,
-                input_hash[:8],
-                time.time() - start,
-            )
+
             return result
 
         return wrapper
