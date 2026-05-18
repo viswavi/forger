@@ -77,6 +77,17 @@ class Model:
         """Show model id for debugging."""
         return f"Model({self._model_id!r})"
 
+    def cache_key(self) -> tuple:
+        """Stable hash key for @op caching using all functional attributes."""
+        kwargs_items = tuple(sorted(self._kwargs.items(), key=lambda kv: kv[0]))
+        return (
+            type(self).__name__,
+            self._model_id,
+            self._temperature,
+            self._max_tokens,
+            kwargs_items,
+        )
+
     @property
     def last_usage(self) -> dict[str, Any] | None:
         """Token counts and cost from the most recent generate call.
