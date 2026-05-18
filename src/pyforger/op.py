@@ -134,7 +134,7 @@ def op(
     """
 
     def decorate(fn: Callable[..., T]) -> Callable[..., T]:
-        # Functions deocrated with @op cannot use the reserved argument '_no_cache'.
+        # Functions decorated with @op cannot use the reserved argument '_no_cache'.
         if "_no_cache" in inspect.signature(fn).parameters:
             raise TypeError(
                 "Forger functions decorated with @op cannot use the reserved "
