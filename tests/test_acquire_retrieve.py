@@ -87,15 +87,29 @@ class TestRetrieve:
         assert len(results) == 5
         assert all(isinstance(r, dict) for r in results)
 
-    def test_retrieve_from_wiki_returns_list(self):
+    @patch("pyforger.acquire.sources.WikiRetrievalSource.fetch")
+    def test_retrieve_from_wiki_returns_list(self, mock_fetch):
         """Return search results from retrieve_from_wiki."""
+        mock_fetch.return_value = [
+            {
+                "title": f"Python page {i}",
+                "url": f"http://wiki/{i}",
+                "snippet": f"snippet {i}",
+            }
+            for i in range(3)
+        ]
         results = retrieve_from_wiki(queries=["Python"], n=3)
         assert isinstance(results, list)
         assert len(results) == 3
         assert all(isinstance(r, dict) for r in results)
 
-    def test_retrieve_from_arxiv_returns_list(self):
+    @patch("pyforger.acquire.sources.ArxivRetrievalSource.fetch")
+    def test_retrieve_from_arxiv_returns_list(self, mock_fetch):
         """Return search results from retrieve_from_arxiv."""
+        mock_fetch.return_value = [
+            {"title": f"paper {i}", "id": f"arxiv:{i}", "summary": f"summary {i}"}
+            for i in range(5)
+        ]
         results = retrieve_from_arxiv(queries=["machine learning"], n=5)
         assert isinstance(results, list)
         assert len(results) == 5
