@@ -44,7 +44,7 @@ class CallRecord:
 
     op_name: str
     input_hash: str
-    output_hash: str
+    output_hash: str | None
     cache_hit: bool
     duration_s: float
 
@@ -181,7 +181,7 @@ def op(
                     CallRecord(
                         op_name=op_name,
                         input_hash=input_hash,
-                        output_hash=_hash(result),
+                        output_hash=None if cache_hit else _hash(result),
                         cache_hit=cache_hit,
                         duration_s=duration,
                     )
