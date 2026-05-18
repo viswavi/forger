@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import hashlib
 import inspect
-import logging
 import os
 import pickle
 import threading
@@ -23,7 +22,9 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, TypeVar
 
-logger = logging.getLogger("forger.op")
+from pyforger.utils import get_formatted_logger
+
+logger = get_formatted_logger("forger.op")
 
 T = TypeVar("T")
 
