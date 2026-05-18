@@ -11,6 +11,7 @@ filtering passes) get cached at the @op layer.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import logging
 import os
 import pickle
@@ -129,6 +130,13 @@ def op(
     """
 
     def decorate(fn: Callable[..., T]) -> Callable[..., T]:
+        # Functions deocrated with @op cannot use the reserved argument '_no_cache'.
+        if "_no_cache" in inspect.signature(fn).parameters:
+            raise TypeError(
+                "Forger functions decorated with @op cannot use the reserved "
+                + "argument name '_no_cache'."
+            )
+
         op_name = name or f"{fn.__module__}.{fn.__qualname__}"
         body_key = _canonical(fn)
 
@@ -178,7 +186,6 @@ def op(
             )
             return result
 
-        wrapper.__wrapped_fn__ = fn  # type: ignore[attr-defined]
         return wrapper
 
     if _fn is not None:
