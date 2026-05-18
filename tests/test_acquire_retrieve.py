@@ -134,7 +134,7 @@ class TestRetrieve:
 
 
 class TestMultiQueryRetrieve:
-    """Multiquery retrieval returns flat rows with a 'query' field."""
+    """Multi-query retrieval returns flat rows with a 'query' field."""
 
     def test_multi_query_flat_output(self):
         """Multiple queries produce a flat list with correct query tags."""
@@ -147,7 +147,7 @@ class TestMultiQueryRetrieve:
         assert [r["text"] for r in result] == ["x", "y", "x", "y"]
 
     def test_single_query_stamps_query_field(self):
-        """A singleelement queries list stamps 'query' on every row."""
+        """A single-element list of queries stamps 'query' on every row."""
         source = MockRetrievalSource([{"text": "t"}])
         spec = retrieve(source, mode=RetrieveMode.QUERY, queries=["hello"])
         result = spec
