@@ -47,10 +47,10 @@ class TestRetrieve:
     def test_retrieve_returns_list(self):
         """Retrieve with a mock source returns retrieval results."""
         source = MockRetrievalSource([{"text": "a"}, {"text": "b"}])
-        spec = retrieve(source, mode=RetrieveMode.QUERY, queries=["x"])
-        assert isinstance(spec, list)
-        assert len(spec) == 2
-        assert isinstance(spec[0], dict)
+        result = retrieve(source, mode=RetrieveMode.QUERY, queries=["x"])
+        assert isinstance(result, list)
+        assert len(result) == 2
+        assert isinstance(result[0], dict)
 
     def test_retrieve_execute_returns_source_result(self):
         """retrieve() returns the list from source.fetch with query stamped."""
@@ -139,8 +139,7 @@ class TestMultiQueryRetrieve:
     def test_multi_query_flat_output(self):
         """Multiple queries produce a flat list with correct query tags."""
         source = MockRetrievalSource([{"text": "x"}, {"text": "y"}])
-        spec = retrieve(source, mode=RetrieveMode.QUERY, queries=["a", "b"], n=10)
-        result = spec
+        result = retrieve(source, mode=RetrieveMode.QUERY, queries=["a", "b"], n=10)
         assert len(result) == 4
         assert all(r["query"] == "a" for r in result[:2])
         assert all(r["query"] == "b" for r in result[2:])
@@ -149,16 +148,14 @@ class TestMultiQueryRetrieve:
     def test_single_query_stamps_query_field(self):
         """A single-element list of queries stamps 'query' on every row."""
         source = MockRetrievalSource([{"text": "t"}])
-        spec = retrieve(source, mode=RetrieveMode.QUERY, queries=["hello"])
-        result = spec
+        result = retrieve(source, mode=RetrieveMode.QUERY, queries=["hello"])
         assert len(result) == 1
         assert result[0]["query"] == "hello"
 
     def test_no_query_stamps_none(self):
         """When queries is not provided, query field is None."""
         source = MockRetrievalSource([{"text": "t"}])
-        spec = retrieve(source, mode=RetrieveMode.RANDOM)
-        result = spec
+        result = retrieve(source, mode=RetrieveMode.RANDOM)
         assert result[0]["query"] is None
 
     def test_fetch_called_once_per_query(self):
@@ -172,13 +169,13 @@ class TestMultiQueryRetrieve:
                 return super().fetch(*args, **kwargs)
 
         source = CountingSource([{"text": "a"}])
-        spec = retrieve(source, queries=["q1", "q2", "q3"])
-        spec
+        # We don't care about the retrieval result here here; just checking that
+        # fetch() is called the right number of times based on the number of queries.
+        retrieve(source, queries=["q1", "q2", "q3"])
         assert call_count == 3
 
     def test_multi_query_preserves_original_fields(self):
         """Source fields (text, id, etc.) are preserved alongside query."""
         source = MockRetrievalSource([{"text": "hello", "id": "42"}])
-        spec = retrieve(source, queries=["a"])
-        result = spec
+        result = retrieve(source, queries=["a"])
         assert result == [{"text": "hello", "id": "42", "query": "a"}]
