@@ -130,7 +130,6 @@ def _generation_loop(
 def sample_from_LLM(
     prompt: Prompt,
     model: Model,
-    *,
     n: int = 100,
     output_schema: dict[str, Any] | None = None,
     temperature: float = 0.7,
