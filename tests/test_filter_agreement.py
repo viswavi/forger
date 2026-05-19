@@ -201,3 +201,33 @@ class TestByRougeLAgreement:
         data = [{"out_a": "hello"}]
         with pytest.raises(KeyError, match="missing required field 'out_b'"):
             by_rouge_l_agreement(data, field_a="out_a", field_b="out_b")
+
+
+class TestByRougeLDisagreement:
+    """by_rouge_l_agreement keeps items where two fields are similar."""
+
+    def test_removes_similar_items(self):
+        """Items with high ROUGE-L between fields are removed."""
+        data = [
+            {
+                "out_a": "the cat sat on the mat",
+                "out_b": "the cat sat on a mat",
+            },
+        ]
+        result = by_rouge_l_agreement(
+            data, threshold=0.7, field_a="out_a", field_b="out_b", disagree=True
+        )
+        assert result == []
+
+    def test_keeps_dissimilar_items(self):
+        """Items with low ROUGE-L between fields are kept."""
+        data = [
+            {
+                "out_a": "the cat sat on the mat",
+                "out_b": "a quick brown fox jumped",
+            },
+        ]
+        result = by_rouge_l_agreement(
+            data, threshold=0.7, field_a="out_a", field_b="out_b", disagree=True
+        )
+        assert result == data
