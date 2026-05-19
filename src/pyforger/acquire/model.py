@@ -79,7 +79,7 @@ class Model:
 
     def cache_key(self) -> tuple:
         """Stable hash key for @op caching using all functional attributes."""
-        kwargs_items = tuple(sorted(self._kwargs.items(), key=lambda kv: kv[0]))
+        kwargs_items = tuple(sorted(self._kwargs.items(), key=lambda kv: str(kv[0])))
         return (
             type(self).__name__,
             self._model_id,
