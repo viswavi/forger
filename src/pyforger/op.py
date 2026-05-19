@@ -176,7 +176,10 @@ def op(
                 if use_cache:
                     # Atomic write to prevent corruption from concurrent threads
                     cache_path.parent.mkdir(parents=True, exist_ok=True)
-                    tmp_path = cache_path.with_suffix(f".tmp.{threading.get_ident()}")
+                    tmp_path = (
+                        cache_path.parent
+                        / f"{cache_path.name}.tmp.{threading.get_ident()}"
+                    )
                     with tmp_path.open("wb") as f:
                         pickle.dump(result, f, protocol=4)
                     os.replace(tmp_path, cache_path)
