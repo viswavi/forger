@@ -62,7 +62,9 @@ def retrieve_from_web(
         fetch_full_content=fetch_full_content,
         **source_kwargs,
     )
-    return retrieve(source, mode=mode, queries=queries, n=n, seed=seed, **kwargs)
+    return retrieve(
+        source, mode=mode, queries=queries, n=n, seed=seed, **source_kwargs
+    )
 
 
 def retrieve_from_wiki(
