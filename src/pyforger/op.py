@@ -148,13 +148,22 @@ def op(
             )
 
         op_name = name or f"{fn.__module__}.{fn.__qualname__}"
+        # Sanitize op_name to be a safe directory name
+        safe_op_name = "".join(c if c.isalnum() or c in "._-" else "_" for c in op_name)
         body_key = _canonical(fn)
 
         @wraps(fn)
         def wrapper(*args: Any, _no_cache: bool = False, **kwargs: Any) -> T:
             start = time.time()
             input_hash = _hash([op_name, body_key, list(args), kwargs])
-            cache_path = _cache_dir() / op_name / f"{input_hash}.pkl"
+
+            cache_root = _cache_dir()
+            cache_path = (cache_root / safe_op_name / f"{input_hash}.pkl").resolve()
+
+            # Ensure the cache path is within the cache root. This prevents users from
+            # supplying cache paths that point outside Forger's directories.
+            if cache_root.resolve() not in cache_path.parents:
+                raise ValueError(f"Invalid cache path provided: {cache_path}")
 
             use_cache = cache and not _no_cache
             cache_hit = False
