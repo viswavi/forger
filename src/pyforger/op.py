@@ -4,6 +4,11 @@ Wrap a plain Python function with ``@op`` and it gains two things: its
 output is memoized on disk keyed by a hash of its inputs, and every call
 is recorded in a trace that can be inspected post-hoc.
 
+.. warning::
+    This module uses ``pickle`` for serialization. Only use this with a cache
+    directory that is trusted and secured (e.g., restricted to the current user).
+    Loading malicious pickle data can lead to arbitrary code execution.
+
 Used by approach #6 (pipeline-as-function): pipelines are plain Python,
 control flow is plain Python, but the expensive boundaries (LLM calls,
 filtering passes) get cached at the @op layer.
@@ -91,7 +96,9 @@ def _canonical(obj: Any) -> Any:
     if isinstance(obj, (list, tuple)):
         return [_canonical(x) for x in obj]
     if isinstance(obj, dict):
-        return {str(k): _canonical(obj[k]) for k in sorted(obj, key=str)}
+        items = [(_canonical(k), _canonical(v)) for k, v in obj.items()]
+        items.sort(key=lambda item: pickle.dumps(item[0]))
+        return items
     if isinstance(obj, type):
         return f"<type {obj.__module__}.{obj.__qualname__}>"
     if hasattr(obj, "cache_key") and callable(obj.cache_key):
@@ -143,19 +150,34 @@ def op(
             )
 
         op_name = name or f"{fn.__module__}.{fn.__qualname__}"
+        # Sanitize op_name to be a safe directory name
+        safe_op_name = "".join(c if c.isalnum() or c in "._-" else "_" for c in op_name)
         body_key = _canonical(fn)
 
         @wraps(fn)
         def wrapper(*args: Any, _no_cache: bool = False, **kwargs: Any) -> T:
             start = time.time()
             input_hash = _hash([op_name, body_key, list(args), kwargs])
-            cache_path = _cache_dir() / op_name / f"{input_hash}.pkl"
+
+            cache_root = _cache_dir()
+            cache_path = (cache_root / safe_op_name / f"{input_hash}.pkl").resolve()
+
+            # Ensure the cache path is within the cache root. This prevents users from
+            # supplying cache paths that point outside Forger's directories.
+            if cache_root.resolve() not in cache_path.parents:
+                raise ValueError(f"Invalid cache path provided: {cache_path}")
 
             use_cache = cache and not _no_cache
             cache_hit = False
 
             if use_cache and cache_path.exists():
                 try:
+                    # Security: verify file ownership matches current process owner
+                    if cache_path.stat().st_uid != os.getuid():
+                        raise PermissionError(
+                            f"Cache file {cache_path} is owned by another user."
+                        )
+
                     with cache_path.open("rb") as f:
                         result = pickle.load(f)
                     cache_hit = True

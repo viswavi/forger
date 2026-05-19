@@ -99,6 +99,7 @@ def sample_from_LLM(
         temperature: Sampling temperature.
         max_retries: Consecutive zero-acceptance rounds before stopping.
         batch_size: Prompts per ``generate_batch`` call.
+        name: Name for caching and logging.
 
     Returns:
         List of accepted sample dicts. ``{"text": <raw>}`` when no schema;
