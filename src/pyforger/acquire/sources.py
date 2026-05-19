@@ -5,7 +5,6 @@ Concrete sources: web, Wikipedia, Hugging Face, ArXiv, Semantic Scholar.
 
 from __future__ import annotations
 
-import logging
 import math
 import random
 from abc import ABC, abstractmethod
@@ -17,7 +16,9 @@ import requests
 import trafilatura
 from semanticscholar import SemanticScholar  # type: ignore[import-untyped]
 
-logger = logging.getLogger(__name__)
+from pyforger.utils import get_formatted_logger
+
+logger = get_formatted_logger("Retrieval Sources")
 
 
 class RetrieveMode(Enum):

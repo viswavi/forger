@@ -156,8 +156,8 @@ class TestByLlmScore:
             {"instruction": "What is 2+2?", "response": "The answer is 4."},
             {"instruction": "Write a poem", "response": "Roses are red..."},
         ]
-        source1 = data
-        source2 = data
+        source1 = list(data)
+        source2 = list(data)
         result1 = by_llm_score(
             source1,
             model=_FakeJudge(),

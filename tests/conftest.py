@@ -15,7 +15,10 @@ from pyforger.op import clear_trace
 
 @pytest.fixture(autouse=True)
 def _isolate_op_cache(tmp_path, monkeypatch):
-    """Point @op's disk cache at a fresh per-test tmp dir; clear the trace."""
+    """Point @op's disk cache at a fresh per-test tmp dir; clear the trace.
+
+    This means that every test starts with a clean cache.
+    """
     monkeypatch.setenv("FORGER_CACHE", str(tmp_path))
     clear_trace()
     yield

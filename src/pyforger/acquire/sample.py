@@ -82,14 +82,14 @@ def _generation_loop(
 def sample_from_LLM(
     prompt: Prompt,
     model: Model,
-    *,
     n: int = 100,
     output_schema: dict[str, Any] | None = None,
     temperature: float = 0.7,
     max_retries: int = 3,
     batch_size: int = 10,
+    name: str = "sample_from_LLM",
 ) -> list[dict]:
-    """Generate from ``model`` until ``n`` samples are accepted.
+    """Generate from `model` until `n` samples are generated.
 
     Args:
         prompt: A string or chat-message list (OpenAI format).

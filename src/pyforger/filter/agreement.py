@@ -32,7 +32,8 @@ def by_exact_agreement(
             If True, keep only items where they differ.
 
     Returns:
-        A filtered list of data items where the specified fields all agree.
+        A filtered list of data items where the specified fields all agree (or disagree
+            if `disagree=True`) by exact match.
     """
     return [
         item
@@ -69,7 +70,8 @@ def by_rouge_l_agreement(
             If True, keep only the items that fall below it.
 
     Returns:
-        A filtered list of data items where the specified fields all agree.
+        A filtered list of data items where the specified fields all agree (or disagree
+            if `disagree=True`) by ROUGE-L F1.
     """
     scorer = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=False)
     return [

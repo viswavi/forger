@@ -104,13 +104,12 @@ class TestSingleField:
         data = [{"instruction": "hello"}]
         source = data
         model = FakeModel(["out"])
-        node = factory(
+        result = factory(
             source,
             target_language=target_language,
             fields=["instruction"],
             model=model,
         )
-        result = node
         assert result == [{"instruction": "out"}]
 
     def test_multiple_items(self, factory, target_language):
@@ -118,13 +117,12 @@ class TestSingleField:
         data = [{"instruction": "hello"}, {"instruction": "goodbye"}]
         source = data
         model = FakeModel(["one", "two"])
-        node = factory(
+        result = factory(
             source,
             target_language=target_language,
             fields=["instruction"],
             model=model,
         )
-        result = node
         assert result == [{"instruction": "one"}, {"instruction": "two"}]
 
     def test_other_keys_pass_through(self, factory, target_language):
@@ -132,13 +130,12 @@ class TestSingleField:
         data = [{"instruction": "hello", "id": 42, "tag": "greeting"}]
         source = data
         model = FakeModel(["out"])
-        node = factory(
+        result = factory(
             source,
             target_language=target_language,
             fields=["instruction"],
             model=model,
         )
-        result = node
         assert result == [{"instruction": "out", "id": 42, "tag": "greeting"}]
 
     def test_leading_trailing_whitespace_stripped(self, factory, target_language):
@@ -146,13 +143,12 @@ class TestSingleField:
         data = [{"instruction": "hello"}]
         source = data
         model = FakeModel(["  out\n"])
-        node = factory(
+        result = factory(
             source,
             target_language=target_language,
             fields=["instruction"],
             model=model,
         )
-        result = node
         assert result == [{"instruction": "out"}]
 
 
@@ -165,13 +161,12 @@ class TestMultiField:
         data = [{"instruction": "hello", "response": "hi there"}]
         source = data
         model = FakeModel(["A", "B"])
-        node = factory(
+        result = factory(
             source,
             target_language=target_language,
             fields=["instruction", "response"],
             model=model,
         )
-        result = node
         assert result == [{"instruction": "A", "response": "B"}]
 
     def test_one_call_per_field_per_item(self, factory, target_language):
@@ -182,13 +177,14 @@ class TestMultiField:
         ]
         source = data
         model = FakeModel(["A", "B", "C", "D"])
-        node = factory(
+        # We don't care about the result here, and instead we just examine internally
+        # how many times the model was called.
+        factory(
             source,
             target_language=target_language,
             fields=["instruction", "response"],
             model=model,
         )
-        node
         assert len(model.batch_calls) == 1
         assert len(model.batch_calls[0]) == 4
 
@@ -200,13 +196,14 @@ class TestMultiField:
         ]
         source = data
         model = FakeModel(["A", "B", "C", "D"])
-        node = factory(
+        # We don't care about the result here, and instead we just examine internally
+        # what prompts the factory generated and sent to the model.
+        factory(
             source,
             target_language=target_language,
             fields=["instruction", "response"],
             model=model,
         )
-        node
         batch = model.batch_calls[0]
         user_msgs_per_prompt = [
             [m for m in prompt if m["role"] == "user"] for prompt in batch
@@ -223,13 +220,12 @@ class TestMultiField:
         ]
         source = data
         model = FakeModel(["A", "B", "C", "D"])
-        node = factory(
+        result = factory(
             source,
             target_language=target_language,
             fields=["instruction", "response"],
             model=model,
         )
-        result = node
         assert result == [
             {"instruction": "A", "response": "B"},
             {"instruction": "C", "response": "D"},
@@ -245,14 +241,13 @@ class TestTargetFields:
         data = [{"instruction": "hello", "response": "hi"}]
         source = data
         model = FakeModel(["A", "B"])
-        node = factory(
+        result = factory(
             source,
             target_language=target_language,
             fields=["instruction", "response"],
             target_fields=["instruction_out", "response_out"],
             model=model,
         )
-        result = node
         assert result == [
             {
                 "instruction": "hello",
@@ -267,14 +262,13 @@ class TestTargetFields:
         data = [{"instruction": "hello"}]
         source = data
         model = FakeModel(["out"])
-        node = factory(
+        result = factory(
             source,
             target_language=target_language,
             fields=["instruction"],
             target_fields=["instruction_out"],
             model=model,
         )
-        result = node
         assert result == [{"instruction": "hello", "instruction_out": "out"}]
 
 
@@ -364,13 +358,14 @@ class TestPromptContent:
         data = [{"instruction": "hello"}]
         source = data
         model = FakeModel(["out"])
-        node = factory(
+        # We don't care about the result here, and instead we just examine internally
+        # how many times the model was called and what prompts were given.
+        factory(
             source,
             target_language=target_language,
             fields=["instruction"],
             model=model,
         )
-        node
         prompt = model.batch_calls[0][0]
         assert isinstance(prompt, list)
         system = next(m for m in prompt if m["role"] == "system")
@@ -381,13 +376,14 @@ class TestPromptContent:
         data = [{"instruction": "what is 2+2?"}]
         source = data
         model = FakeModel(["out"])
-        node = factory(
+        # We don't care about the result here, and instead we just examine internally
+        # how many times the model was called and what prompts were given.
+        factory(
             source,
             target_language=target_language,
             fields=["instruction"],
             model=model,
         )
-        node
         prompt = model.batch_calls[0][0]
         user = next(m for m in prompt if m["role"] == "user")
         assert user["content"] == "what is 2+2?"
@@ -397,13 +393,14 @@ class TestPromptContent:
         data = [{"instruction": "A", "response": "B"}]
         source = data
         model = FakeModel(["a", "b"])
-        node = factory(
+        # We don't care about the result here, and instead we just examine internally
+        # how many times the model was called and what prompts were given.
+        factory(
             source,
             target_language=target_language,
             fields=["instruction", "response"],
             model=model,
         )
-        node
         batch = model.batch_calls[0]
         assert len(batch) == 2
         user_msgs_per_prompt = [[m for m in p if m["role"] == "user"] for p in batch]
@@ -420,13 +417,12 @@ class TestEdgeCases:
         """No data means no generate_batch call is made."""
         source = []
         model = FakeModel([])
-        node = factory(
+        result = factory(
             source,
             target_language=target_language,
             fields=["instruction"],
             model=model,
         )
-        result = node
         assert result == []
         assert model.batch_calls == []
 
@@ -435,13 +431,12 @@ class TestEdgeCases:
         data = [{"instruction": ""}]
         source = data
         model = FakeModel([""])
-        node = factory(
+        result = factory(
             source,
             target_language=target_language,
             fields=["instruction"],
             model=model,
         )
-        result = node
         assert result == [{"instruction": ""}]
 
     def test_multiline_field_content(self, factory, target_language):
@@ -449,13 +444,12 @@ class TestEdgeCases:
         data = [{"instruction": "line one\nline two\nline three"}]
         source = data
         model = FakeModel(["a\nb\nc"])
-        node = factory(
+        result = factory(
             source,
             target_language=target_language,
             fields=["instruction"],
             model=model,
         )
-        result = node
         assert result == [{"instruction": "a\nb\nc"}]
 
     def test_input_dicts_not_mutated(self, factory, target_language):
@@ -464,13 +458,12 @@ class TestEdgeCases:
         data = [original]
         source = data
         model = FakeModel(["out"])
-        node = factory(
+        result = factory(
             source,
             target_language=target_language,
             fields=["instruction"],
             model=model,
         )
-        result = node
         assert original == {"instruction": "hello", "id": 1}
         assert result[0] is not original
         assert result is not data
@@ -491,13 +484,12 @@ class TestToLanguageSpecific:
             "```"
         )
         model = FakeModel([translated])
-        node = translate.to_language(
+        result = translate.to_language(
             source,
             target_language="Spanish",
             fields=["doc"],
             model=model,
         )
-        result = node
         assert result == [{"doc": translated}]
 
 
@@ -509,13 +501,12 @@ class TestToCodeFenceStripping:
         data = [{"prompt": "add"}]
         source = data
         model = FakeModel(["```python\ndef add(a, b):\n    return a + b\n```"])
-        node = translate.to_code(
+        result = translate.to_code(
             source,
             target_language="Python",
             fields=["prompt"],
             model=model,
         )
-        result = node
         assert result == [{"prompt": "def add(a, b):\n    return a + b"}]
 
     def test_fenced_without_language_tag_stripped(self):
@@ -523,13 +514,12 @@ class TestToCodeFenceStripping:
         data = [{"prompt": "hi"}]
         source = data
         model = FakeModel(["```\nprint('hi')\n```"])
-        node = translate.to_code(
+        result = translate.to_code(
             source,
             target_language="Python",
             fields=["prompt"],
             model=model,
         )
-        result = node
         assert result == [{"prompt": "print('hi')"}]
 
     def test_unfenced_response_left_alone(self):
@@ -537,13 +527,12 @@ class TestToCodeFenceStripping:
         data = [{"prompt": "hi"}]
         source = data
         model = FakeModel(["  print('hi')\n"])
-        node = translate.to_code(
+        result = translate.to_code(
             source,
             target_language="Python",
             fields=["prompt"],
             model=model,
         )
-        result = node
         assert result == [{"prompt": "print('hi')"}]
 
     def test_inner_fences_preserved(self):
@@ -561,13 +550,12 @@ class TestToCodeFenceStripping:
             "```"
         )
         model = FakeModel([inner])
-        node = translate.to_code(
+        result = translate.to_code(
             source,
             target_language="Python",
             fields=["prompt"],
             model=model,
         )
-        result = node
         expected = (
             "example = '''\n"
             "```\n"
@@ -587,14 +575,15 @@ class TestToCodeSourceLanguage:
         data = [{"code": "def add(a, b): return a + b"}]
         source = data
         model = FakeModel(["fn add(a: i32, b: i32) -> i32 { a + b }"])
-        node = translate.to_code(
+        # We don't care about the result here, and instead we just examine internally
+        # how many times the model was called and what prompts were given.
+        translate.to_code(
             source,
             target_language="Rust",
             fields=["code"],
             source_language="Python",
             model=model,
         )
-        node
         prompt = model.batch_calls[0][0]
         system = next(m for m in prompt if m["role"] == "system")
         assert "Python" in system["content"]
@@ -605,13 +594,14 @@ class TestToCodeSourceLanguage:
         data = [{"prompt": "hello"}]
         source = data
         model = FakeModel(["print('hello')"])
-        node = translate.to_code(
+        # We don't care about the result here, and instead we just examine internally
+        # how many times the model was called and what prompts were given.
+        translate.to_code(
             source,
             target_language="Python",
             fields=["prompt"],
             model=model,
         )
-        node
         prompt = model.batch_calls[0][0]
         system = next(m for m in prompt if m["role"] == "system")
         assert "input is written in" not in system["content"]
