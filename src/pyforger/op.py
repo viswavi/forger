@@ -4,6 +4,11 @@ Wrap a plain Python function with ``@op`` and it gains two things: its
 output is memoized on disk keyed by a hash of its inputs, and every call
 is recorded in a trace that can be inspected post-hoc.
 
+.. warning::
+    This module uses ``pickle`` for serialization. Only use this with a cache
+    directory that is trusted and secured (e.g., restricted to the current user).
+    Loading malicious pickle data can lead to arbitrary code execution.
+
 Used by approach #6 (pipeline-as-function): pipelines are plain Python,
 control flow is plain Python, but the expensive boundaries (LLM calls,
 filtering passes) get cached at the @op layer.
@@ -156,6 +161,12 @@ def op(
 
             if use_cache and cache_path.exists():
                 try:
+                    # Security: verify file ownership matches current process owner
+                    if cache_path.stat().st_uid != os.getuid():
+                        raise PermissionError(
+                            f"Cache file {cache_path} is owned by another user."
+                        )
+
                     with cache_path.open("rb") as f:
                         result = pickle.load(f)
                     cache_hit = True
