@@ -24,7 +24,7 @@ class MockRetrievalSource(RetrievalSource):
         """Store fixed data to return from fetch().
 
         Args:
-            data: List of dicts (e.g. [{"text": "a"}]); deepcopied by fetch().
+            data: List of dicts (e.g. [{"text": "a"}]); deep-copied by fetch().
         """
         self.data = data
 
