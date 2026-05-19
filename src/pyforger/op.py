@@ -173,7 +173,10 @@ def op(
             if use_cache and cache_path.exists():
                 try:
                     # Security: verify file ownership matches current process owner
-                    if cache_path.stat().st_uid != os.getuid():
+                    if (
+                        hasattr(os, "getuid")
+                        and cache_path.stat().st_uid != os.getuid()
+                    ):
                         raise PermissionError(
                             f"Cache file {cache_path} is owned by another user."
                         )
