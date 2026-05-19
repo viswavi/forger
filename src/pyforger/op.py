@@ -96,7 +96,9 @@ def _canonical(obj: Any) -> Any:
     if isinstance(obj, (list, tuple)):
         return [_canonical(x) for x in obj]
     if isinstance(obj, dict):
-        return {str(k): _canonical(obj[k]) for k in sorted(obj, key=str)}
+        items = [(_canonical(k), _canonical(v)) for k, v in obj.items()]
+        items.sort(key=lambda item: pickle.dumps(item[0]))
+        return items
     if isinstance(obj, type):
         return f"<type {obj.__module__}.{obj.__qualname__}>"
     if hasattr(obj, "cache_key") and callable(obj.cache_key):
