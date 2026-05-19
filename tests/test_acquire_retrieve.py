@@ -24,7 +24,7 @@ class MockRetrievalSource(RetrievalSource):
         """Store fixed data to return from fetch().
 
         Args:
-            data: List of dicts (e.g. [{"text": "a"}]); deepcopied by fetch().
+            data: List of dicts (e.g. [{"text": "a"}]); deep-copied by fetch().
         """
         self.data = data
 
@@ -169,7 +169,7 @@ class TestMultiQueryRetrieve:
                 return super().fetch(*args, **kwargs)
 
         source = CountingSource([{"text": "a"}])
-        # We don't care about the retrieval result here here; just checking that
+        # We don't care about the retrieval result here; just checking that
         # fetch() is called the right number of times based on the number of queries.
         retrieve(source, queries=["q1", "q2", "q3"])
         assert call_count == 3
