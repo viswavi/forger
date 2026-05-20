@@ -153,11 +153,23 @@ def op(
         # Sanitize op_name to be a safe directory name
         safe_op_name = "".join(c if c.isalnum() or c in "._-" else "_" for c in op_name)
         body_key = _canonical(fn)
+        sig = inspect.signature(fn)
 
         @wraps(fn)
         def wrapper(*args: Any, _no_cache: bool = False, **kwargs: Any) -> T:
             start = time.time()
-            input_hash = _hash([op_name, body_key, list(args), kwargs])
+            try:
+                # Attempt to normalize the op function's arguments before hashing.
+                bound = sig.bind(*args, **kwargs)
+                bound.apply_defaults()
+                # Normalize the different ways of stating the same arguments.
+                args = bound.args
+                kwargs = bound.kwargs
+                normalized = dict(bound.arguments)
+            except TypeError:
+                # If the arguments don't match the signature, use them directly.
+                normalized = {"args": list(args), "kwargs": list(kwargs)}
+            input_hash = _hash([op_name, body_key, normalized])
 
             cache_root = _cache_dir()
             cache_path = (cache_root / safe_op_name / f"{input_hash}.pkl").resolve()
