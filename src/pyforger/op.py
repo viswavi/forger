@@ -158,32 +158,39 @@ def op(
     """
 
     def decorate(fn: Callable[..., T]) -> Callable[..., T]:
-        # Functions decorated with @op cannot use the reserved argument '_no_cache'.
-        if "_no_cache" in inspect.signature(fn).parameters:
-            raise TypeError(
-                "Forger functions decorated with @op cannot use the reserved "
-                + "argument name '_no_cache'."
-            )
+        try:
+            sig = inspect.signature(fn)
+        except (TypeError, ValueError):
+            sig = None
+        else:
+            # Functions decorated with @op cannot use the reserved argument '_no_cache'.
+            if "_no_cache" in sig.parameters:
+                raise TypeError(
+                    "Forger functions decorated with @op cannot use the reserved "
+                    + "argument name '_no_cache'."
+                )
 
         op_name = name or f"{fn.__module__}.{fn.__qualname__}"
         # Sanitize op_name to be a safe directory name
         safe_op_name = "".join(c if c.isalnum() or c in "._-" else "_" for c in op_name)
         body_key = _canonical(fn)
-        sig = inspect.signature(fn)
 
         @wraps(fn)
         def wrapper(*args: Any, _no_cache: bool = False, **kwargs: Any) -> T:
             start = time.time()
-            try:
-                # Attempt to normalize the op function's arguments before hashing.
-                bound = sig.bind(*args, **kwargs)
-                bound.apply_defaults()
-                # Normalize the different ways of stating the same arguments.
-                args = bound.args
-                kwargs = bound.kwargs
-                normalized = dict(bound.arguments)
-            except TypeError:
-                # If the arguments don't match the signature, use them directly.
+            if sig is not None:
+                try:
+                    # Attempt to normalize the op function's arguments before hashing.
+                    bound = sig.bind(*args, **kwargs)
+                    bound.apply_defaults()
+                    # Normalize the different ways of stating the same arguments.
+                    args = bound.args
+                    kwargs = bound.kwargs
+                    normalized = dict(bound.arguments)
+                except TypeError:
+                    # If the arguments don't match the signature, use them directly.
+                    normalized = {"args": list(args), "kwargs": dict(kwargs)}
+            else:
                 normalized = {"args": list(args), "kwargs": dict(kwargs)}
             input_hash = _hash([op_name, body_key, normalized])
 
