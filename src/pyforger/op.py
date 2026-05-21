@@ -21,6 +21,7 @@ import os
 import pickle
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import wraps
@@ -54,7 +55,21 @@ class CallRecord:
     duration_s: float
 
 
-_TRACE: list[CallRecord] = []
+_TRACE_DEFAULT_MAX = 10_000
+
+
+def _trace_max() -> int:
+    """We cap the number of trace records to observe -- 0 disables tracing."""
+    raw = os.environ.get("PYFORGER_TRACE_MAX")
+    if raw is None:
+        return _TRACE_DEFAULT_MAX
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return _TRACE_DEFAULT_MAX
+
+
+_TRACE: deque[CallRecord] = deque(maxlen=_trace_max())
 _TRACE_LOCK = threading.Lock()
 
 
