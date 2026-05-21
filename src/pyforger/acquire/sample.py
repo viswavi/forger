@@ -64,15 +64,6 @@ def _parse_output(
     return parsed
 
 
-def _build_batch(
-    prompt: Prompt,
-    batch_size: int,
-    output_schema: dict[str, Any] | None = None,
-) -> list[Prompt]:
-    full_prompt = _build_prompt(prompt, output_schema)
-    return [full_prompt for _ in range(batch_size)]
-
-
 def _generation_loop(
     prompt: Prompt,
     model: Model,
@@ -89,21 +80,19 @@ def _generation_loop(
     while len(accepted) < n and consecutive_failed_rounds < max_retries:
         remaining = n - len(accepted)
         current_batch_size = min(batch_size, remaining)
-        prompts_list = _build_batch(
-            prompt, current_batch_size, output_schema=output_schema
+        full_prompt = _build_prompt(prompt, output_schema)
+
+        raw_responses = model.generate(
+            full_prompt, n=current_batch_size, temperature=temperature
         )
 
-        batch_results = model.generate_batch(prompts_list, temperature=temperature)
-        raw_responses = [r[0] for r in batch_results]
-
-        if len(raw_responses) != len(prompts_list):
+        short_response = len(raw_responses) < current_batch_size
+        if short_response:
             logger.warning(
-                "generate_batch returned %d responses for %d prompts; skipping round",
+                "generate returned %d responses for %d requested",
                 len(raw_responses),
-                len(prompts_list),
+                current_batch_size,
             )
-            consecutive_failed_rounds += 1
-            continue
 
         round_accepts = 0
         for raw_text in raw_responses:
@@ -120,7 +109,7 @@ def _generation_loop(
             if len(accepted) >= n:
                 return
 
-        if round_accepts == 0:
+        if round_accepts == 0 or short_response:
             consecutive_failed_rounds += 1
         else:
             consecutive_failed_rounds = 0
@@ -146,7 +135,7 @@ def sample_from_LLM(
         output_schema: Optional dict of expected keys; triggers JSON parse + validation.
         temperature: Sampling temperature.
         max_retries: Consecutive zero-acceptance rounds before stopping.
-        batch_size: Prompts per ``generate_batch`` call.
+        batch_size: Number of responses to generate at a time.
         name: A string used to distinguish cache keys for otherwise identical calls.
 
     Returns:
