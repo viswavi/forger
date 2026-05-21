@@ -12,18 +12,30 @@ class MockModel(Model):
 
     def __init__(
         self,
-        responses: list[str],
+        responses: list[str] | list[list[str]],
         model_id: str = "test/model",
         **kwargs: Any,
     ) -> None:
-        """Build a MockModel that cycles ``responses`` across prompts."""
+        """Build a MockModel with canned per-prompt completion lists.
+
+        ``responses[i]`` is the list of completions returned for the i-th
+        prompt of each generate_batch call. A flat ``list[str]`` is
+        auto-promoted by wrapping each string in a single-element list.
+        """
         super().__init__(model_id=model_id, **kwargs)
-        self.responses = responses
+        normalized: list[list[str]] = [
+            [r] if isinstance(r, str) else list(r) for r in responses
+        ]
+        self.responses = normalized
         self._call_count = 0
 
     def cache_key(self) -> tuple:
         """Stable hash key for @op caching. Excludes mutable _call_count."""
-        return (type(self).__name__, self._model_id, tuple(self.responses))
+        return (
+            type(self).__name__,
+            self._model_id,
+            tuple(tuple(r) for r in self.responses),
+        )
 
     def generate_batch(
         self,
@@ -34,11 +46,9 @@ class MockModel(Model):
         max_tokens: int | None = None,
         stop: list[str] | None = None,
     ) -> list[list[str]]:
-        """Return one canned response per prompt, cycling through self.responses."""
+        """Return self.responses[i] for the i-th prompt."""
         self._call_count += 1
-        return [
-            [self.responses[i % len(self.responses)]] * n for i in range(len(prompts))
-        ]
+        return [list(self.responses[i]) for i in range(len(prompts))]
 
 
 class RecordingMockModel(MockModel):

@@ -100,7 +100,7 @@ class TestSampling:
 
     def test_yields_accepted_samples(self):
         """Returns an iterable of parsed samples up to n."""
-        model = MockModel(responses=['{"text": "one"}', '{"text": "two"}'])
+        model = MockModel(responses=[['{"text": "one"}', '{"text": "two"}']])
         items = sample_from_LLM(
             "Generate",
             model,
@@ -198,14 +198,14 @@ class TestInputValidationAndBatching:
 
     def test_sampling_respects_n_within_single_batch(self):
         """Stops after n samples even if batch could return more (one round)."""
-        model = MockModel(responses=['{"text": "x"}'])
+        model = MockModel(responses=[['{"text": "x"}'] * 3])
         items = sample_from_LLM("Generate", model, n=3, batch_size=10)
         assert len(items) == 3
         assert model._call_count == 1
 
     def test_batch_size_splits_rounds(self):
         """Multiple rounds when n > batch_size."""
-        model = MockModel(responses=['{"text": "x"}'])
+        model = MockModel(responses=[['{"text": "x"}'] * 2])
         items = sample_from_LLM("Generate", model, n=5, batch_size=2)
         assert len(items) == 5
         # 3 rounds: 2 + 2 + 1
