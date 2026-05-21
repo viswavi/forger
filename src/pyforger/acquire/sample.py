@@ -141,6 +141,12 @@ def sample_from_LLM(
     Returns:
         List of accepted sample dicts. ``{"text": <raw>}`` when no schema;
         otherwise the parsed JSON objects.
+
+    Note:
+        Because this is decorated with `@op`, outputs are memoized on disk by argument
+        hash. Therefore, repeat calls with a non-zero temperature will still produce
+        the same samples if all other arguments are the same. If this is not desired,
+        force fresh generation by passing `_no_cache=True` or varying `name`.
     """
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
