@@ -18,9 +18,11 @@ class MockModel(Model):
     ) -> None:
         """Build a MockModel with canned per-prompt completion lists.
 
-        ``responses[i]`` is the list of completions returned for the i-th
-        prompt of each generate_batch call. A flat ``list[str]`` is
-        auto-promoted by wrapping each string in a single-element list.
+        ``responses[i]`` is the list of completions returned for the i-th prompt of
+        each generate_batch call. A flat ``list[str]`` is auto-promoted by wrapping
+        each string in a single-element list.  Otherwise, if a list of lists is given,
+        the inner lists are used directly as the per-prompt completions (e.g. lists of
+        4 responses for n=4 completions per prompt).
         """
         super().__init__(model_id=model_id, **kwargs)
         normalized: list[list[str]] = [
