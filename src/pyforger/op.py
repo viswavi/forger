@@ -183,7 +183,7 @@ def op(
                 normalized = dict(bound.arguments)
             except TypeError:
                 # If the arguments don't match the signature, use them directly.
-                normalized = {"args": list(args), "kwargs": list(kwargs)}
+                normalized = {"args": list(args), "kwargs": dict(kwargs)}
             input_hash = _hash([op_name, body_key, normalized])
 
             cache_root = _cache_dir()
