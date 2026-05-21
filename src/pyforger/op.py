@@ -160,10 +160,13 @@ def op(
     def decorate(fn: Callable[..., T]) -> Callable[..., T]:
         try:
             sig = inspect.signature(fn)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as exc:
+            # Built-in functions and some callables don't have inspectable signatures.
+            logger.debug("inspect.signature failed for %s: %s", fn, exc)
             sig = None
         else:
             # Functions decorated with @op cannot use the reserved argument '_no_cache'.
+            assert sig is not None  # mypy hint
             if "_no_cache" in sig.parameters:
                 raise TypeError(
                     "Forger functions decorated with @op cannot use the reserved "
