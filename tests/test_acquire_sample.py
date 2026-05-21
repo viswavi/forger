@@ -31,8 +31,8 @@ class TestSchemaFormatInstructions:
         assert "answer" in out
 
 
-class TestSchemaPromptInjection:
-    """Prompt includes schema instructions when output_schema is set."""
+class TestPromptConstruction:
+    """What sample_from_LLM sends to the model's generate_batch."""
 
     def test_string_prompt_includes_schema_instructions(self):
         """String prompt passed to generate_batch has Required keys."""
@@ -91,11 +91,11 @@ class TestSchemaPromptInjection:
         assert model.recorded_prompts[0][0] == messages
 
 
-class TestSampleFromLLMExecution:
-    """Execute_fn runs the generation loop and yields accepted samples."""
+class TestSampling:
+    """sample_from_LLM yields parsed samples from the generation loop."""
 
-    def test_execute_yields_accepted_samples(self):
-        """Execute returns an iterable of parsed samples up to n."""
+    def test_yields_accepted_samples(self):
+        """Returns an iterable of parsed samples up to n."""
         model = MockModel(responses=['{"text": "one"}', '{"text": "two"}'])
         gen = sample_from_LLM(
             "Generate",
@@ -108,15 +108,6 @@ class TestSampleFromLLMExecution:
         assert len(items) == 2
         assert items[0]["text"] == "one"
         assert items[1]["text"] == "two"
-        assert model._call_count == 1
-
-    def test_execute_respects_n(self):
-        """Stops after n samples even if batch could return more."""
-        model = MockModel(responses=['{"text": "x"}'])
-        gen = sample_from_LLM("Generate", model, n=3, batch_size=10)
-        items = list(gen)
-        assert len(items) == 3
-        assert model._call_count == 1
 
     def test_no_schema_returns_text_key(self):
         """Without output_schema, each sample is {"text": raw_response}."""
@@ -125,19 +116,7 @@ class TestSampleFromLLMExecution:
         items = list(gen)
         assert items == [{"text": "plain text"}]
 
-    def test_message_list_prompt_executes(self):
-        """Message-list prompts run through the generation loop."""
-        model = MockModel(responses=['{"text": "result"}'])
-        messages = [
-            {"role": "system", "content": "You are helpful."},
-            {"role": "user", "content": "Generate data"},
-        ]
-        gen = sample_from_LLM(messages, model, n=2, batch_size=2)
-        items = list(gen)
-        assert len(items) == 2
-        assert model._call_count == 1
-
-    def test_message_list_with_schema(self):
+    def test_message_list_prompt_end_to_end(self):
         """Message-list prompt with output_schema parses structured output."""
         model = MockModel(responses=['{"answer": "42"}'])
         messages = [{"role": "user", "content": "What is 6*7?"}]
@@ -152,7 +131,7 @@ class TestSampleFromLLMExecution:
         assert items[0]["answer"] == "42"
 
 
-class TestParseAndSchema:
+class TestSchemaValidation:
     """Parsing and schema validation behavior."""
 
     def test_schema_validation_accepts_valid_json(self):
@@ -196,8 +175,8 @@ class TestParseAndSchema:
         assert len(items) == 0
 
 
-class TestRetriesAndBatch:
-    """max_retries and batch_size behavior."""
+class TestInputValidationAndBatching:
+    """Argument validation and batch_size round-splitting."""
 
     def test_invalid_batch_size_rejected(self):
         """batch_size <= 0 raises ValueError."""
@@ -218,6 +197,14 @@ class TestRetriesAndBatch:
             assert "n" in str(e)
         else:
             raise AssertionError("Expected ValueError")
+
+    def test_sampling_respects_n_within_single_batch(self):
+        """Stops after n samples even if batch could return more (one round)."""
+        model = MockModel(responses=['{"text": "x"}'])
+        gen = sample_from_LLM("Generate", model, n=3, batch_size=10)
+        items = list(gen)
+        assert len(items) == 3
+        assert model._call_count == 1
 
     def test_batch_size_splits_rounds(self):
         """Multiple rounds when n > batch_size."""
