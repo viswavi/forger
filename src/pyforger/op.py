@@ -109,6 +109,7 @@ def _canonical(obj: Any) -> Any:
     if obj is None or isinstance(obj, (bool, int, float, str, bytes)):
         return obj
     if isinstance(obj, (list, tuple)):
+        # We treat input lists and input tuples with the same content as identical.
         return [_canonical(x) for x in obj]
     if isinstance(obj, dict):
         items = [(_canonical(k), _canonical(v)) for k, v in obj.items()]
