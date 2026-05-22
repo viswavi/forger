@@ -21,6 +21,7 @@ import os
 import pickle
 import threading
 import time
+import types
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -138,6 +139,31 @@ def _hash(obj: Any) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _warn_unstable_refs(fn: Callable[..., Any], op_name: str) -> None:
+    """Warn if fn reads module globals or env vars (not captured in cache key)."""
+    names = set(fn.__code__.co_names)
+    g = fn.__globals__
+    data_globals = sorted(
+        n
+        for n in names
+        if n in g and not isinstance(g[n], types.ModuleType) and not callable(g[n])
+    )
+    env_used = bool({"environ", "getenv"} & names)
+    if not (data_globals or env_used):
+        return
+    parts = []
+    if data_globals:
+        parts.append(f"reads globals {data_globals}")
+    if env_used:
+        parts.append("reads os.environ/os.getenv")
+    logger.warning(
+        "@op(%s) %s; these are NOT part of the cache key, so cached results "
+        "may be stale if values change.",
+        op_name,
+        " and ".join(parts),
+    )
+
+
 def op(
     _fn: Callable[..., T] | None = None,
     *,
@@ -177,6 +203,7 @@ def op(
         # Sanitize op_name to be a safe directory name
         safe_op_name = "".join(c if c.isalnum() or c in "._-" else "_" for c in op_name)
         body_key = _canonical(fn)
+        _warn_unstable_refs(fn, op_name)
 
         @wraps(fn)
         def wrapper(*args: Any, _no_cache: bool = False, **kwargs: Any) -> T:
