@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 
 import pytest
 
@@ -60,3 +61,42 @@ def test_op_warns_on_closure(caplog: pytest.LogCaptureFixture) -> None:
     assert any(
         "closure_op" in m and "closes over" in m and "config" in m for m in messages
     )
+
+
+def test_op_raises_for_unpicklable_arg_without_cache_key() -> None:
+    """Unpicklable args with no cache_key() get a clear TypeError, not a silent repr."""
+
+    class UnpicklableObject:
+        def __init__(self) -> None:
+            self._lock = threading.Lock()  # makes the object unpicklable
+
+    @op
+    def takes_anything(x: UnpicklableObject) -> int:
+        return 1
+
+    with pytest.raises(TypeError, match=r"cannot derive a stable cache key.*cache_key"):
+        takes_anything(UnpicklableObject())
+
+
+def test_op_accepts_unpicklable_arg_with_cache_key() -> None:
+    """Unpicklable args with a cache_key() method are accepted."""
+
+    class UnpicklableObject:
+        def __init__(self) -> None:
+            self._lock = threading.Lock()  # makes the object unpicklable
+
+        def cache_key(self) -> str:
+            return "stable-key"
+
+    calls = 0
+
+    @op
+    def takes_unpicklable(x: UnpicklableObject) -> int:
+        nonlocal calls
+        calls += 1
+        return 1
+
+    assert takes_unpicklable(UnpicklableObject()) == 1
+    assert takes_unpicklable(UnpicklableObject()) == 1  # cache hit on second call
+    # Confirm that the op function only executes once, proving there was a cache hit.
+    assert calls == 1

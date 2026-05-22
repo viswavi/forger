@@ -131,7 +131,13 @@ def _canonical(obj: Any) -> Any:
             closure_vals = [_canonical(cell.cell_contents) for cell in closure]
             return ["__callable__", ident, _code_key(code), closure_vals]
         return ["__callable__", ident]
-    return repr(obj)
+    try:
+        return pickle.dumps(obj, protocol=4)
+    except Exception as e:
+        raise TypeError(
+            f"@op cannot derive a stable cache key for {type(obj).__name__}: "
+            f"{e}. Add a cache_key() method to this type."
+        ) from e
 
 
 def _hash(obj: Any) -> str:
