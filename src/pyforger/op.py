@@ -243,7 +243,8 @@ def op(
         # Sanitize op_name to be a safe directory name
         safe_op_name = "".join(c if c.isalnum() or c in "._-" else "_" for c in op_name)
         body_key = _canonical(fn)
-        _warn_unstable_refs(fn, op_name)
+        if cache:
+            _warn_unstable_refs(fn, op_name)
 
         @wraps(fn)
         def wrapper(*args: Any, _no_cache: bool = False, **kwargs: Any) -> T:
