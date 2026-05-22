@@ -109,7 +109,9 @@ def _generation_loop(
             if len(accepted) >= n:
                 return
 
-        if round_accepts == 0 or short_response:
+        # Only count completely failed rounds (zero accepts) towards max_retries.
+        # Partial successes are treated as successes.
+        if round_accepts == 0:
             consecutive_failed_rounds += 1
         else:
             consecutive_failed_rounds = 0
