@@ -50,6 +50,11 @@ class MockModel(Model):
     ) -> list[list[str]]:
         """Return self.responses[i] for the i-th prompt; require len == n."""
         self._call_count += 1
+        if len(self.responses) < len(prompts):
+            raise ValueError(
+                f"MockModel is requested to generate for {len(prompts)} prompts but "
+                f"only {len(self.responses)} canned responses are given"
+            )
         canned = self.responses[: len(prompts)]
         if any(len(r) != n for r in canned):
             shapes = [len(r) for r in canned]
