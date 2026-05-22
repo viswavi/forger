@@ -41,3 +41,22 @@ def test_op_warns_on_unstable_refs(caplog: pytest.LogCaptureFixture) -> None:
     assert any("reads_global" in m and "_SOME_CONFIG" in m for m in messages)
     assert any("reads_env" in m and "os.environ" in m for m in messages)
     assert not any("reads_without_global_or_env" in m for m in messages)
+
+
+def test_op_warns_on_closure(caplog: pytest.LogCaptureFixture) -> None:
+    """@op warns when the body closes over enclosing-scope variables."""
+    with caplog.at_level(logging.WARNING, logger="forger.op"):
+
+        def factory(config: dict) -> object:
+            @op
+            def closure_op(x: int) -> int:
+                return x * config["multiplier"]
+
+            return closure_op
+
+        factory({"multiplier": 2})
+
+    messages = [r.message for r in caplog.records]
+    assert any(
+        "closure_op" in m and "closes over" in m and "config" in m for m in messages
+    )

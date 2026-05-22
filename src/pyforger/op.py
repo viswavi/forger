@@ -140,25 +140,37 @@ def _hash(obj: Any) -> str:
 
 
 def _warn_unstable_refs(fn: Callable[..., Any], op_name: str) -> None:
-    """Warn if fn reads module globals or env vars (not captured in cache key)."""
-    names = set(fn.__code__.co_names)
+    """Warn if fn reads module globals, env vars, or closes over enclosing scope."""
+    code = fn.__code__
+    names = set(code.co_names)
     g = fn.__globals__
+    # We look for referents that can quietly change without affecting the op's cache
+    # key. This will lead to stale cache results and cause problems. We check for:
+    # 1) Module globals that are not modules or callables (e.g. configuration dicts).
+    # 2) Environment variables (detected by usage of os.environ or os.getenv).
+    # 3) Closure variables
     data_globals = sorted(
         n
         for n in names
         if n in g and not isinstance(g[n], types.ModuleType) and not callable(g[n])
     )
     env_used = bool({"environ", "getenv"} & names)
-    if not (data_globals or env_used):
+    # We look for closure variables, e.g. `config["multiplier"]`` in
+    # def new_op(x):
+    #     return x * config["multiplier"]
+    closure_vars = sorted(code.co_freevars) if fn.__closure__ else []
+    if not (data_globals or env_used or closure_vars):
         return
     parts = []
     if data_globals:
         parts.append(f"reads globals {data_globals}")
     if env_used:
         parts.append("reads os.environ/os.getenv")
+    if closure_vars:
+        parts.append(f"closes over {closure_vars}")
     logger.warning(
-        "@op(%s) %s; these are NOT part of the cache key, so cached results "
-        "may be stale if values change.",
+        "@op(%s) %s; changes to these may not invalidate the cache key, "
+        "so cached results may be stale.",
         op_name,
         " and ".join(parts),
     )
