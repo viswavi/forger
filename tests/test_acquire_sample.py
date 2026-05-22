@@ -206,7 +206,7 @@ class TestInputValidationAndBatching:
     def test_batch_size_splits_rounds(self):
         """Multiple rounds when n > batch_size."""
         model = MockModel(responses=[['{"text": "x"}'] * 2])
-        items = sample_from_LLM("Generate", model, n=5, batch_size=2)
-        assert len(items) == 5
-        # 3 rounds: 2 + 2 + 1
+        items = sample_from_LLM("Generate", model, n=6, batch_size=2)
+        assert len(items) == 6
+        # 3 rounds: 2 + 2 + 2
         assert model._call_count == 3

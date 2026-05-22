@@ -48,9 +48,15 @@ class MockModel(Model):
         max_tokens: int | None = None,
         stop: list[str] | None = None,
     ) -> list[list[str]]:
-        """Return self.responses[i] for the i-th prompt."""
+        """Return self.responses[i] for the i-th prompt; require len == n."""
         self._call_count += 1
-        return [list(self.responses[i]) for i in range(len(prompts))]
+        canned = self.responses[: len(prompts)]
+        if any(len(r) != n for r in canned):
+            shapes = [len(r) for r in canned]
+            raise ValueError(
+                f"MockModel canned response shapes {shapes} do not match n={n}"
+            )
+        return [list(r) for r in canned]
 
 
 class RecordingMockModel(MockModel):
