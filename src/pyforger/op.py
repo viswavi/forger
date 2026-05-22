@@ -317,20 +317,22 @@ def op(
                     os.replace(tmp_path, cache_path)
 
             duration = time.time() - start
-            with _TRACE_LOCK:
-                if cache_hit:
-                    output_hash = None
-                else:
-                    output_hash, _ = _hash(result)
-                _TRACE.append(
-                    CallRecord(
-                        op_name=op_name,
-                        input_hash=input_hash,
-                        output_hash=output_hash,
-                        cache_hit=cache_hit,
-                        duration_s=duration,
+            # If tracing is enabled, record this call on the in-memory trace.
+            if _TRACE.maxlen is not None and _TRACE.maxlen > 0:
+                with _TRACE_LOCK:
+                    if cache_hit:
+                        output_hash = None
+                    else:
+                        output_hash, _ = _hash(result)
+                    _TRACE.append(
+                        CallRecord(
+                            op_name=op_name,
+                            input_hash=input_hash,
+                            output_hash=output_hash,
+                            cache_hit=cache_hit,
+                            duration_s=duration,
+                        )
                     )
-                )
 
             if cache_hit:
                 logger.debug("cache HIT %s %s", op_name, input_hash[:8])
