@@ -140,9 +140,31 @@ def _canonical(obj: Any) -> Any:
         ) from e
 
 
-def _hash(obj: Any) -> str:
+_HASH_WARN_BYTES = int(os.environ.get("PYFORGER_HASH_WARN_BYTES", 50 * 1024 * 1024))
+_HASH_WARN_SECONDS = float(os.environ.get("PYFORGER_HASH_WARN_SECONDS", 1.0))
+_HASH_WARNED: set[str] = set()
+_HASH_WARN_LOCK = threading.Lock()
+
+
+def _hash(obj: Any) -> tuple[str, int]:
     payload = pickle.dumps(_canonical(obj), protocol=4)
-    return hashlib.sha256(payload).hexdigest()
+    return hashlib.sha256(payload).hexdigest(), len(payload)
+
+
+def _maybe_warn_hash_cost(op_name: str, duration: float, size: int) -> None:
+    if size <= _HASH_WARN_BYTES and duration <= _HASH_WARN_SECONDS:
+        return
+    with _HASH_WARN_LOCK:
+        if op_name in _HASH_WARNED:
+            return
+        _HASH_WARNED.add(op_name)
+    logger.warning(
+        "@op(%s) cache-key hash took %.2fs to hash input and resulted in a %d MiB"
+        " payload; consider adding cache_key() on large inputs for a cheaper key.",
+        op_name,
+        duration,
+        size / (1024 * 1024),
+    )
 
 
 def _warn_unstable_refs(fn: Callable[..., Any], op_name: str) -> None:
@@ -240,7 +262,9 @@ def op(
                     normalized = {"args": list(args), "kwargs": dict(kwargs)}
             else:
                 normalized = {"args": list(args), "kwargs": dict(kwargs)}
-            input_hash = _hash([op_name, body_key, normalized])
+            t0 = time.perf_counter()
+            input_hash, hash_size = _hash([op_name, body_key, normalized])
+            _maybe_warn_hash_cost(op_name, time.perf_counter() - t0, hash_size)
 
             cache_root = _cache_dir()
             cache_path = (cache_root / safe_op_name / f"{input_hash}.pkl").resolve()
@@ -294,11 +318,15 @@ def op(
 
             duration = time.time() - start
             with _TRACE_LOCK:
+                if cache_hit:
+                    output_hash = None
+                else:
+                    output_hash, _ = _hash(result)
                 _TRACE.append(
                     CallRecord(
                         op_name=op_name,
                         input_hash=input_hash,
-                        output_hash=None if cache_hit else _hash(result),
+                        output_hash=output_hash,
                         cache_hit=cache_hit,
                         duration_s=duration,
                     )
