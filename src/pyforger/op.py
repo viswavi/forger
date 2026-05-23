@@ -114,8 +114,12 @@ def _canonical(obj: Any) -> Any:
         return [_canonical(x) for x in obj]
     if isinstance(obj, dict):
         items = [(_canonical(k), _canonical(v)) for k, v in obj.items()]
-        items.sort(key=lambda item: pickle.dumps(item[0]))
+        items.sort(key=lambda item: repr(item[0]))
         return items
+    if isinstance(obj, (set, frozenset)):
+        items = [_canonical(x) for x in obj]
+        items.sort(key=repr)
+        return ["__frozenset__" if isinstance(obj, frozenset) else "__set__", items]
     if isinstance(obj, type):
         return f"<type {obj.__module__}.{obj.__qualname__}>"
     if hasattr(obj, "cache_key") and callable(obj.cache_key):
