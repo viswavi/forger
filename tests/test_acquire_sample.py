@@ -4,7 +4,7 @@ from __future__ import annotations
 from fixtures import MockModel, RecordingMockModel
 
 from pyforger.acquire import sample_from_LLM
-from pyforger.acquire.sample import _schema_format_instructions
+from pyforger.acquire._model_utils import _schema_format_instructions
 
 
 class TestSchemaFormatInstructions:
