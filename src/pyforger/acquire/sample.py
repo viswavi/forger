@@ -16,15 +16,6 @@ from pyforger.utils import get_formatted_logger
 logger = get_formatted_logger(__name__)
 
 
-def _build_batch(
-    prompt: Prompt,
-    batch_size: int,
-    output_schema: dict[str, Any] | None = None,
-) -> list[Prompt]:
-    full_prompt = _build_prompt(prompt, output_schema)
-    return [full_prompt for _ in range(batch_size)]
-
-
 def _generation_loop(
     prompt: Prompt,
     model: Model,
@@ -41,21 +32,19 @@ def _generation_loop(
     while len(accepted) < n and consecutive_failed_rounds < max_retries:
         remaining = n - len(accepted)
         current_batch_size = min(batch_size, remaining)
-        prompts_list = _build_batch(
-            prompt, current_batch_size, output_schema=output_schema
+        full_prompt = _build_prompt(prompt, output_schema)
+
+        raw_responses = model.generate(
+            full_prompt, n=current_batch_size, temperature=temperature
         )
 
-        batch_results = model.generate_batch(prompts_list, temperature=temperature)
-        raw_responses = [r[0] for r in batch_results]
-
-        if len(raw_responses) != len(prompts_list):
+        short_response = len(raw_responses) < current_batch_size
+        if short_response:
             logger.warning(
-                "generate_batch returned %d responses for %d prompts; skipping round",
+                "generate returned %d responses for %d requested",
                 len(raw_responses),
-                len(prompts_list),
+                current_batch_size,
             )
-            consecutive_failed_rounds += 1
-            continue
 
         round_accepts = 0
         for raw_text in raw_responses:
@@ -72,6 +61,8 @@ def _generation_loop(
             if len(accepted) >= n:
                 return
 
+        # Only count completely failed rounds (zero accepts) towards max_retries.
+        # Partial successes are treated as successes.
         if round_accepts == 0:
             consecutive_failed_rounds += 1
         else:
@@ -98,12 +89,18 @@ def sample_from_LLM(
         output_schema: Optional dict of expected keys; triggers JSON parse + validation.
         temperature: Sampling temperature.
         max_retries: Consecutive zero-acceptance rounds before stopping.
-        batch_size: Prompts per ``generate_batch`` call.
-        name: Name for caching and logging.
+        batch_size: Number of responses to generate at a time.
+        name: A string used to distinguish cache keys for otherwise identical calls.
 
     Returns:
         List of accepted sample dicts. ``{"text": <raw>}`` when no schema;
         otherwise the parsed JSON objects.
+
+    Note:
+        Because this is decorated with `@op`, outputs are memoized on disk by argument
+        hash. Therefore, repeat calls with a non-zero temperature will still produce
+        the same samples if all other arguments are the same. If this is not desired,
+        force fresh generation by passing `_no_cache=True` or varying `name`.
     """
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")

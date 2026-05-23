@@ -6,7 +6,7 @@ directly. Caching, tracing, and pipeline-level optimization are
 opt-in via ``pyforger.op`` / ``pyforger.pipeline``.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.0.3"
 
 import pyforger.acquire as acquire
 import pyforger.alter as alter

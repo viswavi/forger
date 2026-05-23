@@ -46,6 +46,14 @@ class EmptyChoicesModel:
         return [[] for _ in prompts]
 
 
+class FlatModel:
+    """Returns list[str] instead of list[list[str]]."""
+
+    def generate_batch(self, prompts, *, n=1, **_):
+        """Return a string per prompt, not a list of strings."""
+        return ["out" for _ in prompts]
+
+
 # Shared signature + _execute pipeline; parametrize plumbing tests over both.
 FACTORIES = [
     pytest.param(translate.to_language, "Spanish", id="to_language"),
@@ -319,14 +327,6 @@ class TestModelErrors:
 
     def test_wrong_shape_raises(self, factory, target_language):
         """Model returning flat list[str] instead of list[list[str]] fails."""
-
-        class FlatModel:
-            """Returns list[str] instead of list[list[str]]."""
-
-            def generate_batch(self, prompts, *, n=1, **_):
-                """Return a string per prompt, not a list of strings."""
-                return ["out" for _ in prompts]
-
         data = [{"instruction": "hi"}]
         with pytest.raises(ValueError, match="expected list of completions"):
             factory(
