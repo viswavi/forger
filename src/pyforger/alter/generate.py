@@ -116,7 +116,9 @@ def generate_from_context(
         for start in range(0, len(pending), batch_size):
             batch = pending[start : start + batch_size]
             batch_prompts = [p for _, p in batch]
-            batch_results = model.generate_batch(batch_prompts, temperature=temperature)
+            batch_results = model.generate_batch(
+                batch_prompts, temperature=temperature, n=1
+            )
             if len(batch_results) != len(batch):
                 log.warning(
                     "generate_batch returned %d results for %d prompts; will retry",
