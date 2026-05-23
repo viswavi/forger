@@ -61,6 +61,7 @@ _TRACE_DEFAULT_MAX = 10_000
 
 def _trace_max() -> int:
     """We cap the number of trace records to observe -- 0 disables tracing."""
+    # This environment variable must be set before importing Forger to take effect.
     raw = os.environ.get("PYFORGER_TRACE_MAX")
     if raw is None:
         return _TRACE_DEFAULT_MAX
