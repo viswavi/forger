@@ -77,14 +77,14 @@ class TestGenerateFromContextExecution:
     def test_one_output_per_input_item_by_default(self):
         """With samples_per_item=1 (default), output length equals input length."""
         items = [{"text": "a"}, {"text": "b"}, {"text": "c"}]
-        model = MockModel(responses=["ok", "ok", "ok"])
+        model = MockModel(responses=["ok"] * 3)
         result = generate_from_context(items, "p: {text}", model)
         assert len(result) == 3
 
     def test_samples_per_item_multiplies_output(self):
         """Total outputs equal len(inputs) * samples_per_item."""
         items = [{"text": "a"}, {"text": "b"}]
-        model = MockModel(responses=["ok", "ok", "ok", "ok", "ok", "ok"])
+        model = MockModel(responses=["ok"] * 6)  # 2 items * 3 samples each = 6 outputs
         result = generate_from_context(items, "p: {text}", model, samples_per_item=3)
         assert len(result) == 6
 
@@ -107,7 +107,7 @@ class TestPromptBuilding:
     def test_string_template_is_filled_per_item(self):
         """Each input item fills the format string to produce a distinct prompt."""
         items = [{"topic": "gravity"}, {"topic": "photosynthesis"}]
-        model = RecordingMockModel(responses=["ok", "ok"])
+        model = RecordingMockModel(responses=["ok"] * 2)
         generate_from_context(items, "Explain {topic}.", model)
         all_prompts = [p for batch in model.recorded_prompts for p in batch]
         assert "Explain gravity." in all_prompts
@@ -116,7 +116,7 @@ class TestPromptBuilding:
     def test_callable_prompt_fn_is_called_per_item(self):
         """Callable prompt_fn is invoked once per input item."""
         items = [{"q": "Q1"}, {"q": "Q2"}]
-        model = RecordingMockModel(responses=["ok", "ok"])
+        model = RecordingMockModel(responses=["ok"] * 2)
         generate_from_context(
             items,
             lambda item: f"Answer: {item['q']}",
@@ -167,7 +167,7 @@ class TestPromptBuilding:
     def test_samples_per_item_sends_duplicate_prompts(self):
         """samples_per_item copies of the same filled prompt are sent to the model."""
         items = [{"text": "x"}]
-        model = RecordingMockModel(responses=["ok", "ok", "ok", "ok"])
+        model = RecordingMockModel(responses=["ok"] * 4)
         generate_from_context(items, "p: {text}", model, samples_per_item=4)
         all_prompts = [p for batch in model.recorded_prompts for p in batch]
         assert len(all_prompts) == 4
@@ -284,6 +284,6 @@ class TestBatching:
     def test_batch_size_splits_calls(self):
         """If there are 5 prompts with batch_size of 2, 3 batched calls are made."""
         items = [{"text": str(i)} for i in range(5)]
-        model = MockModel(responses=["ok", "ok", "ok", "ok", "ok"])
+        model = MockModel(responses=["ok"] * 5)
         generate_from_context(items, "p: {text}", model, batch_size=2)
         assert model._call_count == 3  # ceil(5/2) = 3
