@@ -44,32 +44,9 @@ def generate_from_context(
 ) -> list[dict | None]:
     r"""Generate LLM outputs conditioned on upstream input items.
 
-    ``prompt_fn`` wraps each input item in a prompt which is passed to ``model``
-    for generation. ``items`` must be a single list of dicts; to condition on
-    multiple upstream sources, combine them first with ``forger.zip`` (see
-    example below).
-
-    Example — self-refine::
-
-        # forger.zip merges items from two lists into one dict per pair
-        prompt_response_pairs = forger.zip(prompts, responses)
-        critiques = generate_from_context(
-            items=prompt_response_pairs,
-            prompt_fn="Critique this response:\\nQ: {prompt}\\nA: {response}",
-            model=model,
-        )
-
-        prompt_response_critique_triples = forger.zip(prompts, responses, critiques)
-        refined = generate_from_context(
-            items=prompt_response_critique_triples,
-            prompt_fn=lambda item: (
-                f"Revise the response given the critique:\\n"
-                f"Q: {item['prompt']}\\n"
-                f"A: {item['response']}\\n"
-                f"Critique: {item['critique']}"
-            ),
-            model=model,
-        )
+    ``prompt_fn`` wraps each input item in a prompt which is passed to ``model`` for
+    generation. ``items`` must be a single list of dicts; to condition on multiple
+    upstream sources, combine them first with ``{**dict1, **dict2}`` or similar.
 
     Args:
         items: Input rows passed one-by-one to ``prompt_fn``. To combine multiple
