@@ -1,1 +1,0 @@
-"""Manipulate module for Forger."""

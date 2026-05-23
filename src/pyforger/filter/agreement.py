@@ -1,23 +1,23 @@
-"""Agreement-based filter operations for Forger.
+"""Agreement-based filter operations.
 
-Filters that remove instruction-tuning examples where two fields within
-each item disagree, as measured by exact matching or ROUGE-L similarity.
+Keep items where two fields agree, by exact match or ROUGE-L similarity.
 """
 from __future__ import annotations
 
 from rouge_score import rouge_scorer
 
-from pyforger.core import DataSpec, NodeType
+from pyforger.op import op
 from pyforger.utils import get_field
 
 
+@op(name="filter.by_exact_agreement")
 def by_exact_agreement(
-    source: DataSpec,
+    items: list[dict],
     *,
     field_a: str,
     field_b: str,
     disagree: bool = False,
-) -> DataSpec:
+) -> list[dict]:
     """Keep items where two fields agree or disagree, by exact match.
 
     Useful for comparing outputs from different models or annotators
@@ -25,45 +25,43 @@ def by_exact_agreement(
     short phrases).
 
     Args:
-        source: Upstream DataSpec providing list[dict] data.
+        items: List of input data items.
         field_a: Key for the first value to compare.
         field_b: Key for the second value to compare.
         disagree: If False (default), keep only items where the fields match.
             If True, keep only items where they differ.
 
     Returns:
-        A FILTER DataSpec that keeps only the selected items.
+        A filtered list of data items where the specified fields all agree (or disagree
+            if `disagree=True`) by exact match.
     """
-
-    def _execute(data: list[dict]) -> list[dict]:
-        return [
-            item
-            for item in data
-            if (
-                str(get_field(item, field_a, "by_exact_agreement")).strip()
-                != str(get_field(item, field_b, "by_exact_agreement")).strip()
-            )
-            == disagree
-        ]
-
-    return DataSpec(NodeType.FILTER, source, _execute, "filter_by_exact_agreement")
+    return [
+        item
+        for item in items
+        if (
+            str(get_field(item, field_a, "by_exact_agreement")).strip()
+            != str(get_field(item, field_b, "by_exact_agreement")).strip()
+        )
+        == disagree
+    ]
 
 
+@op(name="filter.by_rouge_l_agreement")
 def by_rouge_l_agreement(
-    source: DataSpec,
+    items: list[dict],
     *,
     field_a: str,
     field_b: str,
     threshold: float = 0.7,
     disagree: bool = False,
-) -> DataSpec:
+) -> list[dict]:
     """Keep items where ROUGE-L F1 between two fields meets or misses threshold.
 
     Useful for comparing natural-language outputs from different models
     or annotators where exact matching is too strict.
 
     Args:
-        source: Upstream DataSpec providing list[dict] data.
+        items: List of input data items.
         field_a: Key for the first text to compare.
         field_b: Key for the second text to compare.
         threshold: ROUGE-L F1 threshold. Items scoring at or above are
@@ -72,22 +70,19 @@ def by_rouge_l_agreement(
             If True, keep only the items that fall below it.
 
     Returns:
-        A FILTER DataSpec that keeps only the selected items.
+        A filtered list of data items where the specified fields all agree (or disagree
+            if `disagree=True`) by ROUGE-L F1.
     """
-
-    def _execute(data: list[dict]) -> list[dict]:
-        scorer = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=False)
-        return [
-            item
-            for item in data
-            if (
-                scorer.score(
-                    get_field(item, field_a, "by_rouge_l_agreement"),
-                    get_field(item, field_b, "by_rouge_l_agreement"),
-                )["rougeL"].fmeasure
-                < threshold
-            )
-            == disagree
-        ]
-
-    return DataSpec(NodeType.FILTER, source, _execute, "filter_by_rouge_l_agreement")
+    scorer = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=False)
+    return [
+        item
+        for item in items
+        if (
+            scorer.score(
+                get_field(item, field_a, "by_rouge_l_agreement"),
+                get_field(item, field_b, "by_rouge_l_agreement"),
+            )["rougeL"].fmeasure
+            < threshold
+        )
+        == disagree
+    ]
