@@ -168,7 +168,7 @@ def _maybe_warn_hash_cost(op_name: str, duration: float, size: int) -> None:
         " payload; consider adding cache_key() on large inputs for a cheaper key.",
         op_name,
         duration,
-        size / (1024 * 1024),
+        size // (1024 * 1024),
     )
 
 
