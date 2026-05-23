@@ -93,7 +93,7 @@ def generate_from_context(
         for i, p in enumerate(prompts)
     ]
 
-    for _ in range(1 + max_retries):
+    for attempt in range(1 + max_retries):
         if not pending:
             break
         next_pending: list[tuple[Prompt, list[int]]] = []
@@ -112,10 +112,10 @@ def generate_from_context(
                 )
                 if len(batch_results) != len(batch):
                     log.warning(
-                        "generate_batch returned %d results for %d prompts; "
-                        "will retry",
+                        "generate_batch returned %d results for %d prompts; %s",
                         len(batch_results),
                         len(batch),
+                        "giving up" if attempt == max_retries else "will retry",
                     )
                     next_pending.extend(batch)
                     continue
