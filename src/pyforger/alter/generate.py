@@ -128,6 +128,12 @@ def generate_from_context(
                 next_pending.extend(batch)
                 continue
             for (idx, prompt), responses in zip(batch, batch_results):
+                if not responses:
+                    log.warning(
+                        "generate_batch returned no completions for prompt; will retry"
+                    )
+                    next_pending.append((idx, prompt))
+                    continue
                 raw_text = responses[0]
                 parsed = _parse_output(raw_text, output_schema)
                 if parsed is None:
