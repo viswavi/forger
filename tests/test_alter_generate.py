@@ -84,7 +84,7 @@ class TestGenerateFromContextExecution:
     def test_samples_per_item_multiplies_output(self):
         """Total outputs equal len(inputs) * samples_per_item."""
         items = [{"text": "a"}, {"text": "b"}]
-        model = MockModel(responses=["ok"] * 6)  # 2 items * 3 samples each = 6 outputs
+        model = MockModel(responses=[["ok"] * 3, ["ok"] * 3])
         result = generate_from_context(items, "p: {text}", model, samples_per_item=3)
         assert len(result) == 6
 
@@ -164,14 +164,14 @@ class TestPromptBuilding:
         assert "Required keys" in last_message["content"]
         assert "answer" in last_message["content"]
 
-    def test_samples_per_item_sends_duplicate_prompts(self):
-        """samples_per_item copies of the same filled prompt are sent to the model."""
+    def test_samples_per_item_requests_n_completions(self):
+        """samples_per_item completions of the filled prompt are requested."""
         items = [{"text": "x"}]
-        model = RecordingMockModel(responses=["ok"] * 4)
-        generate_from_context(items, "p: {text}", model, samples_per_item=4)
+        model = RecordingMockModel(responses=[["ok"] * 4])
+        result = generate_from_context(items, "p: {text}", model, samples_per_item=4)
         all_prompts = [p for batch in model.recorded_prompts for p in batch]
-        assert len(all_prompts) == 4
         assert all(p == "p: x" for p in all_prompts)
+        assert len(result) == 4
 
 
 # ---------------------------------------------------------------------------
@@ -271,6 +271,24 @@ class TestRetries:
             max_retries=0,
         )
         assert model._call_count == 1
+
+    def test_only_failed_prompt_is_retried(self):
+        """When one prompt parses and another fails, only the failure is retried."""
+        items = [{"text": "a"}, {"text": "b"}]
+        # First call: prompt 0 valid, prompt 1 invalid. The retry batch holds only
+        # prompt 1, so MockModel serves it the (valid) responses[0].
+        model = RecordingMockModel(responses=['{"key": "ok"}', "bad json"])
+        result = generate_from_context(
+            items,
+            "p: {text}",
+            model,
+            output_schema={"key": str},
+            max_retries=1,
+        )
+        assert result == [{"key": "ok"}, {"key": "ok"}]
+        assert model._call_count == 2
+        assert len(model.recorded_prompts[0]) == 2  # both prompts on first pass
+        assert model.recorded_prompts[1] == [model.recorded_prompts[0][1]]  # only #1
 
 
 # ---------------------------------------------------------------------------

@@ -101,51 +101,65 @@ def generate_from_context(
 
     log = _get_logger()
 
-    all_prompts: list[Prompt] = []
-    for item in items:
-        full_prompt = _build_prompt(_resolve_prompt(prompt_fn, item), output_schema)
-        all_prompts.extend([full_prompt] * samples_per_item)
+    prompts: list[Prompt] = [
+        _build_prompt(_resolve_prompt(prompt_fn, item), output_schema) for item in items
+    ]
 
-    results: list[dict | None] = [None] * len(all_prompts)
-    pending: list[tuple[int, Prompt]] = list(enumerate(all_prompts))
+    results: list[dict | None] = [None] * (len(prompts) * samples_per_item)
 
-    for attempt in range(1 + max_retries):
+    # In order to handle retries while generating multiple samples per item via the n=
+    # parameter of generate_batch, we keep a list of pending prompts with the number of
+    # samples still needed for each, so we can track the amount of computation still
+    # required (up to max_retries).
+    pending: list[tuple[Prompt, list[int]]] = [
+        (p, list(range(i * samples_per_item, (i + 1) * samples_per_item)))
+        for i, p in enumerate(prompts)
+    ]
+
+    for _ in range(1 + max_retries):
         if not pending:
             break
-        next_pending: list[tuple[int, Prompt]] = []
-        for start in range(0, len(pending), batch_size):
-            batch = pending[start : start + batch_size]
-            batch_prompts = [p for _, p in batch]
-            batch_results = model.generate_batch(
-                batch_prompts, temperature=temperature, n=1
-            )
-            if len(batch_results) != len(batch):
-                log.warning(
-                    "generate_batch returned %d results for %d prompts; will retry",
-                    len(batch_results),
-                    len(batch),
+        next_pending: list[tuple[Prompt, list[int]]] = []
+
+        # generate_batch uses one n per call, so group prompts needing the same
+        # number of completions (on the first pass all need samples_per_item).
+        by_count: dict[int, list[tuple[Prompt, list[int]]]] = {}
+        for entry in pending:
+            by_count.setdefault(len(entry[1]), []).append(entry)
+
+        for n, group in by_count.items():
+            for start in range(0, len(group), batch_size):
+                batch = group[start : start + batch_size]
+                batch_results = model.generate_batch(
+                    [p for p, _ in batch], temperature=temperature, n=n
                 )
-                next_pending.extend(batch)
-                continue
-            for (idx, prompt), responses in zip(batch, batch_results):
-                raw_text = responses[0]
-                parsed = _parse_output(raw_text, output_schema)
-                if parsed is None:
-                    if attempt < max_retries:
-                        log.debug("Parse failed (attempt %d); will retry", attempt + 1)
-                    else:
-                        log.warning(
-                            "Parse failed after %d attempts; giving up", attempt + 1
-                        )
-                    next_pending.append((idx, prompt))
-                else:
-                    results[idx] = parsed
+                if len(batch_results) != len(batch):
+                    log.warning(
+                        "generate_batch returned %d results for %d prompts; "
+                        "will retry",
+                        len(batch_results),
+                        len(batch),
+                    )
+                    next_pending.extend(batch)
+                    continue
+                for (prompt, slots), completions in zip(batch, batch_results):
+                    unfilled = slots[len(completions) :]  # short batch -> retry
+                    for slot, raw_text in zip(slots, completions):
+                        parsed = _parse_output(raw_text, output_schema)
+                        if parsed is None:
+                            unfilled.append(slot)
+                        else:
+                            results[slot] = parsed
+                    if unfilled:
+                        next_pending.append((prompt, unfilled))
         pending = next_pending
 
     if pending:
+        failed = sum(len(slots) for _, slots in pending)
         log.warning(
-            "%d prompt(s) exhausted %d retries; returning None for failed prompts",
-            len(pending),
+            "%d sample(s) failed to parse after %d retries; "
+            "returning None for those slots",
+            failed,
             max_retries,
         )
     return results
