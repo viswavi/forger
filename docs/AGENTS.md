@@ -292,6 +292,9 @@ Module import time should not execute work. LLM calls, file I/O, and any `@op`-d
 
 We often see some common patterns in data generation pipelines. Here is an incomplete list of examples:
 
+- **Topic-based generation**: First sample from a list of topics (e.g. "biology", "chemistry", "mathematics") and then
+condition generation on the chosen topic. This can improve diversity across topics and allow for topic-specific
+prompting or filtering.
 - **Retrieval-augmented generation:** First retrieve relevant information (e.g. from Wikipedia or a custom document
 collection) and then condition generation on that retrieved information.
 - **Self-refinement:** For a complicated step (e.g. generating a program to pair with a given natural language query),
