@@ -1,0 +1,9 @@
+2026-05-31 23:03:38,459 - forger.op - WARNING - @op(alter.translate.to_language) reads globals ['SYSTEM_PROMPT_LANGUAGE']; changes to these may not invalidate the cache key, so cached results may be stale.
+2026-05-31 23:03:38,459 - forger.op - WARNING - @op(alter.translate.to_code) reads globals ['SYSTEM_PROMPT_CODE']; changes to these may not invalidate the cache key, so cached results may be stale.
+2026-05-31 23:03:39,030 - forger.op - WARNING - @op(filter.by_keyword_blocklist) reads globals ['DEFAULT_BLOCKLIST']; changes to these may not invalidate the cache key, so cached results may be stale.
+2026-05-31 23:03:39,030 - forger.op - WARNING - @op(filter.by_llm_score) reads globals ['logger']; changes to these may not invalidate the cache key, so cached results may be stale.
+2026-05-31 23:03:39,030 - forger.op - WARNING - @op(filter.by_syntax) reads globals ['_SUPPORTED_LANGS']; changes to these may not invalidate the cache key, so cached results may be stale.
+
+seeds=500  questions(dedup)=498  answered=498  kept=268
+(last_usage — gen step $0.0017, strong step $0.0142)
+Wrote 268 pairs to /Users/vijay/Documents/code/forger/examples/instruction_following/instruction_following.jsonl
