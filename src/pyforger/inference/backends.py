@@ -21,7 +21,7 @@ import threading
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
-from pyforger.acquire.model import Model
+from pyforger.acquire.model import Model, Prompt
 from pyforger.op import _canonical
 
 
@@ -70,11 +70,11 @@ class InferenceBackend(Protocol):
 
     model: str
 
-    def generate(
-        self, prompts: list[str], sampling: SamplingConfig
-    ) -> list[str]: ...
+    def generate(self, prompts: list[str], sampling: SamplingConfig) -> list[str]:
+        ...
 
-    def cache_key(self) -> dict: ...
+    def cache_key(self) -> dict:
+        ...
 
 
 _ENGINE_REGISTRY: dict[bytes, Any] = {}
@@ -187,9 +187,7 @@ class VLLMBackend:
                 _ENGINE_REGISTRY[key] = engine
             return engine
 
-    def generate(
-        self, prompts: list[str], sampling: SamplingConfig
-    ) -> list[str]:
+    def generate(self, prompts: list[str], sampling: SamplingConfig) -> list[str]:
         """Generate one completion per prompt.
 
         vLLM preserves input order in its output list, so the returned
@@ -236,9 +234,7 @@ class LiteLLMBackend:
         """Stable hash key delegating to the wrapped Model."""
         return {"backend": "litellm", "model_ck": self._model.cache_key()}
 
-    def generate(
-        self, prompts: list[str], sampling: SamplingConfig
-    ) -> list[str]:
+    def generate(self, prompts: list[Prompt], sampling: SamplingConfig) -> list[str]:
         """Generate one completion per prompt via LiteLLM.
 
         Maps :class:`SamplingConfig` to :meth:`Model.generate_batch`

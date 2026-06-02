@@ -21,6 +21,8 @@ import os
 import pickle
 import threading
 import time
+import types
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import wraps
@@ -54,7 +56,22 @@ class CallRecord:
     duration_s: float
 
 
-_TRACE: list[CallRecord] = []
+_TRACE_DEFAULT_MAX = 10_000
+
+
+def _trace_max() -> int:
+    """We cap the number of trace records to observe -- 0 disables tracing."""
+    # This environment variable must be set before importing Forger to take effect.
+    raw = os.environ.get("PYFORGER_TRACE_MAX")
+    if raw is None:
+        return _TRACE_DEFAULT_MAX
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return _TRACE_DEFAULT_MAX
+
+
+_TRACE: deque[CallRecord] = deque(maxlen=_trace_max())
 _TRACE_LOCK = threading.Lock()
 
 
@@ -94,11 +111,16 @@ def _canonical(obj: Any) -> Any:
     if obj is None or isinstance(obj, (bool, int, float, str, bytes)):
         return obj
     if isinstance(obj, (list, tuple)):
+        # We treat input lists and input tuples with the same content as identical.
         return [_canonical(x) for x in obj]
     if isinstance(obj, dict):
         items = [(_canonical(k), _canonical(v)) for k, v in obj.items()]
-        items.sort(key=lambda item: pickle.dumps(item[0]))
+        items.sort(key=lambda item: repr(item[0]))
         return items
+    if isinstance(obj, (set, frozenset)):
+        items = [_canonical(x) for x in obj]
+        items.sort(key=repr)
+        return ["__frozenset__" if isinstance(obj, frozenset) else "__set__", items]
     if isinstance(obj, type):
         return f"<type {obj.__module__}.{obj.__qualname__}>"
     if hasattr(obj, "cache_key") and callable(obj.cache_key):
@@ -114,12 +136,77 @@ def _canonical(obj: Any) -> Any:
             closure_vals = [_canonical(cell.cell_contents) for cell in closure]
             return ["__callable__", ident, _code_key(code), closure_vals]
         return ["__callable__", ident]
-    return repr(obj)
+    try:
+        return pickle.dumps(obj, protocol=4)
+    except Exception as e:
+        raise TypeError(
+            f"@op cannot derive a stable cache key for {type(obj).__name__}: "
+            f"{e}. Add a cache_key() method to this type."
+        ) from e
 
 
-def _hash(obj: Any) -> str:
+_HASH_WARN_BYTES = int(os.environ.get("PYFORGER_HASH_WARN_BYTES", 50 * 1024 * 1024))
+_HASH_WARN_SECONDS = float(os.environ.get("PYFORGER_HASH_WARN_SECONDS", 1.0))
+_HASH_WARNED: set[str] = set()
+_HASH_WARN_LOCK = threading.Lock()
+
+
+def _hash(obj: Any) -> tuple[str, int]:
     payload = pickle.dumps(_canonical(obj), protocol=4)
-    return hashlib.sha256(payload).hexdigest()
+    return hashlib.sha256(payload).hexdigest(), len(payload)
+
+
+def _maybe_warn_hash_cost(op_name: str, duration: float, size: int) -> None:
+    if size <= _HASH_WARN_BYTES and duration <= _HASH_WARN_SECONDS:
+        return
+    with _HASH_WARN_LOCK:
+        if op_name in _HASH_WARNED:
+            return
+        _HASH_WARNED.add(op_name)
+    logger.warning(
+        "@op(%s) cache-key hash took %.2fs to hash input and resulted in a %d MiB"
+        " payload; consider adding cache_key() on large inputs for a cheaper key.",
+        op_name,
+        duration,
+        size // (1024 * 1024),
+    )
+
+
+def _warn_unstable_refs(fn: Callable[..., Any], op_name: str) -> None:
+    """Warn if fn reads module globals, env vars, or closes over enclosing scope."""
+    code = fn.__code__
+    names = set(code.co_names)
+    g = fn.__globals__
+    # We look for referents that can quietly change without affecting the op's cache
+    # key. This will lead to stale cache results and cause problems. We check for:
+    # 1) Module globals that are not modules or callables (e.g. configuration dicts).
+    # 2) Environment variables (detected by usage of os.environ or os.getenv).
+    # 3) Closure variables
+    data_globals = sorted(
+        n
+        for n in names
+        if n in g and not isinstance(g[n], types.ModuleType) and not callable(g[n])
+    )
+    env_used = bool({"environ", "getenv"} & names)
+    # We look for closure variables, e.g. `config["multiplier"]`` in
+    # def new_op(x):
+    #     return x * config["multiplier"]
+    closure_vars = sorted(code.co_freevars) if fn.__closure__ else []
+    if not (data_globals or env_used or closure_vars):
+        return
+    parts = []
+    if data_globals:
+        parts.append(f"reads globals {data_globals}")
+    if env_used:
+        parts.append("reads os.environ/os.getenv")
+    if closure_vars:
+        parts.append(f"closes over {closure_vars}")
+    logger.warning(
+        "@op(%s) %s; changes to these may not invalidate the cache key, "
+        "so cached results may be stale.",
+        op_name,
+        " and ".join(parts),
+    )
 
 
 def op(
@@ -142,22 +229,48 @@ def op(
     """
 
     def decorate(fn: Callable[..., T]) -> Callable[..., T]:
-        # Functions decorated with @op cannot use the reserved argument '_no_cache'.
-        if "_no_cache" in inspect.signature(fn).parameters:
-            raise TypeError(
-                "Forger functions decorated with @op cannot use the reserved "
-                + "argument name '_no_cache'."
-            )
+        try:
+            sig = inspect.signature(fn)
+        except (TypeError, ValueError) as exc:
+            # Built-in functions and some callables don't have inspectable signatures.
+            logger.debug("inspect.signature failed for %s: %s", fn, exc)
+            sig = None
+        else:
+            # Functions decorated with @op cannot use the reserved argument '_no_cache'.
+            assert sig is not None  # mypy hint
+            if "_no_cache" in sig.parameters:
+                raise TypeError(
+                    "Forger functions decorated with @op cannot use the reserved "
+                    + "argument name '_no_cache'."
+                )
 
         op_name = name or f"{fn.__module__}.{fn.__qualname__}"
         # Sanitize op_name to be a safe directory name
         safe_op_name = "".join(c if c.isalnum() or c in "._-" else "_" for c in op_name)
         body_key = _canonical(fn)
+        if cache:
+            _warn_unstable_refs(fn, op_name)
 
         @wraps(fn)
         def wrapper(*args: Any, _no_cache: bool = False, **kwargs: Any) -> T:
             start = time.time()
-            input_hash = _hash([op_name, body_key, list(args), kwargs])
+            if sig is not None:
+                try:
+                    # Attempt to normalize the op function's arguments before hashing.
+                    bound = sig.bind(*args, **kwargs)
+                    bound.apply_defaults()
+                    # Normalize the different ways of stating the same arguments.
+                    args = bound.args
+                    kwargs = bound.kwargs
+                    normalized = dict(bound.arguments)
+                except TypeError:
+                    # If the arguments don't match the signature, use them directly.
+                    normalized = {"args": list(args), "kwargs": dict(kwargs)}
+            else:
+                normalized = {"args": list(args), "kwargs": dict(kwargs)}
+            t0 = time.perf_counter()
+            input_hash, hash_size = _hash([op_name, body_key, normalized])
+            _maybe_warn_hash_cost(op_name, time.perf_counter() - t0, hash_size)
 
             cache_root = _cache_dir()
             cache_path = (cache_root / safe_op_name / f"{input_hash}.pkl").resolve()
@@ -210,16 +323,22 @@ def op(
                     os.replace(tmp_path, cache_path)
 
             duration = time.time() - start
-            with _TRACE_LOCK:
-                _TRACE.append(
-                    CallRecord(
-                        op_name=op_name,
-                        input_hash=input_hash,
-                        output_hash=None if cache_hit else _hash(result),
-                        cache_hit=cache_hit,
-                        duration_s=duration,
+            # If tracing is enabled, record this call on the in-memory trace.
+            if _TRACE.maxlen is not None and _TRACE.maxlen > 0:
+                with _TRACE_LOCK:
+                    if cache_hit:
+                        output_hash = None
+                    else:
+                        output_hash, _ = _hash(result)
+                    _TRACE.append(
+                        CallRecord(
+                            op_name=op_name,
+                            input_hash=input_hash,
+                            output_hash=output_hash,
+                            cache_hit=cache_hit,
+                            duration_s=duration,
+                        )
                     )
-                )
 
             if cache_hit:
                 logger.debug("cache HIT %s %s", op_name, input_hash[:8])

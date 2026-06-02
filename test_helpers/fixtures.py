@@ -12,13 +12,16 @@ class MockModel(Model):
 
     def __init__(
         self,
-        responses: list[str],
+        responses: list[str] | list[list[str]],
         model_id: str = "test/model",
         **kwargs: Any,
     ) -> None:
         """Build a MockModel that cycles ``responses`` across prompts."""
         super().__init__(model_id=model_id, **kwargs)
-        self.responses = responses
+        normalized: list[list[str]] = [
+            [r] if isinstance(r, str) else list(r) for r in responses
+        ]
+        self.responses = normalized
         self._call_count = 0
 
     def cache_key(self) -> tuple:
@@ -34,11 +37,20 @@ class MockModel(Model):
         max_tokens: int | None = None,
         stop: list[str] | None = None,
     ) -> list[list[str]]:
-        """Return one canned response per prompt, cycling through self.responses."""
+        """Return self.responses[i] for the i-th prompt; require len == n."""
         self._call_count += 1
-        return [
-            [self.responses[i % len(self.responses)]] * n for i in range(len(prompts))
-        ]
+        if len(self.responses) < len(prompts):
+            raise ValueError(
+                f"MockModel is requested to generate for {len(prompts)} prompts but "
+                f"only {len(self.responses)} canned responses are given"
+            )
+        canned = self.responses[: len(prompts)]
+        if any(len(r) != n for r in canned):
+            shapes = [len(r) for r in canned]
+            raise ValueError(
+                f"MockModel canned response shapes {shapes} do not match n={n}"
+            )
+        return [list(r) for r in canned]
 
 
 class RecordingMockModel(MockModel):

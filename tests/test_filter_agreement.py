@@ -204,7 +204,7 @@ class TestByRougeLAgreement:
 
 
 class TestByRougeLDisagreement:
-    """by_rouge_l_agreement keeps items where two fields are similar."""
+    """by_rouge_l_agreement keeps items where two fields are dissimilar."""
 
     def test_removes_similar_items(self):
         """Items with high ROUGE-L between fields are removed."""

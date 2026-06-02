@@ -85,6 +85,7 @@ class Model:
             self._model_id,
             self._temperature,
             self._max_tokens,
+            self._num_retries,
             kwargs_items,
         )
 
