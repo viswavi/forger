@@ -62,6 +62,9 @@ validation = [
 inference = [
     "vllm>=0.6.0",
 ]
+inspect = [
+    "inspect_ai>=0.3.69",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["forger"]
