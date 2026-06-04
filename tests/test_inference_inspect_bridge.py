@@ -288,3 +288,33 @@ class TestEvaluateWithInspect:
         assert result.metrics == {"match/accuracy": 0.5}
         assert result.samples == 12
         assert result.task == "inspect_evals/gsm8k"
+
+    def test_runs_gpqa_task(self, monkeypatch):
+        """Smoke test that the bridge is the supported path for GPQA evals.
+
+        Preserves the intent of the deleted hand-rolled ``evaluate_gpqa`` by
+        pinning that ``evaluate_with_inspect`` can target Inspect's canonical
+        ``inspect_evals/gpqa`` task and surface its scorer metrics.
+        """
+        _install_fake_inspect(monkeypatch)
+
+        def fake_eval(task, *, model, model_args, **kwargs):
+            metric = types.SimpleNamespace(value=0.42)
+            score = types.SimpleNamespace(
+                name="choice", metrics={"accuracy": metric}
+            )
+            results = types.SimpleNamespace(scores=[score], total_samples=8)
+            return [types.SimpleNamespace(results=results)]
+
+        sys.modules["inspect_ai"].eval = fake_eval
+
+        result = bridge.evaluate_with_inspect(
+            FakeBackend(),
+            "inspect_evals/gpqa",
+            limit=8,
+        )
+
+        assert result.task == "inspect_evals/gpqa"
+        assert result.model == "forger/default"
+        assert result.metrics == {"choice/accuracy": 0.42}
+        assert result.samples == 8

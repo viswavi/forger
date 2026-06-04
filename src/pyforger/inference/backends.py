@@ -212,9 +212,10 @@ class LiteLLMBackend:
     """Adapter that exposes a :class:`pyforger.acquire.Model` as an
     :class:`InferenceBackend`.
 
-    Lets evaluation code (``evaluate_gpqa`` etc.) target any LiteLLM
-    provider — OpenAI, Anthropic, Together, local OpenAI-compatible
-    servers — through the same protocol as :class:`VLLMBackend`.
+    Lets evaluation code (e.g. :func:`pyforger.inference.evaluate_with_inspect`)
+    target any LiteLLM provider — OpenAI, Anthropic, Together, local
+    OpenAI-compatible servers — through the same protocol as
+    :class:`VLLMBackend`.
 
     ``SamplingConfig.top_p`` is **ignored** by this backend because the
     underlying :meth:`Model.generate_batch` has no ``top_p`` parameter.
