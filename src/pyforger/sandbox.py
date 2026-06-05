@@ -209,11 +209,12 @@ class Sandbox:
         """Call ``fn`` with a SIGALRM wall-clock timeout. Main thread only."""
         budget = timeout_s if timeout_s is not None else self._default_timeout_s
         old_handler = signal.signal(signal.SIGALRM, _on_alarm)
+        old_timer = signal.getitimer(signal.ITIMER_REAL)
         signal.setitimer(signal.ITIMER_REAL, budget)
         try:
             return fn(*args, **kwargs)
         finally:
-            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.setitimer(signal.ITIMER_REAL, old_timer[0], old_timer[1])
             signal.signal(signal.SIGALRM, old_handler)
 
     def execute(
