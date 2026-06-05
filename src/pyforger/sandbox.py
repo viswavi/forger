@@ -188,8 +188,15 @@ class Sandbox:
         # can see each other via __globals__.
         ns: dict[str, Any] = dict(self._globals)
         baseline = set(self._globals)
-        exec(bytecode, ns)
 
+        old_handler = signal.signal(signal.SIGALRM, _on_alarm)
+        old_timer = signal.getitimer(signal.ITIMER_REAL)
+        signal.setitimer(signal.ITIMER_REAL, self._default_timeout_s)
+        try:
+            exec(bytecode, ns)
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, old_timer[0], old_timer[1])
+            signal.signal(signal.SIGALRM, old_handler)
         for name in reversed(list(ns)):
             if name in baseline:
                 continue
