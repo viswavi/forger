@@ -15,7 +15,7 @@ def execute_code(
     output_field: str = "result",
     error_field: str | None = "error",
     sandbox: Sandbox | None = None,
-    timeout_s: float = 10.0,
+    timeout_s: float | None = None,
 ) -> list[dict]:
     """Compile each item's code and call it with ``arg_field``'s value.
 
