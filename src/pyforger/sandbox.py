@@ -139,8 +139,8 @@ class Sandbox:
 
     Calls run at native Python speed (no subprocess), so there is no
     process-level isolation; this is not a security boundary against
-    adversarial input. Timeouts use ``signal.SIGALRM``, so calls must be
-    on the main thread.
+    adversarial input. Timeouts use ``signal.SIGALRM`` + ``signal.setitimer``
+    (Unix only), so calls must be on the main thread.
     """
 
     def __init__(
@@ -172,8 +172,8 @@ class Sandbox:
             type(self).__name__,
             tuple(sorted(self._allowed_imports)),
             self._default_timeout_s,
+            self._result_cache is not None,
         )
-
     def compile_function(self, code: str) -> Callable[..., Any]:
         """Compile ``code`` and return the last function defined; cached by source."""
         cached = self._compile_cache.get(code)
@@ -189,19 +189,29 @@ class Sandbox:
         ns: dict[str, Any] = dict(self._globals)
         baseline = set(self._globals)
 
-        old_handler = signal.signal(signal.SIGALRM, _on_alarm)
-        old_timer = signal.getitimer(signal.ITIMER_REAL)
-        signal.setitimer(signal.ITIMER_REAL, self._default_timeout_s)
+        sigalrm = getattr(signal, "SIGALRM", None)
+        itimer_real = getattr(signal, "ITIMER_REAL", None)
+        if sigalrm is None or itimer_real is None or not hasattr(signal, "setitimer"):
+            raise NotImplementedError(
+                "sandbox: timeouts require Unix signal.setitimer/SIGALRM"
+            )
+        try:
+            old_handler = signal.signal(sigalrm, _on_alarm)
+        except ValueError as exc:
+            raise RuntimeError(
+                "sandbox: timeouts require running on the main thread"
+            ) from exc
+        old_timer = signal.getitimer(itimer_real)
+        signal.setitimer(itimer_real, self._default_timeout_s)
         try:
             exec(bytecode, ns)
         finally:
-            signal.setitimer(signal.ITIMER_REAL, old_timer[0], old_timer[1])
-            signal.signal(signal.SIGALRM, old_handler)
+            signal.setitimer(itimer_real, old_timer[0], old_timer[1])
+            signal.signal(sigalrm, old_handler)
         for name in reversed(list(ns)):
             if name in baseline:
                 continue
-            obj = ns[name]
-            if callable(obj):
+            if callable(obj) and hasattr(obj, "__code__"):
                 self._compile_cache[code] = obj
                 return obj
         raise ValueError("sandbox: code did not define any function to call")
@@ -215,14 +225,25 @@ class Sandbox:
     ) -> Any:
         """Call ``fn`` with a SIGALRM wall-clock timeout. Main thread only."""
         budget = timeout_s if timeout_s is not None else self._default_timeout_s
-        old_handler = signal.signal(signal.SIGALRM, _on_alarm)
-        old_timer = signal.getitimer(signal.ITIMER_REAL)
-        signal.setitimer(signal.ITIMER_REAL, budget)
+        sigalrm = getattr(signal, "SIGALRM", None)
+        itimer_real = getattr(signal, "ITIMER_REAL", None)
+        if sigalrm is None or itimer_real is None or not hasattr(signal, "setitimer"):
+            raise NotImplementedError(
+                "sandbox: timeouts require Unix signal.setitimer/SIGALRM"
+            )
+        try:
+            old_handler = signal.signal(sigalrm, _on_alarm)
+        except ValueError as exc:
+            raise RuntimeError(
+                "sandbox: timeouts require running on the main thread"
+            ) from exc
+        old_timer = signal.getitimer(itimer_real)
+        signal.setitimer(itimer_real, budget)
         try:
             return fn(*args, **kwargs)
         finally:
-            signal.setitimer(signal.ITIMER_REAL, old_timer[0], old_timer[1])
-            signal.signal(signal.SIGALRM, old_handler)
+            signal.setitimer(itimer_real, old_timer[0], old_timer[1])
+            signal.signal(sigalrm, old_handler)
 
     def execute(
         self,

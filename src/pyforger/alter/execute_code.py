@@ -34,7 +34,9 @@ def execute_code(
             new_item[output_field] = sb.execute(code, arg, timeout_s=timeout_s)
             if error_field is not None:
                 new_item[error_field] = None
-        except Exception as exc:
+        except (KeyboardInterrupt, GeneratorExit):
+            raise
+        except BaseException as exc:
             new_item[output_field] = None
             if error_field is not None:
                 new_item[error_field] = f"{type(exc).__name__}: {exc}"
