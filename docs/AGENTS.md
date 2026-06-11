@@ -274,7 +274,7 @@ import random
 @op
 def one_round(rows, model):
     in_context_examples = random.sample(rows, min(len(rows), 5))
-    prompt = # construct a prompt using the in-context examples
+    prompt = ...  # construct a prompt using the in-context examples
     new = acquire.sample_from_LLM(prompt=prompt, model=model, n=64)
     return rows + filter.by_rouge_l(new, field="text", threshold=0.7)
 
