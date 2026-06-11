@@ -174,6 +174,7 @@ class Sandbox:
             self._default_timeout_s,
             self._result_cache is not None,
         )
+
     def compile_function(self, code: str) -> Callable[..., Any]:
         """Compile ``code`` and return the last function defined; cached by source."""
         cached = self._compile_cache.get(code)
@@ -211,6 +212,7 @@ class Sandbox:
         for name in reversed(list(ns)):
             if name in baseline:
                 continue
+            obj = ns[name]
             if callable(obj) and hasattr(obj, "__code__"):
                 self._compile_cache[code] = obj
                 return obj
