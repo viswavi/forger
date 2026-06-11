@@ -19,8 +19,13 @@
 #   base+task            base SFT'd on the task dataset
 #   base+Capybara+task   the Capybara checkpoint SFT'd on the task dataset
 # =============================================================================
+#SBATCH --job-name=sft_eval_capy
 #SBATCH --nodes=1
+#SBATCH --gres=gpu:2
 #SBATCH --cpus-per-task=16
+#SBATCH --mem-per-gpu=90G
+#SBATCH --time=12:00:00
+#SBATCH --output=train_and_eval_capybara_%j.log
 
 set -euo pipefail
 

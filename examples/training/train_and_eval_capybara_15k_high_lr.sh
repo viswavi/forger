@@ -23,7 +23,7 @@
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:2
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=128G
+#SBATCH --mem-per-gpu=90G
 #SBATCH --time=12:00:00
 #SBATCH --output=train_and_eval_capybara_%j.log
 
@@ -40,9 +40,9 @@ RUNS_DIR=""
 # Lower-LR / more-epochs recipe: SFT brittleness to the eval prompt grows with training
 # DOSE (degeneration climbs each epoch at lr=1e-5), so we train gentler -- 5x lower LR with
 # 5x the epochs -- to reach a similar fit while staying closer to the (robust) base model.
-LR="2e-6"                 # 5x below the train_sft.py 1e-5 default
-EPOCHS="6"               # task-data SFT epochs (5x)
-CAPY_EPOCHS="6"          # Capybara warm-up SFT epochs (5x)
+LR="1e-5"                 # 5x below the train_sft.py 1e-5 default
+EPOCHS="4"               # task-data SFT epochs (5x)
+CAPY_EPOCHS="4"          # Capybara warm-up SFT epochs (5x)
 CAPY_WEIGHT_DECAY="0.1"   # kept identical to the LIMA recipe
 EVAL_LIMIT="-1"           # -1 = full benchmark; set small for quick checks
 GPU_MEM_UTIL="0.6"        # vLLM gpu_memory_utilization for the eval phase
@@ -194,7 +194,7 @@ else
   # cancelled, just relaunch (same paths, any job name) and it continues from the
   # latest checkpoint toward the same --epochs total.
   train_sft "$MODEL" "$CAPY_DATA" "$CAPY_CKPT" "base -> Capybara" \
-    --epochs "$CAPY_EPOCHS" --weight-decay "$CAPY_WEIGHT_DECAY" --save-every-epoch --resume
+    --epochs "$CAPY_EPOCHS" --save-every-epoch
 fi
 
 # 1b) task SFT from the base model               -> base+task

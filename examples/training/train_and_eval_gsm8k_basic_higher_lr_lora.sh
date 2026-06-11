@@ -19,7 +19,7 @@
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:2
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=128G
+#SBATCH --mem-per-gpu=90G
 #SBATCH --time=12:00:00
 #SBATCH --output=train_and_eval_gsm8k_basic_%j.log
 
