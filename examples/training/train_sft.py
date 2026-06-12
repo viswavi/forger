@@ -59,18 +59,28 @@ def log(msg: str) -> None:
         print(f"[train_sft] {msg}", flush=True)
 
 
-def resolve_template(model_id: str, templates_dir: str) -> tuple[Path, str]:
+def infer_family(model_id: str) -> str | None:
+    """Map a model id to a known family substring (for eos handling / template lookup),
+    or None if it matches no known family. None is fine when --use-default-chat-template
+    is set: we then leave the model's own template and eos untouched."""
     name = model_id.lower()
-    for family, tpl in TEMPLATE_FOR_FAMILY.items():
+    for family in TEMPLATE_FOR_FAMILY:
         if family in name:
-            path = Path(templates_dir) / tpl
-            if not path.is_file():
-                raise FileNotFoundError(f"Expected chat template not found: {path}")
-            return path, family
-    raise ValueError(
-        f"Could not infer a chat-template family from model id '{model_id}'. "
-        f"Known families: {sorted(TEMPLATE_FOR_FAMILY)}"
-    )
+            return family
+    return None
+
+
+def resolve_template(model_id: str, templates_dir: str) -> tuple[Path, str]:
+    family = infer_family(model_id)
+    if family is None:
+        raise ValueError(
+            f"Could not infer a chat-template family from model id '{model_id}'. "
+            f"Known families: {sorted(TEMPLATE_FOR_FAMILY)}"
+        )
+    path = Path(templates_dir) / TEMPLATE_FOR_FAMILY[family]
+    if not path.is_file():
+        raise FileNotFoundError(f"Expected chat template not found: {path}")
+    return path, family
 
 
 def set_generation_eos(model, tokenizer, family: str) -> None:
@@ -81,6 +91,9 @@ def set_generation_eos(model, tokenizer, family: str) -> None:
     EVERY artifact Trainer writes correct natively -- all per-epoch checkpoints and the
     final model, including any checkpoints written after a --resume. Inert for training:
     SFT never calls model.generate, so eos only affects what gets serialized."""
+    if family is None:
+        log("unknown model family; leaving generation eos as the model's own default")
+        return
     turn_end_id = tokenizer.convert_tokens_to_ids(EOS_FOR_FAMILY[family])
     if turn_end_id is None or turn_end_id == tokenizer.unk_token_id:
         log(f"WARNING: turn-end token {EOS_FOR_FAMILY[family]!r} not in vocab; leaving eos as-is")
@@ -122,8 +135,16 @@ def parse_args() -> argparse.Namespace:
                    help="HF model id of the BASE model, e.g. Qwen/Qwen3-1.7B-Base")
     p.add_argument("--data-file", required=True, help="Path to the *_trl_format.jsonl dataset")
     p.add_argument("--output-dir", required=True, help="Where to save the fine-tuned model")
-    p.add_argument("--templates-dir", required=True,
-                   help="PostTrainBench eval templates dir (used so train format == eval format)")
+    p.add_argument("--templates-dir", default=None,
+                   help="PostTrainBench eval templates dir (used so train format == eval format). "
+                        "Required unless --use-default-chat-template is set.")
+    p.add_argument("--use-default-chat-template", action="store_true",
+                   help="Keep the model's own built-in chat template instead of forcing the "
+                        "PostTrainBench eval template. Use for INSTRUCT/chat models (e.g. "
+                        "Qwen/Qwen3-4B) that ship a template the eval also uses by default -- then "
+                        "train and eval formats already match. Skips --templates-dir and the "
+                        "<think> reasoning-loop rewrite, and leaves the tokenizer's chat_template "
+                        "and the model's eos untouched. Errors if the model ships no template.")
 
     # Training hyperparameters.
     p.add_argument("--epochs", type=float, default=3.0)
@@ -177,10 +198,17 @@ def main() -> None:
         args.learning_rate *= 10
         log(f"--use-lora set: learning rate scaled 10x -> {args.learning_rate:g}")
 
-    template_path, family = resolve_template(args.model_id, args.templates_dir)
+    if args.use_default_chat_template:
+        template_path = None
+        family = infer_family(args.model_id)  # for eos only; None => leave eos as-is
+    else:
+        if not args.templates_dir:
+            raise SystemExit(
+                "--templates-dir is required unless --use-default-chat-template is set")
+        template_path, family = resolve_template(args.model_id, args.templates_dir)
     log(f"model           = {args.model_id}")
     log(f"data            = {args.data_file}")
-    log(f"chat template   = {template_path}")
+    log(f"chat template   = {template_path or '(model built-in)'}")
     log(f"output dir      = {args.output_dir}")
 
     # --- dataset -----------------------------------------------------------
@@ -191,16 +219,25 @@ def main() -> None:
 
     # --- tokenizer + eval-matched chat template ----------------------------
     tokenizer = AutoTokenizer.from_pretrained(args.model_id)
-    chat_template = template_path.read_text()
-    # The Qwen3 template unconditionally wraps the FINAL assistant turn in an empty
-    # `<think>\n\n</think>\n\n` block (its `loop.last` branch), so every SFT target gets a
-    # think prefix the model never sees at inference (add_generation_prompt doesn't add it,
-    # and `enable_thinking` only guards that branch -- it can't remove this one). Make the
-    # think wrapper fire only when there's actual reasoning content, so train matches infer.
-    # No-op for templates without this construct (smollm/gemma/llama).
-    chat_template = chat_template.replace(
-        "loop.last or (not loop.last and reasoning_content)", "reasoning_content")
-    tokenizer.chat_template = chat_template
+    if args.use_default_chat_template:
+        # Instruct/chat model: the eval also uses the model's built-in template, so leave
+        # it byte-for-byte untouched (no override, no <think> rewrite) to keep train == eval.
+        if tokenizer.chat_template is None:
+            raise ValueError(
+                f"--use-default-chat-template set but {args.model_id} ships no chat template; "
+                f"omit the flag and pass --templates-dir to use an eval template instead.")
+        log("using the model's built-in chat template unchanged")
+    else:
+        chat_template = template_path.read_text()
+        # The Qwen3 template unconditionally wraps the FINAL assistant turn in an empty
+        # `<think>\n\n</think>\n\n` block (its `loop.last` branch), so every SFT target gets a
+        # think prefix the model never sees at inference (add_generation_prompt doesn't add it,
+        # and `enable_thinking` only guards that branch -- it can't remove this one). Make the
+        # think wrapper fire only when there's actual reasoning content, so train matches infer.
+        # No-op for templates without this construct (smollm/gemma/llama).
+        chat_template = chat_template.replace(
+            "loop.last or (not loop.last and reasoning_content)", "reasoning_content")
+        tokenizer.chat_template = chat_template
     # Base models often have no pad token; reuse eos so batching/padding works.
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
