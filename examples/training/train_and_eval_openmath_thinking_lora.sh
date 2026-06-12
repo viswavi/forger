@@ -156,7 +156,7 @@ run_eval() {  # <model_path> <metrics_file> <label>; fresh vLLM process each cal
 # from the last one to dodge the FSDP final-save corruption) and lets you sweep epochs.
 echo ">>> [1/1] SFT base on OPEN MATH REASONING ${VARIANT}"
 train_sft "$MODEL" "$DATA_FILE" "$SFT_DIR" "base -> open_math_reasoning_${VARIANT}" \
-  --epochs "$EPOCHS" --save-every-epoch --max-length 16384 --use-lora --lora-r 32 --lora-alpha 32
+  --epochs "$EPOCHS" --save-every-epoch --max-length 16384 --use-lora --lora-r 32 --lora-alpha 32 --use-default-chat-template
 
 # ---- 2) EVALUATE ------------------------------------------------------------
 # Each eval is a fresh single-GPU vLLM process; the eval forces the per-family chat
