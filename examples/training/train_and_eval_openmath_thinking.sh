@@ -48,20 +48,21 @@ EXTRA_TRAIN_ARGS=()
 # ---- arg parsing ------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --model)        MODEL="$2"; shift 2;;
-    --epochs)       EPOCHS="$2"; shift 2;;
-    --lr)           LR="$2"; shift 2;;
-    --eval-limit)   EVAL_LIMIT="$2"; shift 2;;
-    --gpu-mem-util) GPU_MEM_UTIL="$2"; shift 2;;
-    --no-baseline)  RUN_BASELINE=0; shift 1;;   # skip the untrained-base eval
-    --runs-dir)     RUNS_DIR="$2"; shift 2;;
-    --smoke)        SMOKE=1
-                    EXTRA_TRAIN_ARGS+=(--max-steps 2 --max-train-samples 16
-                                       --per-device-batch-size 2 --grad-accum 1
-                                       --max-length 512)
-                    EVAL_LIMIT="5"; shift 1;;
-    --train-arg)    EXTRA_TRAIN_ARGS+=("$2"); shift 2;;
-    -h|--help)      sed -n '2,30p' "$0"; exit 0;;
+    --model)          MODEL="$2"; shift 2;;
+    --data-file-name) DATA_FILE_NAME="$2"; shift 2;;
+    --epochs)         EPOCHS="$2"; shift 2;;
+    --lr)             LR="$2"; shift 2;;
+    --eval-limit)     EVAL_LIMIT="$2"; shift 2;;
+    --gpu-mem-util)   GPU_MEM_UTIL="$2"; shift 2;;
+    --no-baseline)    RUN_BASELINE=0; shift 1;;   # skip the untrained-base eval
+    --runs-dir)       RUNS_DIR="$2"; shift 2;;
+    --smoke)          SMOKE=1
+                      EXTRA_TRAIN_ARGS+=(--max-steps 2 --max-train-samples 16
+                                         --per-device-batch-size 2 --grad-accum 1
+                                         --max-length 512)
+                      EVAL_LIMIT="5"; shift 1;;
+    --train-arg)      EXTRA_TRAIN_ARGS+=("$2"); shift 2;;
+    -h|--help)        sed -n '2,30p' "$0"; exit 0;;
     *) echo "Unknown arg: $1" >&2; exit 1;;
   esac
 done
@@ -154,7 +155,7 @@ run_eval() {  # <model_path> <metrics_file> <label>; fresh vLLM process each cal
 # from the last one to dodge the FSDP final-save corruption) and lets you sweep epochs.
 echo ">>> [1/1] SFT base on OPEN MATH REASONING ${VARIANT}"
 train_sft "$MODEL" "$DATA_FILE" "$SFT_DIR" "base -> open_math_reasoning_${VARIANT}" \
-  --epochs "$EPOCHS" --save-every-epoch --max-length 16384
+  --epochs "$EPOCHS" --save-every-epoch --max-length 16384 --use-default-chat-template
 
 # ---- 2) EVALUATE ------------------------------------------------------------
 # Each eval is a fresh single-GPU vLLM process; the eval forces the per-family chat
