@@ -88,6 +88,20 @@ vLLM requires CUDA, so these only run on a GPU node — never on a login node.
    pip install git+https://github.com/UKGovernmentBEIS/inspect_evals
    ```
 
+   **CUDA-driver match (important):** an unbounded `vllm>=0.8.5` can pull a
+   release whose bundled PyTorch is built for a newer CUDA than the GPU node's
+   driver supports, which fails at engine start with *"The NVIDIA driver on
+   your system is too old"*. Check the node's ceiling with `nvidia-smi`
+   (top-right `CUDA Version: 12.x`), then make sure the installed torch matches:
+
+   ```bash
+   python -c "import torch; print(torch.__version__, torch.version.cuda)"
+   ```
+
+   If `torch.version.cuda` is newer than the driver supports, pin vLLM to a
+   CUDA-12 build (e.g. `pip install 'vllm==0.8.5'`) or force a matching torch
+   wheel (`pip install --force-reinstall torch --index-url https://download.pytorch.org/whl/cu128`).
+
 4. **Authenticate to the Hugging Face Hub.** GPQA (`Idavidrein/gpqa`) is
    gated; accept the dataset license on the Hub first, then log in so the
    token is cached in `HF_HOME` (never hardcode it in the sbatch file).
@@ -193,3 +207,27 @@ than going through your own backend abstraction.
   task ids occasionally drift across `inspect_evals` releases.
 - Hangs on first run — first invocation downloads ~3.5 GB of weights; watch
   `nvidia-smi` and the job's `.out` file.
+- `RuntimeError: The NVIDIA driver on your system is too old (found version
+  NNNNN)` at engine start — the installed vLLM/PyTorch was built for a newer
+  CUDA than the node's driver. Check `nvidia-smi` and
+  `python -c "import torch; print(torch.version.cuda)"`; pin vLLM to a CUDA-12
+  build (`pip install 'vllm==0.8.5'`) or reinstall a matching torch wheel from
+  the `cu128` index. See the CUDA-driver-match note in step 3.
+- `AttributeError: module 'torch' has no attribute 'float8_e8m0fnu'` (often
+  surfacing as `ModuleNotFoundError: ... 'ProcessorMixin'` or a misleading
+  `VLLMBackend requires the 'inference' extra`) — `transformers` is newer than
+  `torch`. The `float8_e8m0fnu` dtype needs torch >= 2.7; if you pinned vLLM
+  down to a torch-2.6 build, pin transformers to match:
+  `pip install 'transformers==4.51.3'` (still supports Qwen3). Keep vLLM, torch,
+  and transformers as one consistent set — prefer a vLLM version that pins a
+  torch (2.7+/`cu128`) compatible with the node driver so newer transformers
+  works too.
+- `OSError: ...libtorch_c_dlpack_addon*.so: undefined symbol: ...` (or any
+  `undefined symbol` from `flashinfer` / `tvm_ffi` / `xformers`) at engine
+  start — a leftover binary compiled against a different torch ABI, usually
+  debris from downgrading vLLM/torch in place. flashinfer is optional; remove
+  it so vLLM falls back to its native sampler:
+  `pip uninstall -y flashinfer flashinfer-python tvm-ffi tvm_ffi torch_c_dlpack_ext`.
+  If more ABI mismatches appear, rebuild in a fresh venv with one consistent
+  pinned set (`vllm==0.8.5` + `transformers==4.51.3`) rather than uninstalling
+  piecemeal.
