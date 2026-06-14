@@ -22,7 +22,9 @@ def load_humaneval() -> list[dict]:
             "core pyforger dependency. Install with: pip install datasets"
         ) from exc
 
-    ds = load_dataset("openai_humaneval", split="test")
+    # Use the fully-qualified ``namespace/name`` repo id. Newer
+    # huggingface_hub rejects the bare canonical name "openai_humaneval".
+    ds = load_dataset("openai/openai_humaneval", split="test")
     return [
         {
             "task_id": row["task_id"],
