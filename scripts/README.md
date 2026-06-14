@@ -1,14 +1,64 @@
-# Qwen3-1.7B on GPQA Diamond (Babel HPC)
+# Babel HPC eval scripts
 
-End-to-end runner for evaluating `Qwen/Qwen3-1.7B` on `inspect_evals/gpqa_diamond`,
-routed through the Forger Inspect bridge so the eval uses Qwen3's real chat
+End-to-end runners for the two evaluation pipelines we currently care about.
+
+## Qwen3-1.7B on GPQA Diamond
+
+Routes through the Forger Inspect bridge so the eval uses Qwen3's real chat
 template and keeps `VLLMBackend`'s shared-engine registry.
 
 - [`eval_qwen3_gpqa.py`](eval_qwen3_gpqa.py) — the eval entrypoint.
 - [`eval_qwen3_gpqa.sbatch`](eval_qwen3_gpqa.sbatch) — Slurm job for Babel's
   `debug` partition (1 GPU).
 
-vLLM requires CUDA, so this only runs on a GPU node — never on a login node.
+## Forger data-quality on HumanEval (ICL uplift)
+
+Estimates the quality of a small Forger candidate dataset by measuring how
+much using its examples as few-shot demos raises Qwen3-1.7B's HumanEval
+pass@1 over a zero-shot baseline.
+
+- [`eval_forger_humaneval.py`](eval_forger_humaneval.py) — the eval
+  entrypoint, wired to `pyforger.evaluate.estimate_quality`.
+- [`eval_forger_humaneval.sbatch`](eval_forger_humaneval.sbatch) — Slurm job
+  (1 GPU, 2 hours). Set `FORGER_JSONL=/abs/path/to/coding_questions_trl_format.jsonl`
+  in the submitting environment.
+
+Smoke test first (interactive, on a `debug` GPU allocation):
+
+```bash
+srun --partition=debug --gres=gpu:1 --cpus-per-task=8 --mem=32G \
+     --time=01:00:00 --pty bash
+
+source /data/user_data/$USER/envs/forger/bin/activate
+export HF_HOME=/data/user_data/$USER/hf_cache
+
+python scripts/eval_forger_humaneval.py \
+    --forger-jsonl /abs/path/to/coding_questions_trl_format.jsonl \
+    --n-demos 20 --n-val 5 --k 2 --n-subsets 2 \
+    --allow-code-execution
+```
+
+Full Tuesday run:
+
+```bash
+FORGER_JSONL=/abs/path/to/coding_questions_trl_format.jsonl \
+    sbatch scripts/eval_forger_humaneval.sbatch
+```
+
+Output: `logs/forger-humaneval-<jobid>.json` with `metric` (ICL uplift),
+`baseline_pass_at_1`, `conditioned_pass_at_1`, a 95% bootstrap CI, and
+per-item breakdown.
+
+`--allow-code-execution` is **required**: HumanEval scoring runs
+model-generated code in a hardened subprocess (env scrubbed, RLIMIT_AS,
+wall-clock timeout). This is not a true sandbox; only enable on machines
+you control.
+
+---
+
+## Common Babel setup
+
+vLLM requires CUDA, so these only run on a GPU node — never on a login node.
 
 ## One-time setup on Babel
 
