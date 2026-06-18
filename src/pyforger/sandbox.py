@@ -1,4 +1,20 @@
-"""In-process sandboxed code execution via RestrictedPython."""
+"""In-process sandboxed code execution via RestrictedPython.
+
+Snippets get most of Python: expressions, control flow, def/class,
+comprehensions, attribute reads via ``safer_getattr``. The deviations:
+
+* ``import`` only succeeds for modules whose dotted root is in
+  ``allowed_imports`` (``DEFAULT_ALLOWED_IMPORTS`` by default);
+  relative imports are rejected.
+* Builtins are limited to ``_SAFE_BUILTIN_NAMES`` plus exception
+  classes. No ``open``, ``eval``, ``exec``, ``compile``,
+  ``getattr``/``setattr``, ``globals``/``locals``.
+* Underscore-prefixed attribute access (``x.__class__``,
+  ``().__class__.__bases__``) is rejected at compile time.
+
+Not a security boundary against adversarial input, just a guardrail
+against accidental damage from machine-generated code.
+"""
 from __future__ import annotations
 
 import builtins
