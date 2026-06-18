@@ -22,7 +22,13 @@ def execute_code(
     The Sandbox caches by source string, so a snippet reused across items
     pays compile cost once. Exceptions land in ``error_field`` (set to
     ``None`` to omit) rather than raising, so one bad row doesn't kill
-    the batch. ``timeout_s`` is SIGALRM-based, main thread only.
+    the batch.
+
+    ``timeout_s`` is the per-item wall-clock cap: a snippet that runs
+    longer raises ``SandboxTimeout``, caught here and recorded in
+    ``error_field`` like any other exception. ``None`` falls back to
+    the Sandbox's ``default_timeout_s``. SIGALRM-based, so Unix only
+    and main thread only.
     """
     sb = sandbox if sandbox is not None else Sandbox()
     out: list[dict] = []
