@@ -21,6 +21,11 @@ DEFAULT_ALLOWED_IMPORTS = frozenset(
         "statistics",
         "datetime",
         "decimal",
+        "numpy",
+        "urllib.parse",
+        "html",
+        "unicodedata",
+        "hashlib",
     }
 )
 
