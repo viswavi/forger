@@ -197,6 +197,14 @@ def main() -> None:
     if args.use_lora:
         args.learning_rate *= 10
         log(f"--use-lora set: learning rate scaled 10x -> {args.learning_rate:g}")
+        # The LoRA save path (below) merges from the last in-loop adapter checkpoint
+        # rather than the standalone Trainer.save_model() -- that call deadlocks the
+        # FSDP2 adapter gather. So we require per-epoch checkpoints to exist; enable
+        # them automatically if the caller forgot.
+        if not args.save_every_epoch:
+            args.save_every_epoch = True
+            log("--use-lora: auto-enabling --save-every-epoch (the merge reads the last "
+                "in-loop adapter checkpoint)")
 
     if args.use_default_chat_template:
         template_path = None
@@ -265,6 +273,10 @@ def main() -> None:
             task_type="CAUSAL_LM",
             r=args.lora_r,
             lora_alpha=args.lora_alpha,
+            # peft's per-architecture default mapping lacks some model types
+            # (e.g. Olmo-3); pin the modules it would pick for qwen3/llama so
+            # every architecture gets the same adapter placement.
+            target_modules=["q_proj", "v_proj"],
         )
         log(f"LoRA enabled (r={args.lora_r}, alpha={args.lora_alpha}): training peft "
             f"adapters (merged into a full model on save)")
@@ -325,42 +337,70 @@ def main() -> None:
 
     log("saving model")
     if args.use_lora:
-        # LoRA: save_model writes only the adapter, not a full model. SFTTrainer/peft
-        # serialize a consolidated adapter under FSDP FULL_STATE_DICT, but all ranks
-        # must enter save_model for the state-dict gather, so call it unguarded into a
-        # subdir. Then, on rank 0 only, rebuild the base on CPU, merge the adapter in,
-        # and write a standalone full model to output_dir so the eval pipeline loads it
-        # exactly like a full-FT artifact (no adapter awareness needed downstream).
-        adapter_dir = os.path.join(args.output_dir, "lora_adapter")
-        trainer.save_model(adapter_dir)
+        # PEFT + FSDP2: the standalone Trainer.save_model() gather of the (tiny) adapter
+        # DEADLOCKS under FULL_STATE_DICT -- ranks disagree on the collective and rank 0
+        # hangs until the 30-min NCCL watchdog SIGABRTs the whole job (observed in the
+        # wild: a COALESCED gather of NumelOut=2560, i.e. the LoRA params). The per-epoch
+        # in-loop checkpoint adapters, by contrast, are written reliably during training.
+        # So -- exactly like the full-FT branch distrusts its corrupt standalone save and
+        # promotes the last in-loop checkpoint -- we never call save_model here and merge
+        # from the last in-loop adapter checkpoint instead.
+        #
+        # First tear the process group down cleanly on ALL ranks (the barrier + destroy
+        # are symmetric collectives, unlike the save_model gather that hung). This lets
+        # the rank-0-only CPU merge below -- which issues no collectives and can run for
+        # minutes -- proceed with no live NCCL work and no risk of a peer exiting out from
+        # under it and tripping the watchdog.
+        import torch.distributed as dist
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier()
+            dist.destroy_process_group()
+
         if is_main_process():
             from peft import PeftModel
-            log("merging LoRA adapter into base model on CPU")
-            base = load_base_model(args.model_id)
-            merged = PeftModel.from_pretrained(base, adapter_dir).merge_and_unload()
-            # Reapply the turn-end eos: the freshly reloaded base carries the base
-            # generation_config, not the one we edited on the training model.
-            set_generation_eos(merged, tokenizer, family)
-            merged.save_pretrained(args.output_dir)
-            tokenizer.save_pretrained(args.output_dir)
-            log(f"merged full model written to {args.output_dir} (adapter kept in {adapter_dir})")
-            del base, merged
 
-            # Per-epoch checkpoints are bare LoRA adapters (Trainer saves the peft adapter
-            # each epoch), which vLLM/transformers cannot load as a model. Merge each into
-            # checkpoint-N/merged/ so an epoch sweep can load them directly, while leaving
-            # the adapter + optimizer state in checkpoint-N itself untouched for --resume.
+            last_ckpt = get_last_checkpoint(args.output_dir)
+            if not last_ckpt or not os.path.isfile(os.path.join(last_ckpt, "adapter_config.json")):
+                raise RuntimeError(
+                    "LoRA run produced no in-loop adapter checkpoint to merge from "
+                    f"(looked in {args.output_dir}). Use --save-every-epoch (auto-enabled "
+                    "for --use-lora) and run at least one full epoch.")
+
+            def merge_adapter(adapter_path: str, out_dir: str) -> None:
+                # Rebuild the base on CPU and fold the adapter in, so out_dir is a plain
+                # full model the eval loads exactly like a full-FT artifact.
+                base = load_base_model(args.model_id)
+                merged = PeftModel.from_pretrained(base, adapter_path).merge_and_unload()
+                # The freshly reloaded base carries the base generation_config, not the
+                # turn-end eos we set on the training model, so reapply it here.
+                set_generation_eos(merged, tokenizer, family)
+                # Some bases (e.g. Olmo-3-Instruct) ship a generation_config with
+                # temperature/top_p set but do_sample unset, which strict save_pretrained
+                # validation rejects. Keep the shipped sampling values and just mark
+                # do_sample=True so they're valid.
+                gc = merged.generation_config
+                if gc is not None and not getattr(gc, "do_sample", False) and (
+                        getattr(gc, "temperature", None) is not None
+                        or getattr(gc, "top_p", None) is not None):
+                    gc.do_sample = True
+                merged.save_pretrained(out_dir)
+                tokenizer.save_pretrained(out_dir)
+                del base, merged
+
+            # The eval loads output_dir directly: merge the FINAL adapter into a full
+            # model there.
+            log(f"merging final adapter ({os.path.basename(last_ckpt)}) into base -> {args.output_dir}")
+            merge_adapter(last_ckpt, args.output_dir)
+
+            # Also merge every per-epoch adapter into checkpoint-N/merged/ so an epoch
+            # sweep can load them directly, leaving the raw adapter + optimizer state in
+            # checkpoint-N itself untouched for --resume.
             for ckpt in sorted(glob.glob(os.path.join(args.output_dir, "checkpoint-*")),
                                key=lambda p: int(p.rsplit("-", 1)[-1])):
                 if not os.path.isfile(os.path.join(ckpt, "adapter_config.json")):
                     continue
-                base_k = load_base_model(args.model_id)
-                merged_k = PeftModel.from_pretrained(base_k, ckpt).merge_and_unload()
-                set_generation_eos(merged_k, tokenizer, family)
                 merged_dir = os.path.join(ckpt, "merged")
-                merged_k.save_pretrained(merged_dir)
-                tokenizer.save_pretrained(merged_dir)
-                del base_k, merged_k
+                merge_adapter(ckpt, merged_dir)
                 log(f"merged adapter checkpoint -> {merged_dir}")
     else:
         # FSDP FULL_STATE_DICT (set in fsdp.yaml) makes this a consolidated HF model

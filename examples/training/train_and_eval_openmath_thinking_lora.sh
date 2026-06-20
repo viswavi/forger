@@ -14,6 +14,10 @@
 # Trains with LoRA adapters (--use-lora); train_sft.py auto-scales the LR 10x and merges
 # the adapter back into a full model so the eval is unchanged.
 #
+# Unless --epochs is given, epochs are derived from a fixed optimizer-step budget
+# (--target-steps, default 400) so small datasets are not under-trained; datasets
+# under 1000 rows also get a smaller effective batch (see "small-data scaling").
+#
 # Output run dir: .../forger_training_runs_open_math_reasoning_high_lr_lora/full/<model>
 # =============================================================================
 #SBATCH --job-name=sft_eval_openmath_full
@@ -39,7 +43,10 @@ RUNS_DIR=""
 # Gentle recipe (see train_and_eval_capybara_15k.sh): a low LR keeps the SFT close to the
 # robust base model. Override with --lr / --epochs.
 LR="1e-5"
-EPOCHS="6"
+EPOCHS=""                 # empty = derived from TARGET_STEPS and dataset size
+TARGET_STEPS="400"        # optimizer-step budget when --epochs is not given
+PER_DEVICE_BS=""          # empty = 4, or 2 for datasets under 1000 rows
+GRAD_ACCUM=""             # empty = 4, or 2 for datasets under 1000 rows
 EVAL_LIMIT="-1"           # -1 = full benchmark; set small for quick checks
 GPU_MEM_UTIL="0.6"        # vLLM gpu_memory_utilization for the eval phase
 RUN_BASELINE=1            # also eval the untrained base
@@ -52,6 +59,9 @@ while [[ $# -gt 0 ]]; do
     --model)          MODEL="$2"; shift 2;;
     --data-file-name) DATA_FILE_NAME="$2"; shift 2;;
     --epochs)         EPOCHS="$2"; shift 2;;
+    --target-steps)   TARGET_STEPS="$2"; shift 2;;
+    --per-device-batch-size) PER_DEVICE_BS="$2"; shift 2;;
+    --grad-accum)     GRAD_ACCUM="$2"; shift 2;;
     --lr)             LR="$2"; shift 2;;
     --eval-limit)     EVAL_LIMIT="$2"; shift 2;;
     --gpu-mem-util)   GPU_MEM_UTIL="$2"; shift 2;;
@@ -107,10 +117,31 @@ else
   NUM_GPUS=$(nvidia-smi -L | wc -l)
 fi
 
+# ---- small-data scaling -----------------------------------------------------
+# A fixed epoch count under-trains small datasets: 200 rows at the default
+# effective batch of 32 is ~38 optimizer steps -- enough to knock the model off
+# the base distribution (below-base accuracy) but not enough to learn the task.
+# Unless overridden, shrink the batch for small datasets and pick epochs to hit
+# a fixed step budget (TARGET_STEPS), matching the ~400 steps where the 2k/5k
+# runs plateau.
+N_ROWS=$(wc -l < "$DATA_FILE")
+if [[ -z "$PER_DEVICE_BS" ]]; then
+  if [[ "$N_ROWS" -lt 1000 ]]; then PER_DEVICE_BS=2; else PER_DEVICE_BS=4; fi
+fi
+if [[ -z "$GRAD_ACCUM" ]]; then
+  if [[ "$N_ROWS" -lt 1000 ]]; then GRAD_ACCUM=2; else GRAD_ACCUM=4; fi
+fi
+EFF_BATCH=$(( PER_DEVICE_BS * GRAD_ACCUM * NUM_GPUS ))
+STEPS_PER_EPOCH=$(( (N_ROWS + EFF_BATCH - 1) / EFF_BATCH ))
+if [[ -z "$EPOCHS" ]]; then
+  EPOCHS=$(( (TARGET_STEPS + STEPS_PER_EPOCH - 1) / STEPS_PER_EPOCH ))
+fi
+
 echo "============================================================"
 echo " dataset      : open_math_reasoning_${VARIANT}  ->  benchmark: $EVAL_TASK"
 echo " model        : $MODEL"
 echo " SFT          : single stage (LoRA, lr=$LR x10 in train_sft), epochs=$EPOCHS, no warm-up/chaining"
+echo " data rows    : $N_ROWS  (eff. batch $EFF_BATCH -> $STEPS_PER_EPOCH steps/epoch, ~$(( STEPS_PER_EPOCH * EPOCHS )) total)"
 echo " GPUs (train) : $NUM_GPUS  (FSDP full-shard)"
 echo " run dir      : $RUN_DIR"
 echo "============================================================"
@@ -156,7 +187,9 @@ run_eval() {  # <model_path> <metrics_file> <label>; fresh vLLM process each cal
 # from the last one to dodge the FSDP final-save corruption) and lets you sweep epochs.
 echo ">>> [1/1] SFT base on OPEN MATH REASONING ${VARIANT}"
 train_sft "$MODEL" "$DATA_FILE" "$SFT_DIR" "base -> open_math_reasoning_${VARIANT}" \
-  --epochs "$EPOCHS" --save-every-epoch --max-length 16384 --use-lora --lora-r 32 --lora-alpha 32 --use-default-chat-template
+  --epochs "$EPOCHS" --save-every-epoch --max-length 16384 \
+  --per-device-batch-size "$PER_DEVICE_BS" --grad-accum "$GRAD_ACCUM" \
+  --use-lora --lora-r 32 --lora-alpha 32 --use-default-chat-template
 
 # ---- 2) EVALUATE ------------------------------------------------------------
 # Each eval is a fresh single-GPU vLLM process; the eval forces the per-family chat
