@@ -34,6 +34,13 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=16000,
     )
+    # Qwen3 thinking-mode recommended sampling (Qwen3 manual): without an explicit
+    # temperature the vLLM server defaults to 1.0, which we measured swinging the
+    # same checkpoint between 0.267 and 0.533 on this 30-problem benchmark.
+    parser.add_argument("--temperature", type=float, default=0.6)
+    parser.add_argument("--top-p", type=float, default=0.95)
+    parser.add_argument("--top-k", type=int, default=20)
+    parser.add_argument("--min-p", type=float, default=0.0)
     parser.add_argument(
         '--json-output-file',
         type=str,
@@ -107,6 +114,10 @@ def main() -> None:
     if args.log_dir is not None:
         other_kwargs["log_dir"] = args.log_dir
 
+    # min_p is not a GenerateConfig field; vLLM's OpenAI server accepts it via
+    # extra_body (merge: the thinking path above may already have set extra_body).
+    other_kwargs.setdefault("extra_body", {})["min_p"] = args.min_p
+
     eval_out = inspect_eval(
         task,
         model=f"vllm/{args.model_path}",
@@ -117,6 +128,9 @@ def main() -> None:
         log_realtime=False,
         log_format='json',
         max_tokens=args.max_tokens,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        top_k=args.top_k,
         max_connections=args.max_connections,
         **other_kwargs,
     )
