@@ -24,8 +24,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
+
+# The HumanEval executor forks subprocesses after the chat-template tokenizer
+# has been used, which makes HuggingFace `tokenizers` spam a fork-after-parallelism
+# warning. Disable tokenizer parallelism before transformers is imported.
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 
 def parse_args() -> argparse.Namespace:
