@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pyforger.acquire.model import Model, Prompt
+from pyforger.acquire.model import GenerateResult, Model, Prompt
 
 
 class MockModel(Model):
@@ -47,7 +47,7 @@ class MockModel(Model):
         temperature: float | None = None,
         max_tokens: int | None = None,
         stop: list[str] | None = None,
-    ) -> list[list[str]]:
+    ) -> list[GenerateResult]:
         """Return self.responses[i] for the i-th prompt; require len == n."""
         self._call_count += 1
         if len(self.responses) < len(prompts):
@@ -61,7 +61,23 @@ class MockModel(Model):
             raise ValueError(
                 f"MockModel canned response shapes {shapes} do not match n={n}"
             )
-        return [list(r) for r in canned]
+        results = [
+            GenerateResult(
+                list(r),
+                usage={
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "cost_usd": 0.0,
+                },
+                reasoning=[None] * len(r),
+                model_id=self._model_id,
+                raw=None,
+            )
+            for r in canned
+        ]
+        self.history.extend(results)
+        return results
 
 
 class RecordingMockModel(MockModel):
@@ -80,7 +96,7 @@ class RecordingMockModel(MockModel):
         temperature: float | None = None,
         max_tokens: int | None = None,
         stop: list[str] | None = None,
-    ) -> list[list[str]]:
+    ) -> list[GenerateResult]:
         """Append the current prompt batch to recorded_prompts, then delegate."""
         self.recorded_prompts.append(list(prompts))
         return super().generate_batch(
