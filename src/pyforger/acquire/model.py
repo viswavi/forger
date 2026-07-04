@@ -124,7 +124,12 @@ def _extract_reasoning(response: Any, model_id: str) -> list[str | None]:
     Skips ``litellm.supports_reasoning`` (false negatives on proxy aliases).
     OpenRouter uses ``message.reasoning`` instead of ``reasoning_content``.
     """
-    is_openrouter = _family(model_id).startswith("openrouter/")
+    s = (
+        model_id[len("litellm_proxy/") :]
+        if model_id.startswith("litellm_proxy/")
+        else model_id
+    )
+    is_openrouter = s.startswith("openrouter/")
     out: list[str | None] = []
     for choice in response.choices:
         primary = getattr(choice.message, "reasoning_content", None)
