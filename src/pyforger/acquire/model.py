@@ -73,7 +73,7 @@ _PROVIDER_PREFIXES = ("openai/", "anthropic/", "gemini/", "xai/", "deepseek/")
 
 
 def _family(model_id: str) -> str:
-    """Strip gateway prefixes (e.g. ``litellm_proxy/``, ``openrouter/``) and provider prefix."""
+    """Strip ``litellm_proxy/`` / ``openrouter/`` gateway + provider prefix."""
     s = model_id
     if s.startswith("litellm_proxy/"):
         s = s[len("litellm_proxy/") :]
