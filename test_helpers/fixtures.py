@@ -16,14 +16,7 @@ class MockModel(Model):
         model_id: str = "test/model",
         **kwargs: Any,
     ) -> None:
-        """Build a MockModel with canned per-prompt completion lists.
-
-        ``responses[i]`` is the list of completions returned for the i-th prompt of
-        each generate_batch call. A flat ``list[str]`` is auto-promoted by wrapping
-        each string in a single-element list.  Otherwise, if a list of lists is given,
-        the inner lists are used directly as the per-prompt completions (e.g. lists of
-        4 responses for n=4 completions per prompt).
-        """
+        """Build a MockModel that cycles ``responses`` across prompts."""
         super().__init__(model_id=model_id, **kwargs)
         normalized: list[list[str]] = [
             [r] if isinstance(r, str) else list(r) for r in responses
@@ -33,11 +26,7 @@ class MockModel(Model):
 
     def cache_key(self) -> tuple:
         """Stable hash key for @op caching. Excludes mutable _call_count."""
-        return (
-            type(self).__name__,
-            self._model_id,
-            tuple(tuple(r) for r in self.responses),
-        )
+        return (type(self).__name__, self._model_id, tuple(self.responses))
 
     def generate_batch(
         self,
