@@ -41,7 +41,7 @@ a model identifier (e.g. "litellm_proxy/lab_name/XXX") in the prompt, which you 
 LiteLLM. If not given, similarly pause and ask the user to provide one. This model identifier will typically include
 both account/user information (e.g. "litellm_proxy/azure/") and a model name (e.g. "gpt-5-mini"). Within this
 structure, you can potentially try other models within the same account if the user-provided model is undesirable or
-unavailable. Within Azure specifically, the following models are available by default:
+unavailable. The list of models available for a given LiteLLM key is often visible via `curl -s 'https://ai-gateway.andrew.cmu.edu/key/info?key=<LITELLM_KEY>' -X GET -H 'Authorization: Bearer <LITELLM_KEY>' | jq -r '.info.models'`. If that is available, then that is the ground truth of model availability. If that does not work, the following models are often available by default:
 "gemini/gemini-3.1-flash-lite" (fast, cheap), "gemini/gemini-3.5-flash" (accurate, expensive),
 "azure_ai/DeepSeek-R1-0528", "azure_ai/DeepSeek-V4-Flash", "anthropic/claude-haiku-4-5" (fast),
 "anthropic/claude-sonnet-4-6" (medium speed/cost), "anthropic/claude-opus-4-7" (expensive), "azure_ai/gpt-5.1-codex",
@@ -105,6 +105,13 @@ Generate or retrieve new rows.
 | `Model` |   | LiteLLM-backed wrapper. `generate(prompt, *, n=1, ...) -> list[str]` and `generate_batch(prompts, *,
 n=1, ...) -> list[list[str]]`. Exposes`model.last_usage` (prompt tokens, completion tokens, total cost from the most
 recent call). |
+| `LocalModel` |   | On-GPU vLLM-backed model with the same interface as `Model`. Loads weights lazily on first
+generate (so importing/constructing never needs `vllm` or a GPU); efficient for sampling many completions per prompt
+from an open-weights student model. Defines `cache_key()` (so temperature/`enable_thinking`/seed distinguish cache
+entries) and reports token usage with `total_cost=0.0`. Key args: `max_model_len`, `gpu_memory_utilization`,
+`tensor_parallel_size`, `enable_thinking`, `seed`. |
+| `split_reasoning` |   | `str -> (thinking, answer)`. Splits a reasoning-model completion on `</think>` (stripping
+an optional leading `<think>`); whole text is the answer when no tag is present. |
 | `sample_from_LLM` | yes | First-class generation source. Supports JSON-schema validation with retry. |
 | `retrieve` | no | Generic retrieval against a `RetrievalSource`. |
 | `retrieve_from_web` | no | Brave Search backend (QUERY only). |
@@ -134,6 +141,27 @@ from pyforger.alter.generate import generate_from_context
 
 It performs `samples_per_item` LLM calls per input row and returns parsed dicts, with retry against an optional JSON
 schema.
+
+`self_taught_reasoner` (re-exported from `pyforger.alter`, also in `pyforger.alter.generate`) implements the
+**Self-Taught Reasoner (STaR)** approach ([Zelikman et al., 2022](https://arxiv.org/abs/2203.14465)) -- closely
+related to **On-Policy Distillation** (Agarwal et al., 2023), since both keep SFT traces drawn from the student's own
+distribution rather than a separate teacher: for each input row it samples `n` responses from a student `model` and
+keeps only those whose final answer matches the row's reference answer (`reference_field`, default `"final_answer"`).
+Each kept response becomes one
+output row carrying the student's raw response plus, when `split_thinking=True`, its `<think>` trace and answer split
+into `thinking`/`answer` fields; the matched student answer becomes the new ground truth. A row with zero correct
+samples contributes nothing (so 8 samples with 4 correct yield 4 rows). Acceptance defaults to extracting an answer
+with `default_extract_answer` (reads `ANSWER:`/`\boxed{}`/`####` markers) and comparing by normalized string equality;
+pass a custom `extract_answer`, `match_fn`, or a `filter_fn` (any `list[dict] -> list[dict]`, e.g. a `pyforger.filter`
+op bound with `functools.partial`) to override. Pair it with `LocalModel` to generate student traces on-GPU for SFT.
+
+```python
+from pyforger.alter import self_taught_reasoner
+from pyforger.acquire import LocalModel
+
+student = LocalModel("Qwen/Qwen3-4B", max_model_len=40960)
+rows = self_taught_reasoner(problems, solver_prompt, student, n=8, reference_field="final_answer")
+```
 
 #### `pyforger.filter`
 
@@ -323,3 +351,18 @@ outer loop in Python and at each round sample in-context examples from the outpu
 a prompt for the next round. Decorate the inner loop function with `@op` so that improvements to the prompt or
 sampling parameters are cached and reused across rounds. This pattern can improve diversity and quality over multiple
 rounds, as the pool of in-context examples evolves.
+- **Self-Taught Reasoner / STaR (extending thinking for reasoning problems):** This is the Self-Taught Reasoner (STaR)
+approach ([Zelikman et al., 2022](https://arxiv.org/abs/2203.14465)), closely related to On-Policy Distillation
+(Agarwal et al., 2023). When you have prompts paired with *verified*
+answers (e.g. competition-math problems with checked integer answers) but want long chain-of-thought traces for SFT,
+do not copy reasoning from a stronger teacher -- generate it from the *student* you intend to finetune. This is
+generally necessary for training reasoning-style models on tasks that require extended reasoning, such as difficult math, programming, or embodied reasoning. Sample `n`
+solutions per prompt from the student (use `acquire.LocalModel` to run an open-weights reasoning model on-GPU via
+vLLM with a generous `max_tokens`/`max_model_len` so traces are not truncated), keep only the solutions whose final
+answer matches the verified answer, and use each kept trace as a training target. `alter.self_taught_reasoner` implements
+exactly this: it returns one row per correct sample (a prompt with 0 correct samples drops out), with the student's
+`<think>` trace and answer split into separate fields. Because the traces are in the student's own distribution, this
+distills the skill of *extending its own thinking to reach the right answer* far better than off-policy teacher traces,
+and answer-verification keeps only correct reasoning. Filtering on the final answer alone admits the occasional
+"right answer, wrong reasoning" trace; add a `by_llm_score` judge over the reasoning (passed as `filter_fn`, or as a
+downstream filter) only if inspection shows this is actually frequent -- prefer the cheap answer check first.

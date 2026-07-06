@@ -2,14 +2,26 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable
 from typing import Any, Union
 
 from pyforger.acquire._model_utils import _build_prompt, _parse_output
-from pyforger.acquire.model import Model, Prompt
+from pyforger.acquire.model import Model, Prompt, split_reasoning
 from pyforger.op import op
 
 PromptTemplate = Union[str, Callable[[dict], Prompt]]
+
+# Answer-extraction patterns tried in order, most explicit first. Each captures
+# the final-answer token from a free-form response. The trailing-number fallback
+# is applied only if none of these match.
+_ANSWER_PATTERNS = [
+    re.compile(r"ANSWER\s*[:=]\s*\$?\\?\(?\$?\s*(-?[0-9][0-9,]*(?:\.[0-9]+)?)", re.I),
+    re.compile(r"\\boxed\{\s*\$?\s*(-?[0-9][0-9,]*(?:\.[0-9]+)?)\s*\$?\s*\}"),
+    re.compile(r"####\s*(-?[0-9][0-9,]*(?:\.[0-9]+)?)"),
+    re.compile(r"final answer\s*(?:is|:|=)?\s*\$?(-?[0-9][0-9,]*(?:\.[0-9]+)?)", re.I),
+]
+_TRAILING_NUMBER = re.compile(r"-?[0-9][0-9,]*(?:\.[0-9]+)?")
 
 
 def _get_logger() -> logging.Logger:
@@ -140,3 +152,185 @@ def generate_from_context(
             max_retries,
         )
     return results
+
+
+def default_extract_answer(text: str) -> str | None:
+    """Extract a final-answer token from a free-form response.
+
+    Tries explicit answer markers in order -- ``ANSWER: <n>``, ``\\boxed{<n>}``,
+    ``#### <n>``, ``final answer ... <n>`` -- and falls back to the last number
+    in the text. Returns the answer as a normalized string (commas stripped), or
+    ``None`` when no number is found.
+
+    This is the default segmentation used by :func:`self_taught_reasoner`; pass a
+    custom ``extract_answer`` for non-numeric answers or different markers.
+    """
+    if not text:
+        return None
+    for pattern in _ANSWER_PATTERNS:
+        matches = pattern.findall(text)
+        if matches:
+            return matches[-1].replace(",", "").strip()
+    numbers = _TRAILING_NUMBER.findall(text)
+    return numbers[-1].replace(",", "") if numbers else None
+
+
+def _normalized_equal(a: Any, b: Any) -> bool:
+    """Compare two answers by stripped string form (handles int/str mismatch)."""
+    return str(a).strip() == str(b).strip()
+
+
+@op(name="alter.self_taught_reasoner")
+def self_taught_reasoner(
+    items: list[dict],
+    prompt_fn: PromptTemplate,
+    model: Model,
+    *,
+    n: int = 8,
+    reference_field: str = "final_answer",
+    extract_answer: Callable[[str], Any] | None = None,
+    match_fn: Callable[[Any, Any], bool] | None = None,
+    filter_fn: Callable[[list[dict]], list[dict]] | None = None,
+    response_field: str = "response",
+    thinking_field: str = "thinking",
+    answer_field: str = "answer",
+    student_answer_field: str = "student_final_answer",
+    split_thinking: bool = True,
+    temperature: float = 0.7,
+    max_tokens: int | None = None,
+    batch_size: int = 10,
+) -> list[dict]:
+    r"""Self-Taught Reasoner (STaR): keep a student model's own correct solutions.
+
+    This implements the Self-Taught Reasoner (STaR) approach of Zelikman et al.,
+    "STaR: Bootstrapping Reasoning With Reasoning" (https://arxiv.org/abs/2203.14465):
+    the model generates its own reasoning traces and only those that reach the
+    verified answer are retained as training targets. It is closely related to
+    on-policy distillation (Agarwal et al., 2023) -- in both cases the SFT traces
+    come from the student's own distribution rather than a separate teacher.
+
+    For each input item, ``n`` responses are sampled from ``model`` (the
+    "student"). A response is kept only when its final answer matches the item's
+    reference answer, so the surviving rows carry student-generated reasoning
+    traces that arrive at the verified answer. This is the standard way to build
+    on-policy SFT data: the traces are in the student's own distribution, which
+    distills better than traces from a different (teacher) model.
+
+    Acceptance is decided in one of two ways:
+
+    * **Answer matching (default).** ``extract_answer`` pulls a comparable answer
+      out of each response (default: :func:`default_extract_answer`, which reads
+      ``ANSWER: <n>`` / ``\boxed{}`` / ``####`` markers). A response is kept when
+      ``match_fn(student_answer, item[reference_field])`` is true (default:
+      string-normalized equality).
+    * **Custom filter.** Pass ``filter_fn`` -- any ``list[dict] -> list[dict]``
+      callable, e.g. a ``pyforger.filter`` op bound with ``functools.partial`` --
+      to decide acceptance over the candidate rows yourself. Candidate rows
+      expose both ``student_answer_field`` and ``reference_field``, so e.g.
+      ``partial(filter.by_exact_agreement, field_a="student_final_answer",
+      field_b="final_answer")`` reproduces the default.
+
+    Each kept response becomes one output row: a copy of the input item with the
+    student's raw response in ``response_field`` and, when ``split_thinking`` is
+    set, its ``<think>`` block and answer split into ``thinking_field`` and
+    ``answer_field`` (via :func:`pyforger.acquire.split_reasoning`). The
+    ``reference_field`` is set to the student's matched answer (the
+    student-generated answer becomes the ground truth). An item with zero
+    matching responses contributes no rows.
+
+    Args:
+        items: Input rows. Each must contain ``reference_field``.
+        prompt_fn: Format string (keys filled from the item) or callable
+            ``(dict) -> Prompt`` producing the student prompt for each item.
+        model: Student model to sample from.
+        n: Number of responses to sample per item.
+        reference_field: Key holding each item's ground-truth answer.
+        extract_answer: ``str -> answer`` extractor for the default matching
+            path. Ignored when ``filter_fn`` is given.
+        match_fn: ``(student_answer, reference) -> bool`` for the default path.
+            Ignored when ``filter_fn`` is given.
+        filter_fn: Optional ``list[dict] -> list[dict]`` acceptance filter over
+            candidate rows. Overrides the default answer-matching path.
+        response_field: Output key for the raw student response.
+        thinking_field: Output key for the split-out reasoning trace.
+        answer_field: Output key for the answer portion of the response.
+        student_answer_field: Key holding the extracted student answer on each
+            candidate row (also visible to ``filter_fn``).
+        split_thinking: When True, split each response into thinking/answer.
+            When False, the whole response is stored in ``answer_field`` and
+            ``thinking_field`` is left empty.
+        temperature: Sampling temperature passed to the model.
+        max_tokens: Max tokens per response (model default when None).
+        batch_size: Number of items per ``model.generate_batch()`` call.
+
+    Returns:
+        Output rows, in item order, one per accepted response. The length is the
+        total number of accepted responses (between 0 and ``len(items) * n``).
+    """
+    if n <= 0:
+        raise ValueError("n must be positive")
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    if not items:
+        return []
+
+    log = _get_logger()
+    extract = extract_answer if extract_answer is not None else default_extract_answer
+    match = match_fn if match_fn is not None else _normalized_equal
+
+    prompts: list[Prompt] = [_resolve_prompt(prompt_fn, item) for item in items]
+
+    # Sample n responses per item, batching items together for throughput.
+    responses_per_item: list[list[str]] = []
+    for start in range(0, len(prompts), batch_size):
+        batch = prompts[start : start + batch_size]
+        batch_results = model.generate_batch(
+            batch, n=n, temperature=temperature, max_tokens=max_tokens
+        )
+        if len(batch_results) != len(batch):
+            log.warning(
+                "generate_batch returned %d results for %d prompts",
+                len(batch_results),
+                len(batch),
+            )
+            batch_results = (batch_results + [[]] * len(batch))[: len(batch)]
+        responses_per_item.extend(batch_results)
+
+    # Build one candidate row per generated response.
+    candidates: list[dict] = []
+    for item, responses in zip(items, responses_per_item):
+        for raw in responses:
+            thinking, answer = split_reasoning(raw) if split_thinking else ("", raw)
+            candidate = {
+                **item,
+                response_field: raw,
+                thinking_field: thinking,
+                answer_field: answer,
+                student_answer_field: extract(raw),
+            }
+            candidates.append(candidate)
+
+    # Decide which candidates to keep.
+    if filter_fn is not None:
+        kept = filter_fn(candidates)
+    else:
+        kept = [
+            candidate
+            for candidate in candidates
+            if candidate[student_answer_field] is not None
+            and match(candidate[student_answer_field], candidate[reference_field])
+        ]
+
+    # The student-generated answer becomes the ground truth for kept rows.
+    for candidate in kept:
+        student_answer = candidate.get(student_answer_field)
+        if student_answer is not None:
+            candidate[reference_field] = student_answer
+
+    log.info(
+        "self_taught_reasoner: kept %d/%d responses across %d items",
+        len(kept),
+        len(candidates),
+        len(items),
+    )
+    return kept

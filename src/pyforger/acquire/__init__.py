@@ -1,5 +1,5 @@
 """Acquire operations: generate or retrieve new data."""
-from pyforger.acquire.model import Model
+from pyforger.acquire.model import LocalModel, Model, split_reasoning
 from pyforger.acquire.retrieve import (
     retrieve,
     retrieve_from_arxiv,
@@ -21,6 +21,8 @@ from pyforger.acquire.sources import (
 
 __all__ = [
     "Model",
+    "LocalModel",
+    "split_reasoning",
     "retrieve",
     "retrieve_from_web",
     "retrieve_from_wiki",
