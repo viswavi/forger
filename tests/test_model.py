@@ -1,11 +1,25 @@
 """Tests for the Model class (LiteLLM wrapper)."""
+
 from __future__ import annotations
 
+import copy
+import pickle
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from pyforger.acquire.model import Model, _to_messages
+from pyforger.acquire.model import (
+    _COST_WARNING_SEEN,
+    _VALUE_CONSTRAINTS,
+    GenerateResult,
+    Model,
+    _extract_cost,
+    _extract_reasoning,
+    _extract_usage,
+    _family,
+    _to_messages,
+    _validate_params,
+)
 
 
 def make_litellm_response(
@@ -40,7 +54,6 @@ def make_litellm_response(
         response.usage.prompt_tokens = prompt_tokens
         response.usage.completion_tokens = completion_tokens
     else:
-        # Simulate providers that omit usage entirely
         response.usage = None
     if include_hidden_params:
         response._hidden_params = {"response_cost": response_cost}
@@ -102,10 +115,10 @@ class TestConstructor:
         model = Model("gpt-4o", api_base="http://localhost:8080")
         assert model._kwargs == {"api_base": "http://localhost:8080"}
 
-    def test_last_usage_initially_none(self):
-        """last_usage is None before any calls."""
+    def test_history_initially_empty(self):
+        """History is empty before any calls."""
         model = Model("gpt-4o")
-        assert model.last_usage is None
+        assert model.history == []
 
     def test_repr(self):
         """Repr shows model id."""
@@ -304,79 +317,6 @@ class TestGenerate:
         assert len(result) == 1
 
 
-class TestLastUsage:
-    """last_usage tracks token counts and cost."""
-
-    @patch("pyforger.acquire.model.litellm")
-    def test_tracks_single_call(self, mock_litellm):
-        """last_usage reflects a single completion call."""
-        mock_litellm.completion.return_value = make_litellm_response(
-            ["ok"],
-            prompt_tokens=15,
-            completion_tokens=25,
-        )
-        model = Model("gpt-4o", api_key="sk-test")
-        model.generate("Hi")
-        assert model.last_usage["prompt_tokens"] == 15
-        assert model.last_usage["completion_tokens"] == 25
-        assert model.last_usage["total_cost"] == 0.001
-
-    @patch("pyforger.acquire.model.litellm")
-    def test_sums_across_batch(self, mock_litellm):
-        """last_usage sums tokens across all prompts in a batch."""
-        mock_litellm.batch_completion.return_value = [
-            make_litellm_response(["r1"], prompt_tokens=10, completion_tokens=20),
-            make_litellm_response(["r2"], prompt_tokens=30, completion_tokens=40),
-        ]
-        model = Model("gpt-4o", api_key="sk-test")
-        model.generate_batch(["Q1", "Q2"])
-        assert model.last_usage["prompt_tokens"] == 40
-        assert model.last_usage["completion_tokens"] == 60
-        assert model.last_usage["total_cost"] == 0.002
-
-    @patch("pyforger.acquire.model.litellm")
-    def test_resets_on_new_call(self, mock_litellm):
-        """last_usage resets on each new generate call."""
-        mock_litellm.completion.return_value = make_litellm_response(
-            ["ok"],
-            prompt_tokens=100,
-            completion_tokens=200,
-        )
-        model = Model("gpt-4o", api_key="sk-test")
-        model.generate("First call")
-        mock_litellm.completion.return_value = make_litellm_response(
-            ["ok"],
-            prompt_tokens=5,
-            completion_tokens=10,
-        )
-        model.generate("Second call")
-        assert model.last_usage["prompt_tokens"] == 5
-        assert model.last_usage["completion_tokens"] == 10
-
-    @patch("pyforger.acquire.model.litellm")
-    def test_no_usage_from_provider(self, mock_litellm):
-        """Providers that omit usage data get zero tokens."""
-        mock_litellm.completion.return_value = make_litellm_response(
-            ["ok"],
-            include_usage=False,
-        )
-        model = Model("gpt-4o", api_key="sk-test")
-        model.generate("Hi")
-        assert model.last_usage["prompt_tokens"] == 0
-        assert model.last_usage["completion_tokens"] == 0
-
-    @patch("pyforger.acquire.model.litellm")
-    def test_no_response_cost(self, mock_litellm):
-        """Missing response_cost in _hidden_params defaults to 0.0."""
-        mock_litellm.completion.return_value = make_litellm_response(
-            ["ok"],
-            include_hidden_params=False,
-        )
-        model = Model("gpt-4o", api_key="sk-test")
-        model.generate("Hi")
-        assert model.last_usage["total_cost"] == 0.0
-
-
 class TestErrorHandling:
     """Model surfaces errors from litellm."""
 
@@ -389,35 +329,53 @@ class TestErrorHandling:
             model.generate("Hi")
 
     @patch("pyforger.acquire.model.litellm")
-    def test_last_usage_none_on_first_call_error(self, mock_litellm):
-        """last_usage is None if the very first call fails."""
+    def test_history_not_appended_on_first_call_error(self, mock_litellm):
+        """A failing first call leaves history empty."""
+        mock_litellm.get_supported_openai_params.return_value = [
+            "temperature",
+            "n",
+            "max_tokens",
+            "stop",
+        ]
         mock_litellm.completion.side_effect = RuntimeError("API error")
         model = Model("gpt-4o", api_key="sk-test")
         with pytest.raises(RuntimeError):
             model.generate("Hi")
-        assert model.last_usage is None
+        assert model.history == []
 
     @patch("pyforger.acquire.model.litellm")
-    def test_last_usage_cleared_on_batch_error(self, mock_litellm):
-        """last_usage from a prior call is cleared when a new call fails."""
+    def test_history_unchanged_on_subsequent_error(self, mock_litellm):
+        """A failing call after a successful one leaves history at length 1."""
+        mock_litellm.get_supported_openai_params.return_value = [
+            "temperature",
+            "n",
+            "max_tokens",
+            "stop",
+        ]
         mock_litellm.completion.return_value = make_litellm_response(["ok"])
         model = Model("gpt-4o", api_key="sk-test")
         model.generate("First call succeeds")
-        assert model.last_usage is not None
+        assert len(model.history) == 1
 
         mock_litellm.completion.side_effect = RuntimeError("API error")
         with pytest.raises(RuntimeError):
             model.generate("Second call fails")
-        assert model.last_usage is None
+        assert len(model.history) == 1
 
     @patch("pyforger.acquire.model.litellm")
-    def test_batch_failure(self, mock_litellm):
-        """If batch_completion fails, exception propagates and usage is cleared."""
+    def test_batch_failure_leaves_history_empty(self, mock_litellm):
+        """Batch failure leaves history empty."""
+        mock_litellm.get_supported_openai_params.return_value = [
+            "temperature",
+            "n",
+            "max_tokens",
+            "stop",
+        ]
         mock_litellm.batch_completion.side_effect = RuntimeError("API error on batch")
         model = Model("gpt-4o", api_key="sk-test")
         with pytest.raises(RuntimeError, match="API error on batch"):
             model.generate_batch(["Q1", "Q2"])
-        assert model.last_usage is None
+        assert model.history == []
 
 
 class TestEdgeCases:
@@ -425,16 +383,31 @@ class TestEdgeCases:
 
     @patch("pyforger.acquire.model.litellm")
     def test_empty_prompt_list(self, mock_litellm):
-        """Empty prompt list returns empty results with zeroed usage."""
+        """Empty prompt list returns empty results and leaves history untouched."""
+        mock_litellm.get_supported_openai_params.return_value = [
+            "temperature",
+            "n",
+            "max_tokens",
+            "stop",
+        ]
         model = Model("gpt-4o", api_key="sk-test")
         result = model.generate_batch([])
         assert result == []
-        assert model.last_usage == {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_cost": 0.0,
-        }
+        assert model.history == []
         mock_litellm.batch_completion.assert_not_called()
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_empty_prompt_list_skips_validation(self, mock_litellm):
+        """Empty input is a pure no-op even when overrides would be invalid."""
+        mock_litellm.get_supported_openai_params.return_value = [
+            "temperature",
+            "n",
+            "max_tokens",
+            "stop",
+        ]
+        model = Model("openai/o1", temperature=1.0, api_key="sk-test")
+        # temperature=0.5 would normally raise on o1, but empty input is a no-op
+        assert model.generate_batch([], temperature=0.5) == []
 
     @patch("pyforger.acquire.model.litellm")
     def test_empty_choices_from_api(self, mock_litellm):
@@ -463,3 +436,795 @@ class TestEdgeCases:
         model = Model("gpt-4o", api_key="sk-test")
         result = model.generate("Hi", n=3)
         assert result == ["", "valid", ""]
+
+
+class TestGenerateResult:
+    """GenerateResult subclasses list[str] and carries metadata."""
+
+    def test_is_list_instance(self):
+        """Passes isinstance(..., list) check for downstream callers."""
+        result = GenerateResult(
+            ["a", "b"], usage={}, reasoning=[None, None], model_id="gpt-4o", raw=None
+        )
+        assert isinstance(result, list)
+
+    def test_iteration(self):
+        """Iterates as a list of strings."""
+        result = GenerateResult(
+            ["a", "b"], usage={}, reasoning=[None, None], model_id="gpt-4o", raw=None
+        )
+        assert list(result) == ["a", "b"]
+
+    def test_indexing(self):
+        """Indexes like a list."""
+        result = GenerateResult(
+            ["a", "b"], usage={}, reasoning=[None, None], model_id="gpt-4o", raw=None
+        )
+        assert result[0] == "a"
+
+    def test_equality_with_plain_list(self):
+        """Compares equal to a plain list with same contents."""
+        result = GenerateResult(
+            ["a", "b"], usage={}, reasoning=[None, None], model_id="gpt-4o", raw=None
+        )
+        assert result == ["a", "b"]
+
+    def test_attributes_accessible(self):
+        """usage, reasoning, model_id, raw are accessible."""
+        result = GenerateResult(
+            ["a"],
+            usage={"cost_usd": 0.01, "prompt_tokens": 5},
+            reasoning=["thinking..."],
+            model_id="gpt-5",
+            raw={"id": "chatcmpl-123"},
+        )
+        assert result.usage["cost_usd"] == 0.01
+        assert result.reasoning == ["thinking..."]
+        assert result.model_id == "gpt-5"
+        assert result.raw == {"id": "chatcmpl-123"}
+
+    def test_pickle_roundtrip(self):
+        """Pickles cleanly for @op caching."""
+        result = GenerateResult(
+            ["a"],
+            usage={"cost_usd": 0.01},
+            reasoning=[None],
+            model_id="gpt-4o",
+            raw=None,
+        )
+        restored = pickle.loads(pickle.dumps(result))
+        assert restored == ["a"]
+        assert restored.usage["cost_usd"] == 0.01
+        assert restored.model_id == "gpt-4o"
+
+    def test_deepcopy_preserves_attributes(self):
+        """Deepcopy preserves both list contents and metadata."""
+        result = GenerateResult(
+            ["a"],
+            usage={"cost_usd": 0.01},
+            reasoning=[None],
+            model_id="gpt-4o",
+            raw=None,
+        )
+        copied = copy.deepcopy(result)
+        assert copied == ["a"]
+        assert copied.usage == {"cost_usd": 0.01}
+        assert copied.model_id == "gpt-4o"
+
+
+class TestFamily:
+    """_family normalizes model_id to a constraint-table key prefix."""
+
+    def test_strips_litellm_proxy_prefix(self):
+        """Strips litellm proxy prefix."""
+        assert _family("litellm_proxy/openai/o4-mini") == "o4-mini"
+
+    def test_strips_provider_prefix_openai(self):
+        """Strips provider prefix openai."""
+        assert _family("openai/o1") == "o1"
+
+    def test_strips_provider_prefix_gemini(self):
+        """Strips provider prefix gemini."""
+        assert _family("gemini/gemini-3.5-flash") == "gemini-3.5-flash"
+
+    def test_strips_provider_prefix_xai(self):
+        """Strips provider prefix xai."""
+        assert _family("xai/grok-4") == "grok-4"
+
+    def test_strips_provider_prefix_anthropic(self):
+        """Strips provider prefix anthropic."""
+        assert _family("anthropic/claude-sonnet-4-5") == "claude-sonnet-4-5"
+
+    def test_no_prefix_passes_through(self):
+        """No prefix passes through."""
+        assert _family("gpt-4o") == "gpt-4o"
+
+    def test_litellm_proxy_then_unknown_provider(self):
+        """Litellm proxy then unknown provider."""
+        assert (
+            _family("litellm_proxy/gemini/gemini-3.1-flash-lite")
+            == "gemini-3.1-flash-lite"
+        )
+
+
+class TestValueConstraints:
+    """_VALUE_CONSTRAINTS table contents."""
+
+    def test_o_series_require_temp_1_n_1(self):
+        """O series require temp 1 n 1."""
+        for key in ("o1", "o3", "o4", "gpt-5"):
+            assert _VALUE_CONSTRAINTS[key] == {"temperature": 1.0, "n": 1}
+
+    def test_gemini_3_requires_temp_1_n_1(self):
+        """Gemini 3 requires temp 1 n 1."""
+        assert _VALUE_CONSTRAINTS["gemini-3"] == {"temperature": 1.0, "n": 1}
+
+    def test_no_constraint_for_gpt_4o(self):
+        """No constraint for gpt 4o."""
+        assert "gpt-4o" not in _VALUE_CONSTRAINTS
+
+    def test_no_constraint_for_gemini_2(self):
+        """No constraint for gemini 2."""
+        assert not any(k.startswith("gemini-2") for k in _VALUE_CONSTRAINTS)
+
+
+class TestValidateParams:
+    """_validate_params raises ValueError on disallowed params/values."""
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_value_constraint_violation_temperature(self, mock_litellm):
+        """Value constraint violation temperature."""
+        mock_litellm.get_supported_openai_params.return_value = [
+            "temperature",
+            "n",
+            "max_tokens",
+            "stop",
+        ]
+        with pytest.raises(ValueError, match="requires temperature=1.0"):
+            _validate_params("openai/o1", temperature=0.5, n=1)
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_value_constraint_violation_n(self, mock_litellm):
+        """Value constraint violation n."""
+        mock_litellm.get_supported_openai_params.return_value = [
+            "temperature",
+            "n",
+            "max_tokens",
+            "stop",
+        ]
+        with pytest.raises(ValueError, match="requires n=1"):
+            _validate_params("gemini/gemini-3.5-flash", temperature=1.0, n=2)
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_value_constraint_satisfied_passes(self, mock_litellm):
+        """Value constraint satisfied passes."""
+        mock_litellm.get_supported_openai_params.return_value = [
+            "temperature",
+            "n",
+            "max_tokens",
+            "stop",
+        ]
+        _validate_params("openai/o1", temperature=1.0, n=1)  # no raise
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_unsupported_param_name_raises(self, mock_litellm):
+        """Unsupported param name raises."""
+        mock_litellm.get_supported_openai_params.return_value = [
+            "temperature",
+            "n",
+            "max_tokens",
+        ]
+        with pytest.raises(
+            ValueError, match="does not support parameter 'frequency_penalty'"
+        ):
+            _validate_params(
+                "openai/gpt-5", temperature=1.0, n=1, frequency_penalty=0.5
+            )
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_unsupported_param_skips_none_values(self, mock_litellm):
+        """Params with value None are not flagged as unsupported."""
+        mock_litellm.get_supported_openai_params.return_value = ["temperature", "n"]
+        _validate_params("openai/gpt-5", temperature=1.0, n=1, stop=None)  # no raise
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_no_constraint_model_passes(self, mock_litellm):
+        """No constraint model passes."""
+        mock_litellm.get_supported_openai_params.return_value = [
+            "temperature",
+            "n",
+            "max_tokens",
+            "stop",
+        ]
+        _validate_params("gpt-4o", temperature=0.5, n=3)  # no raise
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_thinking_enabled_requires_temperature_1(self, mock_litellm):
+        """Claude with thinking enabled requires temperature=1.0."""
+        mock_litellm.get_supported_openai_params.return_value = [
+            "temperature",
+            "max_tokens",
+            "stop",
+            "thinking",
+        ]
+        with pytest.raises(ValueError, match="requires temperature=1.0"):
+            _validate_params(
+                "anthropic/claude-sonnet-4-5",
+                temperature=0.5,
+                thinking={"type": "enabled", "budget_tokens": 1024},
+            )
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_thinking_disabled_no_temperature_constraint(self, mock_litellm):
+        """Thinking disabled no temperature constraint."""
+        mock_litellm.get_supported_openai_params.return_value = [
+            "temperature",
+            "max_tokens",
+            "stop",
+        ]
+        _validate_params("anthropic/claude-sonnet-4-5", temperature=0.5)  # no raise
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_registry_miss_does_not_block(self, mock_litellm):
+        """If litellm returns None/empty for supported params, skip name check."""
+        mock_litellm.get_supported_openai_params.return_value = None
+        _validate_params("some/unreleased-model", temperature=0.5, n=2)  # no raise
+
+
+def make_response_with_reasoning(
+    contents: list[str],
+    reasoning_contents: list[str | None] | None = None,
+    openrouter_reasoning: list[str | None] | None = None,
+):
+    """Build a mock litellm response with optional reasoning data per choice."""
+    response = MagicMock()
+    choices = []
+    for i, text in enumerate(contents):
+        choice = MagicMock()
+        choice.message.content = text
+        if reasoning_contents is not None:
+            choice.message.reasoning_content = reasoning_contents[i]
+        else:
+            choice.message.reasoning_content = None
+        if openrouter_reasoning is not None:
+            choice.message.reasoning = openrouter_reasoning[i]
+        else:
+            choice.message.reasoning = None
+        choices.append(choice)
+    response.choices = choices
+    return response
+
+
+class TestExtractReasoning:
+    """_extract_reasoning pulls reasoning content per choice."""
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_reasoning_content_populated(self, mock_litellm):
+        """Reasoning content populated."""
+        response = make_response_with_reasoning(
+            ["answer"], reasoning_contents=["thought process"]
+        )
+        assert _extract_reasoning(response, "openai/o1") == ["thought process"]
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_reasoning_absent_returns_none_per_choice(self, mock_litellm):
+        """Reasoning absent returns none per choice."""
+        response = make_response_with_reasoning(
+            ["a", "b"], reasoning_contents=[None, None]
+        )
+        assert _extract_reasoning(response, "openai/o1") == [None, None]
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_no_reasoning_field_returns_none(self, mock_litellm):
+        """Choices without reasoning_content (or empty) yield None per choice.
+
+        Does NOT rely on litellm.supports_reasoning — that registry has false
+        negatives for unregistered gateway aliases. Always attempts extraction
+        and falls back to None when the field is absent.
+        """
+        response = make_response_with_reasoning(["a", "b"])
+        assert _extract_reasoning(response, "gpt-4o") == [None, None]
+
+    def test_reasoning_extracted_even_when_supports_reasoning_false(self):
+        """Do not gate on supports_reasoning (false negatives on proxy aliases)."""
+        response = make_response_with_reasoning(
+            ["answer"], reasoning_contents=["deep thought"]
+        )
+        assert _extract_reasoning(response, "openai/wine-deepseek-r1") == [
+            "deep thought"
+        ]
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_openrouter_fallback(self, mock_litellm):
+        """Fallback to message.reasoning for OpenRouter-routed responses."""
+        response = make_response_with_reasoning(
+            ["answer"],
+            reasoning_contents=[None],
+            openrouter_reasoning=["openrouter thought"],
+        )
+        assert _extract_reasoning(
+            response, "openrouter/anthropic/claude-sonnet-4-5"
+        ) == ["openrouter thought"]
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_openrouter_fallback_via_litellm_proxy(self, mock_litellm):
+        """Fallback works for ``litellm_proxy/openrouter/...`` paths too."""
+        response = make_response_with_reasoning(
+            ["answer"],
+            reasoning_contents=[None],
+            openrouter_reasoning=["openrouter thought"],
+        )
+        assert _extract_reasoning(
+            response, "litellm_proxy/openrouter/anthropic/claude-sonnet-4-5"
+        ) == ["openrouter thought"]
+
+
+class TestExtractCost:
+    """_extract_cost reads response cost; warns on registry miss."""
+
+    def setup_method(self):
+        """Clear the once-per-process warning set so each test starts fresh."""
+        _COST_WARNING_SEEN.clear()
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_reads_hidden_params(self, mock_litellm):
+        """Reads hidden params."""
+        response = MagicMock()
+        response._hidden_params = {"response_cost": 0.0042}
+        assert _extract_cost(response, "gpt-4o") == 0.0042
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_falls_back_to_completion_cost(self, mock_litellm):
+        """Falls back to completion cost."""
+        response = MagicMock()
+        response._hidden_params = {}
+        mock_litellm.completion_cost.return_value = 0.005
+        assert _extract_cost(response, "gpt-4o") == 0.005
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_completion_cost_raises_returns_zero(self, mock_litellm):
+        """Completion cost raises returns zero."""
+        response = MagicMock()
+        response._hidden_params = {}
+        mock_litellm.completion_cost.side_effect = RuntimeError("nope")
+        with pytest.warns(UserWarning, match="pricing registry"):
+            assert _extract_cost(response, "unknown/model") == 0.0
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_warning_emitted_once_per_model_id(self, mock_litellm):
+        """Warning emitted once per model id."""
+        response = MagicMock()
+        response._hidden_params = {}
+        mock_litellm.completion_cost.return_value = None
+        with pytest.warns(UserWarning) as caught:
+            _extract_cost(response, "litellm_proxy/x/y")
+            _extract_cost(response, "litellm_proxy/x/y")
+            _extract_cost(response, "litellm_proxy/x/y")
+        assert len([w for w in caught if "pricing registry" in str(w.message)]) == 1
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_zero_cost_not_treated_as_missing(self, mock_litellm):
+        """Free models (cost_usd == 0.0) must not trigger the registry-miss warning."""
+        response = MagicMock()
+        response._hidden_params = {"response_cost": 0.0}
+        import warnings as warnings_mod
+
+        with warnings_mod.catch_warnings():
+            warnings_mod.simplefilter("error")
+            assert _extract_cost(response, "free/model") == 0.0
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_no_warning_when_cost_present(self, mock_litellm):
+        """No warning when cost present."""
+        response = MagicMock()
+        response._hidden_params = {"response_cost": 0.001}
+        import warnings as warnings_mod
+
+        with warnings_mod.catch_warnings():
+            warnings_mod.simplefilter("error")
+            assert _extract_cost(response, "gpt-4o") == 0.001
+
+
+def make_response_with_usage(
+    prompt_tokens: int = 10,
+    completion_tokens: int = 20,
+    reasoning_tokens: int | None = None,
+    include_usage: bool = True,
+):
+    """Build a mock litellm response shaped for _extract_usage tests."""
+    response = MagicMock()
+    if include_usage:
+        response.usage.prompt_tokens = prompt_tokens
+        response.usage.completion_tokens = completion_tokens
+        if reasoning_tokens is not None:
+            response.usage.completion_tokens_details.reasoning_tokens = reasoning_tokens
+        else:
+            response.usage.completion_tokens_details = None
+    else:
+        response.usage = None
+    return response
+
+
+class TestExtractUsage:
+    """_extract_usage returns a dict with token counts."""
+
+    def test_basic_tokens(self):
+        """Basic tokens."""
+        response = make_response_with_usage(prompt_tokens=15, completion_tokens=25)
+        usage = _extract_usage(response)
+        assert usage["prompt_tokens"] == 15
+        assert usage["completion_tokens"] == 25
+        assert usage["reasoning_tokens"] == 0
+
+    def test_reasoning_tokens_when_present(self):
+        """Reasoning tokens when present."""
+        response = make_response_with_usage(
+            prompt_tokens=10, completion_tokens=50, reasoning_tokens=30
+        )
+        usage = _extract_usage(response)
+        assert usage["reasoning_tokens"] == 30
+
+    def test_no_usage_yields_zeros(self):
+        """No usage yields zeros."""
+        response = make_response_with_usage(include_usage=False)
+        assert _extract_usage(response) == {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "reasoning_tokens": 0,
+        }
+
+
+class TestConstructorValidation:
+    """Model.__init__ rejects bad params at construction time."""
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_o1_with_temperature_05_raises(self, mock_litellm):
+        """O1 with temperature 05 raises."""
+        mock_litellm.get_supported_openai_params.return_value = [
+            "temperature",
+            "n",
+            "max_tokens",
+            "stop",
+        ]
+        with pytest.raises(ValueError, match="requires temperature=1.0"):
+            Model("openai/o1", temperature=0.5)
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_o1_with_temperature_1_passes(self, mock_litellm):
+        """O1 with temperature 1 passes."""
+        mock_litellm.get_supported_openai_params.return_value = [
+            "temperature",
+            "n",
+            "max_tokens",
+            "stop",
+        ]
+        Model("openai/o1", temperature=1.0)  # no raise
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_gpt_4o_unconstrained(self, mock_litellm):
+        """Gpt 4o unconstrained."""
+        mock_litellm.get_supported_openai_params.return_value = [
+            "temperature",
+            "n",
+            "max_tokens",
+            "stop",
+        ]
+        Model("gpt-4o", temperature=0.2)  # no raise
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_kwargs_are_not_validated(self, mock_litellm):
+        """Kwargs (api_base, timeout, etc.) are passthrough — not validated."""
+        mock_litellm.get_supported_openai_params.return_value = [
+            "temperature",
+            "n",
+            "max_tokens",
+        ]
+        Model(
+            "openai/gpt-5",
+            temperature=1.0,
+            api_base="http://proxy:8080",
+            timeout=60,
+        )  # no raise
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_claude_thinking_kwarg_validated_at_construction(self, mock_litellm):
+        """Claude with thinking enabled rejects bad temperature at construction."""
+        mock_litellm.get_supported_openai_params.return_value = [
+            "temperature",
+            "max_tokens",
+            "stop",
+            "thinking",
+        ]
+        with pytest.raises(ValueError, match="requires temperature=1.0"):
+            Model(
+                "anthropic/claude-sonnet-4-5",
+                temperature=0.5,
+                thinking={"type": "enabled", "budget_tokens": 1024},
+            )
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_o44_does_not_collide_with_o4(self, mock_litellm):
+        """Future ``o44`` model must not inherit ``o4`` value constraints."""
+        mock_litellm.get_supported_openai_params.return_value = [
+            "temperature",
+            "n",
+            "max_tokens",
+            "stop",
+        ]
+        Model("openai/o44", temperature=0.5)  # no raise
+
+
+class TestGenerateBatchReturnType:
+    """generate_batch returns list[GenerateResult] with metadata populated."""
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_returns_generate_results(self, mock_litellm):
+        """Returns generate results."""
+        mock_litellm.get_supported_openai_params.return_value = [
+            "temperature",
+            "n",
+            "max_tokens",
+            "stop",
+        ]
+        mock_litellm.batch_completion.return_value = [
+            make_litellm_response(["r1"]),
+            make_litellm_response(["r2"]),
+        ]
+        model = Model("gpt-4o", api_key="sk-test")
+        results = model.generate_batch(["q1", "q2"])
+        assert len(results) == 2
+        assert all(isinstance(r, GenerateResult) for r in results)
+        assert results[0] == ["r1"]
+        assert results[1] == ["r2"]
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_per_call_usage_attached(self, mock_litellm):
+        """Per call usage attached."""
+        mock_litellm.get_supported_openai_params.return_value = [
+            "temperature",
+            "n",
+            "max_tokens",
+            "stop",
+        ]
+        mock_litellm.completion.return_value = make_litellm_response(
+            ["ok"], prompt_tokens=15, completion_tokens=25, response_cost=0.001
+        )
+        model = Model("gpt-4o", api_key="sk-test")
+        results = model.generate_batch(["q"])
+        assert results[0].usage["prompt_tokens"] == 15
+        assert results[0].usage["completion_tokens"] == 25
+        assert results[0].usage["cost_usd"] == 0.001
+        assert results[0].model_id == "gpt-4o"
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_reasoning_attached_when_supported(self, mock_litellm):
+        """Reasoning attached when supported."""
+        mock_litellm.get_supported_openai_params.return_value = [
+            "temperature",
+            "n",
+            "max_tokens",
+            "stop",
+        ]
+        response = make_response_with_reasoning(
+            ["answer"], reasoning_contents=["thinking"]
+        )
+        response.usage.prompt_tokens = 10
+        response.usage.completion_tokens = 20
+        response.usage.completion_tokens_details = None
+        response._hidden_params = {"response_cost": 0.002}
+        mock_litellm.completion.return_value = response
+        model = Model("openai/o1", api_key="sk-test", temperature=1.0)
+        results = model.generate_batch(["q"])
+        assert results[0].reasoning == ["thinking"]
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_history_appended(self, mock_litellm):
+        """History appended."""
+        mock_litellm.get_supported_openai_params.return_value = [
+            "temperature",
+            "n",
+            "max_tokens",
+            "stop",
+        ]
+        mock_litellm.completion.return_value = make_litellm_response(["ok"])
+        model = Model("gpt-4o", api_key="sk-test")
+        assert model.history == []
+        model.generate_batch(["q"])
+        assert len(model.history) == 1
+        assert model.history[0].model_id == "gpt-4o"
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_history_grows_across_batches(self, mock_litellm):
+        """History grows across batches."""
+        mock_litellm.get_supported_openai_params.return_value = [
+            "temperature",
+            "n",
+            "max_tokens",
+            "stop",
+        ]
+        mock_litellm.batch_completion.return_value = [
+            make_litellm_response(["r1"]),
+            make_litellm_response(["r2"]),
+        ]
+        mock_litellm.completion.return_value = make_litellm_response(["r3"])
+        model = Model("gpt-4o", api_key="sk-test")
+        model.generate_batch(["q1", "q2"])
+        model.generate_batch(["q3"])
+        assert len(model.history) == 3
+
+
+class TestCumulativeTracking:
+    """total_cost and total_usage accumulate across calls."""
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_total_cost_sums_across_calls(self, mock_litellm):
+        """Total cost sums across calls."""
+        mock_litellm.get_supported_openai_params.return_value = [
+            "temperature",
+            "n",
+            "max_tokens",
+            "stop",
+        ]
+        mock_litellm.completion.side_effect = [
+            make_litellm_response(["a"], response_cost=0.001),
+            make_litellm_response(["b"], response_cost=0.002),
+            make_litellm_response(["c"], response_cost=0.003),
+        ]
+        model = Model("gpt-4o", api_key="sk-test")
+        model.generate("q1")
+        model.generate("q2")
+        model.generate("q3")
+        assert model.total_cost == pytest.approx(0.006)
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_total_usage_sums_tokens(self, mock_litellm):
+        """Total usage sums tokens."""
+        mock_litellm.get_supported_openai_params.return_value = [
+            "temperature",
+            "n",
+            "max_tokens",
+            "stop",
+        ]
+        r1 = make_litellm_response(["a"], prompt_tokens=10, completion_tokens=20)
+        r1.usage.completion_tokens_details = None
+        r2 = make_litellm_response(["b"], prompt_tokens=15, completion_tokens=25)
+        r2.usage.completion_tokens_details = None
+        mock_litellm.completion.side_effect = [r1, r2]
+        model = Model("gpt-4o", api_key="sk-test")
+        model.generate("q1")
+        model.generate("q2")
+        assert model.total_usage["prompt_tokens"] == 25
+        assert model.total_usage["completion_tokens"] == 45
+        assert model.total_usage["reasoning_tokens"] == 0
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_reset_history_clears(self, mock_litellm):
+        """Reset history clears."""
+        mock_litellm.get_supported_openai_params.return_value = [
+            "temperature",
+            "n",
+            "max_tokens",
+            "stop",
+        ]
+        mock_litellm.completion.return_value = make_litellm_response(
+            ["ok"], response_cost=0.005
+        )
+        model = Model("gpt-4o", api_key="sk-test")
+        model.generate("q1")
+        assert model.total_cost == pytest.approx(0.005)
+        model.reset_history()
+        assert model.history == []
+        assert model.total_cost == 0.0
+        assert model.total_usage == {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "reasoning_tokens": 0,
+        }
+
+    def test_total_cost_empty_history(self):
+        """Total cost empty history."""
+        model = Model("gpt-4o")
+        assert model.total_cost == 0.0
+
+    def test_total_usage_empty_history(self):
+        """Total usage empty history."""
+        model = Model("gpt-4o")
+        assert model.total_usage == {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "reasoning_tokens": 0,
+        }
+
+
+class TestPerCallValidation:
+    """generate/generate_batch validate per-call overrides."""
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_per_call_temperature_violates_constraint(self, mock_litellm):
+        """Per call temperature violates constraint."""
+        mock_litellm.get_supported_openai_params.return_value = [
+            "temperature",
+            "n",
+            "max_tokens",
+            "stop",
+        ]
+        model = Model("openai/o1", api_key="sk-test", temperature=1.0)
+        with pytest.raises(ValueError, match="requires temperature=1.0"):
+            model.generate("Hi", temperature=0.5)
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_per_call_n_violates_constraint(self, mock_litellm):
+        """Per call n violates constraint."""
+        mock_litellm.get_supported_openai_params.return_value = [
+            "temperature",
+            "n",
+            "max_tokens",
+            "stop",
+        ]
+        model = Model("gemini/gemini-3.5-flash", api_key="sk-test", temperature=1.0)
+        with pytest.raises(ValueError, match="requires n=1"):
+            model.generate("Hi", n=3)
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_per_call_unconstrained_passes(self, mock_litellm):
+        """Per call unconstrained passes."""
+        mock_litellm.get_supported_openai_params.return_value = [
+            "temperature",
+            "n",
+            "max_tokens",
+            "stop",
+        ]
+        mock_litellm.completion.return_value = make_litellm_response(["ok"])
+        model = Model("gpt-4o", api_key="sk-test")
+        model.generate("Hi", temperature=0.2, n=2)  # no raise
+
+
+class TestUsageOnResult:
+    """Usage data rides on each GenerateResult and on history aggregates."""
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_per_call_usage_on_result(self, mock_litellm):
+        """Individual call's usage rides on the returned GenerateResult."""
+        mock_litellm.get_supported_openai_params.return_value = [
+            "temperature",
+            "n",
+            "max_tokens",
+            "stop",
+        ]
+        mock_litellm.completion.return_value = make_litellm_response(
+            ["ok"], prompt_tokens=15, completion_tokens=25, response_cost=0.001
+        )
+        model = Model("gpt-4o", api_key="sk-test")
+        result = model.generate("Hi")
+        assert result.usage["prompt_tokens"] == 15
+        assert result.usage["completion_tokens"] == 25
+        assert result.usage["cost_usd"] == 0.001
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_total_usage_sums_across_batch(self, mock_litellm):
+        """Total usage sums across batch."""
+        mock_litellm.get_supported_openai_params.return_value = [
+            "temperature",
+            "n",
+            "max_tokens",
+            "stop",
+        ]
+        mock_litellm.batch_completion.return_value = [
+            make_litellm_response(["r1"], prompt_tokens=10, completion_tokens=20),
+            make_litellm_response(["r2"], prompt_tokens=30, completion_tokens=40),
+        ]
+        model = Model("gpt-4o", api_key="sk-test")
+        model.generate_batch(["Q1", "Q2"])
+        assert model.total_usage["prompt_tokens"] == 40
+        assert model.total_usage["completion_tokens"] == 60
+        assert model.total_cost == pytest.approx(0.002)
+
+
+class TestPublicExports:
+    """GenerateResult is exported from pyforger.acquire."""
+
+    def test_generate_result_importable_from_acquire(self):
+        """Generate result importable from acquire."""
+        from pyforger.acquire import GenerateResult as Exported
+
+        assert Exported is GenerateResult
