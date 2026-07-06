@@ -13,6 +13,7 @@ reference describes the execution model, the public API, and the conventions the
   - [`pyforger.acquire`](#pyforgeracquire)
   - [`pyforger.alter`](#pyforgeralter)
   - [`pyforger.filter`](#pyforgerfilter)
+  - [`pyforger.inspect`](#pyforgerinspect)
 - [Models, prompts, and credentials](#models-prompts-and-credentials)
 - [Caching and tracing with `@op`](#caching-and-tracing-with-op)
 - [Composing a pipeline](#composing-a-pipeline)
@@ -69,8 +70,9 @@ tokens and the model used. For example, gpt-5.4-nano is generally much cheaper t
 
 ### Execution model
 
-A pipeline is a Python function. It calls operations from `pyforger.acquire`, `pyforger.alter`, and `pyforger.filter`.
-Each operation takes a `list[dict]` (or generation parameters) and returns a `list[dict]`. Control flow (`for`, `if`,
+A pipeline is a Python function. It calls operations from `pyforger.acquire`, `pyforger.alter`, `pyforger.filter`,
+and `pyforger.inspect`. Each operation takes a `list[dict]` (or generation parameters) and returns a `list[dict]`
+(inspect operations instead return a report about the rows, leaving them unmodified). Control flow (`for`, `if`,
 comprehensions, helper functions) in plain Python can be used
 
 Caching, tracing, and pipeline-level optimization are opt-in through two modules: `pyforger.op` (`@op` decorator for
@@ -88,13 +90,14 @@ trace, clear_trace`. |
 | `pyforger.acquire` | `src/pyforger/acquire/` | Generate or retrieve rows. |
 | `pyforger.alter` | `src/pyforger/alter/` | Transform rows without removing items. |
 | `pyforger.filter` | `src/pyforger/filter/` | Remove rows by criterion. |
+| `pyforger.inspect` | `src/pyforger/inspect/` | Examine rows without modifying them; returns a report. |
 | `pyforger.utils` | `src/pyforger/utils.py` | `get_field`, `get_formatted_logger`. |
 
 ### Operation reference
 
 All operations are plain functions. Operations that perform LLM calls or expensive in-process work (`sample_from_LLM`
-every `alter.*` op, every `filter.*` op) are decorated internally with `@op`, so their results are cached on disk and
-traced. The retrieval functions (`retrieve`, `retrieve_from_*`) are not internally cached; wrap them with `@op` to
+every `alter.*` op, every `filter.*` op, every `inspect.*` op) are decorated internally with `@op`, so their results
+are cached on disk and traced. The retrieval functions (`retrieve`, `retrieve_from_*`) are not internally cached; wrap them with `@op` to
 memoize their results.
 
 #### `pyforger.acquire`
@@ -186,6 +189,34 @@ These are important for assuring quality and diversity in generated data, and on
 parameters and thresholds to find the right balance for a given use case. For example, `by_rouge_l` with a very high
 threshold produces more diverse outputs but may allow low-quality ones through; `by_llm_score` with multiple judges
 and a high consensus threshold produces higher-quality outputs but at the cost of more LLM calls.
+
+#### `pyforger.inspect`
+
+Examine rows without modifying them: inspect ops return a *report* about the rows (not transformed rows), so they
+can be inserted at any point in a pipeline.
+
+| Export | Cached | Description |
+|---|---|---|
+| `topic_based_clustering` | yes | ClusterFusion clustering ([arXiv:2512.04350](https://arxiv.org/abs/2512.04350)) of one field. Returns `list[str]`: one cluster (topic) name per input row, aligned with the input. |
+
+The required `context` string describes the corpus and what the topics should capture. Embeddings default to a
+local sentence-transformers model (`pip install pyforger[clustering]`; warns on CPU fallback); pass
+`embed_fn: list[str] -> ndarray` to use another backend. LLM summarization is sharded automatically by document
+token count, so small datasets (e.g. a 50-example validation set) are handled in a single pass.
+
+```python
+from pyforger.inspect import topic_based_clustering
+
+clusters = topic_based_clustering(
+    rows,
+    field="problem",
+    model=model,
+    context="competition mathematics problems. Topics should describe the "
+            "mathematical subject and technique, NOT the numeric answer.",
+    num_clusters=20,
+)
+# clusters[i] is the topic name of rows[i]
+```
 
 ### Models, prompts, and credentials
 
