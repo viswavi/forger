@@ -32,8 +32,9 @@ tweaking parameters.
 Many of the operations in Forger involve calls to LLMs or external APIs, which may incur costs. These include LLM
 APIs (e.g. accessing Anthropic's models via the LiteLLM library) or retrieval APIs (e.g. Brave Search, arXiv). These
 APIs typically require credentials (e.g. API keys) that should be kept secure and not committed to version control.
-They can either be stored on disk (e.g. in a `.env` file) or managed through environment variables (e.g. `export
-LITELLM_API_KEY="your_api_key"`).
+They can either be stored on disk (e.g. in a `.env` file loaded by your shell or other external tooling) or managed
+through provider-specific environment variables (e.g. `export OPENAI_API_KEY="your_api_key"` or `export
+ANTHROPIC_API_KEY="your_api_key"`).
 
 LLMs will almost always be accessed via LiteLLM -- if the user does not provide a LITELLM_API_KEY environment
 variable or in the prompt, you should pause and ask the user to provide one. Generally the user should also provide
