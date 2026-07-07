@@ -32,6 +32,7 @@ there's actually pending work; a fully-covered frozen file needs no key at all.
 from __future__ import annotations
 
 import argparse
+import os
 import time
 from pathlib import Path
 
@@ -42,9 +43,15 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-MODEL_ID = "litellm_proxy/anthropic/claude-sonnet-5"
-API_BASE = "https://cmu.litellm.ai"
-# claude-sonnet-5 (via the CMU gateway) rejects an explicit temperature param
+# This can be overrided by the environment variable LITELLM_MODEL_ID
+if "LITELLM_MODEL_ID" in os.environ:
+    MODEL_ID = os.environ["LITELLM_MODEL_ID"]
+else:
+    print(
+        "LITELLM_MODEL_ID not set; default to litellm_proxy/anthropic/claude-sonnet-5"
+    )
+    MODEL_ID = "litellm_proxy/anthropic/claude-sonnet-5"
+# claude-sonnet-5 rejects an explicit temperature param
 # outright, so we don't set one -- diversity across rejection-sampling stages comes
 # from the model's own default stochastic decoding plus each stage getting a
 # genuinely new network call (see stage_tag in llm_async.sample_sync).
@@ -91,13 +98,13 @@ def load_frozen_verdicts(path) -> dict[str, dict]:
     return verdicts
 
 
-def _job_for(row: dict, api_key: str, n: int, stage_idx: int) -> dict:
+def _job_for(row: dict, api_key: str, base_url: str, n: int, stage_idx: int) -> dict:
     problem = checkers.row_to_problem(row)
     messages = pb.build_candidate_prompt(problem, include_abstention_instruction=False)
     return {
         "model_id": MODEL_ID,
         "api_key": api_key,
-        "api_base": API_BASE,
+        "api_base": base_url,
         "messages": messages,
         "n": n,
         "temperature": TEMPERATURE,
@@ -107,7 +114,7 @@ def _job_for(row: dict, api_key: str, n: int, stage_idx: int) -> dict:
 
 
 def run_gold_generation(
-    rows: list[dict], *, api_key: str, concurrency: int = 20
+    rows: list[dict], *, api_key: str, base_url: str, concurrency: int = 20
 ) -> list[dict]:
     """Rejection-sample every row in `rows` (assumed not yet resolved).
 
@@ -126,7 +133,9 @@ def run_gold_generation(
             f"{len(pending_indices)} problem(s) still unsolved"
         )
         t0 = time.time()
-        jobs = [_job_for(rows[i], api_key, n, stage_idx) for i in pending_indices]
+        jobs = [
+            _job_for(rows[i], api_key, base_url, n, stage_idx) for i in pending_indices
+        ]
         results = llm_async.sample_many(jobs, max_workers=concurrency)
         n_newly_solved = 0
         for idx, completions in zip(pending_indices, results):
@@ -193,8 +202,12 @@ def main() -> None:
 
     if pending_rows:
         api_key = checkers.require_litellm_api_key()
+        base_url = checkers.require_litellm_base_url()
         new_verdicts = run_gold_generation(
-            pending_rows, api_key=api_key, concurrency=args.concurrency
+            pending_rows,
+            api_key=api_key,
+            base_url=base_url,
+            concurrency=args.concurrency,
         )
         for v in new_verdicts:
             verdicts[v["question_id"]] = {
