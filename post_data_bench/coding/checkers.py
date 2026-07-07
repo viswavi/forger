@@ -129,10 +129,21 @@ def require_litellm_api_key() -> str:
     api_key = os.environ.get("LITELLM_API_KEY")
     if not api_key:
         raise SystemExit(
-            "LITELLM_API_KEY is not set. Please provide it (CMU LiteLLM gateway key) "
-            "before running this script, e.g.:\n  export LITELLM_API_KEY=..."
+            "LITELLM_API_KEY is not set. Please provide it before running this script,"
+            " e.g.:\n  export LITELLM_API_KEY=..."
         )
     return api_key
+
+
+def require_litellm_base_url() -> str:
+    """Fetch LITELLM_BASE_URL from the environment, or exit with a clear message."""
+    base_url = os.environ.get("LITELLM_BASE_URL")
+    if not base_url:
+        raise SystemExit(
+            "LITELLM_BASE_URL is not set. Please provide it before running this script,"
+            " e.g.:\n  export LITELLM_BASE_URL=..."
+        )
+    return base_url
 
 
 def check_lcb_solution(
