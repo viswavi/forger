@@ -9,6 +9,7 @@ problems, while keeping per-problem/per-stage @op caching.
 from __future__ import annotations
 
 import asyncio
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -17,6 +18,11 @@ from litellm import acompletion
 from pyforger import op
 
 Message = dict[str, str]
+
+# litellm caches its async HTTP client per event loop, so calls must share one
+# long-lived loop rather than each opening/closing its own via asyncio.run().
+_shared_loop = asyncio.new_event_loop()
+threading.Thread(target=_shared_loop.run_forever, daemon=True).start()
 
 
 async def _acomplete_one(
@@ -91,9 +97,9 @@ def sample_sync(
     """Sync, @op-cacheable entry point wrapping one async acompletion call.
 
     @op's wrapper (pyforger/op.py) is plain synchronous code that pickles the return
-    value, so the unit it wraps must itself be sync; asyncio.run opens and closes its
-    own event loop per call, so this is safe to invoke concurrently from multiple
-    threads (each thread gets its own loop, no shared state).
+    value, so the unit it wraps must itself be sync; run_coroutine_threadsafe is the
+    standard way to hand a coroutine to a loop owned by another thread, so this is
+    safe to call concurrently from multiple threads.
 
     `stage_tag` exists purely to vary the @op cache key: gold_generation.py's
     rejection-sampling schedule (1, 1, 2, 4, ...) issues two stages with the same
@@ -102,9 +108,10 @@ def sample_sync(
     is never read in the body -- its only job is being part of the bound arguments
     @op hashes.
     """
-    return asyncio.run(
-        _acomplete_n(model_id, api_key, api_base, messages, n, temperature, max_tokens)
+    coro = _acomplete_n(
+        model_id, api_key, api_base, messages, n, temperature, max_tokens
     )
+    return asyncio.run_coroutine_threadsafe(coro, _shared_loop).result()
 
 
 def sample_many(
@@ -115,11 +122,11 @@ def sample_many(
     """Run many sample_sync calls concurrently across a ThreadPoolExecutor.
 
     Each job dict is the kwargs for one sample_sync call. Each worker thread blocks
-    on its own asyncio.run(acompletion(...)), so many requests are genuinely in
-    flight at once (the GIL releases during network I/O) while sample_sync's @op
-    cache still gives per-job granularity and resumability -- unlike caching a whole
-    batch as one @op call, which would invalidate every job whenever any single one
-    of them changes.
+    waiting for its own coroutine's result, so many requests are genuinely in flight
+    at once (the shared event loop multiplexes their network I/O) while sample_sync's
+    @op cache still gives per-job granularity and resumability -- unlike caching a
+    whole batch as one @op call, which would invalidate every job whenever any single
+    one of them changes.
 
     Returns one entry per job, in the same order as `jobs`; a job whose call fails
     (after sample_sync's own retries) gets None rather than aborting the rest of the
