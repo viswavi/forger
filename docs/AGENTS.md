@@ -122,18 +122,12 @@ Transform rows without removing items.
 
 | Export | Description |
 |---|---|
+| `generate_from_context` | General LLM-based generation given upstream data. |
 | `translate.to_language` | LLM translation of selected fields into a target natural language. |
 | `translate.to_code` | LLM conversion of fields into code in a target programming language. Strips markdown fences. |
 
-`generate_from_context` is defined in `pyforger.alter.generate` but is not re-exported from `pyforger.alter`. Import
-explicitly:
-
-```python
-from pyforger.alter.generate import generate_from_context
-```
-
-It performs `samples_per_item` LLM calls per input row and returns parsed dicts, with retry against an optional JSON
-schema.
+`generate_from_context` performs `samples_per_item` LLM calls per input row and returns parsed dicts, with
+retry against an optional JSON schema.
 
 #### `pyforger.filter`
 
