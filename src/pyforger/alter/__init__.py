@@ -3,6 +3,7 @@
 Alter operations transform existing data without removing items.
 """
 from pyforger.alter import translate
+from pyforger.alter.execute_code import execute_code
 from pyforger.alter.generate import generate_from_context
 
-__all__ = ["generate_from_context", "translate"]
+__all__ = ["execute_code", "generate_from_context", "translate"]
