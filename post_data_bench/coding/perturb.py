@@ -28,8 +28,8 @@ Usage:
     python perturb.py [--limit N] [--concurrency 20] [--refresh]
                        [--frozen-file perturbed_cases.jsonl]
 
-Requires LITELLM_API_KEY in the environment (CMU LiteLLM gateway) -- same model as
-gold_generation.py -- but only if there's actually pending work.
+Requires LITELLM_API_KEY and LITELLM_BASE_URL in the environment unless all results
+are already completed/cached.
 """
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ import checkers
 import llm_async
 
 # Also triggers gold_generation.py's module-level load_dotenv() as a side effect.
-from gold_generation import API_BASE, DATA_DIR, MODEL_ID, load_lcb_native_rows
+from gold_generation import DATA_DIR, MODEL_ID, load_lcb_native_rows
 
 MAX_ATTEMPTS = 3
 
@@ -134,12 +134,16 @@ def _parse_wrong_output(text: str) -> str | None:
 
 
 def _mutation_job(
-    problem: checkers.CodeGenerationProblem, test_case, api_key: str, attempt: int
+    problem: checkers.CodeGenerationProblem,
+    test_case,
+    api_key: str,
+    base_url: str,
+    attempt: int,
 ) -> dict:
     return {
         "model_id": MODEL_ID,
         "api_key": api_key,
-        "api_base": API_BASE,
+        "api_base": base_url,
         "messages": _mutation_messages(problem, test_case),
         "n": 1,
         # claude-sonnet-5 rejects an explicit temperature param outright; see
@@ -152,7 +156,7 @@ def _mutation_job(
 
 
 def run_perturbation(
-    hard_rows: list[dict], *, api_key: str, concurrency: int = 20
+    hard_rows: list[dict], *, api_key: str, base_url: str, concurrency: int = 20
 ) -> list[dict]:
     """Propose a wrong_output for every row in `hard_rows` (assumed unresolved).
 
@@ -191,6 +195,7 @@ def run_perturbation(
                 problems[i],
                 problems[i].public_test_cases[flipped_indices[i]],
                 api_key,
+                base_url,
                 attempt,
             )
             for i in pending
@@ -267,8 +272,12 @@ def main() -> None:
 
     if pending_rows:
         api_key = checkers.require_litellm_api_key()
+        base_url = checkers.require_litellm_base_url()
         new_perturbations = run_perturbation(
-            pending_rows, api_key=api_key, concurrency=args.concurrency
+            pending_rows,
+            api_key=api_key,
+            base_url=base_url,
+            concurrency=args.concurrency,
         )
         for p in new_perturbations:
             perturbations[p["source_question_id"]] = {
