@@ -26,8 +26,9 @@ Usage:
     python gold_generation.py [--limit N] [--concurrency 20] [--refresh]
                                [--frozen-file gold_responses.jsonl]
 
-Requires LITELLM_API_KEY in the environment (CMU LiteLLM gateway) -- but only if
-there's actually pending work; a fully-covered frozen file needs no key at all.
+Requires LITELLM_API_KEY and LITELLM_BASE_URL in the environment unless all results
+are already completed/cached.
+LITELLM_MODEL_ID is optional (defaults to litellm_proxy/anthropic/claude-sonnet-5).
 """
 from __future__ import annotations
 
