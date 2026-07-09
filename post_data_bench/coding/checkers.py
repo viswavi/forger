@@ -8,7 +8,6 @@ from __future__ import annotations
 import base64
 import json
 import os
-import pickle
 import sys
 import zlib
 from pathlib import Path
@@ -187,14 +186,16 @@ def extract_code(completion: str) -> str:
 def encode_answer(value: str) -> str:
     """Obfuscate an answer (gold code, or a poisoned test case's true output) at rest.
 
-    Same recipe LiveCodeBench itself already uses for private_test_cases
-    (base64(zlib(pickle(obj)))) -- light obfuscation against casual
-    leakage/contamination when a downstream user inspects
-    validation_tasks.jsonl/test_tasks.jsonl, not a security boundary.
+    base64(zlib(json(obj))) -- light obfuscation against casual leakage/contamination
+    when a downstream user inspects validation_tasks.jsonl/test_tasks.jsonl, not a
+    security boundary. Uses json rather than pickle so decoding never risks arbitrary
+    code execution on untrusted/tampered files.
     """
-    return base64.b64encode(zlib.compress(pickle.dumps(value))).decode("utf-8")
+    return base64.b64encode(zlib.compress(json.dumps(value).encode("utf-8"))).decode(
+        "utf-8"
+    )
 
 
 def decode_answer(blob: str):
     """Inverse of encode_answer."""
-    return pickle.loads(zlib.decompress(base64.b64decode(blob.encode("utf-8"))))
+    return json.loads(zlib.decompress(base64.b64decode(blob.encode("utf-8"))))
