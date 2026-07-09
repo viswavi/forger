@@ -6,9 +6,9 @@ until one passes every public+private test case, or we give up. Samples are
 collected in escalating stages so easy problems (most of them) resolve cheaply and
 only genuinely hard problems pay for the full budget:
 
-    stage    1  2  3  4  5   6
-    new      1  1  2  4  8  16
-    cumulative 1  2  4  8 16  32
+    stage    1  2  3  4  5
+    new      1  1  2  4  8
+    cumulative 1  2  4  8 16
 
 Each stage is only run for problems that haven't already found a passing sample in
 an earlier stage. Every (problem, stage) sampling call is also @op-cached via
@@ -60,8 +60,8 @@ TEMPERATURE = None
 MAX_TOKENS = 4096
 GRADE_TIMEOUT = 6
 
-# New samples collected at each stage; cumulative totals are 1, 2, 4, 8, 16, 32.
-STAGE_SCHEDULE = [1, 1, 2, 4, 8, 16]
+# New samples collected at each stage; cumulative totals are 1, 2, 4, 8, 16.
+STAGE_SCHEDULE = [1, 1, 2, 4, 8]
 
 DATA_DIR = Path(__file__).resolve().parent
 SOURCE_FILES = [
