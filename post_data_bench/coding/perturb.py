@@ -114,6 +114,29 @@ def _mutation_messages(
     ]
 
 
+def _last_balanced_object(text: str) -> str | None:
+    """Find the last {...} in `text` by walking backward from its last "}".
+
+    Tracks brace depth rather than just pairing the last "{" with the last "}",
+    so it isn't fooled by an unfenced JSON object that comes after other prose.
+    Doesn't try to stay out of quoted strings, so a stray brace inside a string
+    value could still throw off the count -- acceptable here since the object
+    we're looking for is always the last thing in the text.
+    """
+    close = text.rfind("}")
+    if close == -1:
+        return None
+    depth = 1
+    i = close - 1
+    while i >= 0 and depth > 0:
+        if text[i] == "}":
+            depth += 1
+        elif text[i] == "{":
+            depth -= 1
+        i -= 1
+    return text[i + 1 : close + 1] if depth == 0 else None
+
+
 def _parse_wrong_output(text: str) -> str | None:
     if not text:
         return None
@@ -122,6 +145,9 @@ def _parse_wrong_output(text: str) -> str | None:
     if m:
         candidates.append(m.group(1))
     candidates.append(text.strip())
+    last_obj = _last_balanced_object(text)
+    if last_obj is not None:
+        candidates.append(last_obj)
     for candidate in candidates:
         try:
             obj = json.loads(candidate)
@@ -150,7 +176,13 @@ def _mutation_job(
         # gold_generation.py's TEMPERATURE comment. Retries still get a genuinely
         # new sample via stage_tag below.
         "temperature": None,
-        "max_tokens": 512,
+        # Reasoning models (e.g. Claude Opus via the CMU gateway) narrate their
+        # reasoning in plain text before answering regardless of the "ONLY a JSON
+        # object" instruction; 512 routinely truncated that narration before it
+        # ever reached the answer. Observed reasoning traces run ~300-500 tokens,
+        # so 4096 leaves comfortable headroom without materially affecting cost
+        # (max_tokens only caps length; you don't pay for the unused budget).
+        "max_tokens": 4096,
         "stage_tag": f"perturb_attempt_{attempt}",
     }
 
