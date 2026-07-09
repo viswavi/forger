@@ -11,7 +11,7 @@ batching throughput of the server, grades each completion, and writes:
     breakdown
 
 Grading: `gold_response`/`private_test_cases`/`true_output_for_flipped_case` stay
-pickle->zlib->base64-obfuscated in validation_tasks.jsonl/test_tasks.jsonl; they're
+json->zlib->base64-obfuscated in validation_tasks.jsonl/test_tasks.jsonl; they're
 decoded here, server-side, strictly after the candidate-facing prompt has already
 been built, and are never included in any prompt.
 

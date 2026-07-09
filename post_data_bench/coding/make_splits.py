@@ -23,10 +23,9 @@ Split logic:
     always land in the same file, for direct before/after comparison.
 
 Sensitive fields (gold_response, private_test_cases, and a perturbed row's
-true_output_for_flipped_case) are pickle->zlib->base64 obfuscated in the written
-files -- same scheme LiveCodeBench itself already uses for private_test_cases --
-applied uniformly to every row regardless of content, so the mere presence of
-obfuscation can't leak is_possible.
+true_output_for_flipped_case) are json->zlib->base64 obfuscated in the written
+files -- applied uniformly to every row regardless of content, so the mere presence
+of obfuscation can't leak is_possible.
 
 Usage:
     python make_splits.py [--gold gold_responses.jsonl]

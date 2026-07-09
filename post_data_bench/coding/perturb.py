@@ -13,7 +13,7 @@ Determinism / no repeated LLM calls: results are stored in a lean, checked-into-
 file (perturbed_cases.jsonl -- just
 source_question_id/flipped_test_case_index/wrong_output/true_output_for_flipped_case,
 not a duplicate of the full problem) with true_output_for_flipped_case
-pickle->zlib->base64 obfuscated (it's the actual answer to the poisoned test case).
+json->zlib->base64 obfuscated (it's the actual answer to the poisoned test case).
 A run only calls the LLM for hard problems *not already present* in that file, so
 once it's fully populated and committed, running this script does zero network
 calls.
