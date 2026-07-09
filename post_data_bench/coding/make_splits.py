@@ -13,7 +13,7 @@ join+split -- no LLM calls happen here, ever.
 
 Split logic:
   - Unperturbed rows: partitioned into solved/unsolved by the gold verdict's
-    `verified_solvable`. Solved rows are shuffled (fixed seed) and split 90/10 into
+    `verified_solvable`. Solved rows are shuffled (fixed seed) and split 10/90 into
     val/test. Unsolved rows always go to test (never validation -- a "validation
     set with gold responses" should only contain problems we've actually verified
     are solvable).
@@ -48,7 +48,7 @@ from perturb import DEFAULT_FROZEN_FILE as DEFAULT_PERTURBED_FILE
 from perturb import load_frozen_perturbations
 
 SEED = 20260706
-VAL_FRACTION = 0.9
+VAL_FRACTION = 0.1
 
 
 def _split_solved(
