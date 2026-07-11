@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import base64
 import json
-import pickle
 import re
 import zlib
 from pathlib import Path
@@ -126,16 +125,17 @@ def score(rows: list[dict], classes=LABELS, n_boot: int = 1000, seed: int = 0) -
 def encode_answer(value: str) -> str:
     """Obfuscate a gold label at rest.
 
-    Uses base64(zlib(pickle(value))) -- the same recipe
-    post_data_bench/coding/checkers.py uses for gold_response, applied uniformly to
-    every row.
+    base64(zlib(value)) -- light obfuscation against casual leakage/contamination,
+    not a security boundary. The exact same recipe (and, deliberately, no pickle --
+    see forger commit f99c82c) as post_data_bench/coding/checkers.py's encode_answer,
+    applied uniformly to every row's gold label.
     """
-    return base64.b64encode(zlib.compress(pickle.dumps(value))).decode("utf-8")
+    return base64.b64encode(zlib.compress(value.encode("utf-8"))).decode("utf-8")
 
 
-def decode_answer(blob: str):
+def decode_answer(blob: str) -> str:
     """Inverse of encode_answer."""
-    return pickle.loads(zlib.decompress(base64.b64decode(blob.encode("utf-8"))))
+    return zlib.decompress(base64.b64decode(blob.encode("utf-8"))).decode("utf-8")
 
 
 def read_jsonl(path) -> list[dict]:

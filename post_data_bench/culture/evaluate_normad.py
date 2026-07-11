@@ -5,7 +5,12 @@ Same architecture as post_data_bench/coding/evaluate_lcb_v6_plus_impossible.py: 
 to an *already-running* vLLM OpenAI-compatible server (managed by evaluate_normad.sh)
 at $VLLM_BASE_URL, fires every prompt concurrently (asyncio + AsyncOpenAI, bounded by
 --max-connections), parses the {yes,no,neutral} answer, and writes:
-  - predictions.jsonl  one row per instance: id, country, gold, pred, correct, raw
+  - predictions.jsonl  one row per instance: id, country, axis, question, gold, pred,
+    output, score, correctness_reason (field names chosen to line up with
+    post_data_bench/coding/evaluate_lcb_v6_plus_impossible.py's predictions.jsonl:
+    "question" is the full candidate-facing prompt text, "output" the raw completion,
+    "score" the bool used for headline accuracy, "correctness_reason" a per-row
+    category akin to that script's passed/failed/... taxonomy)
   - metrics.json        headline macro_f1 + secondary context metrics
 
 Headline metric is macro_f1 -- the only number used to compare models on this
@@ -19,9 +24,9 @@ filter.
 Two run modes:
   - live (default): query a vLLM server for fresh completions.
   - --from-raw <predictions.jsonl>: skip inference and rescore an existing raw
-    predictions file (id/pred schema, e.g. Qwen3_4b_normad_outputs/predictions.jsonl)
-    against this split's task ids -- backfills metrics from already-computed outputs
-    without paying for new inference.
+    predictions file (id/pred schema, completion text under "output" or the legacy
+    "raw" key) against this split's task ids -- backfills metrics from
+    already-computed outputs without paying for new inference.
 """
 from __future__ import annotations
 
@@ -148,15 +153,24 @@ async def generate_all(args: argparse.Namespace, rows: list[dict]) -> list[str]:
     return results
 
 
-def _score_row(row: dict, *, pred: str, raw: str | None) -> dict:
+def _score_row(row: dict, *, pred: str, output: str | None) -> dict:
     gold = checkers.decode_answer(row["gold_label"])
+    if pred == "":
+        reason = "unparseable"
+    elif pred == gold:
+        reason = "correct"
+    else:
+        reason = "incorrect"
     return {
         "id": row["id"],
         "country": row["country"],
+        "axis": row["axis"],
+        "question": row["task_text"],
         "gold": gold,
         "pred": pred,
-        "correct": pred == gold,
-        "raw": raw,
+        "output": output,
+        "score": pred == gold,
+        "correctness_reason": reason,
     }
 
 
@@ -246,17 +260,21 @@ def run_from_raw(args: argparse.Namespace) -> None:
     existed, without paying for new inference.
     """
     rows = load_tasks(args)
-    raw_by_id = {r["id"]: r for r in checkers.read_jsonl(args.from_raw)}
+    entry_by_id = {r["id"]: r for r in checkers.read_jsonl(args.from_raw)}
 
     output_rows = []
     n_missing = 0
     for row in rows:
-        raw = raw_by_id.get(row["id"])
-        if raw is None:
+        entry = entry_by_id.get(row["id"])
+        if entry is None:
             n_missing += 1
-            output_rows.append(_score_row(row, pred="", raw=None))
+            output_rows.append(_score_row(row, pred="", output=None))
         else:
-            output_rows.append(_score_row(row, pred=raw["pred"], raw=raw.get("raw")))
+            # Legacy input files (pre-dating this pipeline's "output" field name)
+            # store the raw completion under "raw"; newer ones may already say
+            # "output" -- accept either.
+            completion = entry.get("output", entry.get("raw"))
+            output_rows.append(_score_row(row, pred=entry["pred"], output=completion))
     if n_missing:
         print(
             f"[from-raw] WARNING: {n_missing}/{len(rows)} task id(s) missing "
@@ -291,7 +309,7 @@ def main() -> None:
     completions = asyncio.run(generate_all(args, rows))
 
     output_rows = [
-        _score_row(row, pred=checkers.parse_prediction(completion), raw=completion)
+        _score_row(row, pred=checkers.parse_prediction(completion), output=completion)
         for row, completion in zip(rows, completions)
     ]
     _finalize(output_rows, args)
