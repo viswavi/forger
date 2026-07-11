@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import pickle
 import sys
 import zlib
 from pathlib import Path
@@ -123,6 +124,56 @@ def write_jsonl(path, rows: list[dict]) -> None:
             f.write(json.dumps(row) + "\n")
 
 
+def normalize_private_test_cases(raw: str) -> str:
+    """Collapse LiveCodeBench's own pre-obfuscation, if present, to plain JSON text.
+
+    Some rows in the raw LCB dataset ship private_test_cases already
+    pickle->zlib->base64 obfuscated by LCB itself (CodeGenerationProblem.__post_init__
+    handles this transparently with a try/except json.loads-then-unpickle). If we
+    then applied our own encode_answer on top unconditionally, decode_answer alone
+    would leave that inner LCB layer in place, forcing every reader to keep a
+    pickle.loads fallback around forever. Call this once, here, at build time
+    (make_splits.py) on trusted just-downloaded raw data -- the only place in this
+    codebase pickle.loads ever runs -- so every blob in private_test_cases.txt is
+    single-layer (zlib->base64) and decode_answer is the only unwrap anyone else
+    ever needs.
+    """
+    try:
+        json.loads(raw)
+        return raw
+    except json.JSONDecodeError:
+        return pickle.loads(zlib.decompress(base64.b64decode(raw.encode("utf-8"))))
+
+
+def write_private_test_cases(path, blobs: list[str]) -> None:
+    """Write obfuscated private_test_cases blobs, one per line, in index order.
+
+    A validation/test-split row's `private_test_case_idx` is a 0-based line number
+    into this file (see load_private_test_cases). Plain flat text, not jsonl: each
+    blob is already base64 (checkers.encode_answer), whose alphabet never contains a
+    newline or needs escaping, so one blob per line round-trips exactly without JSON
+    framing overhead -- meaningful here since this file can run into the GBs.
+    """
+    with Path(path).open("w") as f:
+        for blob in blobs:
+            f.write(blob + "\n")
+
+
+def load_private_test_cases(path, indices: set[int] | None = None) -> dict[int, str]:
+    """Inverse of write_private_test_cases: index -> still-obfuscated blob.
+
+    Decode an entry with decode_answer. Index into the returned dict with a row's
+    `private_test_case_idx`. Pass `indices` to keep only those lines in memory --
+    this file can run into the GBs, and a sharded caller (evaluate_lcb_v6_plus_
+    impossible.py) only ever needs the indices its own rows reference, not the
+    whole file.
+    """
+    with Path(path).open() as f:
+        if indices is None:
+            return {i: line.rstrip("\n") for i, line in enumerate(f)}
+        return {i: line.rstrip("\n") for i, line in enumerate(f) if i in indices}
+
+
 def require_litellm_api_key() -> str:
     """Fetch LITELLM_API_KEY from the environment, or exit with a clear message."""
     api_key = os.environ.get("LITELLM_API_KEY")
@@ -145,20 +196,24 @@ def require_litellm_base_url() -> str:
     return base_url
 
 
-def check_lcb_solution(
+def check_lcb_solution_split(
     problem: CodeGenerationProblem, code: str, timeout: int = 6
-) -> bool:
-    """Run `code` against every public+private test case in `problem`.
+) -> dict:
+    """Run `code` against `problem`'s test cases, reporting public/private separately.
 
-    True iff every test case passes. Works identically whether `problem` came
-    straight from the dataset or is a hand-perturbed variant (perturb.py), since both
-    are plain CodeGenerationProblem instances and this only depends on
-    get_evaluation_sample().
+    Returns {"passed_public": bool, "passed_private": bool}: each True iff every test
+    case in that segment passed. get_evaluation_sample() concatenates
+    public_test_cases before private_test_cases, and LiveCodeBench's own grading
+    (testing_util.grade_call_based/grade_stdio) runs tests in order and returns early
+    on the first failure -- so a `results` list shorter than a segment always means
+    that segment failed or was never reached, never "unknown".
     """
     sample = problem.get_evaluation_sample()
     results, _metadata = check_correctness(sample, code, timeout=timeout, debug=False)
+    n_public = len(problem.public_test_cases)
+    n_total = n_public + len(problem.private_test_cases)
     if not results:
-        return False
+        return {"passed_public": False, "passed_private": False}
     # Mirror the normalization compute_code_generation_metrics.py itself applies
     # before comparing against 0: results may contain plain bool, plain int error
     # codes (-1/-2/-4/-5), or numpy scalar/array wrappers depending on which grading
@@ -170,7 +225,24 @@ def check_lcb_solution(
         if isinstance(r, np.bool_):
             r = bool(r)
         fixed.append(r)
-    return bool(np.all(np.array(fixed) > 0))
+    arr = np.array(fixed)
+    passed_public = len(arr) >= n_public and bool(np.all(arr[:n_public] > 0))
+    passed_private = len(arr) >= n_total and bool(np.all(arr[n_public:n_total] > 0))
+    return {"passed_public": passed_public, "passed_private": passed_private}
+
+
+def check_lcb_solution(
+    problem: CodeGenerationProblem, code: str, timeout: int = 6
+) -> bool:
+    """Run `code` against every public+private test case in `problem`.
+
+    True iff every test case passes. Works identically whether `problem` came
+    straight from the dataset or is a hand-perturbed variant (perturb.py), since both
+    are plain CodeGenerationProblem instances and this only depends on
+    get_evaluation_sample().
+    """
+    result = check_lcb_solution_split(problem, code, timeout=timeout)
+    return result["passed_public"] and result["passed_private"]
 
 
 def extract_code(completion: str) -> str:
@@ -184,18 +256,19 @@ def extract_code(completion: str) -> str:
 
 
 def encode_answer(value: str) -> str:
-    """Obfuscate an answer (gold code, or a poisoned test case's true output) at rest.
+    """Obfuscate an answer (gold code, private test cases, or a poisoned test case's
+    true output) at rest.
 
-    base64(zlib(json(obj))) -- light obfuscation against casual leakage/contamination
-    when a downstream user inspects validation_tasks.jsonl/test_tasks.jsonl, not a
-    security boundary. Uses json rather than pickle so decoding never risks arbitrary
-    code execution on untrusted/tampered files.
+    base64(zlib(value)) -- light obfuscation against casual leakage/contamination
+    when a downstream user inspects validation_tasks.jsonl/test_tasks.jsonl/
+    private_test_cases.txt, not a security boundary. `value` is always already a
+    plain str (code text, or a JSON-encoded test-case list per LiveCodeBench's own
+    schema), so this just utf-8 encodes it directly -- no json.dumps/pickle wrapping,
+    nothing to deserialize on the way back out.
     """
-    return base64.b64encode(zlib.compress(json.dumps(value).encode("utf-8"))).decode(
-        "utf-8"
-    )
+    return base64.b64encode(zlib.compress(value.encode("utf-8"))).decode("utf-8")
 
 
-def decode_answer(blob: str):
+def decode_answer(blob: str) -> str:
     """Inverse of encode_answer."""
-    return json.loads(zlib.decompress(base64.b64decode(blob.encode("utf-8"))))
+    return zlib.decompress(base64.b64decode(blob.encode("utf-8"))).decode("utf-8")

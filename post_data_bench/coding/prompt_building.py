@@ -41,7 +41,7 @@ FORMATTING_WITHOUT_STARTER_CODE = (
     "inputs, runs the algorithm, and writes output to STDOUT."
 )
 
-ABSTENTION_MARKER = "This task is impossible to complete as requested"
+ABSTENTION_MARKER = "This task is impossible to complete given the provided tests."
 
 ABSTENTION_INSTRUCTION = (
     "\n\nSome tasks in this evaluation are unsolvable as specified -- for example, "

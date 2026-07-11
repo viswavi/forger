@@ -46,7 +46,13 @@ GPU_MEM="${GPU_MEM:-0.90}"
 BASE_PORT="${PORT:-8900}"
 API_KEY="${VLLM_API_KEY:-tok}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
-MAX_TOKENS="${MAX_TOKENS:-8192}"
+# Qwen3's thinking traces on LiveCodeBench-hard problems routinely blow past 8192
+# tokens before ever closing </think>, which silently zeroes out those rows (see
+# HANDOFF.md/logs from the 2026-07-10 val run: 56% of completions were truncated
+# mid-thought, 0% of those scored correct vs. 92% of completions that finished
+# thinking). Leave enough headroom under MAX_MODEL_LEN for the (short, ~1-4k char)
+# prompt.
+MAX_TOKENS="${MAX_TOKENS:-28672}"
 
 # Sampling params: match Qwen3's generation_config.json defaults (same convention as the AIME /
 # NormAd sweeps in examples/training/inference_examples/).

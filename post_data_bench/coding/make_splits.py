@@ -22,16 +22,26 @@ Split logic:
     rule, decided for that twin) -- so a problem's real and perturbed versions
     always land in the same file, for direct before/after comparison.
 
-Sensitive fields (gold_response, private_test_cases, and a perturbed row's
-true_output_for_flipped_case) are json->zlib->base64 obfuscated in the written
-files -- applied uniformly to every row regardless of content, so the mere presence
-of obfuscation can't leak is_possible.
+Sensitive fields (gold_response and a perturbed row's true_output_for_flipped_case)
+are zlib->base64 obfuscated in the written files -- applied uniformly to every row
+regardless of content, so the mere presence of obfuscation can't leak is_possible.
+
+private_test_cases is NOT stored inline: it's often thousands of characters (some
+problems' stress-test inputs run into tens of MB) and a perturbed row's is always
+byte-identical to its unperturbed twin's, so embedding it in every split-file row
+both bloats validation_tasks.jsonl/test_tasks.jsonl and duplicates the same bytes
+across twins. Instead every row's blob is written once, in raw-row order, to
+private_test_cases.txt (flat text, one obfuscated blob per line -- see
+checkers.write_private_test_cases/load_private_test_cases), and every split-file row
+(perturbed or not) carries a `private_test_case_idx` int: a 0-based line number into
+that file. A perturbed row shares its twin's idx.
 
 Usage:
     python make_splits.py [--gold gold_responses.jsonl]
                            [--perturbed perturbed_cases.jsonl]
                            [--val-out validation_tasks.jsonl]
                            [--test-out test_tasks.jsonl]
+                           [--private-test-cases-out private_test_cases.txt]
 """
 from __future__ import annotations
 
@@ -74,7 +84,13 @@ def _render_task_text(row: dict) -> str:
     return messages[1]["content"]
 
 
-def _finalize_row(row: dict, *, gold_response: str | None, is_perturbed: bool) -> dict:
+def _finalize_row(
+    row: dict,
+    *,
+    gold_response: str | None,
+    is_perturbed: bool,
+    private_test_case_idx: int,
+) -> dict:
     out = {
         "question_id": row["question_id"],
         "question_title": row["question_title"],
@@ -87,9 +103,9 @@ def _finalize_row(row: dict, *, gold_response: str | None, is_perturbed: bool) -
         "question_content": row["question_content"],
         "starter_code": row["starter_code"],
         "public_test_cases": row["public_test_cases"],
-        "private_test_cases": checkers.encode_answer(row["private_test_cases"]),
         "metadata": row["metadata"],
         "task_text": _render_task_text(row),
+        "private_test_case_idx": private_test_case_idx,
         "gold_response": (
             checkers.encode_answer(gold_response) if gold_response is not None else None
         ),
@@ -101,6 +117,28 @@ def _finalize_row(row: dict, *, gold_response: str | None, is_perturbed: bool) -
             row["true_output_for_flipped_case"]
         )
     return out
+
+
+def build_private_test_cases_blobs(raw_rows: list[dict]) -> list[str]:
+    """Obfuscated private_test_cases, one per raw problem, in raw_rows order.
+
+    Line i of the written file corresponds to raw_rows[i]'s question_id -- the
+    caller (build_split_files) is responsible for recording that same index (i) on
+    every split-file row derived from raw_rows[i] (including its perturbed twin, if
+    any).
+
+    checkers.normalize_private_test_cases runs first to collapse away LiveCodeBench's
+    own pre-obfuscation on the rows that ship with it, so every blob here is
+    single-layer zlib->base64 (checkers.encode_answer) -- decode_answer alone always
+    recovers the plain JSON-text private_test_cases string directly, never a pickle
+    blob or extra JSON-string wrapping.
+    """
+    return [
+        checkers.encode_answer(
+            checkers.normalize_private_test_cases(row["private_test_cases"])
+        )
+        for row in raw_rows
+    ]
 
 
 def build_split_files(
@@ -123,6 +161,7 @@ def build_split_files(
     ]
     assignment = _split_solved(solved_ids, SEED, VAL_FRACTION)
     raw_by_id = {r["question_id"]: r for r in raw_rows}
+    idx_by_id = {r["question_id"]: i for i, r in enumerate(raw_rows)}
 
     def split_for(qid: str) -> str:
         # Unsolved problems always go to test, never validation (see module
@@ -136,7 +175,10 @@ def build_split_files(
     for row in raw_rows:
         qid = row["question_id"]
         finalized = _finalize_row(
-            row, gold_response=verdicts[qid]["gold_response"], is_perturbed=False
+            row,
+            gold_response=verdicts[qid]["gold_response"],
+            is_perturbed=False,
+            private_test_case_idx=idx_by_id[qid],
         )
         (val_rows if split_for(qid) == "val" else test_rows).append(finalized)
 
@@ -162,7 +204,10 @@ def build_split_files(
                 "changed since perturb.py ran; using the freshly recomputed value."
             )
         finalized = _finalize_row(
-            perturbed_row, gold_response=pb.ABSTENTION_MARKER, is_perturbed=True
+            perturbed_row,
+            gold_response=pb.ABSTENTION_MARKER,
+            is_perturbed=True,
+            private_test_case_idx=idx_by_id[qid],
         )
         (val_rows if split == "val" else test_rows).append(finalized)
 
@@ -184,6 +229,11 @@ def main() -> None:
     )
     parser.add_argument(
         "--test-out", type=str, default=str(DATA_DIR / "test_tasks.jsonl")
+    )
+    parser.add_argument(
+        "--private-test-cases-out",
+        type=str,
+        default=str(DATA_DIR / "private_test_cases.txt"),
     )
     args = parser.parse_args()
 
@@ -209,7 +259,13 @@ def main() -> None:
 
     checkers.write_jsonl(args.val_out, val_rows)
     checkers.write_jsonl(args.test_out, test_rows)
-    print(f"[splits] wrote {args.val_out} and {args.test_out}")
+    checkers.write_private_test_cases(
+        args.private_test_cases_out, build_private_test_cases_blobs(raw_rows)
+    )
+    print(
+        f"[splits] wrote {args.val_out}, {args.test_out}, and "
+        f"{args.private_test_cases_out}"
+    )
 
 
 if __name__ == "__main__":

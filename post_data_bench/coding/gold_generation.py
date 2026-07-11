@@ -17,7 +17,7 @@ llm_async.sample_sync.
 Determinism / no repeated LLM calls: results are stored in a lean, checked-into-git
 verdict file (gold_responses.jsonl -- just
 question_id/gold_response/verified_solvable, not a duplicate of the full problem)
-with gold_response json->zlib->base64 obfuscated. A run only calls the LLM for
+with gold_response zlib->base64 obfuscated. A run only calls the LLM for
 problems *not already present* in that file, so once it's fully populated and
 committed, running this script (and therefore set_up_data.sh) does zero network
 calls -- pure disk load.
