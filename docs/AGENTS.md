@@ -163,10 +163,10 @@ model = Model(
 )
 ```
 
-As described at the beginning of this guide, Identifiers follow LiteLLM conventions (`openai/gpt-4o`, `anthropic
-claude-sonnet-4-20250514`, etc.), but typically the user should provide one in the prompt. Unless the user explicitly
-provides otherwise, set `api_key` as `LITELLM_API_KEY` (from the environment variables). Additional `**kwargs` are
-forwarded to `litellm.completion` (`api_base`, `timeout`, `organization`).
+As described at the beginning of this guide, Identifiers follow LiteLLM conventions (`openai/claude-4.5-haiku`, etc.),
+but typically the user should provide a LITELLM_API_KEY variable in the prompt. If none is provided, then LiteLLM will
+fall back to provider-specific environment variables (e.g. `LITELLM_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`).
+Additional `**kwargs` are forwarded to `litellm.completion` (`api_base`, `organization`, `timeout`).
 
 #### Prompt types
 
