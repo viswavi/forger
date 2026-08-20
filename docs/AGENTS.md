@@ -77,9 +77,6 @@ per-call disk cache and tracing) and `pyforger.pipeline` (`run` and `optimize` h
 
 | Name | Location | Description |
 |---|---|---|
-| `pyforger.run(fn, *a, **kw)` | `pyforger.pipeline.run` | Calls `fn(*a, **kw)`. Hook for future trace and telemetry. |
-| `pyforger.optimize(fn, [transforms])` | `pyforger.pipeline.optimize` | Applies `Callable[[Fn], Fn]` rewriters in
-order. |
 | `pyforger.op` | `pyforger.op.op` | Decorator: disk cache and trace. Trace helpers are `from pyforger.op import
 trace, clear_trace`. |
 | `pyforger.acquire` | `src/pyforger/acquire/` | Generate or retrieve rows. |
