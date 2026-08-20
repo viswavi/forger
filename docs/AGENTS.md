@@ -107,7 +107,7 @@ Generate or retrieve new rows.
 | `Model` |   | LiteLLM-backed wrapper. `generate(prompt, *, n=1, ...) -> list[str]` and `generate_batch(prompts, *,
 n=1, ...) -> list[list[str]]`. Exposes`model.last_usage` (prompt tokens, completion tokens, total cost from the most
 recent call). |
-| `sample_from_LLM` | yes | First-class generation source. Supports JSON-schema validation with retry. |
+| `sample_from_LLM` | yes | Sample data from an LLM with a prompt. Supports schema-based validation and retries. |
 | `retrieve` | no | Generic retrieval against a `RetrievalSource`. |
 | `retrieve_from_web` | no | Brave Search backend (QUERY only). |
 | `retrieve_from_wiki` | no | Wikipedia backend (QUERY or RANDOM). |
@@ -124,7 +124,7 @@ Transform rows without removing items.
 
 | Export | Description |
 |---|---|
-| `generate_from_context` | General LLM-based generation given upstream data. |
+| `generate_from_context` |  LLM-based generation given upstream data (sample_from_LLM with wrapped dependencies) |
 | `translate.to_language` | LLM translation of selected fields into a target natural language. |
 | `translate.to_code` | LLM conversion of fields into code in a target programming language. Strips markdown fences. |
 | `execute_code` | Execute Python code in a sandboxed environment and return the result. |
