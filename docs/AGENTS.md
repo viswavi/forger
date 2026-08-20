@@ -43,14 +43,10 @@ which you should set as the model name in LiteLLM. If not given, similarly pause
 This model identifier will typically include both account/user information (e.g. "litellm_proxy/azure/") and a model
 name (e.g. "gpt-5-mini"). Within this structure, you can potentially try other models within the same account if the
 user-provided model is undesirable or unavailable.
-unavailable. Within Azure specifically, the following models are available by default:
+Within Azure specifically, the following models are available by default:
 "gemini/gemini-3.1-flash-lite" (fast, cheap), "gemini/gemini-3.5-flash" (accurate, expensive),
-"azure_ai/DeepSeek-R1-0528", "azure_ai/DeepSeek-V4-Flash", "anthropic/claude-haiku-4-5" (fast),
-"anthropic/claude-sonnet-4-6" (medium speed/cost), "anthropic/claude-opus-4-7" (expensive), "azure_ai/gpt-5.1-codex",
-"azure_ai/gpt-5.4-mini", "azure_ai/gpt-5.4-nano", "azure_ai/gpt-5.4-pro", "azure_ai/gpt-5.5" (slowest/most accurate),
-"azure_ai/gpt-oss-120b", "azure_ai/Kimi-K2.6", "azure_ai/Kimi-K2-Thinking", "azure_ai/Llama-3.3-70B-Instruct",
-"azure_ai/Llama-4-Maverick-17B-128E-Instruct-FP8", "azure_ai/text-embedding-3-large" (text embeddings),
-"azure_ai/text-embedding-3-small" (text embeddings), "azure_ai/FLUX.2-pro" (image generation)
+"azure_ai/DeepSeek-R1-0528", "azure_ai/DeepSeek-V4-Flash", "azure_ai/gpt-5.6-terra" (fast),
+"azure_ai/gpt-5.6-luna" (medium speed/cost), "azure_ai/gpt-5.6-sol" (expensive/most accurate).
 
 You can check whether the LITELLM_API_KEY environment variable is provided in Python with:
 
