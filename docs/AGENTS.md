@@ -137,8 +137,7 @@ Remove rows by criterion. If a filter empties the list, downstream operations re
 | `by_n_gram_overlap` | N-gram overlap diversity filter. |
 | `by_length` | Filter by word count within a given field. |
 | `by_invalid_response` | Drop empty, identical, or near-identical responses to the instruction. |
-| `by_keyword_blocklist` | Drop responses containing blocklisted keywords; default blocklist targets common refusal
-phrases. |
+| `by_keyword_blocklist` | Drop responses containing blocklisted keywords; default blocklist targets common refusal phrases. |
 | `by_llm_score` | LLM-as-judge with optional multi-judge consensus. |
 | `by_syntax` | Validate JSON, YAML, Python, or XML, optionally against required keys or a JSON schema. |
 
