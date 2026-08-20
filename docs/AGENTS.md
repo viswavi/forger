@@ -6,7 +6,7 @@ reference describes the execution model, the public API, and the conventions the
 ## Contents
 
 - [Basic Strategy for Using Forger](#basic-strategy-for-using-forger)
-- [Credentials and Resource Management](#credentials-and-cost)
+- [Credentials and Cost](#credentials-and-cost)
 - [Execution model](#execution-model)
 - [Public API summary](#public-api-summary)
 - [Operation reference](#operation-reference)
