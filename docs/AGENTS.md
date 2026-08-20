@@ -96,9 +96,6 @@ Generate or retrieve new rows.
 
 | Export | Cached | Description |
 |---|---|---|
-| `Model` |   | LiteLLM-backed wrapper. `generate(prompt, *, n=1, ...) -> list[str]` and `generate_batch(prompts, *,
-n=1, ...) -> list[list[str]]`. Exposes`model.last_usage` (prompt tokens, completion tokens, total cost from the most
-recent call). |
 | `sample_from_LLM` | yes | Sample data from an LLM with a prompt. Supports schema-based validation and retries. |
 | `retrieve` | no | Generic retrieval against a `RetrievalSource`. |
 | `retrieve_from_web` | no | Brave Search backend (QUERY only). |
@@ -107,8 +104,12 @@ recent call). |
 | `retrieve_from_arxiv` | no | arXiv backend. |
 | `retrieve_from_s2` | no | Semantic Scholar backend. |
 | `RetrievalSource`, `RetrieveMode` |   | Abstract base class and mode enum (`QUERY`, `RANDOM`). |
-| `WebRetrievalSource`, `WikiRetrievalSource`, `HFRetrievalSource`, `ArxivRetrievalSource`, `S2RetrievalSource` |   |
-Per-backend source classes. |
+| `WebRetrievalSource`, `WikiRetrievalSource`, `HFRetrievalSource`, ... |   | Per-backend source classes. |
+| `ArxivRetrievalSource`, `S2RetrievalSource` |   |Per-backend source classes. |
+| `Model` |   | LiteLLM-backed wrapper for LLM generation. Meant to be internal (underneath `sample_from_LLM`) |
+
+`sample_from_LLM` performs `samples_per_item` LLM calls per input and returns parsed dicts. We validate against
+an optional JSON schema. If the validated LLM call fails after `num_retries`, we return `None` for the failing slots.
 
 #### `pyforger.alter`
 
@@ -121,8 +122,8 @@ Transform rows without removing items.
 | `translate.to_code` | LLM conversion of fields into code in a target programming language. Strips markdown fences. |
 | `execute_code` | Execute Python code in a sandboxed environment and return the result. |
 
-`generate_from_context` performs `samples_per_item` LLM calls per input row and returns parsed dicts, with
-retry against an optional JSON schema.
+`generate_from_context` performs `samples_per_item` LLM calls per input and returns parsed dicts. We validate against
+an optional JSON schema. If the validated LLM call fails after `num_retries`, we return `None` for the failing slots.
 
 #### `pyforger.filter`
 
@@ -137,7 +138,7 @@ Remove rows by criterion. If a filter empties the list, downstream operations re
 | `by_n_gram_overlap` | N-gram overlap diversity filter. |
 | `by_length` | Filter by word count within a given field. |
 | `by_invalid_response` | Drop empty, identical, or near-identical responses to the instruction. |
-| `by_keyword_blocklist` | Drop responses containing blocklisted keywords; default blocklist targets common refusal phrases. |
+| `by_keyword_blocklist` | Drop responses with certain keywords; default blocklist targets common refusal phrases. |
 | `by_llm_score` | LLM-as-judge with optional multi-judge consensus. |
 | `by_syntax` | Validate JSON, YAML, Python, or XML, optionally against required keys or a JSON schema. |
 

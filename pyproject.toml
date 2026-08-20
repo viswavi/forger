@@ -17,6 +17,7 @@ dependencies = [
     "semanticscholar>=0.11.0",
     "litellm==1.83.0",
     "RestrictedPython>=7.0",
+    "python-dotenv",
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
