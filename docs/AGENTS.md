@@ -77,8 +77,7 @@ per-call disk cache and tracing) and `pyforger.pipeline` (`run` and `optimize` h
 
 | Name | Location | Description |
 |---|---|---|
-| `pyforger.op` | `pyforger.op.op` | Decorator: disk cache and trace. Trace helpers are `from pyforger.op import
-trace, clear_trace`. |
+| `pyforger.op` | Decorator for caching operations. |
 | `pyforger.acquire` | `src/pyforger/acquire/` | Generate or retrieve rows. |
 | `pyforger.alter` | `src/pyforger/alter/` | Transform rows without removing items. |
 | `pyforger.filter` | `src/pyforger/filter/` | Remove rows by criterion. |
