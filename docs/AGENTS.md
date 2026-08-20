@@ -220,11 +220,9 @@ can redirect it.
 
 **Per-call bypass.** Pass `_no_cache=True` at the call site to skip the cache for a single invocation.
 
-**Custom hash keys for objects.** If an argument defines `cache_key() -> Any`, the return value is hashed in place of
-the object's full canonical form. `MockModel` defines one. The base `Model` class does not: its canonical form falls
-through to `__repr__`, which includes only `model_id`. As a result, two `Model("openai/gpt-4o", temperature=0.7)` and
-`Model("openai/gpt-4o", temperature=0.0)` produce the same cache key. Subclass `Model` and implement `cache_key()`
-when configuration differences must be distinguished by the cache:
+**Custom hash keys for objects.** If an argument defines `cache_key() -> Any`, this is used in place of the argument's
+canonical form. This is useful for objects that are expensive to serialize or contain ever-changing state. Here is
+an example:
 
 ```python
 class ConfiguredModel(Model):
