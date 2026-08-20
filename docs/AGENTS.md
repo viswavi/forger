@@ -305,12 +305,8 @@ with `by_rouge_l` to keep a diverse subset of 100.
 - **Rubric-based filtering:** For complex tasks where quality is hard to assure with simple heuristics, generate a
 rubric (using `pyforger.alter.generate_from_context`) and then use multiple `by_llm_score` calls with each rubric item
 as a separate judge to filter for high-quality outputs that meet multiple criteria.
-- **Ensemble of experts:** For a given step, generate multiple outputs using different models or different prompts
-(e.g. a "creative" prompt and a "precise" prompt) and then use `pyforger.filter.by_rouge_l_agreement" to only keep
-rows where these different experts have matching outputs. This can improve quality (at the cost of diversity and
-computational cost).
-- **Expert-and-nonexpert prompting:** For a given input, generate one output with a "non-expert" model (e.g. "Llama-3
-3-70B-Instruct") and one with multiple "expert" models (e.g. multiple calls of "gpt-5.5" with slightly different
+- **Strong-vs-weak gap:** For a given input, generate one output with a "weak" model (e.g. "gemini-3.1") and one with
+multiple "expert" models (e.g. multiple calls of "gemini-3.5" with slightly different
 prompts or another strong model). Then choose only the rows where the expert models agree with each other (answer is
 likely correct) but disagree with the non-expert model (input is not too easy).
 - **Iterative in-context learning:** Start with a simple pipeline that generates some initial outputs. Then, keep an
