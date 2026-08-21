@@ -33,9 +33,7 @@ Many of the operations in Forger involve calls to LLMs or external APIs, which m
 APIs (e.g. accessing Anthropic's models via the LiteLLM library) or retrieval APIs (e.g. Brave Search, arXiv). These
 APIs typically require credentials (e.g. API keys) that should be kept secure and not committed to version control.
 They can either be stored on disk (e.g. in a `.env` file loaded by your shell or other external tooling) or managed
-through provider-specific environment variables (e.g. `export OPENAI_API_KEY="your_api_key"` or `export
-ANTHROPIC_API_KEY="your_api_key"`).
-
+through provider-specific environment variables.
 LLMs will almost always be accessed via LiteLLM-backed model wrappers. If the user does not provide credentials in
 the prompt or via the relevant provider-specific environment variable, you should pause and ask the user to provide
 them. Generally the user should also provide a model identifier (e.g. "litellm_proxy/lab_name/XXX") in the prompt,
@@ -47,6 +45,11 @@ Within Azure specifically, the following models are available by default:
 "gemini/gemini-3.1-flash-lite" (fast, cheap), "gemini/gemini-3.5-flash" (accurate, expensive),
 "azure_ai/DeepSeek-R1-0528", "azure_ai/DeepSeek-V4-Flash", "azure_ai/gpt-5.6-terra" (fast),
 "azure_ai/gpt-5.6-luna" (medium speed/cost), "azure_ai/gpt-5.6-sol" (expensive/most accurate).
+
+Typically, the user should set LITELLM_API_KEY environment variable. If none is given, then LiteLLM will fall back to
+provider-specific environment variables (e.g. `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`). When instantiating a `Model` with
+such variables, do not look at or print the key; simply pass it to the client via `os.environ.get("LITELLM_API_KEY")`
+(or equivalent).  Additional `**kwargs` are forwarded to `litellm.completion` (`api_base`, `organization`, `timeout`).
 
 You can check whether the LITELLM_API_KEY environment variable is provided in Python with:
 
@@ -152,21 +155,17 @@ and a high consensus threshold produces higher-quality outputs but at the cost o
 #### The `Model` class
 
 ```python
+import os
 from pyforger.acquire import Model
 
 model = Model(
     "openai/claude-4.5-haiku",
-    api_key="sk-...",
+    api_key=os.environ.get("LITELLM_API_KEY"),
     temperature=0.7,
     max_tokens=None,
     num_retries=2,
 )
 ```
-
-As described at the beginning of this guide, Identifiers follow LiteLLM conventions (`openai/claude-4.5-haiku`, etc.),
-but typically the user should provide a LITELLM_API_KEY variable in the prompt. If none is provided, then LiteLLM will
-fall back to provider-specific environment variables (e.g. `LITELLM_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`).
-Additional `**kwargs` are forwarded to `litellm.completion` (`api_base`, `organization`, `timeout`).
 
 #### Prompt types
 
