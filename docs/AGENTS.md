@@ -159,7 +159,7 @@ import os
 from pyforger.acquire import Model
 
 model = Model(
-    "openai/claude-4.5-haiku",
+    os.environ.get("MODEL_ID"),
     api_key=os.environ.get("LITELLM_API_KEY"),
     temperature=0.7,
     max_tokens=None,
