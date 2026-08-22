@@ -34,14 +34,12 @@ APIs (e.g. accessing Anthropic's models via the LiteLLM library) or retrieval AP
 APIs typically require credentials (e.g. API keys) that should be kept secure and not committed to version control.
 They can either be stored on disk (e.g. in a `.env` file loaded by your shell or other external tooling) or managed
 through provider-specific environment variables.
-LLMs will almost always be accessed via LiteLLM-backed model wrappers. If the user does not provide credentials in
-the prompt or via the relevant provider-specific environment variable, you should pause and ask the user to provide
-them. Generally the user should also provide a model identifier (e.g. "litellm_proxy/lab_name/XXX") in the prompt,
-which you should set as the model name in LiteLLM. If not given, similarly pause and ask the user to provide one.
-This model identifier will typically include both account/user information (e.g. "litellm_proxy/azure/") and a model
-name (e.g. "gpt-5-mini"). Within this structure, you can potentially try other models within the same account if the
-user-provided model is undesirable or unavailable.
-Within Azure specifically, the following models are available by default:
+LLMs will almost always be accessed via LiteLLM-backed model wrappers. Generally the user should also provide a model
+identifier (e.g. "base/org_name/XXX") in the prompt, which you should set as the model name in LiteLLM. If not given,
+pause and ask the user to provide one. This identifier should include account/user information (e.g. "base/org_name")
+a model name (e.g. "gpt-5.6-sol"). Within this structure, you can potentially try other models within the same account
+if the user-provided model is undesirable or unavailable. Within Azure specifically, the following models are available
+by default:
 "gemini/gemini-3.1-flash-lite" (fast, cheap), "gemini/gemini-3.5-flash" (accurate, expensive),
 "azure_ai/DeepSeek-R1-0528", "azure_ai/DeepSeek-V4-Flash", "azure_ai/gpt-5.6-terra" (fast),
 "azure_ai/gpt-5.6-luna" (medium speed/cost), "azure_ai/gpt-5.6-sol" (expensive/most accurate).
@@ -69,12 +67,17 @@ tokens and the model used. For example, gpt-5.4-nano is generally much cheaper t
 
 ### Execution model
 
-A pipeline is a Python function. It calls operations from `pyforger.acquire`, `pyforger.alter`, and `pyforger.filter`.
-Each operation takes a `list[dict]` (or generation parameters) and returns a `list[dict]`. Control flow (`for`, `if`,
-comprehensions, helper functions) in plain Python can be used
+A pipeline is a Python function that consists of a a sequence of operations. Many useful implementations of operations
+are given in `pyforger.{acquire/alter/filter}`. You can also implement your own operations. Each operations takes an
+optional input list (`list[dict]`) and returns an output list (`list[dict]`). Caching and tracing are enabled by adding
+the `@op` decorator.
 
-Caching, tracing, and pipeline-level optimization are opt-in through two modules: `pyforger.op` (`@op` decorator for
-per-call disk cache and tracing) and `pyforger.pipeline` (`run` and `optimize` hooks).
+### Operation reference
+
+All operations are plain functions. Operations that perform LLM calls or expensive in-process work (`sample_from_LLM`
+every `alter.*` op, every `filter.*` op) are decorated internally with `@op`, so their results are cached on disk and
+traced. The retrieval functions (`retrieve`, `retrieve_from_*`) are not internally cached; wrap them with `@op` to
+memoize their results.
 
 ### Public API summary
 
@@ -85,13 +88,6 @@ per-call disk cache and tracing) and `pyforger.pipeline` (`run` and `optimize` h
 | `pyforger.alter` | `src/pyforger/alter/` | Transform rows without removing items. |
 | `pyforger.filter` | `src/pyforger/filter/` | Remove rows by criterion. |
 | `pyforger.utils` | `src/pyforger/utils.py` | `get_field`, `get_formatted_logger`. |
-
-### Operation reference
-
-All operations are plain functions. Operations that perform LLM calls or expensive in-process work (`sample_from_LLM`
-every `alter.*` op, every `filter.*` op) are decorated internally with `@op`, so their results are cached on disk and
-traced. The retrieval functions (`retrieve`, `retrieve_from_*`) are not internally cached; wrap them with `@op` to
-memoize their results.
 
 #### `pyforger.acquire`
 
