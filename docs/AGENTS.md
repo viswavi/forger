@@ -231,7 +231,7 @@ from pyforger.op import trace, clear_trace
 ```
 
 `trace()` returns a list of `CallRecord(op_name, input_hash, output_hash, cache_hit, duration_s)` for every `@op` call
-in the current process. `clear_trace()` resets it.
+in the current process up to a certain maximum (default 10000). `clear_trace()` resets it.
 
 ### Composing a pipeline
 
