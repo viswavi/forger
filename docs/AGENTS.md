@@ -293,9 +293,9 @@ includes the query, draft, and critique and asks for a refined output.
 input that could have produced that output (e.g. an English description of a math problem). This can be done with two
 separate `@op`-decorated functions, one for the forward direction and one for the backward direction.
 - **Overgenerate and filter:** Generate more candidates than needed (especially at the early stages of a pipeline) and
-then apply `pyforger.filter` operations to assure quality and diversity. For example, generate 1000 candidate
-queries,  filter with `by_llm_score` to keep the 250 best according to a consensus of 5 judge calls, and then filter
-with `by_rouge_l` to keep a diverse subset of 100.
+then apply `pyforger.filter` operations to assure quality and diversity. For example, generate 1000 candidate queries,
+filter with `by_llm_score` to keep the best according to a consensus of 5 judge calls, and then filter with
+`by_rouge_l` to keep a subset with sufficient lexical diversity.
 - **Rubric-based filtering:** For complex tasks where quality is hard to assure with simple heuristics, generate a
 rubric (using `pyforger.alter.generate_from_context`) and then use multiple `by_llm_score` calls with each rubric item
 as a separate judge to filter for high-quality outputs that meet multiple criteria.
