@@ -83,7 +83,7 @@ memoize their results.
 
 | Name | Location | Description |
 |---|---|---|
-| `pyforger.op` | Decorator for caching operations. |
+| `pyforger.op` | `src/pyforger/op.py` | Decorator for caching operations. |
 | `pyforger.acquire` | `src/pyforger/acquire/` | Generate or retrieve rows. |
 | `pyforger.alter` | `src/pyforger/alter/` | Transform rows without removing items. |
 | `pyforger.filter` | `src/pyforger/filter/` | Remove rows by criterion. |
@@ -105,10 +105,10 @@ Generate or retrieve new rows.
 | `RetrievalSource`, `RetrieveMode` |   | Abstract base class and mode enum (`QUERY`, `RANDOM`). |
 | `WebRetrievalSource`, `WikiRetrievalSource`, `HFRetrievalSource`, ... |   | Per-backend source classes. |
 | `ArxivRetrievalSource`, `S2RetrievalSource` |   |Per-backend source classes. |
-| `Model` |   | LiteLLM-backed wrapper for LLM generation. Meant to be internal (underneath `sample_from_LLM`) |
+| `Model` |   | LLM wrapper (initialized by user). Otherwise, LLM generation should be called with `sample_from_LLM`. |
 
-`sample_from_LLM` performs `samples_per_item` LLM calls per input and returns parsed dicts. We validate against
-an optional JSON schema. If the validated LLM call fails after `num_retries`, we return `None` for the failing slots.
+`sample_from_LLM` performs `n` LLM calls per input and returns parsed dicts. It does under-the-hood batching and
+validation, making this a superior choice to calling `Model` directly.
 
 #### `pyforger.alter`
 
