@@ -216,10 +216,17 @@ canonical form. This is useful for objects that are expensive to serialize or co
 an example:
 
 ```python
-class ConfiguredModel(Model):
+class ExecutionSandbox:
+    def __init__(self, allowed_imports):
+        self._allowed_imports = frozenset(allowed_imports)
+        self._compiled_fns = {}  # grows as code runs; not part of the sandbox's config
+
     def cache_key(self):
-        return (self._model_id, self._temperature, self._max_tokens)
+        return (type(self).__name__, tuple(sorted(self._allowed_imports)))
 ```
+
+`_compiled_fns` accumulates entries across calls and isn't hashable. `cache_key()` here omits this field to avoid
+cache misses. Repeated calls with the same sandbox stay cache hits.
 
 **Trace.** Import the trace helpers from the module:
 
