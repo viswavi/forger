@@ -68,7 +68,7 @@ tokens and the model used. For example, gpt-5.4-nano is generally much cheaper t
 ### Execution model
 
 A pipeline is a Python function that consists of a sequence of operations. Many useful implementations of operations
-are given in `pyforger.{acquire/alter/filter}`. You can also implement your own operations. Each operations takes an
+are given in `pyforger.{acquire/alter/filter}`. You can also implement your own operations. Each operation takes an
 optional input list (`list[dict]`) and returns an output list (`list[dict]`). Caching and tracing are enabled by adding
 the `@op` decorator.
 
