@@ -74,10 +74,10 @@ the `@op` decorator.
 
 ### Operation reference
 
-All operations are plain functions. Operations that perform LLM calls or expensive in-process work (`sample_from_LLM`
-every `alter.*` op, every `filter.*` op) are decorated internally with `@op`, so their results are cached on disk and
-traced. The retrieval functions (`retrieve`, `retrieve_from_*`) are not internally cached; wrap them with `@op` to
-memoize their results.
+All operations are plain functions. Operations that perform LLM calls or expensive in-process work (including almost
+everything in `pyforger.{acquire/alter/filter}`) should be decorated internally with `@op`, so their results are cached on
+disk and traced. The retrieval functions (`retrieve`, `retrieve_from_*`) are not internally cached; wrap them with `@op`
+to cache their results.
 
 ### Public API summary
 
