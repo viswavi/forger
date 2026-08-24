@@ -51,15 +51,13 @@ def retrieve_from_web(
     n: int = 10,
     seed: int | None = None,
     base_url: str | None = None,
-    fetch_full_content: bool = False,
     **kwargs: Any,
 ) -> list[dict]:
-    """Search the web via Brave Search. QUERY mode only."""
+    """Search the web via Brave's LLM Context API. QUERY mode only."""
     source_kwargs = {k: v for k, v in kwargs.items() if k not in ("api_key",)}
     source = WebRetrievalSource(
         base_url=base_url,
         api_key=kwargs.get("api_key"),
-        fetch_full_content=fetch_full_content,
         **source_kwargs,
     )
     return retrieve(source, mode=mode, queries=queries, n=n, seed=seed, **source_kwargs)
