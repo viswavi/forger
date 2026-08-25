@@ -76,8 +76,8 @@ the `@op` decorator.
 
 All operations are plain functions. Operations that perform LLM calls or expensive in-process work (including almost
 everything in `pyforger.{acquire/alter/filter}`) should be decorated internally with `@op`, so their results are cached on
-disk and traced. The retrieval functions (`retrieve`, `retrieve_from_*`) are not internally cached; wrap them with `@op`
-to cache their results.
+disk and traced. The generic `retrieve` is never internally cached; wrap it with `@op` yourself. Each `retrieve_from_*`
+wrapper instead takes a `cache: bool = False` kwarg -- pass `cache=True` to memoize its results via `@op`.
 
 ### Public API summary
 
@@ -98,17 +98,18 @@ Generate or retrieve new rows.
 |---|---|---|
 | `sample_from_LLM` | yes | Sample data from an LLM with a prompt. Supports schema-based validation and retries. |
 | `retrieve` | no | Generic retrieval against a `RetrievalSource`. |
-| `retrieve_from_web` | no | Brave Search backend (QUERY only). |
-| `retrieve_from_wiki` | no | Wikipedia backend (QUERY or RANDOM). |
-| `retrieve_from_hf` | no | Hugging Face datasets backend. |
-| `retrieve_from_arxiv` | no | arXiv backend. |
-| `retrieve_from_s2` | no | Semantic Scholar backend. |
+| `retrieve_from_web` | opt-in | Brave Search backend (QUERY only). |
+| `retrieve_from_wiki` | opt-in | Wikipedia backend (QUERY or RANDOM). |
+| `retrieve_from_hf` | opt-in | Hugging Face datasets backend. |
+| `retrieve_from_arxiv` | opt-in | arXiv backend. |
+| `retrieve_from_s2` | opt-in | Semantic Scholar backend. |
 | `RetrievalSource`, `RetrieveMode` |   | Abstract base class and mode enum (`QUERY`, `RANDOM`). |
 | `WebRetrievalSource`, `WikiRetrievalSource`, `HFRetrievalSource`, ... |   | Per-backend source classes. |
 | `ArxivRetrievalSource`, `S2RetrievalSource` |   |Per-backend source classes. |
 | `Model` |   | LLM wrapper (initialized by user). Otherwise, LLM generation should be called with `sample_from_LLM`. |
 | `LocalModel` |   | On-GPU vLLM-backed model with the same interface as `Model` |
 | `split_reasoning` |   | `str -> (thinking, answer)`. Splits a reasoning-model completion on `</think>`. |
+
 
 `sample_from_LLM` performs `n` LLM calls per input and returns parsed dicts. It does under-the-hood batching and
 validation, making this a superior choice to calling `Model` directly.
@@ -326,4 +327,3 @@ distills the skill of *extending its own thinking to reach the right answer* far
 and answer-verification keeps only correct reasoning. Filtering on the final answer alone admits the occasional
 "right answer, wrong reasoning" trace; add a `by_llm_score` judge over the reasoning (passed as `filter_fn`, or as a
 downstream filter) only if inspection shows this is actually frequent -- prefer the cheap answer check first.
-

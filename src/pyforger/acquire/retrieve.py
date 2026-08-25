@@ -2,9 +2,14 @@
 
 ``retrieve()`` is the generic entry point; the convenience wrappers
 construct the appropriate source for a backend (web, wiki, HF, arXiv, S2).
+Each wrapper takes ``cache=False`` by default; pass ``cache=True`` to
+memoize results on disk via ``@op``.
 """
 from __future__ import annotations
 
+import inspect
+from collections.abc import Callable
+from functools import wraps
 from typing import Any
 
 from pyforger.acquire.sources import (
@@ -16,6 +21,31 @@ from pyforger.acquire.sources import (
     WebRetrievalSource,
     WikiRetrievalSource,
 )
+from pyforger.op import op
+
+
+def _cacheable(fn: Callable[..., list[dict]]) -> Callable[..., list[dict]]:
+    """Wrap fn like @op, but with a ``cache: bool = False`` kwarg (default off).
+
+    Translates ``cache`` into @op's ``_no_cache`` opt-out toggle, which
+    otherwise defaults to caching being enabled.
+    """
+    cached = op(fn, name=f"pyforger.acquire.retrieve.{fn.__name__}")
+    params = list(inspect.signature(fn).parameters.values())
+    insert_at = next(
+        (i for i, p in enumerate(params) if p.kind is p.VAR_KEYWORD), len(params)
+    )
+    params.insert(
+        insert_at,
+        inspect.Parameter("cache", inspect.Parameter.KEYWORD_ONLY, default=False),
+    )
+
+    @wraps(fn)
+    def wrapper(*args: Any, cache: bool = False, **kwargs: Any) -> list[dict]:
+        return cached(*args, _no_cache=not cache, **kwargs)
+
+    wrapper.__signature__ = inspect.Signature(params)  # type: ignore[attr-defined]
+    return wrapper  # type: ignore[return-value]
 
 
 def retrieve(
@@ -44,6 +74,7 @@ def retrieve(
     return all_rows
 
 
+@_cacheable
 def retrieve_from_web(
     mode: RetrieveMode = RetrieveMode.QUERY,
     *,
@@ -63,6 +94,7 @@ def retrieve_from_web(
     return retrieve(source, mode=mode, queries=queries, n=n, seed=seed, **source_kwargs)
 
 
+@_cacheable
 def retrieve_from_wiki(
     mode: RetrieveMode = RetrieveMode.QUERY,
     *,
@@ -72,11 +104,15 @@ def retrieve_from_wiki(
     language: str = "en",
     **kwargs: Any,
 ) -> list[dict]:
-    """Fetch Wikipedia articles. QUERY (full-text) or RANDOM (random article)."""
+    """Fetch Wikipedia articles. QUERY (full-text) or RANDOM (random article).
+
+    cache=True memoizes results on disk via @op (default False).
+    """
     source = WikiRetrievalSource(language=language, **kwargs)
     return retrieve(source, mode=mode, queries=queries, n=n, seed=seed, **kwargs)
 
 
+@_cacheable
 def retrieve_from_hf(
     dataset: str,
     config: str | None = None,
@@ -89,7 +125,10 @@ def retrieve_from_hf(
     seed: int | None = None,
     **kwargs: Any,
 ) -> list[dict]:
-    """Load rows from a Hugging Face dataset."""
+    """Load rows from a Hugging Face dataset.
+
+    cache=True memoizes results on disk via @op (default False).
+    """
     source = HFRetrievalSource(
         dataset=dataset,
         config=config,
@@ -100,6 +139,7 @@ def retrieve_from_hf(
     return retrieve(source, mode=mode, queries=queries, n=n, seed=seed, **kwargs)
 
 
+@_cacheable
 def retrieve_from_arxiv(
     mode: RetrieveMode = RetrieveMode.QUERY,
     *,
@@ -108,11 +148,15 @@ def retrieve_from_arxiv(
     seed: int | None = None,
     **kwargs: Any,
 ) -> list[dict]:
-    """Fetch arXiv papers. QUERY (text search) or RANDOM (sample from category)."""
+    """Fetch arXiv papers. QUERY (text search) or RANDOM (sample from category).
+
+    cache=True memoizes results on disk via @op (default False).
+    """
     source = ArxivRetrievalSource(**kwargs)
     return retrieve(source, mode=mode, queries=queries, n=n, seed=seed, **kwargs)
 
 
+@_cacheable
 def retrieve_from_s2(
     mode: RetrieveMode = RetrieveMode.QUERY,
     *,
@@ -121,6 +165,9 @@ def retrieve_from_s2(
     seed: int | None = None,
     **kwargs: Any,
 ) -> list[dict]:
-    """Fetch papers from Semantic Scholar."""
+    """Fetch papers from Semantic Scholar.
+
+    cache=True memoizes results on disk via @op (default False).
+    """
     source = S2RetrievalSource(**kwargs)
     return retrieve(source, mode=mode, queries=queries, n=n, seed=seed, **kwargs)
