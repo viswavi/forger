@@ -110,7 +110,6 @@ Generate or retrieve new rows.
 | `LocalModel` |   | On-GPU vLLM-backed model with the same interface as `Model` |
 | `split_reasoning` |   | `str -> (thinking, answer)`. Splits a reasoning-model completion on `</think>`. |
 
-
 `sample_from_LLM` performs `n` LLM calls per input and returns parsed dicts. It does under-the-hood batching and
 validation, making this a superior choice to calling `Model` directly.
 

@@ -393,21 +393,6 @@ class Model:
             results.append(result)
             self.history.append(result)
 
-            usage = getattr(response, "usage", None)
-            if usage is not None:
-                total_prompt_tokens += usage.prompt_tokens or 0
-                total_completion_tokens += usage.completion_tokens or 0
-
-            hidden = getattr(response, "_hidden_params", None)
-            if isinstance(hidden, dict):
-                total_cost += hidden.get("response_cost") or 0.0
-
-        self._last_usage = {
-            "prompt_tokens": total_prompt_tokens,
-            "completion_tokens": total_completion_tokens,
-            "total_cost": total_cost,
-        }
-
         return results
 
 
@@ -551,7 +536,7 @@ class LocalModel(Model):
         temperature: float | None = None,
         max_tokens: int | None = None,
         stop: list[str] | None = None,
-    ) -> list[list[str]]:
+    ) -> GenerateResult:
         """Generate ``n`` completions per prompt with the local vLLM engine.
 
         Args:
