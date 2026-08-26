@@ -5,7 +5,16 @@ from pyforger.acquire import sample_from_LLM
 from pyforger.acquire import retrieve_from_web
 from pyforger import op
 
+from extraction import (
+    extract_problems_from_github,
+    extract_problems_from_pdf,
+    extract_problems_from_webpage,
+    extract_problems_from_search_results,
+    write_jsonl,
+)
+
 BASE = "/home/vijayv/forger/post_data_bench/coding"
+PIPELINE_DIR = os.path.join(BASE, ".hidden_agents", "vijay_manual_8_23_26")
 
 
 def read_jsonl(path):
@@ -24,18 +33,6 @@ def load_validation_data():
 def web_search(query: str, n=20):
     return retrieve_from_web(queries=[query], n=n, api_key=os.environ["BRAVE_API_KEY"], cache=True)
 
-def extract_problems_from_github(repo):
-    if repo == "RepoName":
-        raise NotImplementedError("GitHub extraction not implemented yet.")
-
-def extract_problems_from_webpage(url):
-    if url == "https://example.com/problems":
-        raise NotImplementedError("Webpage extraction not implemented yet.")
-
-def extract_problems_from_pdf(pdf_url):
-    if pdf_url == "https://example.com/problems.pdf":
-        raise NotImplementedError("PDF extraction not implemented yet.")
-
 # asyncify in next iteration
 def impossible_lcb_pipeline():
     # First attempt: retrieve new Python programming contest problems
@@ -43,7 +40,19 @@ def impossible_lcb_pipeline():
     icpc_problems = web_search("ICPC programming problems in Python", n=20)
     icpc_problems_2 = web_search("ICPC programming problems full list", n=20)
     icpc_solutions = web_search("ICPC programming problem solutions full list", n=20)
-    icpc_solutions = web_search("IOI programming problem solutions full list", n=20)
+    ioi_solutions = web_search("IOI programming problem solutions full list", n=20)
+    all_search_results = (
+        basic_search_results
+        + icpc_problems
+        + icpc_problems_2
+        + icpc_solutions
+        + ioi_solutions
+    )
+    extracted = extract_problems_from_search_results(all_search_results)
+    out_path = os.path.join(PIPELINE_DIR, "raw_extracted_problems.jsonl")
+    write_jsonl(extracted, out_path)
+    print(f"Extracted {len(extracted)} problem rows from {len(all_search_results)} search results -> {out_path}")
+    return extracted
 
 
 # asyncify in next iteration
