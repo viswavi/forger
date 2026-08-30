@@ -151,6 +151,111 @@ class TestResultCache:
         assert sb._result_cache == {}
 
 
+class TestWriteGuardAndClasses:
+    """Attribute/item assignment and class definitions (self.x = ..., d[k] = ...)."""
+
+    def test_dict_item_assignment(self):
+        """d[key] = value works without a NameError on the _write_ guard."""
+        sb = Sandbox()
+        assert (
+            sb.execute("def f(x):\n    d = {}\n    d[x] = x + 1\n    return d[x]\n", 5)
+            == 6
+        )
+
+    def test_class_definition_compiles_and_runs(self):
+        """A bare class statement no longer needs __metaclass__ from the caller."""
+        sb = Sandbox()
+        code = (
+            "class Solution:\n"
+            "    def f(self, x):\n"
+            "        self.memo = {}\n"
+            "        self.memo[x] = x * 2\n"
+            "        return self.memo[x]\n"
+        )
+        assert sb.call_method(code, "Solution", "f", 5) == 10
+
+    def test_call_method_uses_a_fresh_instance_per_call(self):
+        """Instance state set in one call_method call doesn't leak into the next."""
+        sb = Sandbox()
+        code = (
+            "class Solution:\n"
+            "    def __init__(self):\n"
+            "        self.seen = []\n"
+            "    def add(self, x):\n"
+            "        self.seen.append(x)\n"
+            "        return len(self.seen)\n"
+        )
+        assert sb.call_method(code, "Solution", "add", 1) == 1
+        assert sb.call_method(code, "Solution", "add", 99) == 1
+
+    def test_call_method_missing_class_raises(self):
+        """Asking for a class name the code doesn't define is a clear ValueError."""
+        sb = Sandbox()
+        with pytest.raises(ValueError, match="not a class"):
+            sb.call_method("class Missing:\n    pass\n", "Solution", "f")
+
+    def test_heapq_bisect_typing_imports_work(self):
+        """Default allowed_imports covers competitive-programming staples."""
+        sb = Sandbox()
+        code = (
+            "import heapq\n"
+            "from typing import List\n"
+            "class Solution:\n"
+            "    def kth(self, nums: List[int], k: int) -> int:\n"
+            "        h = []\n"
+            "        for n in nums:\n"
+            "            heapq.heappush(h, n)\n"
+            "        return heapq.nsmallest(k, h)[-1]\n"
+        )
+        assert sb.call_method(code, "Solution", "kth", [5, 3, 8, 1], 2) == 3
+
+
+class TestRunProgram:
+    """Standalone-script execution with real stdin/stdout."""
+
+    def test_stdin_and_print_round_trip(self):
+        """input()/print() read from and write to the given stdin/captured stdout."""
+        sb = Sandbox()
+        code = "n = int(input())\nprint(n * 2)\n"
+        assert sb.run_program(code, stdin="21\n") == "42\n"
+
+    def test_main_guard_runs(self):
+        """A trailing `if __name__ == "__main__":` guard is unwrapped and runs."""
+        sb = Sandbox()
+        code = (
+            "def main():\n"
+            "    print('hi')\n"
+            "\n"
+            "if __name__ == '__main__':\n"
+            "    main()\n"
+        )
+        assert sb.run_program(code) == "hi\n"
+
+    def test_sys_stdin_readline_and_exit_zero(self):
+        """`sys.stdin`/`sys.exit(0)` work; a clean exit doesn't kill the host."""
+        sb = Sandbox()
+        code = (
+            "import sys\n"
+            "line = sys.stdin.readline()\n"
+            "sys.stdout.write('got:' + line)\n"
+            "sys.exit(0)\n"
+        )
+        assert sb.run_program(code, stdin="ok\n") == "got:ok\n"
+
+    def test_nonzero_exit_raises(self):
+        """A nonzero sys.exit() code raises RuntimeError, not a silent success."""
+        sb = Sandbox()
+        with pytest.raises(RuntimeError, match="1"):
+            sb.run_program("import sys\nsys.exit(1)\n")
+
+    def test_fresh_globals_each_call(self):
+        """Module-level state from one run_program call doesn't leak into the next."""
+        sb = Sandbox()
+        code = "count = 0\ncount += 1\nprint(count)\n"
+        assert sb.run_program(code) == "1\n"
+        assert sb.run_program(code) == "1\n"
+
+
 class TestErrors:
     """Compile errors raise ValueError; runtime errors propagate verbatim."""
 
