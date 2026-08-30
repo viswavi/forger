@@ -379,6 +379,24 @@ class Model:
 
         results: list[GenerateResult] = []
         for response in responses:
+            if isinstance(response, BaseException):
+                # litellm.batch_completion returns the exception itself (rather
+                # than raising) for a prompt that failed after retries -- e.g. a
+                # provider-side RateLimitError on one item shouldn't crash every
+                # other, otherwise-successful prompt in the same batch. Surface
+                # it as an empty/failed result (same shape callers already treat
+                # a parse failure as) instead of an AttributeError deep in
+                # unrelated code that tries to read .choices off it.
+                result = GenerateResult(
+                    [""] * n,
+                    usage={"cost_usd": 0.0, "error": str(response)},
+                    reasoning=[None] * n,
+                    model_id=self._model_id,
+                    raw=response,
+                )
+                results.append(result)
+                self.history.append(result)
+                continue
             completions = [choice.message.content or "" for choice in response.choices]
             usage: dict[str, Any] = dict(_extract_usage(response))
             usage["cost_usd"] = _extract_cost(response, self._model_id)
