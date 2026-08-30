@@ -40,19 +40,37 @@ def _build_prompt(
     return [*prompt, {"role": "user", "content": schema_text}]
 
 
+def _reasoning_for(completions: Any) -> list[str | None]:
+    """Per-completion reasoning list from a ``GenerateResult``, else all-``None``.
+
+    ``Model.generate``/``generate_batch`` return ``GenerateResult`` (a
+    ``list[str]`` carrying a parallel ``.reasoning`` list), but a user-supplied
+    or built-in ``Model`` subclass may return a plain list instead (e.g.
+    ``LocalModel``, whose reasoning is already inline in the completion text
+    rather than a separate field) -- fall back to ``None`` per slot then.
+    """
+    reasoning = getattr(completions, "reasoning", None)
+    return reasoning if reasoning is not None else [None] * len(completions)
+
+
 def _parse_output(
     raw_text: str,
     output_schema: dict[str, Any] | None,
+    reasoning: str | None = None,
 ) -> dict[str, Any] | None:
     if output_schema is None:
-        return {"text": raw_text}
-    try:
-        parsed = json.loads(raw_text)
-    except (json.JSONDecodeError, TypeError):
-        return None
-    if not isinstance(parsed, dict):
-        return None
-    required_keys = set(output_schema.keys())
-    if not required_keys.issubset(parsed.keys()):
-        return None
+        parsed: dict[str, Any] = {"text": raw_text}
+    else:
+        try:
+            loaded = json.loads(raw_text)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if not isinstance(loaded, dict):
+            return None
+        required_keys = set(output_schema.keys())
+        if not required_keys.issubset(loaded.keys()):
+            return None
+        parsed = loaded
+    if reasoning:
+        parsed["reasoning"] = reasoning
     return parsed

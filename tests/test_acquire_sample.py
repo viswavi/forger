@@ -118,6 +118,18 @@ class TestSampling:
         items = sample_from_LLM("Generate", model, n=1)
         assert items == [{"text": "plain text"}]
 
+    def test_reasoning_attached_when_model_returns_it(self):
+        """A completion's reasoning trace is carried as a 'reasoning' key."""
+        model = MockModel(responses=["plain text"], reasoning=["the trace"])
+        items = sample_from_LLM("Generate", model, n=1)
+        assert items == [{"text": "plain text", "reasoning": "the trace"}]
+
+    def test_no_reasoning_key_when_model_has_none(self):
+        """Without reasoning from the model, no 'reasoning' key is added."""
+        model = MockModel(responses=["plain text"])
+        items = sample_from_LLM("Generate", model, n=1)
+        assert "reasoning" not in items[0]
+
     def test_message_list_prompt_end_to_end(self):
         """Message-list prompt with output_schema parses structured output."""
         model = MockModel(responses=['{"answer": "42"}'])

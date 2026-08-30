@@ -6,7 +6,7 @@ import re
 from collections.abc import Callable
 from typing import Any, Union
 
-from pyforger.acquire._model_utils import _build_prompt, _parse_output
+from pyforger.acquire._model_utils import _build_prompt, _parse_output, _reasoning_for
 from pyforger.acquire.model import Model, Prompt, split_reasoning
 from pyforger.op import op
 
@@ -79,7 +79,9 @@ def generate_from_context(
         List of length ``len(items) * samples_per_item`` in input order, grouped
         by item (item ``i``'s samples occupy slots ``i * samples_per_item`` to
         ``(i + 1) * samples_per_item``). Each slot holds the parsed output dict,
-        or ``None`` if the prompt failed to parse after ``max_retries``.
+        or ``None`` if the prompt failed to parse after ``max_retries``. When the
+        model returns a reasoning trace for a completion, the dict also carries
+        that trace under a ``reasoning`` key.
     """
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
@@ -133,8 +135,12 @@ def generate_from_context(
                     continue
                 for (prompt, slots), completions in zip(batch, batch_results):
                     unfilled = slots[len(completions) :]  # short batch -> retry
-                    for slot, raw_text in zip(slots, completions):
-                        parsed = _parse_output(raw_text, output_schema)
+                    for slot, raw_text, reasoning_text in zip(
+                        slots, completions, _reasoning_for(completions)
+                    ):
+                        parsed = _parse_output(
+                            raw_text, output_schema, reasoning=reasoning_text
+                        )
                         if parsed is None:
                             unfilled.append(slot)
                         else:
@@ -232,8 +238,11 @@ def self_taught_reasoner(
 
     Each kept response becomes one output row: a copy of the input item with the
     student's raw response in ``response_field`` and, when ``split_thinking`` is
-    set, its ``<think>`` block and answer split into ``thinking_field`` and
-    ``answer_field`` (via :func:`pyforger.acquire.split_reasoning`). The
+    set, its thinking and answer split into ``thinking_field`` and
+    ``answer_field``. When the model returns reasoning as a separate field (an
+    API reasoning/thinking parameter), that trace is used for ``thinking_field``
+    directly; otherwise an inline ``<think>...</think>`` block is split out via
+    :func:`pyforger.acquire.split_reasoning`. The
     ``reference_field`` is set to the student's matched answer (the
     student-generated answer becomes the ground truth). An item with zero
     matching responses contributes no rows.
@@ -301,8 +310,15 @@ def self_taught_reasoner(
     # Build one candidate row per generated response.
     candidates: list[dict] = []
     for item, responses in zip(items, responses_per_item):
-        for raw in responses:
-            thinking, answer = split_reasoning(raw) if split_thinking else ("", raw)
+        for raw, api_reasoning in zip(responses, _reasoning_for(responses)):
+            if not split_thinking:
+                thinking, answer = "", raw
+            elif api_reasoning:
+                # Model returned reasoning as a separate field (e.g. API
+                # reasoning/thinking param) rather than inline <think> tags.
+                thinking, answer = api_reasoning, raw.strip()
+            else:
+                thinking, answer = split_reasoning(raw)
             candidate = {
                 **item,
                 response_field: raw,

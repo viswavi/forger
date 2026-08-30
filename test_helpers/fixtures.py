@@ -14,6 +14,7 @@ class MockModel(Model):
         self,
         responses: list[str] | list[list[str]],
         model_id: str = "test/model",
+        reasoning: list[str | None] | list[list[str | None]] | None = None,
         **kwargs: Any,
     ) -> None:
         """Build a MockModel with canned per-prompt completion lists.
@@ -23,12 +24,24 @@ class MockModel(Model):
         each string in a single-element list.  Otherwise, if a list of lists is given,
         the inner lists are used directly as the per-prompt completions (e.g. lists of
         4 responses for n=4 completions per prompt).
+
+        ``reasoning``, if given, mirrors ``responses``' shape and supplies the
+        per-completion reasoning trace (``GenerateResult.reasoning``) returned
+        alongside each response. Defaults to ``None`` per completion.
         """
         super().__init__(model_id=model_id, **kwargs)
         normalized: list[list[str]] = [
             [r] if isinstance(r, str) else list(r) for r in responses
         ]
         self.responses = normalized
+        if reasoning is None:
+            self.reasoning: list[list[str | None]] = [
+                [None] * len(r) for r in normalized
+            ]
+        else:
+            self.reasoning = [
+                [r] if not isinstance(r, list) else list(r) for r in reasoning
+            ]
         self._call_count = 0
 
     def cache_key(self) -> tuple:
@@ -56,6 +69,7 @@ class MockModel(Model):
                 f"only {len(self.responses)} canned responses are given"
             )
         canned = self.responses[: len(prompts)]
+        canned_reasoning = self.reasoning[: len(prompts)]
         if any(len(r) != n for r in canned):
             shapes = [len(r) for r in canned]
             raise ValueError(
@@ -70,11 +84,11 @@ class MockModel(Model):
                     "reasoning_tokens": 0,
                     "cost_usd": 0.0,
                 },
-                reasoning=[None] * len(r),
+                reasoning=list(reasoning_for_row),
                 model_id=self._model_id,
                 raw=None,
             )
-            for r in canned
+            for r, reasoning_for_row in zip(canned, canned_reasoning)
         ]
         self.history.extend(results)
         return results
