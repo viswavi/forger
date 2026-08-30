@@ -63,6 +63,7 @@ class MockModel(Model):
         temperature: float | None = None,
         max_tokens: int | None = None,
         stop: list[str] | None = None,
+        show_progress: bool | None = None,
     ) -> list[GenerateResult]:
         """Return self.responses[i] for the i-th prompt; require len == n."""
         self._call_count += 1
@@ -112,11 +113,17 @@ class RecordingMockModel(MockModel):
         temperature: float | None = None,
         max_tokens: int | None = None,
         stop: list[str] | None = None,
+        show_progress: bool | None = None,
     ) -> list[GenerateResult]:
         """Append the current prompt batch to recorded_prompts, then delegate."""
         self.recorded_prompts.append(list(prompts))
         return super().generate_batch(
-            prompts, n=n, temperature=temperature, max_tokens=max_tokens, stop=stop
+            prompts,
+            n=n,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stop=stop,
+            show_progress=show_progress,
         )
 
 

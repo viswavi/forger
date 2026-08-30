@@ -7,6 +7,7 @@ completions from any supported LLM provider.
 from __future__ import annotations
 
 import warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Union
 
 import litellm
@@ -14,6 +15,40 @@ import litellm
 # Type aliases
 Message = dict[str, str]
 Prompt = Union[str, list[Message]]
+
+
+def _batch_completion_with_progress(
+    all_messages: list[list[dict[str, str]]], call_kwargs: dict[str, Any]
+) -> list[Any]:
+    """Concurrent, progress-tracked replacement for litellm.batch_completion.
+
+    Unlike ``litellm.batch_completion`` -- which retrieves ``future.result()``
+    in submission order, so the whole call looks frozen until the *slowest*
+    early-submitted item finishes even if later ones completed first -- this
+    updates a tqdm bar via ``as_completed`` as each call actually finishes.
+    """
+    from tqdm import tqdm
+
+    results: list[Any] = [None] * len(all_messages)
+    model_id = call_kwargs.get("model", "?")
+    max_workers = min(100, len(all_messages))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_idx = {
+            executor.submit(litellm.completion, messages=msgs, **call_kwargs): i
+            for i, msgs in enumerate(all_messages)
+        }
+        for future in tqdm(
+            as_completed(future_to_idx),
+            total=len(all_messages),
+            desc=f"LLM calls ({model_id})",
+            leave=False,
+        ):
+            idx = future_to_idx[future]
+            try:
+                results[idx] = future.result()
+            except Exception as exc:
+                results[idx] = exc
+    return results
 
 
 class GenerateResult(list):
@@ -226,6 +261,7 @@ class Model:
         temperature: float = 0.7,
         max_tokens: int | None = None,
         num_retries: int = 2,
+        show_progress: bool = False,
         **kwargs: Any,
     ) -> None:
         """Create a Model instance.
@@ -239,6 +275,8 @@ class Model:
             max_tokens: Default max tokens. None lets the provider decide.
             num_retries: Retries with exponential backoff on transient
                 failures.
+            show_progress: When True, a multi-prompt generate_batch() call
+                (len(prompts) > 1) shows a live tqdm progress bar to stderr.
             **kwargs: Passed through to litellm.completion()
                 (e.g. api_base, timeout, organization).
         """
@@ -247,6 +285,7 @@ class Model:
         self._temperature = temperature
         self._max_tokens = max_tokens
         self._num_retries = num_retries
+        self._show_progress = show_progress
         self._kwargs = kwargs
         self.history: list[GenerateResult] = []
         self._check_params(
@@ -336,6 +375,7 @@ class Model:
         temperature: float | None = None,
         max_tokens: int | None = None,
         stop: list[str] | None = None,
+        show_progress: bool | None = None,
     ) -> list[GenerateResult]:
         """Generate n responses for each prompt in a batch.
 
@@ -346,6 +386,8 @@ class Model:
             temperature: Sampling temperature. Overrides the instance default.
             max_tokens: Max tokens. Overrides the instance default.
             stop: Stop sequences.
+            show_progress: Per-call override of the instance's show_progress
+                (see __init__). None (default) uses the instance setting.
 
         Returns:
             List of GenerateResult, one per prompt. Each GenerateResult
@@ -382,7 +424,15 @@ class Model:
         if len(all_messages) == 1:
             responses = [litellm.completion(messages=all_messages[0], **call_kwargs)]
         else:
-            responses = litellm.batch_completion(messages=all_messages, **call_kwargs)
+            use_progress = (
+                self._show_progress if show_progress is None else show_progress
+            )
+            if use_progress:
+                responses = _batch_completion_with_progress(all_messages, call_kwargs)
+            else:
+                responses = litellm.batch_completion(
+                    messages=all_messages, **call_kwargs
+                )
         for response in responses:
             # batch_completion returns (rather than raises) per-request exceptions.
             if isinstance(response, Exception):
@@ -572,6 +622,7 @@ class LocalModel(Model):
         temperature: float | None = None,
         max_tokens: int | None = None,
         stop: list[str] | None = None,
+        show_progress: bool | None = None,
     ) -> list[GenerateResult]:
         """Generate ``n`` completions per prompt with the local vLLM engine.
 
@@ -582,6 +633,8 @@ class LocalModel(Model):
             max_tokens: Max generated tokens per completion. Overrides the
                 instance default (which itself defaults to a generous ceiling).
             stop: Optional stop strings.
+            show_progress: Per-call override of the instance's show_progress.
+                None (default) uses the instance setting.
 
         Returns:
             List of GenerateResult, one per prompt, in input order. Each is a
@@ -615,7 +668,7 @@ class LocalModel(Model):
             conversations,
             sampling_params,
             chat_template_kwargs=self._template_kwargs(),
-            use_tqdm=self._show_progress,
+            use_tqdm=self._show_progress if show_progress is None else show_progress,
         )
 
         results: list[GenerateResult] = []
