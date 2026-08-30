@@ -155,7 +155,7 @@ def generate_from_context(
 
 
 def default_extract_answer(text: str) -> str | None:
-    """Extract a final-answer token from a free-form response.
+    r"""Extract a final-answer token from a free-form response.
 
     Tries explicit answer markers in order -- ``ANSWER: <n>``, ``\\boxed{<n>}``,
     ``#### <n>``, ``final answer ... <n>`` -- and falls back to the last number
@@ -293,8 +293,10 @@ def self_taught_reasoner(
                 len(batch_results),
                 len(batch),
             )
-            batch_results = (batch_results + [[]] * len(batch))[: len(batch)]
-        responses_per_item.extend(batch_results)
+        padded: list[list[str]] = list(batch_results) + [[]] * max(
+            0, len(batch) - len(batch_results)
+        )
+        responses_per_item.extend(padded[: len(batch)])
 
     # Build one candidate row per generated response.
     candidates: list[dict] = []

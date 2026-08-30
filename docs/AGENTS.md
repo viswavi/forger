@@ -316,7 +316,8 @@ approach ([Zelikman et al., 2022](https://arxiv.org/abs/2203.14465)), closely re
 (Agarwal et al., 2023). When you have prompts paired with *verified*
 answers (e.g. competition-math problems with checked integer answers) but want long chain-of-thought traces for SFT,
 do not copy reasoning from a stronger teacher -- generate it from the *student* you intend to finetune. This is
-generally necessary for training reasoning-style models on tasks that require extended reasoning, such as difficult math, programming, or embodied reasoning. Sample `n`
+generally necessary for training reasoning-style models on tasks that require extended reasoning, such as
+difficult math, programming, or embodied reasoning. Sample `n`
 solutions per prompt from the student (use `acquire.LocalModel` to run an open-weights reasoning model on-GPU via
 vLLM with a generous `max_tokens`/`max_model_len` so traces are not truncated), keep only the solutions whose final
 answer matches the verified answer, and use each kept trace as a training target. `alter.self_taught_reasoner` implements

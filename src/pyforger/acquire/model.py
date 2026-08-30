@@ -528,7 +528,8 @@ class LocalModel(Model):
             return self._chat_template_kwargs
         return {"enable_thinking": self._enable_thinking}
 
-    def generate_batch(
+    # Returns plain lists, not GenerateResult -- deliberately narrower than Model.
+    def generate_batch(  # type: ignore[override]
         self,
         prompts: list[Prompt],
         *,
@@ -536,7 +537,7 @@ class LocalModel(Model):
         temperature: float | None = None,
         max_tokens: int | None = None,
         stop: list[str] | None = None,
-    ) -> GenerateResult:
+    ) -> list[list[str]]:
         """Generate ``n`` completions per prompt with the local vLLM engine.
 
         Args:
