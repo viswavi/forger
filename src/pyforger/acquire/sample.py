@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections.abc import Generator
 from typing import Any
 
-from pyforger.acquire._model_utils import _build_prompt, _parse_output
+from pyforger.acquire._model_utils import _build_prompt, _parse_output, _reasoning_for
 from pyforger.acquire.model import Model, Prompt
 from pyforger.op import op
 from pyforger.utils import get_formatted_logger
@@ -47,8 +47,10 @@ def _generation_loop(
             )
 
         round_accepts = 0
-        for raw_text in raw_responses:
-            parsed = _parse_output(raw_text, output_schema)
+        for raw_text, reasoning_text in zip(
+            raw_responses, _reasoning_for(raw_responses)
+        ):
+            parsed = _parse_output(raw_text, output_schema, reasoning=reasoning_text)
             if parsed is None:
                 logger.debug(
                     "Parse failed for output (schema=%s)",
@@ -94,7 +96,8 @@ def sample_from_LLM(
 
     Returns:
         List of accepted sample dicts. ``{"text": <raw>}`` when no schema;
-        otherwise the parsed JSON objects.
+        otherwise the parsed JSON objects. When the model returns a reasoning
+        trace for a completion, it is included under the `reasoning` key.
 
     Note:
         Because this is decorated with `@op`, outputs are memoized on disk by argument

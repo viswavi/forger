@@ -112,7 +112,8 @@ Generate or retrieve new rows.
 | `split_reasoning` |   | `str -> (thinking, answer)`: splits a reasoning-model completion on `</think>`. |
 
 `sample_from_LLM` performs `n` LLM calls per input and returns parsed dicts. It does under-the-hood batching and
-validation, making this a superior choice to calling `Model` directly.
+validation, making this a superior choice to calling `Model` directly. Any reasoning traces contained in a completion are
+contained in the output dict under a `reasoning` key.
 
 #### `pyforger.alter`
 
@@ -127,6 +128,8 @@ Transform rows without removing items.
 
 `generate_from_context` performs `samples_per_item` LLM calls per input and returns parsed dicts, with retry against an
 optional JSON schema. If the validated LLM call fails after `num_retries`, we return `None` for the failing slots.
+As with `sample_from_LLM`, a completion's reasoning trace (if any) is attached to its output dict under a `reasoning`
+key.
 
 `self_taught_reasoner` (re-exported from `pyforger.alter`, also in `pyforger.alter.generate`) implements the
 **Self-Taught Reasoner (STaR)** approach ([Zelikman et al., 2022](https://arxiv.org/abs/2203.14465)) -- closely

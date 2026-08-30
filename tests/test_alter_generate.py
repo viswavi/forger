@@ -95,6 +95,18 @@ class TestGenerateFromContextExecution:
         assert result == []
         assert model._call_count == 0
 
+    def test_reasoning_attached_when_model_returns_it(self):
+        """A completion's reasoning trace is carried as a 'reasoning' key."""
+        model = MockModel(responses=["world"], reasoning=["thinking about it"])
+        result = generate_from_context([{"text": "hello"}], "prompt: {text}", model)
+        assert result == [{"text": "world", "reasoning": "thinking about it"}]
+
+    def test_no_reasoning_key_when_model_has_none(self):
+        """Without reasoning from the model, no 'reasoning' key is added."""
+        model = MockModel(responses=["world"])
+        result = generate_from_context([{"text": "hello"}], "prompt: {text}", model)
+        assert result == [{"text": "world"}]
+
 
 # ---------------------------------------------------------------------------
 # Execution — prompt building
