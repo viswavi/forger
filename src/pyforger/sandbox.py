@@ -1,29 +1,51 @@
 """In-process sandboxed code execution via RestrictedPython.
 
-Snippets get most of Python: expressions, control flow, def/class,
-comprehensions, attribute reads via ``safer_getattr``. The deviations:
+Allows most of Python: expressions, control flow, def/class, comprehensions,
+attribute reads via ``safer_getattr``, attribute/item assignment via a
+permissive ``_write_`` guard. Some things not allowed include:
 
-* ``import`` only succeeds for modules whose dotted root is in
-  ``allowed_imports`` (``DEFAULT_ALLOWED_IMPORTS`` by default);
-  relative imports are rejected.
-* Builtins are limited to ``_SAFE_BUILTIN_NAMES`` plus exception
-  classes. No ``open``, ``eval``, ``exec``, ``compile``,
-  ``getattr``/``setattr``, ``globals``/``locals``.
-* Underscore-prefixed attribute access (``x.__class__``,
-  ``().__class__.__bases__``) is rejected at compile time.
+* ``import`` only succeeds for modules whose root is in ``allowed_imports``
+* Builtins are limited to ``_SAFE_BUILTIN_NAMES`` plus stated exceptions.
+  No open, eval, exec, compile, getattr/setattr, globals, or locals.
+* Underscored attribute access (e.g. x.__class__, self._cache) are not allowed.
+* ``nonlocal`` is rejected at compile time (``global`` is fine).
 
-Not a security boundary against adversarial input, just a guardrail
-against accidental damage from machine-generated code.
+Two execution models are supported through the sandbox:
+
+* compile_function/call/execute -- compile once, extract the top-level function,
+  and call it with positional args. Good if your solution is a single function.
+  last top-level function defined, call it directly with positional args.
+* call_method -- compile once (cached, so module-level state is shared across
+  calls, matching how a real grader might compiles a submission once and call it
+  repeatedly for each test case), instantiate the named class fresh each call, and
+ call the named. E.g. the class `Solution` might be loaded once and its method (e.g.
+ `run_program`) called multiple times.
+
+Note that this is not a proper security boundary against adversarial input, but
+rather a guardrail against accidental damage from machine-generated code.
 """
 from __future__ import annotations
 
+import ast
 import builtins
+import copy
+import io
 import signal
+import sys
 from collections.abc import Callable
 from typing import Any
 
 from RestrictedPython import compile_restricted, safe_globals
-from RestrictedPython.Guards import guarded_iter_unpack_sequence, safer_getattr
+from RestrictedPython.Guards import (
+    guarded_iter_unpack_sequence,
+    guarded_unpack_sequence,
+    safer_getattr,
+)
+from RestrictedPython.transformer import (
+    IOPERATOR_TO_STR,
+    RestrictingNodeTransformer,
+    copy_locations,
+)
 
 DEFAULT_ALLOWED_IMPORTS = frozenset(
     {
@@ -42,6 +64,14 @@ DEFAULT_ALLOWED_IMPORTS = frozenset(
         "html",
         "unicodedata",
         "hashlib",
+        "sys",
+        "heapq",
+        "bisect",
+        "typing",
+        "array",
+        "operator",
+        "copy",
+        "random",
     }
 )
 
@@ -63,6 +93,7 @@ _SAFE_BUILTIN_NAMES = (
     "format",
     "frozenset",
     "hex",
+    "input",
     "int",
     "isinstance",
     "issubclass",
@@ -114,6 +145,85 @@ def _inplacevar(op: str, a: Any, b: Any) -> Any:
         raise NotImplementedError(f"sandbox: in-place op {op!r} not supported")
 
 
+class _SandboxPolicy(RestrictingNodeTransformer):
+    """Expanded policy to allow augmented assignment to subscripts/attributes.
+
+    RestrictedPython's default policy rejects ALL augmented assignment to
+    subscripts and attributes (d[k] += v, self.x += v) outright -- unlike
+    most of its other restrictions, there's no globals hook to opt back in.
+    This override allows these the same way the base policy already allows
+    standard augmented assignment (`n += v -> n` = _inplacevar_("+=", n, v)`),
+    routed through the same _write_/_inplacevar_ guards.
+    Note that d[k] += v  and self.x += v are very common in ordinary Python
+    (DP tables, counters, memoized instance state), so this one hard-coded
+    restriction would otherwise pose a significant hindrance.
+    """
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> ast.stmt:
+        node = self.node_contents_visit(node)
+        target = node.target
+        op_str = ast.Constant(IOPERATOR_TO_STR[type(node.op)])
+
+        if isinstance(target, ast.Name):
+            read_target: ast.expr = ast.Name(target.id, ast.Load())
+        elif isinstance(target, ast.Subscript):
+            read_target = ast.Subscript(
+                value=copy.deepcopy(target.value),
+                slice=copy.deepcopy(target.slice),
+                ctx=ast.Load(),
+            )
+        elif isinstance(target, ast.Attribute):
+            read_target = ast.Attribute(
+                value=copy.deepcopy(target.value), attr=target.attr, ctx=ast.Load()
+            )
+        else:  # pragma: no cover -- ast.c only ever produces these three target types
+            raise NotImplementedError(
+                f"sandbox: unknown AugAssign target type: {type(target)}"
+            )
+
+        new_node = ast.Assign(
+            targets=[target],
+            value=ast.Call(
+                func=ast.Name("_inplacevar_", ast.Load()),
+                args=[op_str, read_target, node.value],
+                keywords=[],
+            ),
+        )
+        copy_locations(new_node, node)
+        return new_node
+
+
+class _SandboxPrinter:
+    """# Allow print() to stdout in RestrictedPython without buffering output."""
+
+    def __init__(self, _getattr_: Any = None) -> None:
+        self._getattr_: Any = _getattr_
+
+    def write(self, text: str) -> None:
+        sys.stdout.write(text)
+
+    def __call__(self) -> str:
+        return ""
+
+    def _call_print(self, *objects: Any, **kwargs: Any) -> None:
+        if kwargs.get("file") is None:
+            kwargs["file"] = self
+        else:
+            self._getattr_(kwargs["file"], "write")
+        print(*objects, **kwargs)
+
+
+def _write_(ob: Any) -> Any:
+    """Make the RestrictedPython guard allow attribute/item assignment.
+
+    Without this, RestrictedPython's own ``full_write_guard`` refuses
+    `obj.attr = value` on any plain object that doesn't define
+    ``__guarded_setattr__`` -- which is every ordinary class, This would make
+    typical ``class Solution:``-style code with instance state uncompilable.
+    """
+    return ob
+
+
 def _build_globals(allowed_imports: frozenset[str]) -> dict[str, Any]:
     def _restricted_import(
         name: str,
@@ -139,12 +249,43 @@ def _build_globals(allowed_imports: frozenset[str]) -> dict[str, Any]:
     g = dict(safe_globals)
     g["__builtins__"] = safe_builtins
     g["__name__"] = "sandbox"
+    # Required by RestrictedPython's compiled class statements.
+    g["__metaclass__"] = type
     g["_getattr_"] = safer_getattr
     g["_getitem_"] = lambda obj, key: obj[key]
     g["_getiter_"] = iter
     g["_iter_unpack_sequence_"] = guarded_iter_unpack_sequence
+    g["_unpack_sequence_"] = guarded_unpack_sequence
     g["_inplacevar_"] = _inplacevar
+    g["_write_"] = _write_
+    g["_print_"] = _SandboxPrinter
     return g
+
+
+def _unwrap_main_guard(code: str) -> str:
+    """Strip a trailing ``if __name__ == "__main__": ...``.
+
+    If the last top-level statement is exactly that, then replace the whole
+    snippet with everything before it plus that guard's body, unindented, so
+    the sandbox never needs to see the identifier ``__name__`` at all.
+    RestrictedPython rejects *any* bare name starting with ``_``, dunders
+    included, so this is necessary. Falls back to the code unchanged if it
+    doesn't parse.
+    """
+    try:
+        tree = ast.parse(code)
+        if not tree.body:
+            return code
+        last = tree.body[-1]
+        if (
+            isinstance(last, ast.If)
+            and ast.unparse(last.test).strip() == "__name__ == '__main__'"
+        ):
+            new_body = tree.body[:-1] + last.body
+            return ast.unparse(ast.Module(body=new_body, type_ignores=[]))
+    except Exception:
+        pass
+    return code
 
 
 class SandboxTimeout(TimeoutError):
@@ -158,10 +299,9 @@ def _on_alarm(signum: int, frame: Any) -> None:
 class Sandbox:
     """In-process sandbox. Compile a snippet once, call the function many times.
 
-    Calls run at native Python speed (no subprocess), so there is no
-    process-level isolation; this is not a security boundary against
-    adversarial input. Timeouts use ``signal.SIGALRM`` + ``signal.setitimer``
-    (Unix only), so calls must be on the main thread.
+    Calls run at native Python speed (no subprocess), so there is no process-level
+    isolation; this is shallow protection, not a security boundary against adversarial
+    input.
     """
 
     def __init__(
@@ -184,7 +324,9 @@ class Sandbox:
         self._allowed_imports = frozenset(allowed_imports)
         self._globals = _build_globals(self._allowed_imports)
         self._default_timeout_s = default_timeout_s
+        self._bytecode_cache: dict[str, Any] = {}
         self._compile_cache: dict[str, Callable[..., Any]] = {}
+        self._namespace_cache: dict[str, dict[str, Any]] = {}
         self._result_cache: dict[tuple, Any] | None = {} if cache_results else None
 
     def cache_key(self) -> tuple:
@@ -196,40 +338,55 @@ class Sandbox:
             self._result_cache is not None,
         )
 
+    def _compile_restricted(self, code: str) -> Any:
+        """``compile_restricted``, cached by source string."""
+        cached = self._bytecode_cache.get(code)
+        if cached is not None:
+            return cached
+        try:
+            bytecode = compile_restricted(
+                code, "<sandbox>", "exec", policy=_SandboxPolicy
+            )
+        except SyntaxError as exc:
+            raise ValueError(f"sandbox: failed to compile code: {exc}") from exc
+        self._bytecode_cache[code] = bytecode
+        return bytecode
+
+    def _exec_bytecode(
+        self, bytecode: Any, ns: dict[str, Any], timeout_s: float | None = None
+    ) -> None:
+        """``exec(bytecode, ns)`` under the same SIGALRM budget as ``call``."""
+        self.call(lambda: exec(bytecode, ns), timeout_s=timeout_s)
+
+    def _exec_namespace(self, code: str) -> dict[str, Any]:
+        """Exec ``code`` once (cached by source) into a fresh namespace, and return it.
+
+        Namespace is seeded from the sandbox's globals. Module-level
+        definitions (classes, helper functions, precomputed tables) are
+        shared across calls -- matches how a real grader compiles a
+        submission once and calls its method per test case.
+        """
+        cached = self._namespace_cache.get(code)
+        if cached is not None:
+            return cached
+        bytecode = self._compile_restricted(code)
+        ns: dict[str, Any] = dict(self._globals)
+        self._exec_bytecode(bytecode, ns)
+        self._namespace_cache[code] = ns
+        return ns
+
     def compile_function(self, code: str) -> Callable[..., Any]:
         """Compile ``code`` and return the last function defined; cached by source."""
         cached = self._compile_cache.get(code)
         if cached is not None:
             return cached
-        try:
-            bytecode = compile_restricted(code, "<sandbox>", "exec")
-        except SyntaxError as exc:
-            raise ValueError(f"sandbox: failed to compile code: {exc}") from exc
+        bytecode = self._compile_restricted(code)
 
         # Single dict for globals+locals so helper functions in the snippet
         # can see each other via __globals__.
         ns: dict[str, Any] = dict(self._globals)
         baseline = set(self._globals)
-
-        sigalrm = getattr(signal, "SIGALRM", None)
-        itimer_real = getattr(signal, "ITIMER_REAL", None)
-        if sigalrm is None or itimer_real is None or not hasattr(signal, "setitimer"):
-            raise NotImplementedError(
-                "sandbox: timeouts require Unix signal.setitimer/SIGALRM"
-            )
-        try:
-            old_handler = signal.signal(sigalrm, _on_alarm)
-        except ValueError as exc:
-            raise RuntimeError(
-                "sandbox: timeouts require running on the main thread"
-            ) from exc
-        old_timer = signal.getitimer(itimer_real)
-        signal.setitimer(itimer_real, self._default_timeout_s)
-        try:
-            exec(bytecode, ns)
-        finally:
-            signal.setitimer(itimer_real, old_timer[0], old_timer[1])
-            signal.signal(sigalrm, old_handler)
+        self._exec_bytecode(bytecode, ns)
         for name in reversed(list(ns)):
             if name in baseline:
                 continue
@@ -238,6 +395,63 @@ class Sandbox:
                 self._compile_cache[code] = obj
                 return obj
         raise ValueError("sandbox: code did not define any function to call")
+
+    def call_method(
+        self,
+        code: str,
+        class_name: str,
+        method_name: str,
+        *args: Any,
+        timeout_s: float | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Instantiate `class_name` from `code` and call `method_name` on it.
+
+        Compiles `code` (which must define `class_name` at the module level),
+        instantiates it fresh (no constructor args) and calls `method_name`
+        on that instance with ``*args``/``**kwargs``.
+        """
+        ns = self._exec_namespace(code)
+        cls = ns.get(class_name)
+        if not isinstance(cls, type):
+            raise ValueError(
+                f"sandbox: {class_name!r} is not a class defined in the given code"
+            )
+        instance = cls()
+        method = getattr(instance, method_name)
+        return self.call(method, *args, timeout_s=timeout_s, **kwargs)
+
+    def run_program(
+        self, code: str, *, stdin: str = "", timeout_s: float | None = None
+    ) -> str:
+        """Execute ``code`` as a script; return everything it wrote to stdout.
+
+        Unlike `compile_function`'s "define once, call many times" model,
+        the whole snippet re-execs from scratch every call (fresh globals).
+        """
+        bytecode = self._compile_restricted(_unwrap_main_guard(code))
+        ns: dict[str, Any] = dict(self._globals)
+        ns["__name__"] = "__main__"
+
+        old_stdin, old_stdout = sys.stdin, sys.stdout
+        # A TextIOWrapper over BytesIO (not a bare StringIO) so `.buffer` is
+        # present, to support reading from `sys.stdin.buffer`.
+        sys.stdin = io.TextIOWrapper(
+            io.BytesIO(stdin.encode("utf-8")), encoding="utf-8"
+        )
+        captured = io.StringIO()
+        sys.stdout = captured
+        try:
+            try:
+                self._exec_bytecode(bytecode, ns, timeout_s=timeout_s)
+            except SystemExit as exc:
+                if exc.code not in (None, 0):
+                    raise RuntimeError(
+                        f"sandbox: program exited with code {exc.code!r}"
+                    ) from None
+        finally:
+            sys.stdin, sys.stdout = old_stdin, old_stdout
+        return captured.getvalue()
 
     def call(
         self,
