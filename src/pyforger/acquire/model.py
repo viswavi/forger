@@ -106,7 +106,11 @@ def _validate_params(model_id: str, **params: Any) -> None:
             required = dict(_VALUE_CONSTRAINTS[key])
             break
     thinking = params.get("thinking")
-    if isinstance(thinking, dict) and thinking.get("type") == "enabled":
+    if (
+        isinstance(thinking, dict)
+        and thinking.get("type") == "enabled"
+        and family.startswith("claude")
+    ):
         required.setdefault("temperature", 1.0)
 
     for name, required_value in required.items():
