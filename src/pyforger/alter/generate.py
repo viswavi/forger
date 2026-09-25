@@ -155,9 +155,9 @@ def generate_from_context(
 
 
 def default_extract_answer(text: str) -> str | None:
-    """Extract a final-answer token from a free-form response.
+    r"""Extract a final-answer token from a free-form response.
 
-    Tries explicit answer markers in order -- ``ANSWER: <n>``, ``\\boxed{<n>}``,
+    Tries explicit answer markers in order -- ``ANSWER: <n>``, ``\boxed{<n>}``,
     ``#### <n>``, ``final answer ... <n>`` -- and falls back to the last number
     in the text. Returns the answer as a normalized string (commas stripped), or
     ``None`` when no number is found.
@@ -284,8 +284,10 @@ def self_taught_reasoner(
     responses_per_item: list[list[str]] = []
     for start in range(0, len(prompts), batch_size):
         batch = prompts[start : start + batch_size]
-        batch_results = model.generate_batch(
-            batch, n=n, temperature=temperature, max_tokens=max_tokens
+        batch_results: list[list[str]] = list(
+            model.generate_batch(
+                batch, n=n, temperature=temperature, max_tokens=max_tokens
+            )
         )
         if len(batch_results) != len(batch):
             log.warning(
