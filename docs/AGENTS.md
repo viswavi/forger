@@ -137,8 +137,9 @@ related to **On-Policy Distillation** (Agarwal et al., 2023), since both keep SF
 distribution rather than a separate teacher: for each input row it samples `n` responses from a student `model` and
 keeps only those whose final answer matches the row's reference answer (`reference_field`, default `"final_answer"`).
 Each kept response becomes one
-output row carrying the student's raw response plus, when `split_thinking=True`, its `<think>` trace and answer split
-into `thinking`/`answer` fields; the matched student answer becomes the new ground truth. A row with zero correct
+output row carrying the student's raw response plus, when `split_thinking=True`, its reasoning and answer in
+`thinking`/`answer` fields (reasoning comes from the provider's separate reasoning field when returned, otherwise from
+the inline `<think>` block); the matched student answer becomes the new ground truth. A row with zero correct
 samples contributes nothing (so 8 samples with 4 correct yield 4 rows). Acceptance defaults to extracting an answer
 with `default_extract_answer` (reads `ANSWER:`/`\boxed{}`/`####` markers) and comparing by normalized string equality;
 pass a custom `extract_answer`, `match_fn`, or a `filter_fn` (any `list[dict] -> list[dict]`, e.g. a `pyforger.filter`

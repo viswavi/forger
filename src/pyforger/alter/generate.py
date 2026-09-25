@@ -232,9 +232,11 @@ def self_taught_reasoner(
 
     Each kept response becomes one output row: a copy of the input item with the
     student's raw response in ``response_field`` and, when ``split_thinking`` is
-    set, its ``<think>`` block and answer split into ``thinking_field`` and
-    ``answer_field`` (via :func:`pyforger.acquire.split_reasoning`). The
-    ``reference_field`` is set to the student's matched answer (the
+    set, its reasoning and answer in ``thinking_field`` and ``answer_field``. The
+    reasoning is the provider's separate reasoning field
+    (``GenerateResult.reasoning``) when the model returns one, and otherwise the
+    inline ``<think>`` block split out via :func:`pyforger.acquire.split_reasoning`.
+    The ``reference_field`` is set to the student's matched answer (the
     student-generated answer becomes the ground truth). An item with zero
     matching responses contributes no rows.
 
@@ -256,7 +258,8 @@ def self_taught_reasoner(
         answer_field: Output key for the answer portion of the response.
         student_answer_field: Key holding the extracted student answer on each
             candidate row (also visible to ``filter_fn``).
-        split_thinking: When True, split each response into thinking/answer.
+        split_thinking: When True, fill thinking/answer from the API reasoning,
+            or by splitting an inline ``<think>`` block when there is none.
             When False, the whole response is stored in ``answer_field`` and
             ``thinking_field`` is left empty.
         temperature: Sampling temperature passed to the model.
@@ -301,8 +304,17 @@ def self_taught_reasoner(
     # Build one candidate row per generated response.
     candidates: list[dict] = []
     for item, responses in zip(items, responses_per_item):
-        for raw in responses:
-            thinking, answer = split_reasoning(raw) if split_thinking else ("", raw)
+        # Providers that return reasoning separately (GenerateResult.reasoning)
+        # leave it out of the content; otherwise it is inline as <think>...</think>.
+        reasoning = getattr(responses, "reasoning", None) or []
+        for i, raw in enumerate(responses):
+            api_thinking = reasoning[i] if i < len(reasoning) else None
+            if not split_thinking:
+                thinking, answer = "", raw
+            elif api_thinking:
+                thinking, answer = api_thinking.strip(), raw.strip()
+            else:
+                thinking, answer = split_reasoning(raw)
             candidate = {
                 **item,
                 response_field: raw,
