@@ -106,6 +106,8 @@ Generate or retrieve new rows.
 | `WebRetrievalSource`, `WikiRetrievalSource`, `HFRetrievalSource`, ... |   | Per-backend source classes. |
 | `ArxivRetrievalSource`, `S2RetrievalSource` |   |Per-backend source classes. |
 | `Model` |   | LLM wrapper (initialized by user). Otherwise, LLM generation should be called with `sample_from_LLM`. |
+| `LocalModel` |   | On-GPU vLLM model with `Model`'s interface; loads weights lazily. Zero cost, `<think>` inline. |
+| `split_reasoning` |   | `str -> (thinking, answer)`: splits a reasoning-model completion on `</think>`. |
 
 `sample_from_LLM` performs `n` LLM calls per input and returns parsed dicts. It does under-the-hood batching and
 validation, making this a superior choice to calling `Model` directly.
@@ -121,15 +123,8 @@ Transform rows without removing items.
 | `translate.to_code` | LLM conversion of fields into code in a target programming language. Strips markdown fences. |
 | `execute_code` | Execute Python code in a sandboxed environment and return the result. |
 
-`generate_from_context` is defined in `pyforger.alter.generate` but is not re-exported from `pyforger.alter`. Import
-explicitly:
-
-```python
-from pyforger.alter.generate import generate_from_context
-```
-
-It performs `samples_per_item` LLM calls per input and returns parsed dicts, with retry against an optional JSON schema.
-If the validated LLM call fails after `num_retries`, we return `None` for the failing slots.
+`generate_from_context` performs `samples_per_item` LLM calls per input and returns parsed dicts, with retry against an
+optional JSON schema. If the validated LLM call fails after `num_retries`, we return `None` for the failing slots.
 
 `self_taught_reasoner` (re-exported from `pyforger.alter`, also in `pyforger.alter.generate`) implements the
 **Self-Taught Reasoner (STaR)** approach ([Zelikman et al., 2022](https://arxiv.org/abs/2203.14465)) -- closely
