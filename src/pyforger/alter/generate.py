@@ -9,19 +9,22 @@ from typing import Any, Union
 from pyforger.acquire._model_utils import _build_prompt, _parse_output
 from pyforger.acquire.model import Model, Prompt, split_reasoning
 from pyforger.op import op
+from pyforger.utils import get_field
 
 PromptTemplate = Union[str, Callable[[dict], Prompt]]
 
+_NUMBER = r"-?[0-9][0-9,]*(?:\.[0-9]+)?"
+
 # Answer-extraction patterns tried in order, most explicit first. Each captures
-# the final-answer token from a free-form response. The trailing-number fallback
-# is applied only if none of these match.
+# the final-answer token from a free-form response; the last is a trailing-number
+# fallback, applied only if none of the explicit markers match.
 _ANSWER_PATTERNS = [
-    re.compile(r"ANSWER\s*[:=]\s*\$?\\?\(?\$?\s*(-?[0-9][0-9,]*(?:\.[0-9]+)?)", re.I),
-    re.compile(r"\\boxed\{\s*\$?\s*(-?[0-9][0-9,]*(?:\.[0-9]+)?)\s*\$?\s*\}"),
-    re.compile(r"####\s*(-?[0-9][0-9,]*(?:\.[0-9]+)?)"),
-    re.compile(r"final answer\s*(?:is|:|=)?\s*\$?(-?[0-9][0-9,]*(?:\.[0-9]+)?)", re.I),
+    re.compile(rf"ANSWER\s*[:=]\s*\$?\\?\(?\$?\s*({_NUMBER})", re.I),
+    re.compile(rf"\\boxed\{{\s*\$?\s*({_NUMBER})\s*\$?\s*\}}"),
+    re.compile(rf"####\s*({_NUMBER})"),
+    re.compile(rf"final answer\s*(?:is|:|=)?\s*\$?({_NUMBER})", re.I),
+    re.compile(_NUMBER),
 ]
-_TRAILING_NUMBER = re.compile(r"-?[0-9][0-9,]*(?:\.[0-9]+)?")
 
 
 def _get_logger() -> logging.Logger:
@@ -170,9 +173,8 @@ def default_extract_answer(text: str) -> str | None:
     for pattern in _ANSWER_PATTERNS:
         matches = pattern.findall(text)
         if matches:
-            return matches[-1].replace(",", "").strip()
-    numbers = _TRAILING_NUMBER.findall(text)
-    return numbers[-1].replace(",", "") if numbers else None
+            return matches[-1].replace(",", "")
+    return None
 
 
 def _normalized_equal(a: Any, b: Any) -> bool:
@@ -284,13 +286,11 @@ def self_taught_reasoner(
     prompts: list[Prompt] = [_resolve_prompt(prompt_fn, item) for item in items]
 
     # Sample n responses per item, batching items together for throughput.
-    responses_per_item: list[list[str]] = []
+    item_responses: list[tuple[dict, list[str]]] = []
     for start in range(0, len(prompts), batch_size):
         batch = prompts[start : start + batch_size]
-        batch_results: list[list[str]] = list(
-            model.generate_batch(
-                batch, n=n, temperature=temperature, max_tokens=max_tokens
-            )
+        batch_results = model.generate_batch(
+            batch, n=n, temperature=temperature, max_tokens=max_tokens
         )
         if len(batch_results) != len(batch):
             log.warning(
@@ -298,12 +298,12 @@ def self_taught_reasoner(
                 len(batch_results),
                 len(batch),
             )
-            batch_results = (batch_results + [[]] * len(batch))[: len(batch)]
-        responses_per_item.extend(batch_results)
+        # zip drops items left without results; they contribute no rows.
+        item_responses.extend(zip(items[start : start + batch_size], batch_results))
 
     # Build one candidate row per generated response.
     candidates: list[dict] = []
-    for item, responses in zip(items, responses_per_item):
+    for item, responses in item_responses:
         # Providers that return reasoning separately (GenerateResult.reasoning)
         # leave it out of the content; otherwise it is inline as <think>...</think>.
         reasoning = getattr(responses, "reasoning", None) or []
@@ -332,7 +332,10 @@ def self_taught_reasoner(
             candidate
             for candidate in candidates
             if candidate[student_answer_field] is not None
-            and match(candidate[student_answer_field], candidate[reference_field])
+            and match(
+                candidate[student_answer_field],
+                get_field(candidate, reference_field, "alter.self_taught_reasoner"),
+            )
         ]
 
     # The student-generated answer becomes the ground truth for kept rows.

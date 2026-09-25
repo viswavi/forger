@@ -342,7 +342,7 @@ math, programming, or embodied reasoning. Sample `n` solutions per prompt from t
 run an open-weights reasoning model on-GPU via vLLM with a generous `max_tokens`/`max_model_len` so traces are not
 truncated), keep only the solutions whose final answer matches the verified answer, and use each kept trace as a
 training target. `alter.self_taught_reasoner` implements exactly this: it returns one row per correct sample (a prompt
-with 0 correct samples drops out), with the student's `<think>` trace and answer split into separate fields. Because the
+with 0 correct samples drops out), with the student's reasoning trace and answer split into separate fields. Because the
 traces are in the student's own distribution, this distills the skill of *extending its own thinking to reach the right
 answer* far better than off-policy teacher traces, and answer-verification keeps only correct reasoning. Filtering on
 the final answer alone admits the occasional "right answer, wrong reasoning" trace; add a `by_llm_score` judge over the

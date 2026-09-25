@@ -519,11 +519,7 @@ class LocalModel(Model):
                 tensor_parallel_size=self._tensor_parallel_size,
                 dtype=self._dtype,
                 seed=self._seed,
-                **(
-                    {"max_model_len": self._max_model_len}
-                    if self._max_model_len is not None
-                    else {}
-                ),
+                max_model_len=self._max_model_len,
                 **self._kwargs,
             )
         return self._llm
@@ -639,7 +635,4 @@ def split_reasoning(text: str) -> tuple[str, str]:
     if _THINK_CLOSE not in text:
         return "", text.strip()
     thinking, _, answer = text.partition(_THINK_CLOSE)
-    thinking = thinking.strip()
-    if thinking.startswith(_THINK_OPEN):
-        thinking = thinking[len(_THINK_OPEN) :].strip()
-    return thinking, answer.strip()
+    return thinking.strip().removeprefix(_THINK_OPEN).strip(), answer.strip()
