@@ -84,3 +84,59 @@ class TestAnswerMatching:
             [{"prompt": "6*7?", "final_answer": "42"}], "{prompt}", model, n=1
         )
         assert items == []
+
+
+class TestCustomFilter:
+    """extract_answer still fills the student answer when filter_fn is given."""
+
+    @staticmethod
+    def _spelled_out(text: str) -> str | None:
+        """Extract a spelled-out answer the default extractor cannot read."""
+        return "42" if "forty-two" in text else None
+
+    def test_extract_answer_feeds_filter_fn(self, caplog):
+        """filter_fn sees the custom extractor's answer, with a warning logged."""
+        seen: list[dict] = []
+
+        def keep_all(rows: list[dict]) -> list[dict]:
+            seen.extend(rows)
+            return rows
+
+        model = MockModel(responses=["It is forty-two."])
+        items = self_taught_reasoner(
+            [{"prompt": "6*7?", "final_answer": "forty-two"}],
+            "{prompt}",
+            model,
+            n=1,
+            extract_answer=self._spelled_out,
+            filter_fn=keep_all,
+        )
+        assert seen[0]["student_final_answer"] == "42"
+        assert items[0]["final_answer"] == "42"  # student answer becomes the truth
+        assert "extract_answer still runs when filter_fn is given" in caplog.text
+
+    def test_no_warning_without_custom_extractor(self, caplog):
+        """filter_fn alone uses the default extractor and logs no warning."""
+        model = MockModel(responses=["ANSWER: 42"])
+        items = self_taught_reasoner(
+            [{"prompt": "6*7?", "final_answer": "42"}],
+            "{prompt}",
+            model,
+            n=1,
+            filter_fn=lambda rows: rows,
+        )
+        assert items[0]["student_final_answer"] == "42"
+        assert "extract_answer still runs" not in caplog.text
+
+    def test_no_warning_without_filter_fn(self, caplog):
+        """A custom extractor on the default matching path logs no warning."""
+        model = MockModel(responses=["It is forty-two."])
+        items = self_taught_reasoner(
+            [{"prompt": "6*7?", "final_answer": "42"}],
+            "{prompt}",
+            model,
+            n=1,
+            extract_answer=self._spelled_out,
+        )
+        assert len(items) == 1
+        assert "extract_answer still runs" not in caplog.text

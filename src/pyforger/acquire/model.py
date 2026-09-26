@@ -490,19 +490,32 @@ class LocalModel(Model):
     def cache_key(self) -> tuple:
         """Stable hash key for @op caching from the functional configuration.
 
-        Includes the sampling/template settings that affect outputs so that, for
-        example, two ``LocalModel`` instances with different temperatures or
-        ``enable_thinking`` do not collide in the disk cache.
+        Includes the sampling settings, the chat-template kwargs actually sent,
+        ``dtype`` and every extra ``vllm.LLM`` kwarg (e.g. ``revision``,
+        ``quantization``), since any of those can change outputs; two instances
+        that differ in them must not share cached completions.
+        ``gpu_memory_utilization`` and ``tensor_parallel_size`` only affect speed
+        and memory, so they are left out -- except with ``max_model_len=-1``,
+        where vLLM sizes the context to fit memory and they cap generation
+        length. ``show_progress`` is always left out.
         """
+        engine_kwargs = tuple(sorted(self._kwargs.items(), key=lambda kv: str(kv[0])))
+        memory = (
+            (self._gpu_memory_utilization, self._tensor_parallel_size)
+            if self._max_model_len == -1
+            else ()
+        )
         return (
             type(self).__name__,
             self._model_id,
             self._temperature,
             self._max_tokens,
             self._max_model_len,
-            self._enable_thinking,
-            tuple(sorted((self._chat_template_kwargs or {}).items())),
+            self._dtype,
+            self._template_kwargs(),
             self._seed,
+            engine_kwargs,
+            memory,
         )
 
     def _check_params(self, **params: Any) -> None:

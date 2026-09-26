@@ -207,40 +207,27 @@ def self_taught_reasoner(
     This implements the Self-Taught Reasoner (STaR) approach of Zelikman et al.,
     "STaR: Bootstrapping Reasoning With Reasoning" (https://arxiv.org/abs/2203.14465):
     the model generates its own reasoning traces and only those that reach the
-    verified answer are retained as training targets. It is closely related to
-    on-policy distillation (Agarwal et al., 2023) -- in both cases the SFT traces
-    come from the student's own distribution rather than a separate teacher.
+    verified answer are retained as training targets.
 
     For each input item, ``n`` responses are sampled from ``model`` (the
-    "student"). A response is kept only when its final answer matches the item's
-    reference answer, so the surviving rows carry student-generated reasoning
-    traces that arrive at the verified answer. This is the standard way to build
-    on-policy SFT data: the traces are in the student's own distribution, which
-    distills better than traces from a different (teacher) model.
+    "student"). A response is only kept when the final answer matches the item's
+    reference, so the surviving rows carry student-generated reasoning traces that
+    arrive at a verified answer.
 
     Acceptance is decided in one of two ways:
 
-    * **Answer matching (default).** ``extract_answer`` pulls a comparable answer
-      out of each response (default: :func:`default_extract_answer`, which reads
-      ``ANSWER: <n>`` / ``\boxed{}`` / ``####`` markers). A response is kept when
+    * **Answer matching (default):**  A response is kept when
       ``match_fn(student_answer, item[reference_field])`` is true (default:
       string-normalized equality).
-    * **Custom filter.** Pass ``filter_fn`` -- any ``list[dict] -> list[dict]``
-      callable, e.g. a ``pyforger.filter`` op bound with ``functools.partial`` --
-      to decide acceptance over the candidate rows yourself. Candidate rows
-      expose both ``student_answer_field`` and ``reference_field``, so e.g.
-      ``partial(filter.by_exact_agreement, field_a="student_final_answer",
-      field_b="final_answer")`` reproduces the default.
+    * **Custom filter:** Pass ``filter_fn`` -- any ``list[dict] -> list[dict]``
+      callable.
 
-    Each kept response becomes one output row: a copy of the input item with the
-    student's raw response in ``response_field`` and, when ``split_thinking`` is
-    set, its reasoning and answer in ``thinking_field`` and ``answer_field``. The
-    reasoning is the provider's separate reasoning field
-    (``GenerateResult.reasoning``) when the model returns one, and otherwise the
-    inline ``<think>`` block split out via :func:`pyforger.acquire.split_reasoning`.
-    The ``reference_field`` is set to the student's matched answer (the
-    student-generated answer becomes the ground truth). An item with zero
-    matching responses contributes no rows.
+    Each kept response becomes a separate output row (e.g. if ``n`` responses
+    are sampled and two are correct, there will be two new output rows created).
+    An item with zero matching responses contributes no rows. The reasoning is
+    the provider's separate reasoning field (``GenerateResult.reasoning``) when
+    the model returns one, and otherwise the inline ``<think>`` block split out
+    via `pyforger.acquire.split_reasoning`.
 
     Args:
         items: Input rows. Each must contain ``reference_field``.
@@ -249,8 +236,8 @@ def self_taught_reasoner(
         model: Student model to sample from.
         n: Number of responses to sample per item.
         reference_field: Key holding each item's ground-truth answer.
-        extract_answer: ``str -> answer`` extractor for the default matching
-            path. Ignored when ``filter_fn`` is given.
+        extract_answer: ``str -> answer`` extractor. Do not use when filter_fn
+            is provided.
         match_fn: ``(student_answer, reference) -> bool`` for the default path.
             Ignored when ``filter_fn`` is given.
         filter_fn: Optional ``list[dict] -> list[dict]`` acceptance filter over
@@ -269,8 +256,7 @@ def self_taught_reasoner(
         batch_size: Number of items per ``model.generate_batch()`` call.
 
     Returns:
-        Output rows, in item order, one per accepted response. The length is the
-        total number of accepted responses (between 0 and ``len(items) * n``).
+        Output rows, in item order, one per accepted response.
     """
     if n <= 0:
         raise ValueError("n must be positive")
@@ -280,6 +266,12 @@ def self_taught_reasoner(
         return []
 
     log = _get_logger()
+    if extract_answer is not None and filter_fn is not None:
+        log.warning(
+            "self_taught_reasoner: extract_answer still runs when filter_fn is "
+            "given; it fills %r on the candidate rows filter_fn receives.",
+            student_answer_field,
+        )
     extract = extract_answer if extract_answer is not None else default_extract_answer
     match = match_fn if match_fn is not None else _normalized_equal
 
