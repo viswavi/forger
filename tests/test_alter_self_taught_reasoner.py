@@ -1,9 +1,10 @@
 """Tests for self_taught_reasoner ALTER building block."""
 from __future__ import annotations
 
+import pytest
 from fixtures import MockModel
 
-from pyforger.alter.generate import self_taught_reasoner
+from pyforger.alter.generate import _normalized_equal, self_taught_reasoner
 
 
 class TestSplitThinking:
@@ -84,6 +85,82 @@ class TestAnswerMatching:
             [{"prompt": "6*7?", "final_answer": "42"}], "{prompt}", model, n=1
         )
         assert items == []
+
+    @pytest.mark.parametrize(
+        "response, reference, answer",
+        [
+            ("ANSWER: 1000", "1,000", "1000"),
+            ("ANSWER: 1,000", "1000", "1000"),
+            ("ANSWER: 1,000", 1000, "1000"),
+            ("#### 1,234,567", " 1,234,567 ", "1234567"),
+        ],
+    )
+    def test_thousands_separators_match(self, response, reference, answer):
+        """Commas in a numeric reference don't block a correct sample.
+
+        The kept row's new ground truth is the extracted answer, without commas.
+        """
+        model = MockModel(responses=[response])
+        items = self_taught_reasoner(
+            [{"prompt": "q", "final_answer": reference}], "{prompt}", model, n=1
+        )
+        assert len(items) == 1
+        assert items[0]["final_answer"] == answer
+
+    @pytest.mark.parametrize(
+        "response, reference",
+        [("ANSWER: 12", "1,2"), ("\\boxed{34}", "3,4"), ("ANSWER: 35", "3,5")],
+    )
+    def test_list_or_decimal_comma_reference_rejects_merged_digits(
+        self, response, reference
+    ):
+        """A wrong answer equal to a list's digits run together is dropped."""
+        model = MockModel(responses=[response])
+        items = self_taught_reasoner(
+            [{"prompt": "q", "final_answer": reference}], "{prompt}", model, n=1
+        )
+        assert items == []
+
+
+class TestNormalizedEqual:
+    """The default match_fn normalizes both sides the same way."""
+
+    @pytest.mark.parametrize(
+        "a, b",
+        [
+            ("42", "42"),
+            ("42", 42),
+            (" 42 ", "42"),
+            ("1000", "1,000"),
+            ("-1,000.5", "-1000.5"),
+            ("Paris, France", "Paris, France"),
+        ],
+    )
+    def test_equal(self, a, b):
+        """Equal answers match regardless of whitespace, type or separators."""
+        assert _normalized_equal(a, b)
+        assert _normalized_equal(b, a)
+
+    @pytest.mark.parametrize(
+        "a, b",
+        [
+            ("42", "41"),
+            ("Paris, France", "Paris France"),  # commas only dropped from numbers
+            ("1, 2", "1 2"),  # starts with a number but isn't one
+            ("1,2", "12"),  # a list, not thousands grouping
+            ("-2,1", "-21"),
+            ("1,2,3", "123"),
+            ("3,5", "35"),  # a decimal comma
+            ("1,00,0", "1000"),  # malformed grouping is left alone
+            ("1,000,2", "10002"),  # grouping only at the start doesn't count
+            ("12,34", "1234"),  # 2-digit groups read as a list, not a number
+            ("1,000", "1000.5"),
+        ],
+    )
+    def test_not_equal(self, a, b):
+        """Different answers, and text differing only by a comma, don't match."""
+        assert not _normalized_equal(a, b)
+        assert not _normalized_equal(b, a)
 
 
 class TestCustomFilter:

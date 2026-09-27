@@ -14,6 +14,8 @@ from pyforger.utils import get_field
 PromptTemplate = Union[str, Callable[[dict], Prompt]]
 
 _NUMBER = r"-?[0-9][0-9,]*(?:\.[0-9]+)?"
+# A number written with thousands separators, e.g. "-1,234,567.5".
+_GROUPED_NUMBER_RE = re.compile(r"-?[0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?")
 
 # Answer-extraction patterns tried in order, most explicit first. Each captures
 # the final-answer token from a free-form response; the last is a trailing-number
@@ -177,9 +179,21 @@ def default_extract_answer(text: str) -> str | None:
     return None
 
 
+def _normalize_answer(value: Any) -> str:
+    """Stripped string form, with thousands separators dropped from numbers."""
+    text = str(value).strip()
+    return text.replace(",", "") if _GROUPED_NUMBER_RE.fullmatch(text) else text
+
+
 def _normalized_equal(a: Any, b: Any) -> bool:
-    """Compare two answers by stripped string form (handles int/str mismatch)."""
-    return str(a).strip() == str(b).strip()
+    """Compare two answers by normalized string form (handles int/str mismatch).
+
+    Both sides get the same normalization, so a reference of ``"1,000"`` matches
+    the ``"1000"`` that :func:`default_extract_answer` returns. Other commas are
+    kept, so a list such as ``"1,2"`` or a decimal comma such as ``"3,5"`` does
+    not match ``"12"`` or ``"35"``.
+    """
+    return _normalize_answer(a) == _normalize_answer(b)
 
 
 @op(name="alter.self_taught_reasoner")
