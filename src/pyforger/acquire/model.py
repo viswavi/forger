@@ -405,6 +405,20 @@ class Model:
 _DEFAULT_LOCAL_MAX_TOKENS = 32768
 
 
+def _import_vllm() -> Any:
+    """Import vllm, with an install hint when it is not installed."""
+    try:
+        import vllm
+    except ModuleNotFoundError as e:
+        if e.name != "vllm":  # vllm is installed but one of its imports failed
+            raise
+        raise ImportError(
+            "vllm is required for LocalModel generation. "
+            'Install it with: pip install "pyforger[vllm]"'
+        ) from e
+    return vllm
+
+
 class LocalModel(Model):
     """On-GPU model served locally via vLLM, with the same interface as ``Model``.
 
@@ -416,7 +430,8 @@ class LocalModel(Model):
 
     The engine is created lazily so that importing ``pyforger`` -- and even
     constructing a ``LocalModel`` -- never requires ``vllm`` or a GPU. ``vllm``
-    is imported only when generation actually happens.
+    is imported only when generation actually happens; it is an optional
+    dependency, installed with ``pip install "pyforger[vllm]"``.
 
     Chat prompts are rendered with the model's own chat template. For reasoning
     models (e.g. Qwen3) the generated text contains a ``<think>...</think>``
@@ -496,8 +511,8 @@ class LocalModel(Model):
         that differ in them must not share cached completions.
         ``gpu_memory_utilization`` and ``tensor_parallel_size`` only affect speed
         and memory, so they are left out -- except with ``max_model_len=-1``,
-        where vLLM sizes the context to fit memory and they cap generation
-        length. ``show_progress`` is always left out.
+        where vLLM (0.14+) sizes the context to fit memory and they cap
+        generation length. ``show_progress`` is always left out.
         """
         engine_kwargs = tuple(sorted(self._kwargs.items(), key=lambda kv: str(kv[0])))
         memory = (
@@ -524,9 +539,7 @@ class LocalModel(Model):
     def _engine(self) -> Any:
         """Lazily construct and cache the vLLM engine."""
         if self._llm is None:
-            from vllm import LLM
-
-            self._llm = LLM(
+            self._llm = _import_vllm().LLM(
                 model=self._model_id,
                 gpu_memory_utilization=self._gpu_memory_utilization,
                 tensor_parallel_size=self._tensor_parallel_size,
@@ -572,7 +585,7 @@ class LocalModel(Model):
         if not prompts:
             return []
 
-        from vllm import SamplingParams
+        vllm = _import_vllm()
 
         temperature = temperature if temperature is not None else self._temperature
         if max_tokens is None:
@@ -583,7 +596,7 @@ class LocalModel(Model):
             )
 
         conversations = [_to_messages(prompt) for prompt in prompts]
-        sampling_params = SamplingParams(
+        sampling_params = vllm.SamplingParams(
             n=n,
             temperature=temperature,
             max_tokens=max_tokens,

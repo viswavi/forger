@@ -127,6 +127,33 @@ class TestLazyEngine:
         assert engines[0].init_kwargs["max_model_len"] is None
 
 
+class TestMissingVllm:
+    """Generating without vllm installed fails with an install hint."""
+
+    def test_generation_explains_how_to_install(self, monkeypatch):
+        """A missing vllm raises ImportError naming the pyforger[vllm] extra."""
+        monkeypatch.setitem(sys.modules, "vllm", None)  # makes `import vllm` fail
+        model = LocalModel("Qwen/Qwen3-4B")
+        with pytest.raises(ImportError, match=r'pip install "pyforger\[vllm\]"'):
+            model.generate("a")
+
+    def test_empty_batch_needs_no_vllm(self, monkeypatch):
+        """An empty batch returns [] even without vllm."""
+        monkeypatch.setitem(sys.modules, "vllm", None)
+        assert LocalModel("Qwen/Qwen3-4B").generate_batch([]) == []
+
+    def test_broken_vllm_install_is_not_masked(self, monkeypatch, tmp_path):
+        """If vllm is installed but one of its own imports fails, that surfaces."""
+        package = tmp_path / "vllm"
+        package.mkdir()
+        (package / "__init__.py").write_text("import _pyforger_missing_dependency\n")
+        monkeypatch.delitem(sys.modules, "vllm", raising=False)
+        monkeypatch.syspath_prepend(str(tmp_path))
+        with pytest.raises(ModuleNotFoundError) as excinfo:
+            LocalModel("Qwen/Qwen3-4B").generate("a")
+        assert excinfo.value.name == "_pyforger_missing_dependency"
+
+
 class TestNoLiteLLMValidation:
     """LocalModel skips LiteLLM's parameter registry, which has no vLLM ids."""
 

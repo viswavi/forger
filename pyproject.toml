@@ -61,6 +61,11 @@ validation = [
     "pyyaml",
     "jsonschema",
 ]
+# LocalModel (on-GPU inference). 0.9.0 is the first vLLM whose LLM.chat takes
+# chat_template_kwargs.
+vllm = [
+    "vllm>=0.9.0",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["forger"]

@@ -106,7 +106,7 @@ Generate or retrieve new rows.
 | `WebRetrievalSource`, `WikiRetrievalSource`, `HFRetrievalSource`, ... |   | Per-backend source classes. |
 | `ArxivRetrievalSource`, `S2RetrievalSource` |   |Per-backend source classes. |
 | `Model` |   | LLM wrapper (initialized by user). Otherwise, LLM generation should be called with `sample_from_LLM`. |
-| `LocalModel` |   | On-GPU vLLM model with `Model`'s interface; loads weights lazily. Zero cost, `<think>` inline. |
+| `LocalModel` |   | On-GPU vLLM model with `Model`'s interface (needs the `vllm` extra). Zero cost, `<think>` inline. |
 | `split_reasoning` |   | `str -> (thinking, answer)`: splits a reasoning-model completion on `</think>`. |
 
 `sample_from_LLM` performs `n` LLM calls per input and returns parsed dicts. It does under-the-hood batching and
@@ -141,6 +141,7 @@ pass a custom `extract_answer`, `match_fn`, or a `filter_fn` (any `list[dict] ->
 op bound with `functools.partial`) to override. Pair it with `LocalModel` to generate student traces on-GPU for SFT.
 
 ```python
+# LocalModel needs vLLM: pip install "pyforger[vllm]"
 from pyforger.alter import self_taught_reasoner
 from pyforger.acquire import LocalModel
 
