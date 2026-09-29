@@ -250,8 +250,10 @@ def self_taught_reasoner(
         model: Student model to sample from.
         n: Number of responses to sample per item.
         reference_field: Key holding each item's ground-truth answer.
-        extract_answer: ``str -> answer`` extractor. Do not use when filter_fn
-            is provided.
+        extract_answer: ``str -> answer`` extractor that fills
+            ``student_answer_field`` on every candidate. It still runs when
+            ``filter_fn`` is given (a warning is logged), and the filter sees
+            its output.
         match_fn: ``(student_answer, reference) -> bool`` for the default path.
             Ignored when ``filter_fn`` is given.
         filter_fn: Optional ``list[dict] -> list[dict]`` acceptance filter over
