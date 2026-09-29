@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import copy
 from typing import Any
+from unittest.mock import patch
 
-from pyforger import DataSpec, NodeType
 from pyforger.acquire import (
     RetrievalSource,
     RetrieveMode,
@@ -42,72 +42,95 @@ class MockRetrievalSource(RetrievalSource):
 
 
 class TestRetrieve:
-    """Retrieve() and wrappers return DataSpec and behave as specified."""
+    """Retrieve() and wrappers return list with specified length and format."""
 
-    def test_retrieve_returns_dataspec(self):
-        """Retrieve with a mock source returns a DataSpec with node_type ACQUIRE."""
+    def test_retrieve_returns_list(self):
+        """Retrieve with a mock source returns retrieval results."""
         source = MockRetrievalSource([{"text": "a"}, {"text": "b"}])
-        spec = retrieve(source, mode=RetrieveMode.QUERY, queries=["x"])
-        assert isinstance(spec, DataSpec)
-        assert spec.node_type == NodeType.ACQUIRE
-
-    def test_retrieve_no_execution_on_build(self):
-        """Building retrieve(...) does not call source.fetch."""
-        fetch_called = False
-
-        class TrackingSource(MockRetrievalSource):
-            def fetch(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
-                nonlocal fetch_called
-                fetch_called = True
-                return super().fetch(*args, **kwargs)
-
-        source = TrackingSource([{"text": "a"}])
-        retrieve(source, mode=RetrieveMode.RANDOM, n=5)
-        assert not fetch_called
+        result = retrieve(source, mode=RetrieveMode.QUERY, queries=["x"])
+        assert isinstance(result, list)
+        assert len(result) == 2
+        assert isinstance(result[0], dict)
 
     def test_retrieve_execute_returns_source_result(self):
-        """Execute returns the list from source.fetch with query stamped."""
+        """retrieve() returns the list from source.fetch with query stamped."""
         source = MockRetrievalSource([{"text": "a"}])
-        spec = retrieve(source, mode=RetrieveMode.QUERY)
-        result = spec.execute_fn()
-        assert result == [{"text": "a", "query": None}]
+        results = retrieve(source, mode=RetrieveMode.QUERY)
+        assert results == [{"text": "a", "query": None}]
 
-    def test_retrieve_has_no_dependencies(self):
-        """Retrieve node has no upstream dependencies."""
-        source = MockRetrievalSource([])
-        spec = retrieve(source)
-        assert spec.get_dependencies() == []
+    @patch("pyforger.acquire.sources.HFRetrievalSource.fetch")
+    def test_retrieve_from_hf_returns_list(self, mock_fetch):
+        """Return a list of datasets from retrieve_from_hf."""
+        mock_fetch.return_value = [
+            {"row_idx": i, "dataset_id": "some/dataset", "text": f"row{i}"}
+            for i in range(5)
+        ]
+        results = retrieve_from_hf("some/dataset", n=5)
+        assert isinstance(results, list)
+        assert len(results) == 5
+        assert all(isinstance(r, dict) for r in results)
 
-    def test_retrieve_from_hf_returns_dataspec(self):
-        """Return a DataSpec from retrieve_from_hf."""
-        spec = retrieve_from_hf("some/dataset", n=5)
-        assert isinstance(spec, DataSpec)
-        assert spec.node_type == NodeType.ACQUIRE
-        assert spec.get_dependencies() == []
+    @patch("pyforger.acquire.sources.WebRetrievalSource.fetch")
+    def test_retrieve_from_web_returns_list(self, mock_fetch):
+        """Return search results from retrieve_from_web."""
+        mock_fetch.return_value = [
+            {
+                "text": f"snippet {i}",
+                "id": f"http://source/{i}",
+                "title": f"t{i}",
+                "url": f"http://source/{i}",
+            }
+            for i in range(5)
+        ]
+        results = retrieve_from_web(queries=["test"], n=5)
+        assert isinstance(results, list)
+        assert len(results) == 5
+        assert all(isinstance(r, dict) for r in results)
 
-    def test_retrieve_from_web_returns_dataspec(self):
-        """Return a DataSpec from retrieve_from_web."""
-        spec = retrieve_from_web(queries=["test"], n=3)
-        assert isinstance(spec, DataSpec)
-        assert spec.get_dependencies() == []
+    @patch("pyforger.acquire.sources.WikiRetrievalSource.fetch")
+    def test_retrieve_from_wiki_returns_list(self, mock_fetch):
+        """Return search results from retrieve_from_wiki."""
+        mock_fetch.return_value = [
+            {
+                "title": f"Python page {i}",
+                "url": f"http://wiki/{i}",
+                "snippet": f"snippet {i}",
+            }
+            for i in range(3)
+        ]
+        results = retrieve_from_wiki(queries=["Python"], n=3)
+        assert isinstance(results, list)
+        assert len(results) == 3
+        assert all(isinstance(r, dict) for r in results)
 
-    def test_retrieve_from_wiki_returns_dataspec(self):
-        """Return a DataSpec from retrieve_from_wiki."""
-        spec = retrieve_from_wiki(queries=["Python"], n=3)
-        assert isinstance(spec, DataSpec)
-        assert spec.get_dependencies() == []
+    @patch("pyforger.acquire.sources.ArxivRetrievalSource.fetch")
+    def test_retrieve_from_arxiv_returns_list(self, mock_fetch):
+        """Return search results from retrieve_from_arxiv."""
+        mock_fetch.return_value = [
+            {"title": f"paper {i}", "id": f"arxiv:{i}", "summary": f"summary {i}"}
+            for i in range(5)
+        ]
+        results = retrieve_from_arxiv(queries=["machine learning"], n=5)
+        assert isinstance(results, list)
+        assert len(results) == 5
+        assert all(isinstance(r, dict) for r in results)
 
-    def test_retrieve_from_arxiv_returns_dataspec(self):
-        """Return a DataSpec from retrieve_from_arxiv."""
-        spec = retrieve_from_arxiv(queries=["machine learning"], n=5)
-        assert isinstance(spec, DataSpec)
-        assert spec.get_dependencies() == []
-
-    def test_retrieve_from_s2_returns_dataspec(self):
-        """Return a DataSpec from retrieve_from_s2."""
-        spec = retrieve_from_s2(queries=["NLP"], n=5)
-        assert isinstance(spec, DataSpec)
-        assert spec.get_dependencies() == []
+    @patch("pyforger.acquire.sources.S2RetrievalSource.fetch")
+    def test_retrieve_from_s2_returns_list(self, mock_fetch):
+        """Return search results from retrieve_from_s2."""
+        mock_fetch.return_value = [
+            {
+                "text": f"abstract {i}",
+                "id": f"s2:{i}",
+                "title": f"paper {i}",
+                "summary": f"summary {i}",
+            }
+            for i in range(5)
+        ]
+        results = retrieve_from_s2(queries=["NLP"], n=5)
+        assert isinstance(results, list)
+        assert len(results) == 5
+        assert all(isinstance(r, dict) for r in results)
 
 
 class TestMultiQueryRetrieve:
@@ -116,41 +139,24 @@ class TestMultiQueryRetrieve:
     def test_multi_query_flat_output(self):
         """Multiple queries produce a flat list with correct query tags."""
         source = MockRetrievalSource([{"text": "x"}, {"text": "y"}])
-        spec = retrieve(source, mode=RetrieveMode.QUERY, queries=["a", "b"], n=10)
-        result = spec.execute_fn()
+        result = retrieve(source, mode=RetrieveMode.QUERY, queries=["a", "b"], n=10)
         assert len(result) == 4
         assert all(r["query"] == "a" for r in result[:2])
         assert all(r["query"] == "b" for r in result[2:])
         assert [r["text"] for r in result] == ["x", "y", "x", "y"]
 
     def test_single_query_stamps_query_field(self):
-        """A single-element queries list stamps 'query' on every row."""
+        """A single-element list of queries stamps 'query' on every row."""
         source = MockRetrievalSource([{"text": "t"}])
-        spec = retrieve(source, mode=RetrieveMode.QUERY, queries=["hello"])
-        result = spec.execute_fn()
+        result = retrieve(source, mode=RetrieveMode.QUERY, queries=["hello"])
         assert len(result) == 1
         assert result[0]["query"] == "hello"
 
     def test_no_query_stamps_none(self):
         """When queries is not provided, query field is None."""
         source = MockRetrievalSource([{"text": "t"}])
-        spec = retrieve(source, mode=RetrieveMode.RANDOM)
-        result = spec.execute_fn()
+        result = retrieve(source, mode=RetrieveMode.RANDOM)
         assert result[0]["query"] is None
-
-    def test_multi_query_no_execution_on_build(self):
-        """Building with queries does not call source.fetch."""
-        fetch_called = False
-
-        class TrackingSource(MockRetrievalSource):
-            def fetch(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
-                nonlocal fetch_called
-                fetch_called = True
-                return super().fetch(*args, **kwargs)
-
-        source = TrackingSource([{"text": "a"}])
-        retrieve(source, queries=["q1", "q2"])
-        assert not fetch_called
 
     def test_fetch_called_once_per_query(self):
         """source.fetch is called exactly len(queries) times."""
@@ -163,19 +169,13 @@ class TestMultiQueryRetrieve:
                 return super().fetch(*args, **kwargs)
 
         source = CountingSource([{"text": "a"}])
-        spec = retrieve(source, queries=["q1", "q2", "q3"])
-        spec.execute_fn()
+        # We don't care about the retrieval result here; just checking that
+        # fetch() is called the right number of times based on the number of queries.
+        retrieve(source, queries=["q1", "q2", "q3"])
         assert call_count == 3
 
     def test_multi_query_preserves_original_fields(self):
         """Source fields (text, id, etc.) are preserved alongside query."""
         source = MockRetrievalSource([{"text": "hello", "id": "42"}])
-        spec = retrieve(source, queries=["a"])
-        result = spec.execute_fn()
+        result = retrieve(source, queries=["a"])
         assert result == [{"text": "hello", "id": "42", "query": "a"}]
-
-    def test_wrapper_forwards_queries(self):
-        """Convenience wrappers forward queries to retrieve()."""
-        spec = retrieve_from_web(queries=["q1", "q2"], n=3)
-        assert isinstance(spec, DataSpec)
-        assert spec.node_type == NodeType.ACQUIRE
