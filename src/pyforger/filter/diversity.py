@@ -37,7 +37,7 @@ def by_exact_match(
             if key not in first_seen:
                 first_seen[key] = val
                 unanimous[key] = True
-            elif first_seen[key] != val:
+            elif not _same_value(first_seen[key], val):
                 unanimous[key] = False
 
     counts: dict[Any, int] = {}
@@ -57,6 +57,21 @@ def by_exact_match(
 def _strip_str(value: Any) -> Any:
     """Strip surrounding whitespace from strings; return other values as-is."""
     return value.strip() if isinstance(value, str) else value
+
+
+def _same_value(a: Any, b: Any) -> bool:
+    """Compare by type and value, recursing into lists, tuples, and dicts.
+
+    Unlike ``==``, this treats ``True`` and ``1`` (or ``1`` and ``1.0``) as
+    different values.
+    """
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, dict):
+        return a.keys() == b.keys() and all(_same_value(a[k], b[k]) for k in a)
+    if isinstance(a, (list, tuple)):
+        return len(a) == len(b) and all(map(_same_value, a, b))
+    return bool(a == b)
 
 
 @op(name="filter.by_rouge_l")

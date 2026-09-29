@@ -164,6 +164,18 @@ class TestByExactMatch:
         ]
         assert by_exact_match(data, field="input", agree_on="output") == []
 
+    @pytest.mark.parametrize(
+        "a, b",
+        [(True, 1), (1, 1.0), ([True], [1]), ({"k": False}, {"k": 0})],
+    )
+    def test_agree_on_equal_but_differently_typed_outputs_disagree(self, a, b):
+        """Outputs that are == but differ in type (e.g. True vs 1) disagree."""
+        data = [
+            {"input": "x", "output": a},
+            {"input": "x", "output": b},
+        ]
+        assert by_exact_match(data, field="input", agree_on="output") == []
+
     def test_agree_on_compares_unhashable_outputs_by_value(self):
         """List and dict outputs are compared by value."""
         data = [
