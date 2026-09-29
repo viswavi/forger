@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pyforger.acquire.model import Model, Prompt
+from pyforger.acquire.model import GenerateResult, Model, Prompt
 
 
 class MockModel(Model):
@@ -14,6 +14,7 @@ class MockModel(Model):
         self,
         responses: list[str] | list[list[str]],
         model_id: str = "test/model",
+        reasoning: list[str | None] | list[list[str | None]] | None = None,
         **kwargs: Any,
     ) -> None:
         """Build a MockModel with canned per-prompt completion lists.
@@ -23,12 +24,26 @@ class MockModel(Model):
         each string in a single-element list.  Otherwise, if a list of lists is given,
         the inner lists are used directly as the per-prompt completions (e.g. lists of
         4 responses for n=4 completions per prompt).
+
+        ``reasoning`` optionally sets each completion's ``GenerateResult.reasoning``
+        (as returned by providers that separate reasoning from content). It must
+        have the same shape as ``responses`` and is promoted the same way; when
+        omitted, reasoning is ``None`` for every completion.
         """
         super().__init__(model_id=model_id, **kwargs)
         normalized: list[list[str]] = [
             [r] if isinstance(r, str) else list(r) for r in responses
         ]
         self.responses = normalized
+        self.reasoning: list[list[str | None]] = (
+            [[None] * len(r) for r in normalized]
+            if reasoning is None
+            else [
+                [r] if r is None or isinstance(r, str) else list(r) for r in reasoning
+            ]
+        )
+        if [len(r) for r in self.reasoning] != [len(r) for r in normalized]:
+            raise ValueError("MockModel reasoning shape must match responses")
         self._call_count = 0
 
     def cache_key(self) -> tuple:
@@ -37,6 +52,7 @@ class MockModel(Model):
             type(self).__name__,
             self._model_id,
             tuple(tuple(r) for r in self.responses),
+            tuple(tuple(r) for r in self.reasoning),
         )
 
     def generate_batch(
@@ -47,7 +63,7 @@ class MockModel(Model):
         temperature: float | None = None,
         max_tokens: int | None = None,
         stop: list[str] | None = None,
-    ) -> list[list[str]]:
+    ) -> list[GenerateResult]:
         """Return self.responses[i] for the i-th prompt; require len == n."""
         self._call_count += 1
         if len(self.responses) < len(prompts):
@@ -61,7 +77,23 @@ class MockModel(Model):
             raise ValueError(
                 f"MockModel canned response shapes {shapes} do not match n={n}"
             )
-        return [list(r) for r in canned]
+        results = [
+            GenerateResult(
+                list(r),
+                usage={
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "cost_usd": 0.0,
+                },
+                reasoning=list(reasoning),
+                model_id=self._model_id,
+                raw=None,
+            )
+            for r, reasoning in zip(canned, self.reasoning)
+        ]
+        self.history.extend(results)
+        return results
 
 
 class RecordingMockModel(MockModel):
@@ -80,7 +112,7 @@ class RecordingMockModel(MockModel):
         temperature: float | None = None,
         max_tokens: int | None = None,
         stop: list[str] | None = None,
-    ) -> list[list[str]]:
+    ) -> list[GenerateResult]:
         """Append the current prompt batch to recorded_prompts, then delegate."""
         self.recorded_prompts.append(list(prompts))
         return super().generate_batch(
