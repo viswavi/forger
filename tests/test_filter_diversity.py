@@ -156,28 +156,17 @@ class TestByExactMatch:
         result = by_exact_match(data, field="input", agree_on="output")
         assert result == data
 
-    def test_agree_on_does_not_stringify_outputs(self):
-        """Outputs that differ only by type count as disagreeing."""
+    def test_agree_on_compares_outputs_as_strings(self):
+        """Outputs with the same string form agree regardless of type."""
         data = [
             {"input": "x", "output": 1},
-            {"input": "x", "output": "1"},
+            {"input": "x", "output": " 1 "},
         ]
-        assert by_exact_match(data, field="input", agree_on="output") == []
+        result = by_exact_match(data, field="input", agree_on="output")
+        assert result == [data[0]]
 
-    @pytest.mark.parametrize(
-        "a, b",
-        [(True, 1), (1, 1.0), ([True], [1]), ({"k": False}, {"k": 0})],
-    )
-    def test_agree_on_equal_but_differently_typed_outputs_disagree(self, a, b):
-        """Outputs that are == but differ in type (e.g. True vs 1) disagree."""
-        data = [
-            {"input": "x", "output": a},
-            {"input": "x", "output": b},
-        ]
-        assert by_exact_match(data, field="input", agree_on="output") == []
-
-    def test_agree_on_compares_unhashable_outputs_by_value(self):
-        """List and dict outputs are compared by value."""
+    def test_agree_on_compares_unhashable_outputs(self):
+        """List and dict outputs are compared by their string form."""
         data = [
             {"input": "x", "output": [1, 2]},
             {"input": "x", "output": [1, 2]},

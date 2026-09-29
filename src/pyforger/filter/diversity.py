@@ -24,20 +24,21 @@ def by_exact_match(
     When ``agree_on`` is set, also drop every item whose ``field`` group
     contains disagreeing ``agree_on`` values (useful for filtering
     (input, output) pairs where the same input has conflicting outputs).
-    In that mode, string values of both keys are compared after stripping
-    surrounding whitespace; other values are compared as-is. Kept items
-    retain their original order.
+    In that mode, string ``field`` values are grouped after stripping
+    surrounding whitespace (other values are grouped as-is), and
+    ``agree_on`` values are compared by their stripped string form, so
+    ``1`` and ``"1"`` agree. Kept items retain their original order.
     """
     unanimous: dict[Any, bool] = {}
     if agree_on is not None:
-        first_seen: dict[Any, Any] = {}
+        first_seen: dict[Any, str] = {}
         for item in items:
             key = _strip_str(get_field(item, field, "by_exact_match"))
-            val = _strip_str(get_field(item, agree_on, "by_exact_match"))
+            val = str(get_field(item, agree_on, "by_exact_match")).strip()
             if key not in first_seen:
                 first_seen[key] = val
                 unanimous[key] = True
-            elif not _same_value(first_seen[key], val):
+            elif first_seen[key] != val:
                 unanimous[key] = False
 
     counts: dict[Any, int] = {}
@@ -57,21 +58,6 @@ def by_exact_match(
 def _strip_str(value: Any) -> Any:
     """Strip surrounding whitespace from strings; return other values as-is."""
     return value.strip() if isinstance(value, str) else value
-
-
-def _same_value(a: Any, b: Any) -> bool:
-    """Compare by type and value, recursing into lists, tuples, and dicts.
-
-    Unlike ``==``, this treats ``True`` and ``1`` (or ``1`` and ``1.0``) as
-    different values.
-    """
-    if type(a) is not type(b):
-        return False
-    if isinstance(a, dict):
-        return a.keys() == b.keys() and all(_same_value(a[k], b[k]) for k in a)
-    if isinstance(a, (list, tuple)):
-        return len(a) == len(b) and all(map(_same_value, a, b))
-    return bool(a == b)
 
 
 @op(name="filter.by_rouge_l")
