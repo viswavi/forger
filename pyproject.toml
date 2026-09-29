@@ -45,10 +45,17 @@ exclude = [
 only-packages = true
 
 [project.optional-dependencies]
+clustering = [
+    "numpy",
+    "scikit-learn",
+    "sentence-transformers",
+]
 test = [
     "pytest>=6.0.0",
     "pyyaml",
     "jsonschema",
+    "numpy",
+    "scikit-learn",
 ]
 dev = [
     "pytest",
