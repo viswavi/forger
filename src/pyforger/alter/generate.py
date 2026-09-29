@@ -164,8 +164,9 @@ def default_extract_answer(text: str) -> str | None:
 
     Tries explicit answer markers in order -- ``ANSWER: <n>``, ``\boxed{<n>}``,
     ``#### <n>``, ``final answer ... <n>`` -- and falls back to the last number
-    in the text. Returns the answer as a normalized string (commas stripped), or
-    ``None`` when no number is found.
+    in the text. Returns the answer as a normalized string (thousands separators
+    stripped; other commas, as in ``1,2``, kept), or ``None`` when no number is
+    found.
 
     This is the default segmentation used by :func:`self_taught_reasoner`; pass a
     custom ``extract_answer`` for non-numeric answers or different markers.
@@ -175,7 +176,8 @@ def default_extract_answer(text: str) -> str | None:
     for pattern in _ANSWER_PATTERNS:
         matches = pattern.findall(text)
         if matches:
-            return matches[-1].replace(",", "")
+            # A trailing comma is punctuation ("1000, so ..."), not part of it.
+            return _normalize_answer(matches[-1].rstrip(","))
     return None
 
 

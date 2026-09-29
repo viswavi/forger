@@ -4,7 +4,11 @@ from __future__ import annotations
 import pytest
 from fixtures import MockModel
 
-from pyforger.alter.generate import _normalized_equal, self_taught_reasoner
+from pyforger.alter.generate import (
+    _normalized_equal,
+    default_extract_answer,
+    self_taught_reasoner,
+)
 
 
 class TestSplitThinking:
@@ -217,3 +221,30 @@ class TestCustomFilter:
         )
         assert len(items) == 1
         assert "extract_answer still runs" not in caplog.text
+
+
+class TestDefaultExtractAnswer:
+    """default_extract_answer keeps list commas but drops thousands separators."""
+
+    @pytest.mark.parametrize(
+        "text, expected",
+        [
+            ("ANSWER: 1,000", "1000"),
+            ("#### -1,234,567.5", "-1234567.5"),
+            ("ANSWER: 1,2", "1,2"),  # a list, not one number
+            ("The answer is 1000, so we are done.", "1000"),  # trailing comma
+            ("\\boxed{1,000,}", "1000"),
+            ("no digits here", None),
+        ],
+    )
+    def test_extracts(self, text, expected):
+        """Separators are normalized the same way as references."""
+        assert default_extract_answer(text) == expected
+
+    def test_list_answer_does_not_match_merged_digits(self):
+        """A student "1,2" is not accepted for reference "12"."""
+        model = MockModel(responses=["ANSWER: 1,2"])
+        items = self_taught_reasoner(
+            [{"prompt": "q", "final_answer": "12"}], "{prompt}", model, n=1
+        )
+        assert items == []
