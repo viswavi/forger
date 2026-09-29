@@ -1,16 +1,18 @@
-"""Topic-based clustering via ClusterFusion (arXiv:2512.04350):
-embedding-guided partition -> sharded LLM topic summarization -> LLM
+"""Topic-based clustering via ClusterFusion (arXiv:2512.04350).
+
+Pipeline: embedding-guided partition -> sharded LLM topic summarization -> LLM
 topic assignment.
 """
 from __future__ import annotations
 
 import json
 import re
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import tiktoken
 
-from pyforger.acquire.model import Message, Model
+from pyforger.acquire.model import Message, Model, Prompt
 from pyforger.op import op
 from pyforger.utils import get_field, get_formatted_logger
 
@@ -21,38 +23,59 @@ _DEFAULT_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 _SUMMARIZE_SYSTEM = (
     "You are an intelligent assistant skilled in summarizing and extracting insights."
 )
-_SUMMARIZE_USER = """You are now tasked with reviewing records related to {context}
-Each record is separated by ";" symbols.
-
-Records: {records}
-
-Your goal is to extract the key topics from these records. Extract at most {num_clusters} topics.
-
-Return the result as a single JSON object mapping each topic name (a short keyphrase) to a one-sentence description of that topic. Output only the JSON object."""
+_SUMMARIZE_USER = (
+    "You are now tasked with reviewing records related to {context}\n"
+    'Each record is separated by ";" symbols.\n'
+    "\n"
+    "Records: {records}\n"
+    "\n"
+    "Your goal is to extract the key topics from these records. "
+    "Extract at most {num_clusters} topics.\n"
+    "\n"
+    "Return the result as a single JSON object mapping each topic name "
+    "(a short keyphrase) to a one-sentence description of that topic. "
+    "Output only the JSON object."
+)
 
 _AGGREGATE_SYSTEM = (
-    "You are an intelligent assistant skilled in organizing and consolidating taxonomies."
+    "You are an intelligent assistant skilled in organizing and consolidating "
+    "taxonomies."
 )
-_AGGREGATE_USER = """Below are candidate topics proposed independently from {num_shards} different samples of a corpus of {context}
-Each entry is "topic name: description". Many topics overlap or are near-duplicates.
-
-Candidate topics:
-{candidates}
-
-Consolidate these into exactly {num_clusters} final, mutually-distinct topics that together cover the corpus. Merge synonyms/overlaps, prefer clear keyphrase names, and keep topics at a consistent level of granularity. The total number of final topics must be exactly {num_clusters}, not more and not fewer.
-
-Return the result as a single JSON object mapping each final topic name (a short keyphrase) to a one-sentence description. Output only the JSON object."""
+_AGGREGATE_USER = (
+    "Below are candidate topics proposed independently from {num_shards} "
+    "different samples of a corpus of {context}\n"
+    'Each entry is "topic name: description". '
+    "Many topics overlap or are near-duplicates.\n"
+    "\n"
+    "Candidate topics:\n"
+    "{candidates}\n"
+    "\n"
+    "Consolidate these into exactly {num_clusters} final, mutually-distinct "
+    "topics that together cover the corpus. Merge synonyms/overlaps, prefer "
+    "clear keyphrase names, and keep topics at a consistent level of "
+    "granularity. The total number of final topics must be exactly "
+    "{num_clusters}, not more and not fewer.\n"
+    "\n"
+    "Return the result as a single JSON object mapping each final topic name "
+    "(a short keyphrase) to a one-sentence description. "
+    "Output only the JSON object."
+)
 
 _ASSIGN_SYSTEM = (
     "You are a helpful assistant, that can help me label each record into topics."
 )
-_ASSIGN_USER = """Following record is about {context}
-Please classify the record into exactly one of the following topics, which are represented as a dictionary whose keys are topic names and values are descriptions:
-{topics}
-
-Record: {record}
-
-Return the result in JSON format with a single key 'topic' whose value is exactly one of the topic names above (copied verbatim)."""
+_ASSIGN_USER = (
+    "Following record is about {context}\n"
+    "Please classify the record into exactly one of the following topics, "
+    "which are represented as a dictionary whose keys are topic names and "
+    "values are descriptions:\n"
+    "{topics}\n"
+    "\n"
+    "Record: {record}\n"
+    "\n"
+    "Return the result in JSON format with a single key 'topic' whose value is "
+    "exactly one of the topic names above (copied verbatim)."
+)
 
 
 @op(name="inspect.topic_based_clustering")
@@ -86,9 +109,7 @@ def topic_based_clustering(
     if not items:
         return []
 
-    row_docs = [
-        str(get_field(item, field, "topic_based_clustering")) for item in items
-    ]
+    row_docs = [str(get_field(item, field, "topic_based_clustering")) for item in items]
     unique_docs = list(dict.fromkeys(row_docs))
     if len(unique_docs) <= num_clusters:
         raise ValueError(
@@ -174,7 +195,9 @@ def _partition(
     for group in range(num_groups):
         group_idx = np.where(labels == group)[0]
         take = min(per_group, len(group_idx))
-        sample_idx.extend(int(i) for i in rng.choice(group_idx, size=take, replace=False))
+        sample_idx.extend(
+            int(i) for i in rng.choice(group_idx, size=take, replace=False)
+        )
 
     records = [docs[i].replace("\n", " ")[:truncation] for i in sample_idx]
     encoding = tiktoken.get_encoding("o200k_base")
@@ -193,7 +216,7 @@ def _summarize_shards(
     shards: list[list[str]], model: Model, context: str, num_clusters: int
 ) -> list[dict[str, str]]:
     """Step 2a: summarize each shard into candidate topics."""
-    prompts = [
+    prompts: list[Prompt] = [
         [
             {"role": "system", "content": _SUMMARIZE_SYSTEM},
             {
@@ -273,7 +296,7 @@ def _assign_topics(
     topic_of: dict[str, str] = {}
     pending = list(docs)
     for _ in range(max_retries):  # rerun documents whose label was invalid
-        prompts = [
+        prompts: list[Prompt] = [
             [
                 {"role": "system", "content": _ASSIGN_SYSTEM},
                 {

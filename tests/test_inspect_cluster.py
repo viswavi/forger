@@ -37,7 +37,10 @@ def _fake_embed(docs):
         base = [1.0, 0.0] if _is_cooking(doc) else [0.0, 1.0]
         digest = hashlib.md5(doc.encode()).digest()
         vectors.append(
-            [base[0] + (digest[0] / 255 - 0.5) * 0.1, base[1] + (digest[1] / 255 - 0.5) * 0.1]
+            [
+                base[0] + (digest[0] / 255 - 0.5) * 0.1,
+                base[1] + (digest[1] / 255 - 0.5) * 0.1,
+            ]
         )
     return np.array(vectors)
 
@@ -51,7 +54,9 @@ class _FakeClusterModel(Model):
         self.assign_calls = 0
         self.summarized_records = []
 
-    def generate_batch(self, prompts, *, n=1, temperature=None, max_tokens=None, stop=None):
+    def generate_batch(
+        self, prompts, *, n=1, temperature=None, max_tokens=None, stop=None
+    ):
         return [[self._respond(prompt)] * max(n, 1) for prompt in prompts]
 
     def _respond(self, prompt):
@@ -60,9 +65,13 @@ class _FakeClusterModel(Model):
             self.summarize_calls += 1
             records = user_content.split("Records: ", 1)[1].split("\n\nYour goal")[0]
             self.summarized_records.extend(records.split(" ; "))
-            return json.dumps({"cooking": "Notes about food.", "space": "Notes about the sky."})
+            return json.dumps(
+                {"cooking": "Notes about food.", "space": "Notes about the sky."}
+            )
         if "candidate topics" in user_content.lower():
-            return json.dumps({"cooking": "Preparing food.", "space": "Astronomy and rockets."})
+            return json.dumps(
+                {"cooking": "Preparing food.", "space": "Astronomy and rockets."}
+            )
         if "classify the record" in user_content:
             self.assign_calls += 1
             record = user_content.split("Record: ", 1)[1]
@@ -87,6 +96,7 @@ def _cluster(items, model=None, **kwargs):
 
 
 def test_returns_aligned_cluster_names():
+    """Each row gets its cluster name; unique docs are processed once."""
     docs = COOKING_DOCS + SPACE_DOCS + [COOKING_DOCS[0]]  # last row is a duplicate
     items = _rows(docs)
     model = _FakeClusterModel()
@@ -103,6 +113,7 @@ def test_returns_aligned_cluster_names():
 
 
 def test_tiny_tokens_per_shard_splits_into_shards():
+    """A tiny token budget puts each record in its own shard."""
     docs = COOKING_DOCS + SPACE_DOCS
     model = _FakeClusterModel()
     _cluster(_rows(docs), model, tokens_per_shard=1)
@@ -112,20 +123,24 @@ def test_tiny_tokens_per_shard_splits_into_shards():
 
 
 def test_empty_items_returns_empty():
+    """Empty input yields an empty result."""
     assert _cluster([]) == []
 
 
 def test_missing_field_raises_key_error():
+    """A row without the target field raises KeyError."""
     with pytest.raises(KeyError, match="text"):
         _cluster([{"other": "value"}])
 
 
 def test_num_clusters_below_two_raises():
+    """Fewer than two clusters is rejected."""
     with pytest.raises(ValueError, match="num_clusters"):
         _cluster(_rows(COOKING_DOCS), num_clusters=1)
 
 
 def test_too_few_unique_values_raises():
+    """More clusters than unique values is rejected."""
     with pytest.raises(ValueError, match="unique"):
         _cluster(_rows(COOKING_DOCS), num_clusters=3)
 
@@ -141,12 +156,14 @@ class _GarbageAssignModel(_FakeClusterModel):
 
 
 def test_unclassifiable_docs_fall_back_to_first_topic():
+    """Docs that never classify fall back to the first topic."""
     items = _rows(COOKING_DOCS + SPACE_DOCS)
     clusters = _cluster(items, _GarbageAssignModel(), max_assign_retries=2)
     assert clusters == ["cooking"] * len(items)  # first codebook topic
 
 
 def test_match_topic_is_lenient():
+    """Topic matching tolerates case and surrounding text."""
     codebook = {"Number Theory": "...", "Geometry": "..."}
     assert _match_topic("Number Theory", codebook) == "Number Theory"
     assert _match_topic("number theory", codebook) == "Number Theory"
@@ -156,6 +173,7 @@ def test_match_topic_is_lenient():
 
 
 def test_default_embed_warns_without_gpu(monkeypatch, caplog):
+    """The default embedder warns and uses CPU when no GPU is present."""
     import sys
     import types
 
@@ -181,6 +199,7 @@ def test_default_embed_warns_without_gpu(monkeypatch, caplog):
 
 
 def test_parse_json_handles_fences_and_prose():
+    """JSON parsing strips code fences and surrounding prose."""
     assert _parse_json('```json\n{"a": 1}\n```') == {"a": 1}
     assert _parse_json('Sure! Here you go: {"topic": "space"} hope that helps') == {
         "topic": "space"
