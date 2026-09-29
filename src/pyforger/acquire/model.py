@@ -3,8 +3,10 @@
 Provides a simplified interface to LiteLLM for generating text
 completions from any supported LLM provider.
 """
+
 from __future__ import annotations
 
+import warnings
 from typing import Any, Union
 
 import litellm
@@ -12,6 +14,177 @@ import litellm
 # Type aliases
 Message = dict[str, str]
 Prompt = Union[str, list[Message]]
+
+
+class GenerateResult(list):
+    """list[str] with ``usage`` / ``reasoning`` / ``model_id`` / ``raw`` attributes."""
+
+    usage: dict[str, Any]
+    reasoning: list[str | None]
+    model_id: str
+    raw: Any
+
+    def __init__(
+        self,
+        completions: list[str],
+        *,
+        usage: dict[str, Any],
+        reasoning: list[str | None],
+        model_id: str,
+        raw: Any,
+    ) -> None:
+        """Wrap completions with per-call metadata."""
+        super().__init__(completions)
+        self.usage = usage
+        self.reasoning = reasoning
+        self.model_id = model_id
+        self.raw = raw
+
+    def __reduce__(self):
+        """Pickle support."""
+        return (
+            _rebuild_generate_result,
+            (list(self), self.usage, self.reasoning, self.model_id, self.raw),
+        )
+
+
+def _rebuild_generate_result(
+    completions: list[str],
+    usage: dict[str, Any],
+    reasoning: list[str | None],
+    model_id: str,
+    raw: Any,
+) -> GenerateResult:
+    """Pickle helper for GenerateResult."""
+    return GenerateResult(
+        completions, usage=usage, reasoning=reasoning, model_id=model_id, raw=raw
+    )
+
+
+_VALUE_CONSTRAINTS: dict[str, dict[str, Any]] = {
+    "o1": {"temperature": 1.0, "n": 1},
+    "o3": {"temperature": 1.0, "n": 1},
+    "o4": {"temperature": 1.0, "n": 1},
+    "gpt-5": {"temperature": 1.0, "n": 1},
+    "gemini-3": {"temperature": 1.0, "n": 1},
+}
+
+_PROVIDER_PREFIXES = ("openai/", "anthropic/", "gemini/", "xai/", "deepseek/")
+
+
+def _family(model_id: str) -> str:
+    """Strip ``litellm_proxy/`` / ``openrouter/`` gateway + provider prefix."""
+    s = model_id
+    if s.startswith("litellm_proxy/"):
+        s = s[len("litellm_proxy/") :]
+    if s.startswith("openrouter/"):
+        s = s[len("openrouter/") :]
+    for prefix in _PROVIDER_PREFIXES:
+        if s.startswith(prefix):
+            s = s[len(prefix) :]
+            break
+    return s
+
+
+def _validate_params(model_id: str, **params: Any) -> None:
+    """Raise ``ValueError`` on unsupported params or constraint violations."""
+    supported_set = set(litellm.get_supported_openai_params(model=model_id) or [])
+
+    for name, value in params.items():
+        if value is None:
+            continue
+        if supported_set and name not in supported_set:
+            raise ValueError(
+                f"{model_id} does not support parameter '{name}'. "
+                f"Supported parameters: {sorted(supported_set)}"
+            )
+
+    family = _family(model_id)
+    required: dict[str, Any] = {}
+    for key in sorted(_VALUE_CONSTRAINTS, key=len, reverse=True):
+        if family == key or (family.startswith(key) and family[len(key)] in "-."):
+            required = dict(_VALUE_CONSTRAINTS[key])
+            break
+    thinking = params.get("thinking")
+    if isinstance(thinking, dict) and thinking.get("type") == "enabled":
+        required.setdefault("temperature", 1.0)
+
+    for name, required_value in required.items():
+        got = params.get(name)
+        if got is not None and got != required_value:
+            raise ValueError(
+                f"{model_id} requires {name}={required_value} (got {got}). "
+                f"Pass {name}={required_value} or omit the parameter."
+            )
+
+
+def _extract_reasoning(response: Any, model_id: str) -> list[str | None]:
+    """Extract reasoning per choice; ``None`` when absent.
+
+    Skips ``litellm.supports_reasoning`` (false negatives on proxy aliases).
+    OpenRouter uses ``message.reasoning`` instead of ``reasoning_content``.
+    """
+    s = (
+        model_id[len("litellm_proxy/") :]
+        if model_id.startswith("litellm_proxy/")
+        else model_id
+    )
+    is_openrouter = s.startswith("openrouter/")
+    out: list[str | None] = []
+    for choice in response.choices:
+        primary = getattr(choice.message, "reasoning_content", None)
+        if primary:
+            out.append(primary)
+            continue
+        if is_openrouter:
+            fallback = getattr(choice.message, "reasoning", None)
+            out.append(fallback if fallback else None)
+        else:
+            out.append(None)
+    return out
+
+
+_COST_WARNING_SEEN: set[str] = set()
+
+
+def _extract_cost(response: Any, model_id: str) -> float:
+    """Cost in USD; ``0.0`` when unavailable. Warns once per ``model_id`` on miss."""
+    hidden = getattr(response, "_hidden_params", None) or {}
+    cost = hidden.get("response_cost")
+    if cost is None:
+        try:
+            cost = litellm.completion_cost(completion_response=response)
+        except Exception:
+            cost = None
+    if cost is None:
+        if model_id not in _COST_WARNING_SEEN:
+            _COST_WARNING_SEEN.add(model_id)
+            warnings.warn(
+                f"Cost unavailable for {model_id} (model may be absent from "
+                f"LiteLLM's pricing registry). total_cost may undercount.",
+                UserWarning,
+                stacklevel=2,
+            )
+        return 0.0
+    return float(cost)
+
+
+def _extract_usage(response: Any) -> dict[str, int]:
+    """Dict with ``prompt_tokens`` / ``completion_tokens`` / ``reasoning_tokens``."""
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return {"prompt_tokens": 0, "completion_tokens": 0, "reasoning_tokens": 0}
+
+    details = getattr(usage, "completion_tokens_details", None)
+    reasoning_tokens = (
+        getattr(details, "reasoning_tokens", 0) if details is not None else 0
+    ) or 0
+
+    return {
+        "prompt_tokens": getattr(usage, "prompt_tokens", 0) or 0,
+        "completion_tokens": getattr(usage, "completion_tokens", 0) or 0,
+        "reasoning_tokens": reasoning_tokens,
+    }
 
 
 def _to_messages(prompt: Prompt) -> list[Message]:
@@ -71,11 +244,20 @@ class Model:
         self._max_tokens = max_tokens
         self._num_retries = num_retries
         self._kwargs = kwargs
-        self._last_usage: dict[str, Any] | None = None
+        self.history: list[GenerateResult] = []
+        self._check_params(
+            temperature=temperature,
+            max_tokens=max_tokens,
+            thinking=kwargs.get("thinking"),
+        )
 
     def __repr__(self) -> str:
         """Show model id for debugging."""
         return f"Model({self._model_id!r})"
+
+    def _check_params(self, **params: Any) -> None:
+        """Validate params against LiteLLM's registry for this model id."""
+        _validate_params(self._model_id, **params)
 
     def cache_key(self) -> tuple:
         """Stable hash key for @op caching using all functional attributes."""
@@ -90,14 +272,22 @@ class Model:
         )
 
     @property
-    def last_usage(self) -> dict[str, Any] | None:
-        """Token counts and cost from the most recent generate call.
+    def total_cost(self) -> float:
+        """Sum of cost_usd across every call in this Model's history."""
+        return sum(r.usage.get("cost_usd", 0.0) for r in self.history)
 
-        Returns:
-            Dict with prompt_tokens, completion_tokens, and total_cost,
-            or None if no calls have been made yet.
-        """
-        return self._last_usage
+    @property
+    def total_usage(self) -> dict[str, int]:
+        """Sum of token counts across every call in this Model's history."""
+        totals = {"prompt_tokens": 0, "completion_tokens": 0, "reasoning_tokens": 0}
+        for r in self.history:
+            for key in totals:
+                totals[key] += r.usage.get(key, 0)
+        return totals
+
+    def reset_history(self) -> None:
+        """Drop all recorded calls; total_cost and total_usage reset to zero."""
+        self.history = []
 
     def generate(
         self,
@@ -107,7 +297,7 @@ class Model:
         temperature: float | None = None,
         max_tokens: int | None = None,
         stop: list[str] | None = None,
-    ) -> list[str]:
+    ) -> GenerateResult:
         """Generate n responses for a single prompt.
 
         Convenience wrapper around generate_batch for the single-prompt
@@ -142,7 +332,7 @@ class Model:
         temperature: float | None = None,
         max_tokens: int | None = None,
         stop: list[str] | None = None,
-    ) -> list[list[str]]:
+    ) -> list[GenerateResult]:
         """Generate n responses for each prompt in a batch.
 
         Args:
@@ -151,29 +341,28 @@ class Model:
             n: Number of completions per prompt.
             temperature: Sampling temperature. Overrides the instance default.
             max_tokens: Max tokens. Overrides the instance default.
-            stop: Stop sequences. Generation stops when any of these
-                strings is produced.
+            stop: Stop sequences.
 
         Returns:
-            List of lists — one inner list of n responses per prompt.
+            List of GenerateResult, one per prompt. Each GenerateResult
+            is a list of n completion strings carrying usage / reasoning
+            / model_id / raw as attributes.
         """
+        if not prompts:
+            return []
+
         temperature = temperature if temperature is not None else self._temperature
         max_tokens = max_tokens if max_tokens is not None else self._max_tokens
 
-        total_prompt_tokens = 0
-        total_completion_tokens = 0
-        total_cost = 0.0
-        all_results: list[list[str]] = []
-
-        self._last_usage = None
-
-        if not prompts:
-            self._last_usage = {
-                "prompt_tokens": total_prompt_tokens,
-                "completion_tokens": total_completion_tokens,
-                "total_cost": total_cost,
-            }
-            return all_results
+        validate_kwargs: dict[str, Any] = {
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stop": stop,
+            "thinking": self._kwargs.get("thinking"),
+        }
+        if n != 1:
+            validate_kwargs["n"] = n
+        self._check_params(**validate_kwargs)
 
         all_messages = [_to_messages(prompt) for prompt in prompts]
         call_kwargs = dict(
@@ -191,32 +380,43 @@ class Model:
         else:
             responses = litellm.batch_completion(messages=all_messages, **call_kwargs)
 
+        results: list[GenerateResult] = []
         for response in responses:
             completions = [choice.message.content or "" for choice in response.choices]
-            all_results.append(completions)
+            usage: dict[str, Any] = dict(_extract_usage(response))
+            usage["cost_usd"] = _extract_cost(response, self._model_id)
+            reasoning = _extract_reasoning(response, self._model_id)
+            result = GenerateResult(
+                completions,
+                usage=usage,
+                reasoning=reasoning,
+                model_id=self._model_id,
+                raw=response,
+            )
+            results.append(result)
+            self.history.append(result)
 
-            usage = getattr(response, "usage", None)
-            if usage is not None:
-                total_prompt_tokens += usage.prompt_tokens or 0
-                total_completion_tokens += usage.completion_tokens or 0
-
-            hidden = getattr(response, "_hidden_params", None)
-            if isinstance(hidden, dict):
-                total_cost += hidden.get("response_cost") or 0.0
-
-        self._last_usage = {
-            "prompt_tokens": total_prompt_tokens,
-            "completion_tokens": total_completion_tokens,
-            "total_cost": total_cost,
-        }
-
-        return all_results
+        return results
 
 
 # Default cap on generated tokens for a local reasoning model. Reasoning traces
 # can be long (tens of thousands of tokens), so the LiteLLM default of "let the
 # provider decide" is replaced here by an explicit, generous ceiling.
 _DEFAULT_LOCAL_MAX_TOKENS = 32768
+
+
+def _import_vllm() -> Any:
+    """Import vllm, with an install hint when it is not installed."""
+    try:
+        import vllm
+    except ModuleNotFoundError as e:
+        if e.name != "vllm":  # vllm is installed but one of its imports failed
+            raise
+        raise ImportError(
+            "vllm is required for LocalModel generation. "
+            'Install it with: pip install "pyforger[vllm]"'
+        ) from e
+    return vllm
 
 
 class LocalModel(Model):
@@ -230,7 +430,8 @@ class LocalModel(Model):
 
     The engine is created lazily so that importing ``pyforger`` -- and even
     constructing a ``LocalModel`` -- never requires ``vllm`` or a GPU. ``vllm``
-    is imported only when generation actually happens.
+    is imported only when generation actually happens; it is an optional
+    dependency, installed with ``pip install "pyforger[vllm]"``.
 
     Chat prompts are rendered with the model's own chat template. For reasoning
     models (e.g. Qwen3) the generated text contains a ``<think>...</think>``
@@ -304,37 +505,47 @@ class LocalModel(Model):
     def cache_key(self) -> tuple:
         """Stable hash key for @op caching from the functional configuration.
 
-        Includes the sampling/template settings that affect outputs so that, for
-        example, two ``LocalModel`` instances with different temperatures or
-        ``enable_thinking`` do not collide in the disk cache.
+        Includes the sampling settings, the chat-template kwargs actually sent,
+        ``dtype`` and every extra ``vllm.LLM`` kwarg (e.g. ``revision``,
+        ``quantization``), since any of those can change outputs; two instances
+        that differ in them must not share cached completions.
+        ``gpu_memory_utilization`` and ``tensor_parallel_size`` only affect speed
+        and memory, so they are left out -- except with ``max_model_len=-1``,
+        where vLLM (0.14+) sizes the context to fit memory and they cap
+        generation length. ``show_progress`` is always left out.
         """
+        engine_kwargs = tuple(sorted(self._kwargs.items(), key=lambda kv: str(kv[0])))
+        memory = (
+            (self._gpu_memory_utilization, self._tensor_parallel_size)
+            if self._max_model_len == -1
+            else ()
+        )
         return (
             type(self).__name__,
             self._model_id,
             self._temperature,
             self._max_tokens,
             self._max_model_len,
-            self._enable_thinking,
-            tuple(sorted((self._chat_template_kwargs or {}).items())),
+            self._dtype,
+            self._template_kwargs(),
             self._seed,
+            engine_kwargs,
+            memory,
         )
+
+    def _check_params(self, **params: Any) -> None:
+        """No-op: vLLM model ids are not in LiteLLM's parameter registry."""
 
     def _engine(self) -> Any:
         """Lazily construct and cache the vLLM engine."""
         if self._llm is None:
-            from vllm import LLM
-
-            self._llm = LLM(
+            self._llm = _import_vllm().LLM(
                 model=self._model_id,
                 gpu_memory_utilization=self._gpu_memory_utilization,
                 tensor_parallel_size=self._tensor_parallel_size,
                 dtype=self._dtype,
                 seed=self._seed,
-                **(
-                    {"max_model_len": self._max_model_len}
-                    if self._max_model_len is not None
-                    else {}
-                ),
+                max_model_len=self._max_model_len,
                 **self._kwargs,
             )
         return self._llm
@@ -353,7 +564,7 @@ class LocalModel(Model):
         temperature: float | None = None,
         max_tokens: int | None = None,
         stop: list[str] | None = None,
-    ) -> list[list[str]]:
+    ) -> list[GenerateResult]:
         """Generate ``n`` completions per prompt with the local vLLM engine.
 
         Args:
@@ -365,11 +576,16 @@ class LocalModel(Model):
             stop: Optional stop strings.
 
         Returns:
-            List of lists -- one inner list of ``n`` completion strings per
-            prompt, in input order. Each completion is the raw generated text
-            (including any ``<think>...</think>`` block for reasoning models).
+            List of GenerateResult, one per prompt, in input order. Each is a
+            list of ``n`` completion strings holding the raw generated text
+            (including any ``<think>...</think>`` block for reasoning models;
+            ``reasoning`` is therefore ``None`` per choice -- use
+            :func:`split_reasoning` to separate it).
         """
-        from vllm import SamplingParams
+        if not prompts:
+            return []
+
+        vllm = _import_vllm()
 
         temperature = temperature if temperature is not None else self._temperature
         if max_tokens is None:
@@ -379,17 +595,8 @@ class LocalModel(Model):
                 else _DEFAULT_LOCAL_MAX_TOKENS
             )
 
-        self._last_usage = None
-        if not prompts:
-            self._last_usage = {
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_cost": 0.0,
-            }
-            return []
-
         conversations = [_to_messages(prompt) for prompt in prompts]
-        sampling_params = SamplingParams(
+        sampling_params = vllm.SamplingParams(
             n=n,
             temperature=temperature,
             max_tokens=max_tokens,
@@ -403,24 +610,32 @@ class LocalModel(Model):
             use_tqdm=self._show_progress,
         )
 
-        all_results: list[list[str]] = []
-        total_prompt_tokens = 0
-        total_completion_tokens = 0
+        results: list[GenerateResult] = []
         for output in outputs:
             completions = [completion.text for completion in output.outputs]
-            all_results.append(completions)
-            total_prompt_tokens += len(output.prompt_token_ids or [])
-            total_completion_tokens += sum(
-                len(completion.token_ids) for completion in output.outputs
+            # Local inference has no per-call monetary cost; cost is fixed (GPU
+            # time). Thinking tokens are inline in the text, so not counted apart.
+            usage: dict[str, Any] = {
+                "prompt_tokens": len(output.prompt_token_ids or []),
+                "completion_tokens": sum(
+                    len(completion.token_ids) for completion in output.outputs
+                ),
+                "reasoning_tokens": 0,
+                "cost_usd": 0.0,
+            }
+            # raw is dropped: vLLM's RequestOutput holds per-token id lists that
+            # would pin gigabytes in self.history over a long sampling run.
+            result = GenerateResult(
+                completions,
+                usage=usage,
+                reasoning=[None] * len(completions),
+                model_id=self._model_id,
+                raw=None,
             )
+            results.append(result)
+            self.history.append(result)
 
-        # Local inference has no per-call monetary cost; cost is fixed (GPU time).
-        self._last_usage = {
-            "prompt_tokens": total_prompt_tokens,
-            "completion_tokens": total_completion_tokens,
-            "total_cost": 0.0,
-        }
-        return all_results
+        return results
 
 
 # Marks the boundary between a reasoning model's thinking block and its answer.
@@ -446,7 +661,4 @@ def split_reasoning(text: str) -> tuple[str, str]:
     if _THINK_CLOSE not in text:
         return "", text.strip()
     thinking, _, answer = text.partition(_THINK_CLOSE)
-    thinking = thinking.strip()
-    if thinking.startswith(_THINK_OPEN):
-        thinking = thinking[len(_THINK_OPEN) :].strip()
-    return thinking, answer.strip()
+    return thinking.strip().removeprefix(_THINK_OPEN).strip(), answer.strip()
