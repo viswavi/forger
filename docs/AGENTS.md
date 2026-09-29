@@ -106,6 +106,8 @@ Generate or retrieve new rows.
 | `WebRetrievalSource`, `WikiRetrievalSource`, `HFRetrievalSource`, ... |   | Per-backend source classes. |
 | `ArxivRetrievalSource`, `S2RetrievalSource` |   |Per-backend source classes. |
 | `Model` |   | LLM wrapper (initialized by user). Otherwise, LLM generation should be called with `sample_from_LLM`. |
+| `LocalModel` |   | On-GPU vLLM model with `Model`'s interface (needs the `vllm` extra). Zero cost, `<think>` inline. |
+| `split_reasoning` |   | `str -> (thinking, answer)`: splits a reasoning-model completion on `</think>`. |
 
 `sample_from_LLM` performs `n` LLM calls per input and returns parsed dicts. It does under-the-hood batching and
 validation, making this a superior choice to calling `Model` directly.
@@ -121,8 +123,31 @@ Transform rows without removing items.
 | `translate.to_code` | LLM conversion of fields into code in a target programming language. Strips markdown fences. |
 | `execute_code` | Execute Python code in a sandboxed environment and return the result. |
 
-`generate_from_context` performs `samples_per_item` LLM calls per input and returns parsed dicts. We validate against
-an optional JSON schema. If the validated LLM call fails after `num_retries`, we return `None` for the failing slots.
+`generate_from_context` performs `samples_per_item` LLM calls per input and returns parsed dicts, with retry against an
+optional JSON schema. If the validated LLM call fails after `num_retries`, we return `None` for the failing slots.
+
+`self_taught_reasoner` (re-exported from `pyforger.alter`, also in `pyforger.alter.generate`) implements the
+**Self-Taught Reasoner (STaR)** approach ([Zelikman et al., 2022](https://arxiv.org/abs/2203.14465)) -- closely
+related to **On-Policy Distillation** (Agarwal et al., 2023), since both keep SFT traces drawn from the student's own
+distribution rather than a separate teacher: for each input row it samples `n` responses from a student `model` and
+keeps only those whose final answer matches the row's reference answer (`reference_field`, default `"final_answer"`).
+Each kept response becomes one
+output row carrying the student's raw response plus, when `split_thinking=True`, its reasoning and answer in
+`thinking`/`answer` fields (reasoning comes from the provider's separate reasoning field when returned, otherwise from
+the inline `<think>` block); the matched student answer becomes the new ground truth. A row with zero correct
+samples contributes nothing (so 8 samples with 4 correct yield 4 rows). Acceptance defaults to extracting an answer
+with `default_extract_answer` (reads `ANSWER:`/`\boxed{}`/`####` markers) and comparing by normalized string equality;
+pass a custom `extract_answer`, `match_fn`, or a `filter_fn` (any `list[dict] -> list[dict]`, e.g. a `pyforger.filter`
+op bound with `functools.partial`) to override. Pair it with `LocalModel` to generate student traces on-GPU for SFT.
+
+```python
+# LocalModel needs vLLM: pip install "pyforger[vllm]"
+from pyforger.alter import self_taught_reasoner
+from pyforger.acquire import LocalModel
+
+student = LocalModel("Qwen/Qwen3-4B", max_model_len=40960)
+rows = self_taught_reasoner(problems, solver_prompt, student, n=8, reference_field="final_answer")
+```
 
 #### `pyforger.filter`
 
@@ -308,3 +333,19 @@ outer loop in Python and at each round sample in-context examples from the outpu
 a prompt for the next round. Decorate the inner loop function with `@op` so that improvements to the prompt or
 sampling parameters are cached and reused across rounds. This pattern can improve diversity and quality over multiple
 rounds, as the pool of in-context examples evolves.
+- **Self-Taught Reasoner / STaR (extending thinking for reasoning problems):** This is the Self-Taught Reasoner (STaR)
+approach ([Zelikman et al., 2022](https://arxiv.org/abs/2203.14465)), closely related to On-Policy Distillation
+(Agarwal et al., 2023). When you have prompts paired with *verified*
+answers (e.g. competition-math problems with checked integer answers) but want long chain-of-thought traces for SFT,
+do not copy reasoning from a stronger teacher -- generate it from the *student* you intend to finetune. This is
+generally necessary for training reasoning-style models on tasks that require extended reasoning, such as difficult
+math, programming, or embodied reasoning. Sample `n` solutions per prompt from the student (use `acquire.LocalModel` to
+run an open-weights reasoning model on-GPU via vLLM with a generous `max_tokens`/`max_model_len` so traces are not
+truncated), keep only the solutions whose final answer matches the verified answer, and use each kept trace as a
+training target. `alter.self_taught_reasoner` implements exactly this: it returns one row per correct sample (a prompt
+with 0 correct samples drops out), with the student's reasoning trace and answer split into separate fields. Because the
+traces are in the student's own distribution, this distills the skill of *extending its own thinking to reach the right
+answer* far better than off-policy teacher traces, and answer-verification keeps only correct reasoning. Filtering on
+the final answer alone admits the occasional "right answer, wrong reasoning" trace; add a `by_llm_score` judge over the
+reasoning (passed as `filter_fn`, or as a downstream filter) only if inspection shows this is actually frequent --
+prefer the cheap answer check first.
