@@ -5,6 +5,8 @@ similarity, or n-gram overlap against the kept pool.
 """
 from __future__ import annotations
 
+from typing import Any
+
 from pyforger.op import op
 from pyforger.utils import get_field
 
@@ -22,28 +24,39 @@ def by_exact_match(
     When ``agree_on`` is set, also drop every item whose ``field`` group
     contains disagreeing ``agree_on`` values (useful for filtering
     (input, output) pairs where the same input has conflicting outputs).
-    Both keys are compared after stripping surrounding whitespace.
+    In that mode, string values of both keys are compared after stripping
+    surrounding whitespace; other values are compared as-is. Kept items
+    retain their original order.
     """
-    if agree_on is None:
-        counts: dict[str, int] = {}
-        result: list[dict] = []
+    unanimous: dict[Any, bool] = {}
+    if agree_on is not None:
+        first_seen: dict[Any, Any] = {}
         for item in items:
-            val = get_field(item, field, "by_exact_match")
-            counts[val] = counts.get(val, 0) + 1
-            if counts[val] <= max_count:
-                result.append(item)
-        return result
+            key = _strip_str(get_field(item, field, "by_exact_match"))
+            val = _strip_str(get_field(item, agree_on, "by_exact_match"))
+            if key not in first_seen:
+                first_seen[key] = val
+                unanimous[key] = True
+            elif first_seen[key] != val:
+                unanimous[key] = False
 
-    groups: dict[str, list[dict]] = {}
+    counts: dict[Any, int] = {}
+    result: list[dict] = []
     for item in items:
-        key = str(get_field(item, field, "by_exact_match")).strip()
-        groups.setdefault(key, []).append(item)
-    result = []
-    for group in groups.values():
-        values = {str(get_field(i, agree_on, "by_exact_match")).strip() for i in group}
-        if len(values) == 1:
-            result.extend(group[:max_count])
+        key = get_field(item, field, "by_exact_match")
+        if agree_on is not None:
+            key = _strip_str(key)
+            if not unanimous[key]:
+                continue
+        counts[key] = counts.get(key, 0) + 1
+        if counts[key] <= max_count:
+            result.append(item)
     return result
+
+
+def _strip_str(value: Any) -> Any:
+    """Strip surrounding whitespace from strings; return other values as-is."""
+    return value.strip() if isinstance(value, str) else value
 
 
 @op(name="filter.by_rouge_l")

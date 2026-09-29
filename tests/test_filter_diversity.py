@@ -147,6 +147,54 @@ class TestByExactMatch:
         with pytest.raises(KeyError, match="missing required field 'output'"):
             by_exact_match(source, field="input", agree_on="output")
 
+    def test_agree_on_does_not_stringify_field(self):
+        """Values that differ only by type are separate groups."""
+        data = [
+            {"input": 1, "output": "a"},
+            {"input": "1", "output": "b"},
+        ]
+        result = by_exact_match(data, field="input", agree_on="output")
+        assert result == data
+
+    def test_agree_on_does_not_stringify_outputs(self):
+        """Outputs that differ only by type count as disagreeing."""
+        data = [
+            {"input": "x", "output": 1},
+            {"input": "x", "output": "1"},
+        ]
+        assert by_exact_match(data, field="input", agree_on="output") == []
+
+    def test_agree_on_compares_unhashable_outputs_by_value(self):
+        """List and dict outputs are compared by value."""
+        data = [
+            {"input": "x", "output": [1, 2]},
+            {"input": "x", "output": [1, 2]},
+            {"input": "y", "output": {"k": 1}},
+            {"input": "y", "output": {"k": 2}},
+        ]
+        result = by_exact_match(data, field="input", agree_on="output")
+        assert result == [data[0]]
+
+    def test_agree_on_preserves_input_order(self):
+        """Kept items stay in input order when groups are interleaved."""
+        data = [
+            {"input": "x", "output": "a"},
+            {"input": "y", "output": "b"},
+            {"input": "x", "output": "a"},
+        ]
+        result = by_exact_match(data, field="input", max_count=2, agree_on="output")
+        assert result == data
+
+    @pytest.mark.parametrize("max_count", [0, -1])
+    def test_nonpositive_max_count_keeps_nothing(self, max_count):
+        """Nonpositive max_count keeps nothing, with or without agree_on."""
+        data = [{"input": "x", "output": "a"}] * 3
+        assert by_exact_match(data, field="input", max_count=max_count) == []
+        result = by_exact_match(
+            data, field="input", max_count=max_count, agree_on="output"
+        )
+        assert result == []
+
 
 class TestByRougeL:
     """by_rouge_l removes near-duplicates by ROUGE-L similarity."""
