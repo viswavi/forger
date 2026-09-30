@@ -305,7 +305,15 @@ class TestByGroupAgreement:
         assert _agree(data) == data
 
     @pytest.mark.parametrize(
-        "a, b", [(1, "1"), (True, 1), (1, 1.0), ([True], [1]), ({"k": 1}, {"k": "1"})]
+        "a, b",
+        [
+            (1, "1"),
+            (True, 1),
+            (1, 1.0),
+            ([True], [1]),
+            ({"k": 1}, {"k": "1"}),
+            ([1, 2], (1, 2)),
+        ],
     )
     def test_differently_typed_outputs_disagree(self, a, b):
         """Outputs that differ in type disagree, even if == or str() match."""
@@ -330,13 +338,12 @@ class TestByGroupAgreement:
         [
             ({"a": 1, "b": 2}, {"b": 2, "a": 1}),
             ({"n": {"a": 1, "b": 2}}, {"n": {"b": 2, "a": 1}}),
-            ([1, 2], (1, 2)),
-            ([{"a": 1, "b": 2}], ({"b": 2, "a": 1},)),
+            ([{"a": 1, "b": 2}], [{"b": 2, "a": 1}]),
             ({1, 2}, {2, 1}),
         ],
     )
     def test_ignores_container_ordering(self, a, b):
-        """Reordered dict keys and list-vs-tuple outputs agree."""
+        """Outputs that differ only in dict key or set order agree."""
         data = [
             {"input": "x", "output": a},
             {"input": "x", "output": b},
@@ -403,10 +410,10 @@ class TestByGroupAgreement:
         assert _agree(data, max_count=max_count) == []
 
     def test_unhashable_inputs_are_grouped(self):
-        """List and dict inputs group structurally instead of raising."""
+        """List, tuple and dict inputs group by type and value instead of raising."""
         data = [
             {"input": [1, 2], "output": "a"},
-            {"input": (1, 2), "output": "a"},
+            {"input": (1, 2), "output": "b"},
             {"input": {"k": 1}, "output": "b"},
             {"input": {"k": 1}, "output": "c"},
         ]

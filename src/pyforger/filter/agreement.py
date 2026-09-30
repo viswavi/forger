@@ -107,9 +107,9 @@ def by_group_agreement(
     e.g. checking self-consistency across several samples per input.
 
     Both fields are compared structurally: string values are stripped of
-    surrounding whitespace, dict and set order is ignored, lists and tuples
-    are interchangeable. However, values of different types (``1`` and ``"1"``,
-    or ``True`` and ``1``) differ.
+    surrounding whitespace and dict and set order is ignored. However, values
+    of different types (``1`` and ``"1"``, ``True`` and ``1``, or ``[1]`` and
+    ``(1,)``) differ.
 
     Args:
         items: List of input data items.
