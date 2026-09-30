@@ -119,7 +119,8 @@ def topic_based_clustering(
         ("summarize_truncation", summarize_truncation),
         ("assign_truncation", assign_truncation),
     ):
-        assert value > 0, f"{name} must be positive"
+        if value < 1:
+            raise ValueError(f"{name} must be positive")
     if max_assign_retries < 0:
         raise ValueError("max_assign_retries must be non-negative")
     if not items:
