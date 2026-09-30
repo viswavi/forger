@@ -60,6 +60,10 @@ _AGGREGATE_USER = (
     "(a short keyphrase) to a one-sentence description. "
     "Output only the JSON object."
 )
+_AGGREGATE_RETRY = (
+    "That is {got} topics, but exactly {num_clusters} are required. Merge or "
+    "split topics as needed and output only the corrected JSON object."
+)
 
 _ASSIGN_SYSTEM = (
     "You are a helpful assistant, that can help me label each record into topics."
@@ -102,10 +106,14 @@ def topic_based_clustering(
     "competition math problems. Topics should describe the technique,
     NOT the numeric answer.". Embeddings default to ``embedding_model``
     via sentence-transformers (GPU when available); pass ``embed_fn``
-    to use another backend.
+    to use another backend. If the LLM still misses ``num_clusters``
+    topics after being corrected, a warning is logged and its last
+    codebook is used.
     """
     if num_clusters < 2:
         raise ValueError("num_clusters must be at least 2")
+    if tokens_per_shard < 1:
+        raise ValueError("tokens_per_shard must be positive")
     if not items:
         return []
 
@@ -262,23 +270,38 @@ def _build_codebook(
             ),
         },
     ]
-    for _ in range(3):  # retry on unparseable JSON
+    codebook: dict[str, str] = {}  # latest nonempty attempt
+    for _ in range(3):  # retry on unparseable JSON or the wrong topic count
+        response = model.generate(messages, temperature=0.0)[0]
         try:
-            parsed = _parse_json(model.generate(messages, temperature=0.0)[0])
+            parsed = _parse_json(response)
         except ValueError:
             continue
-        codebook = {str(name): str(desc) for name, desc in parsed.items()}
-        if codebook:
-            if len(codebook) != num_clusters:
-                logger.warning(
-                    "topic_based_clustering: codebook has %d topics instead of %d",
-                    len(codebook),
-                    num_clusters,
-                )
-            return codebook
-    raise RuntimeError(
-        "topic_based_clustering: model never returned a parseable codebook"
+        attempt = {str(name): str(desc) for name, desc in parsed.items()}
+        if len(attempt) == num_clusters:
+            return attempt
+        if attempt:
+            codebook = attempt
+        messages = [
+            *messages,
+            {"role": "assistant", "content": response},
+            {
+                "role": "user",
+                "content": _AGGREGATE_RETRY.format(
+                    got=len(attempt), num_clusters=num_clusters
+                ),
+            },
+        ]
+    if not codebook:
+        raise RuntimeError(
+            "topic_based_clustering: model never returned a parseable codebook"
+        )
+    logger.warning(
+        "topic_based_clustering: codebook has %d topics instead of %d",
+        len(codebook),
+        num_clusters,
     )
+    return codebook
 
 
 def _assign_topics(
@@ -293,7 +316,7 @@ def _assign_topics(
     topics_str = json.dumps(codebook, indent=2)
     topic_of: dict[str, str] = {}
     pending = list(docs)
-    for _ in range(max_retries):  # rerun documents whose label was invalid
+    for _ in range(1 + max_retries):  # rerun documents whose label was invalid
         prompts: list[Prompt] = [
             [
                 {"role": "system", "content": _ASSIGN_SYSTEM},
@@ -336,37 +359,35 @@ def _assign_topics(
 
 
 def _match_topic(label: str, codebook: dict[str, str]) -> str | None:
-    """Match a label to a codebook key: case-insensitive, then substring."""
+    """Match a label to a codebook key: case-insensitive, then longest whole-word."""
     low = label.lower()
     if not low:
         return None
     for name in codebook:
         if name.lower() == low:
             return name
-    for name in codebook:
-        if name.lower() in low or low in name.lower():
-            return name
-    return None
+    matches = [
+        name
+        for name in codebook
+        if _has_phrase(low, name.lower()) or _has_phrase(name.lower(), low)
+    ]
+    return max(matches, key=len) if matches else None
+
+
+def _has_phrase(text: str, phrase: str) -> bool:
+    """Whether ``phrase`` occurs in ``text`` as whole words."""
+    return re.search(rf"(?<!\w){re.escape(phrase)}(?!\w)", text) is not None
 
 
 def _parse_json(text: str) -> dict:
     """Extract the first JSON object from a model response."""
-    stripped = re.sub(
-        r"```$", "", re.sub(r"^```(?:json)?", "", text.strip()).strip()
-    ).strip()
-    try:
-        parsed = json.loads(stripped)
-    except (json.JSONDecodeError, TypeError):
-        match = re.search(r"\{.*\}", stripped, re.DOTALL)
-        if not match:
-            raise ValueError(f"no JSON object in response: {text[:200]!r}")
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", text):
         try:
-            parsed = json.loads(match.group(0))
+            return decoder.raw_decode(text, match.start())[0]
         except json.JSONDecodeError:
-            raise ValueError(f"invalid JSON in response: {text[:200]!r}")
-    if not isinstance(parsed, dict):
-        raise ValueError(f"expected a JSON object, got: {text[:200]!r}")
-    return parsed
+            continue
+    raise ValueError(f"no JSON object in response: {text[:200]!r}")
 
 
 def _parse_topics(text: str) -> dict[str, str]:

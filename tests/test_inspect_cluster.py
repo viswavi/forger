@@ -8,7 +8,7 @@ import pytest
 
 from pyforger.acquire.model import Model
 from pyforger.inspect import topic_based_clustering
-from pyforger.inspect.cluster import _match_topic, _parse_json
+from pyforger.inspect.cluster import _build_codebook, _match_topic, _parse_json
 
 CONTEXT = "short hobby notes. Topics should describe the HOBBY the note is about."
 
@@ -139,6 +139,13 @@ def test_num_clusters_below_two_raises():
         _cluster(_rows(COOKING_DOCS), num_clusters=1)
 
 
+@pytest.mark.parametrize("tokens_per_shard", [0, -1])
+def test_non_positive_tokens_per_shard_raises(tokens_per_shard):
+    """A token budget below one is rejected."""
+    with pytest.raises(ValueError, match="tokens_per_shard"):
+        _cluster(_rows(COOKING_DOCS), tokens_per_shard=tokens_per_shard)
+
+
 def test_too_few_unique_values_raises():
     """More clusters than unique values is rejected."""
     with pytest.raises(ValueError, match="unique"):
@@ -162,6 +169,47 @@ def test_unclassifiable_docs_fall_back_to_first_topic():
     assert clusters == ["cooking"] * len(items)  # first codebook topic
 
 
+def test_zero_assign_retries_still_classifies():
+    """max_assign_retries counts retries, so 0 still makes one attempt."""
+    docs = COOKING_DOCS + SPACE_DOCS
+    clusters = _cluster(_rows(docs), max_assign_retries=0)
+    assert clusters == ["cooking" if _is_cooking(doc) else "space" for doc in docs]
+
+
+_TWO_TOPICS = {"cooking": "Preparing food.", "space": "Astronomy and rockets."}
+_THREE_TOPICS = {**_TWO_TOPICS, "gardening": "Growing plants."}
+
+
+class _ScriptedCodebookModel(Model):
+    """Returns scripted codebooks in order, recording each prompt."""
+
+    def __init__(self, codebooks):
+        super().__init__("fake-model")
+        self.codebooks = list(codebooks)
+        self.prompts = []
+
+    def generate_batch(self, prompts, **kwargs):
+        self.prompts.extend(prompts)
+        return [[json.dumps(self.codebooks.pop(0))] for _ in prompts]
+
+
+def test_codebook_with_wrong_topic_count_is_sent_back():
+    """A codebook with the wrong number of topics is returned for correction."""
+    model = _ScriptedCodebookModel([_THREE_TOPICS, _TWO_TOPICS])
+    codebook = _build_codebook([_THREE_TOPICS], model, CONTEXT, num_clusters=2)
+    assert codebook == _TWO_TOPICS
+    assert "That is 3 topics" in model.prompts[-1][-1]["content"]
+
+
+def test_codebook_keeps_last_attempt_when_count_never_matches(caplog):
+    """If the count is never corrected, the last codebook is used with a warning."""
+    model = _ScriptedCodebookModel([_THREE_TOPICS] * 3)
+    with caplog.at_level("WARNING", logger="Inspect"):
+        codebook = _build_codebook([_THREE_TOPICS], model, CONTEXT, num_clusters=2)
+    assert codebook == _THREE_TOPICS
+    assert any("3 topics instead of 2" in record.message for record in caplog.records)
+
+
 def test_match_topic_is_lenient():
     """Topic matching tolerates case and surrounding text."""
     codebook = {"Number Theory": "...", "Geometry": "..."}
@@ -170,6 +218,13 @@ def test_match_topic_is_lenient():
     assert _match_topic("Topic: Geometry problems", codebook) == "Geometry"
     assert _match_topic("Algebra", codebook) is None
     assert _match_topic("", codebook) is None
+
+
+def test_match_topic_prefers_longest_whole_word_match():
+    """The most specific topic wins, and topic names must match whole words."""
+    codebook = {"Data": "...", "Data Science": "...", "Art": "..."}
+    assert _match_topic("Topic: Data Science", codebook) == "Data Science"
+    assert _match_topic("Partial derivatives", codebook) is None
 
 
 def test_default_embed_warns_without_gpu(monkeypatch, caplog):
@@ -207,3 +262,9 @@ def test_parse_json_handles_fences_and_prose():
     }
     with pytest.raises(ValueError):
         _parse_json("no json here")
+
+
+def test_parse_json_returns_first_complete_object():
+    """Only the first complete object is parsed, skipping stray braces."""
+    assert _parse_json('{"topic": "a"} or maybe {"topic": "b"}') == {"topic": "a"}
+    assert _parse_json('Using {braces} loosely: {"topic": "a"}') == {"topic": "a"}

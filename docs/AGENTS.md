@@ -183,7 +183,8 @@ can be inserted at any point in a pipeline.
 | `topic_based_clustering` | yes | Interpretable clustering of contents of one field from the input rows. |
 
 Topic-based clustering uses the ClusterFusion clustering algorithm ([arXiv:2512.04350](https://arxiv.org/abs/2512.04350)),
-which is an LLM-enhanced clustering algorithm that performs a causal clustering based on interpretable cluster summaries.
+a hybrid method in which embeddings guide how rows are partitioned and an LLM summarizes the partitions into
+interpretable topics, then assigns each row to one of them.
 
 ```python
 from pyforger.inspect import topic_based_clustering
