@@ -35,7 +35,7 @@ def by_exact_match(
         for item in items:
             key = get_field(item, field, "by_exact_match")
             key = key.strip() if isinstance(key, str) else key
-            val = _canonicalize_value(key)
+            val = _canonicalize_value(get_field(item, agree_on, "by_exact_match"))
             if key not in first_seen:
                 first_seen[key] = val
                 unanimous[key] = True
