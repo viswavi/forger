@@ -87,7 +87,7 @@ to cache their results.
 | `pyforger.acquire` | `src/pyforger/acquire/` | Generate or retrieve rows. |
 | `pyforger.alter` | `src/pyforger/alter/` | Transform rows without removing items. |
 | `pyforger.filter` | `src/pyforger/filter/` | Remove rows by criterion. |
-| `pyforger.utils` | `src/pyforger/utils.py` | `get_field`, `get_formatted_logger`. |
+| `pyforger.utils` | `src/pyforger/utils.py` | `get_field`, `get_formatted_logger`, `canonical`. |
 
 #### `pyforger.acquire`
 

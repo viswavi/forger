@@ -3,6 +3,7 @@
 import pytest
 
 from pyforger.filter import by_exact_match, by_n_gram_overlap, by_rouge_l
+from pyforger.op import trace
 
 
 class TestByExactMatch:
@@ -166,7 +167,7 @@ class TestByExactMatch:
         assert result == [data[0]]
 
     def test_agree_on_compares_unhashable_outputs(self):
-        """List and dict outputs are compared by their string form."""
+        """List and dict outputs are compared element-wise."""
         data = [
             {"input": "x", "output": [1, 2]},
             {"input": "x", "output": [1, 2]},
@@ -175,6 +176,52 @@ class TestByExactMatch:
         ]
         result = by_exact_match(data, field="input", agree_on="output")
         assert result == [data[0]]
+
+    @pytest.mark.parametrize(
+        "a, b",
+        [
+            ({"a": 1, "b": 2}, {"b": 2, "a": 1}),
+            ({"n": {"a": 1, "b": 2}}, {"n": {"b": 2, "a": 1}}),
+            ([1, 2], (1, 2)),
+            ([{"a": 1, "b": 2}], ({"b": 2, "a": 1},)),
+            ({1, 2}, {2, 1}),
+        ],
+    )
+    def test_agree_on_ignores_container_ordering(self, a, b):
+        """Reordered dict keys and list-vs-tuple outputs agree."""
+        data = [
+            {"input": "x", "output": a},
+            {"input": "x", "output": b},
+        ]
+        result = by_exact_match(data, field="input", agree_on="output")
+        assert result == [data[0]]
+
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_agree_on_consistent_across_cache(self, reverse):
+        """Inputs sharing an @op cache key give the same result in any order.
+
+        ``@op`` sorts dict entries in its cache key, so these two inputs share
+        a cache entry; whichever call runs second receives the first call's
+        result, which must match what it would have computed itself.
+        """
+        ordered = [
+            {"input": "x", "output": {"a": 1, "b": 2}},
+            {"input": "x", "output": {"a": 1, "b": 2}},
+        ]
+        mixed = [
+            {"input": "x", "output": {"a": 1, "b": 2}},
+            {"input": "x", "output": {"b": 2, "a": 1}},
+        ]
+        calls = [mixed, ordered] if reverse else [ordered, mixed]
+        for data in calls:
+            uncached = by_exact_match(
+                data, field="input", agree_on="output", _no_cache=True
+            )
+            cached = by_exact_match(data, field="input", agree_on="output")
+            assert cached == uncached == [data[0]]
+        # The second cached call must have been served from the first's entry.
+        hits = [r.cache_hit for r in trace() if r.op_name == "filter.by_exact_match"]
+        assert hits[-1]
 
     def test_agree_on_preserves_input_order(self):
         """Kept items stay in input order when groups are interleaved."""

@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 from pyforger.op import op
-from pyforger.utils import get_field
+from pyforger.utils import canonical, get_field
 
 
 @op(name="filter.by_exact_match")
@@ -31,10 +31,11 @@ def by_exact_match(
     """
     unanimous: dict[Any, bool] = {}
     if agree_on is not None:
-        first_seen: dict[Any, str] = {}
+        first_seen: dict[Any, Any] = {}
         for item in items:
-            key = _strip_str(get_field(item, field, "by_exact_match"))
-            val = str(get_field(item, agree_on, "by_exact_match")).strip()
+            key = get_field(item, field, "by_exact_match")
+            key = key.strip() if isinstance(key, str) else key
+            val = _canonicalize_value(key)
             if key not in first_seen:
                 first_seen[key] = val
                 unanimous[key] = True
@@ -46,7 +47,7 @@ def by_exact_match(
     for item in items:
         key = get_field(item, field, "by_exact_match")
         if agree_on is not None:
-            key = _strip_str(key)
+            key = key.strip() if isinstance(key, str) else key
             if not unanimous[key]:
                 continue
         counts[key] = counts.get(key, 0) + 1
@@ -55,9 +56,16 @@ def by_exact_match(
     return result
 
 
-def _strip_str(value: Any) -> Any:
-    """Strip surrounding whitespace from strings; return other values as-is."""
-    return value.strip() if isinstance(value, str) else value
+def _stringify_leaves(obj: Any) -> Any:
+    """Recursively convert the leaves of a ``canonical`` result to strings."""
+    if isinstance(obj, (list, tuple)):
+        return [_stringify_leaves(x) for x in obj]
+    return str(obj).strip()
+
+
+def _canonicalize_value(value: Any) -> Any:
+    """Normalize an ``agree_on`` value for comparison."""
+    return _stringify_leaves(canonical(value))
 
 
 @op(name="filter.by_rouge_l")

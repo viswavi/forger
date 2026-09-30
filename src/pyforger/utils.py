@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import pickle
 from typing import Any
 
 
@@ -50,3 +51,60 @@ def get_field(item: dict, field: str, caller: str) -> Any:
             f"{caller}: item is missing required field '{field}'. "
             f"Available fields: {list(item.keys())}"
         )
+
+
+_CODE_T = type((lambda: None).__code__)
+
+
+def _code_key(code: Any) -> list[Any]:
+    """Behavior-only key for a code object (to avoid repeating code execution)."""
+    consts = [
+        _code_key(c) if isinstance(c, _CODE_T) else canonical(c) for c in code.co_consts
+    ]
+    return [
+        code.co_code,
+        consts,
+        list(code.co_names),
+        list(code.co_varnames),
+        list(code.co_freevars),
+        code.co_argcount,
+    ]
+
+
+def canonical(obj: Any) -> Any:
+    """Convert obj to a stable, picklable structure for hashing."""
+    if obj is None or isinstance(obj, (bool, int, float, str, bytes)):
+        return obj
+    if isinstance(obj, (list, tuple)):
+        # We treat input lists and input tuples with the same content as identical.
+        return [canonical(x) for x in obj]
+    if isinstance(obj, dict):
+        items = [(canonical(k), canonical(v)) for k, v in obj.items()]
+        items.sort(key=lambda item: repr(item[0]))
+        return items
+    if isinstance(obj, (set, frozenset)):
+        items = [canonical(x) for x in obj]
+        items.sort(key=repr)
+        return ["__frozenset__" if isinstance(obj, frozenset) else "__set__", items]
+    if isinstance(obj, type):
+        return f"<type {obj.__module__}.{obj.__qualname__}>"
+    if hasattr(obj, "cache_key") and callable(obj.cache_key):
+        return ["__cache_key__", canonical(obj.cache_key())]
+    if callable(obj):
+        ident = (
+            f"{getattr(obj, '__module__', '?')}."
+            f"{getattr(obj, '__qualname__', repr(obj))}"
+        )
+        code = getattr(obj, "__code__", None)
+        if code is not None:
+            closure = getattr(obj, "__closure__", None) or ()
+            closure_vals = [canonical(cell.cell_contents) for cell in closure]
+            return ["__callable__", ident, _code_key(code), closure_vals]
+        return ["__callable__", ident]
+    try:
+        return pickle.dumps(obj, protocol=4)
+    except Exception as e:
+        raise TypeError(
+            f"@op cannot derive a stable cache key for {type(obj).__name__}: "
+            f"{e}. Add a cache_key() method to this type."
+        ) from e
