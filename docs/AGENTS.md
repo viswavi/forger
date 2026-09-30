@@ -157,6 +157,7 @@ Remove rows by criterion. If a filter empties the list, downstream operations re
 |---|---|
 | `by_exact_agreement` | Keep rows where two fields agree (or disagree, with `disagree=True`). |
 | `by_rouge_l_agreement` | ROUGE-L similarity gate between two fields. |
+| `by_group_agreement` | Drop groups of rows (by `group_by_input_field`) whose `match_output_field` values differ. |
 | `by_exact_match` | Keep up to `max_count` rows per unique field value. |
 | `by_rouge_l` | Pairwise ROUGE-L diversity filter. |
 | `by_n_gram_overlap` | N-gram overlap diversity filter. |

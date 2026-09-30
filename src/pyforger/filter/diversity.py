@@ -5,11 +5,8 @@ similarity, or n-gram overlap against the kept pool.
 """
 from __future__ import annotations
 
-import pickle
-from typing import Any
-
 from pyforger.op import op
-from pyforger.utils import canonical, get_field
+from pyforger.utils import get_field
 
 
 @op(name="filter.by_exact_match")
@@ -18,51 +15,16 @@ def by_exact_match(
     *,
     field: str,
     max_count: int = 1,
-    agree_on: str | None = None,
 ) -> list[dict]:
-    """Keep up to ``max_count`` occurrences of each unique ``field`` value.
-
-    ``field`` identifies the groups of duplicate candidates; rows only need
-    to agree with other rows that share this value. ``agree_on`` optionally
-    names the column to validate within each such group. When set, every item
-    in a group is dropped if any ``agree_on`` value differs (useful
-    for filtering (input, output) pairs where one input has conflicting
-    outputs). String values are stripped of surrounding whitespace before
-    comparison; values of different types (``1`` and ``"1"``) differ. Kept
-    items retain their original order.
-    """
-    unanimous: dict[Any, bool] = {}
-    if agree_on is not None:
-        first_seen: dict[Any, Any] = {}
-        for item in items:
-            key = get_field(item, field, "by_exact_match")
-            key = key.strip() if isinstance(key, str) else key
-            val = _canonicalize_value(get_field(item, agree_on, "by_exact_match"))
-            if key not in first_seen:
-                first_seen[key] = val
-                unanimous[key] = True
-            elif first_seen[key] != val:
-                unanimous[key] = False
-
-    counts: dict[Any, int] = {}
+    """Keep up to ``max_count`` occurrences of each unique ``field`` value."""
+    counts: dict[str, int] = {}
     result: list[dict] = []
     for item in items:
-        key = get_field(item, field, "by_exact_match")
-        if agree_on is not None:
-            key = key.strip() if isinstance(key, str) else key
-            if not unanimous[key]:
-                continue
-        counts[key] = counts.get(key, 0) + 1
-        if counts[key] <= max_count:
+        val = get_field(item, field, "by_exact_match")
+        counts[val] = counts.get(val, 0) + 1
+        if counts[val] <= max_count:
             result.append(item)
     return result
-
-
-def _canonicalize_value(value: Any) -> bytes:
-    """Normalize an ``agree_on`` value the same way ``@op`` keys its cache."""
-    if isinstance(value, str):
-        value = value.strip()
-    return pickle.dumps(canonical(value), protocol=4)
 
 
 @op(name="filter.by_rouge_l")
