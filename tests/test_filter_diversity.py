@@ -157,14 +157,16 @@ class TestByExactMatch:
         result = by_exact_match(data, field="input", agree_on="output")
         assert result == data
 
-    def test_agree_on_compares_outputs_as_strings(self):
-        """Outputs with the same string form agree regardless of type."""
+    @pytest.mark.parametrize(
+        "a, b", [(1, "1"), (True, 1), (1, 1.0), ([True], [1]), ({"k": 1}, {"k": "1"})]
+    )
+    def test_agree_on_differently_typed_outputs_disagree(self, a, b):
+        """Outputs that differ in type disagree, even if == or str() match."""
         data = [
-            {"input": "x", "output": 1},
-            {"input": "x", "output": " 1 "},
+            {"input": "x", "output": a},
+            {"input": "x", "output": b},
         ]
-        result = by_exact_match(data, field="input", agree_on="output")
-        assert result == [data[0]]
+        assert by_exact_match(data, field="input", agree_on="output") == []
 
     def test_agree_on_compares_unhashable_outputs(self):
         """List and dict outputs are compared element-wise."""

@@ -5,6 +5,7 @@ similarity, or n-gram overlap against the kept pool.
 """
 from __future__ import annotations
 
+import pickle
 from typing import Any
 
 from pyforger.op import op
@@ -21,13 +22,14 @@ def by_exact_match(
 ) -> list[dict]:
     """Keep up to ``max_count`` occurrences of each unique ``field`` value.
 
-    When ``agree_on`` is set, also drop every item whose ``field`` group
-    contains disagreeing ``agree_on`` values (useful for filtering
-    (input, output) pairs where the same input has conflicting outputs).
-    In that mode, string ``field`` values are grouped after stripping
-    surrounding whitespace (other values are grouped as-is), and
-    ``agree_on`` values are compared by their stripped string form, so
-    ``1`` and ``"1"`` agree. Kept items retain their original order.
+    ``field`` identifies the groups of duplicate candidates; rows only need
+    to agree with other rows that share this value. ``agree_on`` optionally
+    names the column to validate within each such group. When set, every item
+    in a group is dropped if any ``agree_on`` value differs (useful
+    for filtering (input, output) pairs where one input has conflicting
+    outputs). String values are stripped of surrounding whitespace before
+    comparison; values of different types (``1`` and ``"1"``) differ. Kept
+    items retain their original order.
     """
     unanimous: dict[Any, bool] = {}
     if agree_on is not None:
@@ -56,22 +58,11 @@ def by_exact_match(
     return result
 
 
-def _stringify_leaves(obj: Any) -> Any:
-    """Recursively convert the leaves of a ``canonical`` result to strings.
-
-    Tuples are kept as tuples: ``canonical`` uses them to tag dicts and sets,
-    so this keeps mappings distinct from sequences (``{}`` vs. ``[]``).
-    """
-    if isinstance(obj, tuple):
-        return tuple(_stringify_leaves(x) for x in obj)
-    if isinstance(obj, list):
-        return [_stringify_leaves(x) for x in obj]
-    return str(obj).strip()
-
-
-def _canonicalize_value(value: Any) -> Any:
-    """Normalize an ``agree_on`` value for comparison."""
-    return _stringify_leaves(canonical(value))
+def _canonicalize_value(value: Any) -> bytes:
+    """Normalize an ``agree_on`` value the same way ``@op`` keys its cache."""
+    if isinstance(value, str):
+        value = value.strip()
+    return pickle.dumps(canonical(value), protocol=4)
 
 
 @op(name="filter.by_rouge_l")
