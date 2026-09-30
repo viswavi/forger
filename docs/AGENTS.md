@@ -175,8 +175,9 @@ threshold produces higher-quality outputs but at the cost of more LLM calls.
 
 #### `pyforger.inspect`
 
-Examine rows without modifying them: inspect ops return a *report* about the rows (not transformed rows), so they
-can be inserted at any point in a pipeline.
+Examine rows without modifying them: inspect ops return a *report* about the rows (e.g. `list[str]`), not rows. At any
+point, inspection can be performed to generate a report about the current data, without altering the original rows or
+producing new rows in the pipeline.
 
 | Export | Cached | Description |
 |---|---|---|
