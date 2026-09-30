@@ -385,3 +385,49 @@ class TestByGroupAgreement:
             r.cache_hit for r in trace() if r.op_name == "filter.by_group_agreement"
         ]
         assert hits[-1]
+
+    def test_max_count_caps_agreeing_groups(self):
+        """max_count caps kept items per group, using the same grouping key."""
+        data = [
+            {"input": "x", "output": "a"},
+            {"input": " x ", "output": "a"},
+            {"input": "y", "output": "b"},
+            {"input": "x", "output": "a"},
+        ]
+        assert _agree(data, max_count=1) == data[:1] + data[2:3]
+
+    @pytest.mark.parametrize("max_count", [0, -1])
+    def test_nonpositive_max_count_keeps_nothing(self, max_count):
+        """Nonpositive max_count keeps nothing."""
+        data = [{"input": "x", "output": "a"}] * 3
+        assert _agree(data, max_count=max_count) == []
+
+    def test_unhashable_inputs_are_grouped(self):
+        """List and dict inputs group structurally instead of raising."""
+        data = [
+            {"input": [1, 2], "output": "a"},
+            {"input": (1, 2), "output": "a"},
+            {"input": {"k": 1}, "output": "b"},
+            {"input": {"k": 1}, "output": "c"},
+        ]
+        assert _agree(data) == data[:2]
+
+    def test_differently_typed_inputs_are_separate_groups(self):
+        """True and 1 (or 1 and 1.0) are separate groups, each judged alone."""
+        data = [
+            {"input": True, "output": "a"},
+            {"input": 1, "output": "b"},
+            {"input": 1.0, "output": "c"},
+        ]
+        assert _agree(data) == data
+
+    def test_equal_outputs_agree_regardless_of_aliasing(self):
+        """Equal outputs agree whether or not they share sub-objects."""
+        s = "x" * 100
+        copy_of_s = "".join(["x"] * 100)
+        assert s == copy_of_s and s is not copy_of_s
+        data = [
+            {"input": "x", "output": [s, s]},
+            {"input": "x", "output": [s, copy_of_s]},
+        ]
+        assert _agree(data) == data

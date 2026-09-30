@@ -5,7 +5,6 @@ or groups of items whose outputs agree.
 """
 from __future__ import annotations
 
-import pickle
 from typing import Any
 
 from rouge_score import rouge_scorer
@@ -98,45 +97,66 @@ def by_group_agreement(
     *,
     group_by_input_field: str,
     match_output_field: str,
+    max_count: int | None = None,
 ) -> list[dict]:
     """Drop every group of items whose output values disagree.
 
     Items are grouped by ``group_by_input_field``, and a group is kept only if
     all of its ``match_output_field`` values are identical. Useful for
     filtering (input, output) pairs where one input has conflicting outputs,
-    e.g. checking self-consistency across several samples per input. Chain
-    with ``by_exact_match`` to cap the rows kept per group.
+    e.g. checking self-consistency across several samples per input.
 
-    String values of both fields are stripped of surrounding whitespace.
-    Values of different types (``1`` and ``"1"``) disagree.
+    Both fields are compared structurally: string values are stripped of
+    surrounding whitespace, dict and set order is ignored, lists and tuples
+    are interchangeable. However, values of different types (``1`` and ``"1"``,
+    or ``True`` and ``1``) differ.
 
     Args:
         items: List of input data items.
         group_by_input_field: Key whose value defines each group.
         match_output_field: Key whose value must be identical within a group.
+        max_count: If set, keep at most this many items from each agreeing
+            group (``None`` keeps them all).
 
     Returns:
         The items from groups whose outputs all agree, in their original order.
     """
-
-    def group_key(item: dict) -> Any:
-        key = get_field(item, group_by_input_field, "by_group_agreement")
-        return key.strip() if isinstance(key, str) else key
-
-    first_seen: dict[Any, bytes] = {}
+    keys = [
+        _normalize(get_field(item, group_by_input_field, "by_group_agreement"))
+        for item in items
+    ]
+    first_seen: dict[Any, Any] = {}
     conflicting: set[Any] = set()
-    for item in items:
-        key = group_key(item)
-        val = _canonicalize_value(
-            get_field(item, match_output_field, "by_group_agreement")
-        )
+    for key, item in zip(keys, items):
+        val = _normalize(get_field(item, match_output_field, "by_group_agreement"))
         if first_seen.setdefault(key, val) != val:
             conflicting.add(key)
-    return [item for item in items if group_key(item) not in conflicting]
+
+    counts: dict[Any, int] = {}
+    result: list[dict] = []
+    for key, item in zip(keys, items):
+        if key in conflicting:
+            continue
+        counts[key] = counts.get(key, 0) + 1
+        if max_count is None or counts[key] <= max_count:
+            result.append(item)
+    return result
 
 
-def _canonicalize_value(value: Any) -> bytes:
-    """Normalize an output value the way ``@op`` keys its cache."""
+def _normalize(value: Any) -> Any:
+    """Hashable, type-preserving structural form of ``value`` for comparison.
+
+    Builds on ``canonical`` (so values sharing an ``@op`` cache key compare
+    equal) and tags every node with its type, so ``True``, ``1``, ``1.0`` and
+    ``"1"`` stay distinct. Unlike pickled bytes, the result doesn't depend on
+    whether equal sub-values are the same object.
+    """
     if isinstance(value, str):
         value = value.strip()
-    return pickle.dumps(canonical(value), protocol=4)
+    return _tag(canonical(value))
+
+
+def _tag(obj: Any) -> Any:
+    if isinstance(obj, (list, tuple)):
+        return (type(obj).__name__, tuple(_tag(x) for x in obj))
+    return (type(obj).__name__, obj)
