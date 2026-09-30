@@ -110,13 +110,21 @@ def topic_based_clustering(
     topics after being corrected, a warning is logged and its last
     codebook is used.
     """
+    # Validate input parameters.
     if num_clusters < 2:
         raise ValueError("num_clusters must be at least 2")
-    if tokens_per_shard < 1:
-        raise ValueError("tokens_per_shard must be positive")
+    for name, value in (
+        ("sample_size", sample_size),
+        ("tokens_per_shard", tokens_per_shard),
+        ("summarize_truncation", summarize_truncation),
+        ("assign_truncation", assign_truncation),
+    ):
+        assert value > 0, f"{name} must be positive"
+    if max_assign_retries < 0:
+        raise ValueError("max_assign_retries must be non-negative")
     if not items:
         return []
-
+    # Perform topic-based clustering.
     row_docs = [str(get_field(item, field, "topic_based_clustering")) for item in items]
     unique_docs = list(dict.fromkeys(row_docs))
     if len(unique_docs) <= num_clusters:

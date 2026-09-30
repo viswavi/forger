@@ -139,11 +139,21 @@ def test_num_clusters_below_two_raises():
         _cluster(_rows(COOKING_DOCS), num_clusters=1)
 
 
-@pytest.mark.parametrize("tokens_per_shard", [0, -1])
-def test_non_positive_tokens_per_shard_raises(tokens_per_shard):
-    """A token budget below one is rejected."""
-    with pytest.raises(ValueError, match="tokens_per_shard"):
-        _cluster(_rows(COOKING_DOCS), tokens_per_shard=tokens_per_shard)
+@pytest.mark.parametrize(
+    "param, value",
+    [
+        ("sample_size", 0),
+        ("tokens_per_shard", 0),
+        ("tokens_per_shard", -1),
+        ("summarize_truncation", 0),
+        ("assign_truncation", -1),
+        ("max_assign_retries", -1),
+    ],
+)
+def test_invalid_count_parameters_raise(param, value):
+    """Non-positive sizes and budgets, and negative retry counts, are rejected."""
+    with pytest.raises(ValueError, match=param):
+        _cluster(_rows(COOKING_DOCS), **{param: value})
 
 
 def test_too_few_unique_values_raises():
