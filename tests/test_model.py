@@ -377,6 +377,20 @@ class TestErrorHandling:
             model.generate_batch(["Q1", "Q2"])
         assert model.history == []
 
+    @patch("pyforger.acquire.model.litellm")
+    def test_batch_request_exception_is_raised(self, mock_litellm):
+        """An exception returned for one batch request is raised as-is."""
+        error = ValueError("context window exceeded: 200000 > 128000 tokens")
+        mock_litellm.batch_completion.return_value = [
+            make_litellm_response(["r1"]),
+            error,
+        ]
+        model = Model("gpt-4o", api_key="sk-test")
+        with pytest.raises(ValueError) as excinfo:
+            model.generate_batch(["Q1", "Q2"])
+        assert excinfo.value is error
+        assert model.history == []
+
 
 class TestEdgeCases:
     """Edge cases and boundary conditions."""
