@@ -45,7 +45,7 @@ exclude = [
 only-packages = true
 
 [project.optional-dependencies]
-# Topic-Based Clustering require K-means cluteirng and on-device embedding creation.
+# Topic-Based Clustering requires K-means clustering and on-device embedding creation.
 clustering = [
     "numpy",
     "scikit-learn",
