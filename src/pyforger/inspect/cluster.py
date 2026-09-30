@@ -143,7 +143,6 @@ def topic_based_clustering(
 def _default_embed(docs: list[str], embedding_model: str) -> Any:
     """Embed documents with sentence-transformers, preferring the GPU."""
     try:
-        import torch
         from sentence_transformers import SentenceTransformer
     except ImportError as e:
         raise ImportError(
@@ -151,8 +150,8 @@ def _default_embed(docs: list[str], embedding_model: str) -> Any:
             "`pip install pyforger[clustering]`, or pass embed_fn=."
         ) from e
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    if device == "cpu":
+    encoder = SentenceTransformer(embedding_model)
+    if encoder.device.type == "cpu":
         logger.warning(
             "topic_based_clustering: no GPU detected; embedding %d documents "
             "with %s on CPU may be slow. Pass embed_fn= to use a different "
@@ -160,7 +159,6 @@ def _default_embed(docs: list[str], embedding_model: str) -> Any:
             len(docs),
             embedding_model,
         )
-    encoder = SentenceTransformer(embedding_model, device=device)
     return encoder.encode(
         docs, batch_size=64, normalize_embeddings=True, convert_to_numpy=True
     )

@@ -173,20 +173,21 @@ def test_match_topic_is_lenient():
 
 
 def test_default_embed_warns_without_gpu(monkeypatch, caplog):
-    """The default embedder warns and uses CPU when no GPU is present."""
+    """The default embedder warns when sentence-transformers lands on the CPU."""
     import sys
     import types
 
     from pyforger.inspect.cluster import _default_embed
 
     class _FakeEncoder:
-        def __init__(self, model_id, device=None):
-            assert device == "cpu"
+        device = types.SimpleNamespace(type="cpu")
+
+        def __init__(self, model_id):
+            pass
 
         def encode(self, docs, **kwargs):
             return _fake_embed(docs)
 
-    monkeypatch.setattr("torch.cuda.is_available", lambda: False)
     fake_st = types.ModuleType("sentence_transformers")
     fake_st.SentenceTransformer = _FakeEncoder
     monkeypatch.setitem(sys.modules, "sentence_transformers", fake_st)
