@@ -72,7 +72,13 @@ def _code_key(code: Any) -> list[Any]:
 
 
 def canonical(obj: Any) -> Any:
-    """Convert obj to a stable, picklable structure for hashing."""
+    """Convert obj to a stable, picklable structure for hashing.
+
+    Input lists and tuples both become lists, so the only tuples in the
+    result are the type tags below. Tagging dicts and sets with a tuple keeps
+    them distinct from any list (e.g. ``{}`` vs. ``[]``, or ``{"k": 1}`` vs.
+    ``[("k", 1)]``), since no input can produce a tuple of its own.
+    """
     if obj is None or isinstance(obj, (bool, int, float, str, bytes)):
         return obj
     if isinstance(obj, (list, tuple)):
@@ -81,11 +87,11 @@ def canonical(obj: Any) -> Any:
     if isinstance(obj, dict):
         items = [(canonical(k), canonical(v)) for k, v in obj.items()]
         items.sort(key=lambda item: repr(item[0]))
-        return items
+        return ("__dict__", items)
     if isinstance(obj, (set, frozenset)):
         items = [canonical(x) for x in obj]
         items.sort(key=repr)
-        return ["__frozenset__" if isinstance(obj, frozenset) else "__set__", items]
+        return ("__frozenset__" if isinstance(obj, frozenset) else "__set__", items)
     if isinstance(obj, type):
         return f"<type {obj.__module__}.{obj.__qualname__}>"
     if hasattr(obj, "cache_key") and callable(obj.cache_key):

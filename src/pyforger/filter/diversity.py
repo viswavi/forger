@@ -57,8 +57,14 @@ def by_exact_match(
 
 
 def _stringify_leaves(obj: Any) -> Any:
-    """Recursively convert the leaves of a ``canonical`` result to strings."""
-    if isinstance(obj, (list, tuple)):
+    """Recursively convert the leaves of a ``canonical`` result to strings.
+
+    Tuples are kept as tuples: ``canonical`` uses them to tag dicts and sets,
+    so this keeps mappings distinct from sequences (``{}`` vs. ``[]``).
+    """
+    if isinstance(obj, tuple):
+        return tuple(_stringify_leaves(x) for x in obj)
+    if isinstance(obj, list):
         return [_stringify_leaves(x) for x in obj]
     return str(obj).strip()
 

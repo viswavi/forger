@@ -196,6 +196,23 @@ class TestByExactMatch:
         result = by_exact_match(data, field="input", agree_on="output")
         assert result == [data[0]]
 
+    @pytest.mark.parametrize(
+        "a, b",
+        [
+            ({"k": 1}, [("k", 1)]),
+            ({"k": 1}, [["k", 1]]),
+            ({}, []),
+            ({1}, ["__set__", [1]]),
+        ],
+    )
+    def test_agree_on_mapping_and_sequence_disagree(self, a, b):
+        """A mapping (or set) never agrees with a sequence of the same content."""
+        data = [
+            {"input": "x", "output": a},
+            {"input": "x", "output": b},
+        ]
+        assert by_exact_match(data, field="input", agree_on="output") == []
+
     @pytest.mark.parametrize("reverse", [False, True])
     def test_agree_on_consistent_across_cache(self, reverse):
         """Inputs sharing an @op cache key give the same result in any order.

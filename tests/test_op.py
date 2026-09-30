@@ -63,6 +63,42 @@ def test_op_warns_on_closure(caplog: pytest.LogCaptureFixture) -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "a, b",
+    [
+        ({}, []),
+        ({"k": 1}, [("k", 1)]),
+        ({"k": 1}, [["k", 1]]),
+        (set(), []),
+        ({1}, ["__set__", [1]]),
+    ],
+)
+def test_op_distinguishes_mappings_and_sets_from_sequences(a, b) -> None:
+    """Dicts and sets never share a cache key with a list of the same content."""
+
+    @op
+    def type_name(x: object) -> str:
+        return type(x).__name__
+
+    assert type_name(a) == type(a).__name__
+    assert type_name(b) == type(b).__name__
+
+
+def test_op_treats_lists_and_tuples_alike() -> None:
+    """Lists and tuples with the same content intentionally share a cache key."""
+    calls = 0
+
+    @op
+    def count(x: object) -> int:
+        nonlocal calls
+        calls += 1
+        return 1
+
+    count([1, 2])
+    count((1, 2))
+    assert calls == 1
+
+
 def test_op_raises_for_unpicklable_arg_without_cache_key() -> None:
     """Unpicklable args with no cache_key() get a clear TypeError, not a silent repr."""
 
