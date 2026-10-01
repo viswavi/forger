@@ -13,6 +13,7 @@ reference describes the execution model, the public API, and the conventions the
   - [`pyforger.acquire`](#pyforgeracquire)
   - [`pyforger.alter`](#pyforgeralter)
   - [`pyforger.filter`](#pyforgerfilter)
+  - [`pyforger.inspect`](#pyforgerinspect)
 - [Models, prompts, and credentials](#models-prompts-and-credentials)
 - [Caching and tracing with `@op`](#caching-and-tracing-with-op)
 - [Composing a pipeline](#composing-a-pipeline)
@@ -67,17 +68,17 @@ tokens and the model used. For example, gpt-5.4-nano is generally much cheaper t
 
 ### Execution model
 
-A pipeline is a Python function that consists of a sequence of operations. Many useful implementations of operations
-are given in `pyforger.{acquire/alter/filter}`. You can also implement your own operations. Each operation takes an
-optional input list (`list[dict]`) and returns an output list (`list[dict]`). Caching and tracing are enabled by adding
-the `@op` decorator.
+A pipeline is a Python function. It calls operations from `pyforger.acquire`, `pyforger.alter`, `pyforger.filter`,
+and `pyforger.inspect`. Each operation takes a `list[dict]` (or generation parameters). Acquire, alter, and filter
+operations return a `list[dict]`; inspect operations instead return a report about the rows without modifying rows.
+Control flow (`for`, `if`, comprehensions, helper functions) in plain Python can be used
 
 ### Operation reference
 
-All operations are plain functions. Operations that perform LLM calls or expensive in-process work (including almost
-everything in `pyforger.{acquire/alter/filter}`) should be decorated internally with `@op`, so their results are cached on
-disk and traced. The retrieval functions (`retrieve`, `retrieve_from_*`) are not internally cached; wrap them with `@op`
-to cache their results.
+All operations are plain functions. Operations that perform LLM calls or expensive in-process work (`sample_from_LLM`
+every `alter.*` op, every `filter.*` op, every `inspect.*` op) are decorated internally with `@op`, so their results
+are cached on disk and traced. The retrieval functions (`retrieve`, `retrieve_from_*`) are not internally cached; wrap
+them with `@op` to memoize their results.
 
 ### Public API summary
 
@@ -87,6 +88,7 @@ to cache their results.
 | `pyforger.acquire` | `src/pyforger/acquire/` | Generate or retrieve rows. |
 | `pyforger.alter` | `src/pyforger/alter/` | Transform rows without removing items. |
 | `pyforger.filter` | `src/pyforger/filter/` | Remove rows by criterion. |
+| `pyforger.inspect` | `src/pyforger/inspect/` | Examine rows without modifying them; returns a report. |
 | `pyforger.utils` | `src/pyforger/utils.py` | `get_field`, `get_formatted_logger`, `canonical`. |
 
 #### `pyforger.acquire`
@@ -171,6 +173,34 @@ These are important for assuring quality and diversity in generated data, and on
 and thresholds to find the right balance for a given use case. For example, `by_rouge_l` with a very low threshold
 produces more diverse outputs but may filter out many rows; `by_llm_score` with multiple judges and a high consensus
 threshold produces higher-quality outputs but at the cost of more LLM calls.
+
+#### `pyforger.inspect`
+
+Examine rows without modifying them: inspect ops return a *report* about the rows (e.g. `list[str]`), not rows. At any
+point, inspection can be performed to generate a report about the current data, without altering the original rows or
+producing new rows in the pipeline.
+
+| Export | Cached | Description |
+|---|---|---|
+| `topic_based_clustering` | yes | Interpretable clustering of contents of one field from the input rows. |
+
+Topic-based clustering uses the ClusterFusion clustering algorithm ([arXiv:2512.04350](https://arxiv.org/abs/2512.04350)),
+a hybrid method in which embeddings guide how rows are partitioned and an LLM summarizes the partitions into
+interpretable topics, then assigns each row to one of them.
+
+```python
+from pyforger.inspect import topic_based_clustering
+
+clusters = topic_based_clustering(
+    rows,
+    field="problem",
+    model=model,
+    context="competition mathematics problems. Topics should describe the "
+            "mathematical subject and technique, NOT the numeric answer.",
+    num_clusters=20,
+)
+# clusters[i] is the topic name of rows[i]
+```
 
 ### Models, prompts, and credentials
 
