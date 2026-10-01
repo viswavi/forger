@@ -182,7 +182,7 @@ class WebRetrievalSource(RetrievalSource):
             mode: QUERY or RANDOM.
             query: Search string.  Required; raises ``ValueError`` if
                 empty or None.
-            n: Number of results to return (capped at 50).
+            n: Number of results to return (greater than 0, capped at 50).
             seed: Unused (RANDOM mode unsupported).
             **kwargs: Overrides (e.g. timeout).
 
@@ -199,6 +199,8 @@ class WebRetrievalSource(RetrievalSource):
                 "WebRetrievalSource does not support RANDOM mode -- "
                 "web search has no reproducible random corpus."
             )
+        if n <= 0:
+            raise ValueError("n must be greater than 0")
 
         merged = {**self._kwargs, **kwargs}
         session = self._get_session()
