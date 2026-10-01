@@ -48,8 +48,10 @@ def _fake_embed(docs):
 class _FakeClusterModel(Model):
     """Fake Model that answers the three ClusterFusion prompt types."""
 
-    def __init__(self):
+    def __init__(self, broken=()):
+        """``broken``: prompt markers whose responses are unparseable."""
         super().__init__("fake-model")
+        self.broken = broken
         self.summarize_calls = 0
         self.assign_calls = 0
         self.summarized_records = []
@@ -60,7 +62,9 @@ class _FakeClusterModel(Model):
         return [[self._respond(prompt)] * max(n, 1) for prompt in prompts]
 
     def _respond(self, prompt):
-        user_content = prompt[-1]["content"] if isinstance(prompt, list) else prompt
+        user_content = prompt[-1]["content"]
+        if any(marker in user_content for marker in self.broken):
+            return "not json at all"
         if "reviewing records" in user_content:
             self.summarize_calls += 1
             records = user_content.split("Records: ", 1)[1].split("\n\nYour goal")[0]
@@ -162,20 +166,21 @@ def test_too_few_unique_values_raises():
         _cluster(_rows(COOKING_DOCS), num_clusters=3)
 
 
-class _GarbageAssignModel(_FakeClusterModel):
-    """Summarizes and aggregates fine but never returns a valid assignment."""
-
-    def _respond(self, prompt):
-        user_content = prompt[-1]["content"] if isinstance(prompt, list) else prompt
-        if "classify the record" in user_content:
-            return "not json at all"
-        return super()._respond(prompt)
+def test_all_unparseable_summaries_raise():
+    """With no parseable shard summary, there is nothing to build a codebook from."""
+    with pytest.raises(RuntimeError, match="every shard summary"):
+        _cluster(
+            _rows(COOKING_DOCS + SPACE_DOCS),
+            _FakeClusterModel(broken=("reviewing records",)),
+        )
 
 
 def test_unclassifiable_docs_fall_back_to_first_topic():
     """Docs that never classify fall back to the first topic."""
     items = _rows(COOKING_DOCS + SPACE_DOCS)
-    clusters = _cluster(items, _GarbageAssignModel(), max_assign_retries=2)
+    clusters = _cluster(
+        items, _FakeClusterModel(broken=("classify the record",)), max_assign_retries=2
+    )
     assert clusters == ["cooking"] * len(items)  # first codebook topic
 
 
@@ -208,7 +213,7 @@ def test_codebook_with_wrong_topic_count_is_sent_back():
     model = _ScriptedCodebookModel([_THREE_TOPICS, _TWO_TOPICS])
     codebook = _build_codebook([_THREE_TOPICS], model, CONTEXT, num_clusters=2)
     assert codebook == _TWO_TOPICS
-    assert "That is 3 topics" in model.prompts[-1][-1]["content"]
+    assert "That is 3 distinct topic names" in model.prompts[-1][-1]["content"]
 
 
 def test_codebook_keeps_last_attempt_when_count_never_matches(caplog):
@@ -218,6 +223,15 @@ def test_codebook_keeps_last_attempt_when_count_never_matches(caplog):
         codebook = _build_codebook([_THREE_TOPICS], model, CONTEXT, num_clusters=2)
     assert codebook == _THREE_TOPICS
     assert any("3 topics instead of 2" in record.message for record in caplog.records)
+
+
+def test_codebook_case_duplicates_count_once():
+    """Names differing only in case are one topic, so the count gets corrected."""
+    duplicated = {"Cooking": "Food.", "cooking ": "Also food.", " ": "Blank."}
+    model = _ScriptedCodebookModel([duplicated, _TWO_TOPICS])
+    codebook = _build_codebook([_TWO_TOPICS], model, CONTEXT, num_clusters=2)
+    assert codebook == _TWO_TOPICS
+    assert "That is 1 distinct topic names" in model.prompts[-1][-1]["content"]
 
 
 def test_match_topic_is_lenient():
@@ -235,6 +249,12 @@ def test_match_topic_prefers_longest_whole_word_match():
     codebook = {"Data": "...", "Data Science": "...", "Art": "..."}
     assert _match_topic("Topic: Data Science", codebook) == "Data Science"
     assert _match_topic("Partial derivatives", codebook) is None
+
+
+def test_match_topic_rejects_ambiguous_partial_label():
+    """A label contained in several topic names is ambiguous, so it's unmatched."""
+    codebook = {"Data Science": "...", "Data Engineering": "...", "Art": "..."}
+    assert _match_topic("Data", codebook) is None
 
 
 def test_default_embed_warns_without_gpu(monkeypatch, caplog):

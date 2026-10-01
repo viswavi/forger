@@ -61,8 +61,9 @@ _AGGREGATE_USER = (
     "Output only the JSON object."
 )
 _AGGREGATE_RETRY = (
-    "That is {got} topics, but exactly {num_clusters} are required. Merge or "
-    "split topics as needed and output only the corrected JSON object."
+    "That is {got} distinct topic names (ignoring case), but exactly "
+    "{num_clusters} distinct topics are required. Merge or split topics as "
+    "needed and output only the corrected JSON object."
 )
 
 _ASSIGN_SYSTEM = (
@@ -80,6 +81,16 @@ _ASSIGN_USER = (
     "Return the result in JSON format with a single key 'topic' whose value is "
     "exactly one of the topic names above (copied verbatim)."
 )
+
+
+def _chat(system: str, user: str) -> list[Message]:
+    """A system + user message prompt."""
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+def _clip(doc: str, truncation: int) -> str:
+    """Flatten a document onto one line and truncate it for a prompt."""
+    return doc.replace("\n", " ")[:truncation]
 
 
 @op(name="inspect.topic_based_clustering")
@@ -214,7 +225,7 @@ def _partition(
             int(i) for i in rng.choice(group_idx, size=take, replace=False)
         )
 
-    records = [docs[i].replace("\n", " ")[:truncation] for i in sample_idx]
+    records = [_clip(docs[i], truncation) for i in sample_idx]
     encoding = tiktoken.get_encoding("o200k_base")
     total_tokens = sum(len(encoding.encode(record)) for record in records)
     num_shards = max(1, min(-(-total_tokens // tokens_per_shard), len(records)))
@@ -232,27 +243,28 @@ def _summarize_shards(
 ) -> list[dict[str, str]]:
     """Step 2a: summarize each shard into candidate topics."""
     prompts: list[Prompt] = [
-        [
-            {"role": "system", "content": _SUMMARIZE_SYSTEM},
-            {
-                "role": "user",
-                "content": _SUMMARIZE_USER.format(
-                    context=context,
-                    records=" ; ".join(shard),
-                    num_clusters=num_clusters,
-                ),
-            },
-        ]
+        _chat(
+            _SUMMARIZE_SYSTEM,
+            _SUMMARIZE_USER.format(
+                context=context, records=" ; ".join(shard), num_clusters=num_clusters
+            ),
+        )
         for shard in shards
     ]
     responses = model.generate_batch(prompts, temperature=0.2)
     shard_topics = [_parse_topics(shard_responses[0]) for shard_responses in responses]
-    unparseable = sum(1 for topics in shard_topics if not topics)
-    if unparseable:
-        logger.warning(
-            "topic_based_clustering: %d shard summaries unparseable", unparseable
+    kept = [topics for topics in shard_topics if topics]
+    if not kept:
+        raise RuntimeError(
+            "topic_based_clustering: every shard summary was unparseable, so "
+            "there are no candidate topics to build a codebook from"
         )
-    return [topics for topics in shard_topics if topics]
+    if len(kept) < len(shard_topics):
+        logger.warning(
+            "topic_based_clustering: %d shard summaries unparseable",
+            len(shard_topics) - len(kept),
+        )
+    return kept
 
 
 def _build_codebook(
@@ -267,18 +279,15 @@ def _build_codebook(
         for topics in shard_topics
         for name, description in topics.items()
     )
-    messages: list[Message] = [
-        {"role": "system", "content": _AGGREGATE_SYSTEM},
-        {
-            "role": "user",
-            "content": _AGGREGATE_USER.format(
-                num_shards=len(shard_topics),
-                context=context,
-                candidates=candidates,
-                num_clusters=num_clusters,
-            ),
-        },
-    ]
+    messages = _chat(
+        _AGGREGATE_SYSTEM,
+        _AGGREGATE_USER.format(
+            num_shards=len(shard_topics),
+            context=context,
+            candidates=candidates,
+            num_clusters=num_clusters,
+        ),
+    )
     codebook: dict[str, str] = {}  # latest nonempty attempt
     for _ in range(3):  # retry on unparseable JSON or the wrong topic count
         response = model.generate(messages, temperature=0.0)[0]
@@ -287,7 +296,11 @@ def _build_codebook(
         except ValueError:
             continue
         attempt = {str(name): str(desc) for name, desc in parsed.items()}
-        if len(attempt) == num_clusters:
+        # _match_topic ignores case, so a case-variant duplicate is unreachable.
+        distinct_topics = {name.strip().lower() for name in attempt}
+        if "" in distinct_topics:
+            distinct_topics.remove("")
+        if len(distinct_topics) == len(attempt) == num_clusters:
             return attempt
         if attempt:
             codebook = attempt
@@ -297,7 +310,7 @@ def _build_codebook(
             {
                 "role": "user",
                 "content": _AGGREGATE_RETRY.format(
-                    got=len(attempt), num_clusters=num_clusters
+                    got=len(distinct_topics), num_clusters=num_clusters
                 ),
             },
         ]
@@ -323,23 +336,19 @@ def _assign_topics(
 ) -> dict[str, str]:
     """Step 3: classify every document into one codebook topic."""
     topics_str = json.dumps(codebook, indent=2)
+    prompt_of = {
+        doc: _chat(
+            _ASSIGN_SYSTEM,
+            _ASSIGN_USER.format(
+                context=context, topics=topics_str, record=_clip(doc, truncation)
+            ),
+        )
+        for doc in docs
+    }
     topic_of: dict[str, str] = {}
     pending = list(docs)
     for _ in range(1 + max_retries):  # rerun documents whose label was invalid
-        prompts: list[Prompt] = [
-            [
-                {"role": "system", "content": _ASSIGN_SYSTEM},
-                {
-                    "role": "user",
-                    "content": _ASSIGN_USER.format(
-                        context=context,
-                        topics=topics_str,
-                        record=doc.replace("\n", " ")[:truncation],
-                    ),
-                },
-            ]
-            for doc in pending
-        ]
+        prompts: list[Prompt] = [prompt_of[doc] for doc in pending]
         responses = model.generate_batch(prompts, temperature=0.0)
         still_pending = []
         for doc, doc_responses in zip(pending, responses):
@@ -368,19 +377,16 @@ def _assign_topics(
 
 
 def _match_topic(label: str, codebook: dict[str, str]) -> str | None:
-    """Match a label to a codebook key: case-insensitive, then longest whole-word."""
+    """Match a label to a codebook key, or return None if there's no clear match.
+
+    Returns the longest key whose words all appear in sequence in the label
+    (case-insensitive), which covers an exact match.
+    """
     low = label.lower()
     if not low:
         return None
-    for name in codebook:
-        if name.lower() == low:
-            return name
-    matches = [
-        name
-        for name in codebook
-        if _has_phrase(low, name.lower()) or _has_phrase(name.lower(), low)
-    ]
-    return max(matches, key=len) if matches else None
+    in_label = [name for name in codebook if _has_phrase(low, name.lower())]
+    return max(in_label, key=len) if in_label else None
 
 
 def _has_phrase(text: str, phrase: str) -> bool:

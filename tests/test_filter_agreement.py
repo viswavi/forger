@@ -2,7 +2,8 @@
 
 import pytest
 
-from pyforger.filter import by_exact_agreement, by_rouge_l_agreement
+from pyforger.filter import by_exact_agreement, by_group_agreement, by_rouge_l_agreement
+from pyforger.op import trace
 
 
 class TestByExactAgreement:
@@ -231,3 +232,180 @@ class TestByRougeLDisagreement:
             data, threshold=0.7, field_a="out_a", field_b="out_b", disagree=True
         )
         assert result == data
+
+
+def _agree(data, **kwargs):
+    return by_group_agreement(
+        data, group_by_input_field="input", match_output_field="output", **kwargs
+    )
+
+
+class TestByGroupAgreement:
+    """by_group_agreement drops groups whose outputs disagree."""
+
+    def test_keeps_unanimous_group(self):
+        """A group whose outputs all match is kept in full."""
+        data = [
+            {"input": "x", "output": "42"},
+            {"input": "x", "output": "42"},
+        ]
+        assert _agree(data) == data
+
+    def test_drops_conflicting_group(self):
+        """A group with disagreeing outputs is dropped."""
+        data = [
+            {"input": "x", "output": "42"},
+            {"input": "x", "output": "43"},
+        ]
+        assert _agree(data) == []
+
+    def test_mixed_groups(self):
+        """Unanimous groups kept, conflicting groups dropped."""
+        data = [
+            {"input": "x", "output": "a"},
+            {"input": "x", "output": "a"},
+            {"input": "y", "output": "b"},
+            {"input": "y", "output": "c"},
+            {"input": "z", "output": "d"},
+        ]
+        assert [r["input"] for r in _agree(data)] == ["x", "x", "z"]
+
+    def test_preserves_input_order(self):
+        """Kept items stay in input order when groups are interleaved."""
+        data = [
+            {"input": "x", "output": "a"},
+            {"input": "y", "output": "b"},
+            {"input": "x", "output": "a"},
+        ]
+        assert _agree(data) == data
+
+    def test_empty_input(self):
+        """Empty input returns empty output."""
+        assert _agree([]) == []
+
+    def test_whitespace_ignored(self):
+        """Surrounding whitespace is stripped from both fields."""
+        data = [
+            {"input": "x", "output": "yes"},
+            {"input": " x ", "output": " yes "},
+        ]
+        assert _agree(data) == data
+
+    def test_missing_field_raises(self):
+        """A missing output field raises an error."""
+        with pytest.raises(KeyError, match="missing required field 'output'"):
+            _agree([{"input": "x"}])
+
+    @pytest.mark.parametrize(
+        "a, b",
+        [
+            (1, "1"),
+            (True, 1),
+            (1, 1.0),
+            ([True], [1]),
+            ({"k": 1}, {"k": "1"}),
+            ([1, 2], (1, 2)),
+            ({"k": 1}, [("k", 1)]),
+            ({}, []),
+        ],
+    )
+    def test_differently_typed_outputs_disagree(self, a, b):
+        """Outputs of different types disagree."""
+        data = [
+            {"input": "x", "output": a},
+            {"input": "x", "output": b},
+        ]
+        assert _agree(data) == []
+
+    def test_compares_unhashable_outputs(self):
+        """List and dict outputs are compared element-wise."""
+        data = [
+            {"input": "x", "output": [1, 2]},
+            {"input": "x", "output": [1, 2]},
+            {"input": "y", "output": {"k": 1}},
+            {"input": "y", "output": {"k": 2}},
+        ]
+        assert _agree(data) == data[:2]
+
+    @pytest.mark.parametrize(
+        "a, b",
+        [
+            ({"a": 1, "b": 2}, {"b": 2, "a": 1}),
+            ({"n": {"a": 1, "b": 2}}, {"n": {"b": 2, "a": 1}}),
+            ([{"a": 1, "b": 2}], [{"b": 2, "a": 1}]),
+            ({1, 2}, {2, 1}),
+        ],
+    )
+    def test_ignores_container_ordering(self, a, b):
+        """Outputs that differ only in dict key or set order agree."""
+        data = [
+            {"input": "x", "output": a},
+            {"input": "x", "output": b},
+        ]
+        assert _agree(data) == data
+
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_consistent_across_cache(self, reverse):
+        """Inputs sharing an @op cache key give the same result in either order."""
+        ordered = [
+            {"input": "x", "output": {"a": 1, "b": 2}},
+            {"input": "x", "output": {"a": 1, "b": 2}},
+        ]
+        mixed = [
+            {"input": "x", "output": {"a": 1, "b": 2}},
+            {"input": "x", "output": {"b": 2, "a": 1}},
+        ]
+        calls = [mixed, ordered] if reverse else [ordered, mixed]
+        for data in calls:
+            uncached = _agree(data, _no_cache=True)
+            assert _agree(data) == uncached == data
+        hits = [
+            r.cache_hit for r in trace() if r.op_name == "filter.by_group_agreement"
+        ]
+        assert hits[-1]
+
+    def test_max_count_caps_agreeing_groups(self):
+        """max_count caps items per agreeing group."""
+        data = [
+            {"input": "x", "output": "a"},
+            {"input": " x ", "output": "a"},
+            {"input": "y", "output": "b"},
+            {"input": "x", "output": "a"},
+        ]
+        assert _agree(data, max_count=1) == data[:1] + data[2:3]
+
+    @pytest.mark.parametrize("max_count", [0, -1])
+    def test_nonpositive_max_count_keeps_nothing(self, max_count):
+        """Nonpositive max_count keeps nothing."""
+        data = [{"input": "x", "output": "a"}] * 3
+        assert _agree(data, max_count=max_count) == []
+
+    def test_unhashable_inputs_are_grouped(self):
+        """Unhashable inputs are grouped by type and value."""
+        data = [
+            {"input": [1, 2], "output": "a"},
+            {"input": (1, 2), "output": "b"},
+            {"input": {"k": 1}, "output": "b"},
+            {"input": {"k": 1}, "output": "c"},
+        ]
+        assert _agree(data) == data[:2]
+
+    def test_differently_typed_inputs_are_separate_groups(self):
+        """Inputs of different types form separate groups."""
+        data = [
+            {"input": True, "output": "a"},
+            {"input": 1, "output": "b"},
+            {"input": 1.0, "output": "c"},
+            {"input": "1", "output": "d"},
+        ]
+        assert _agree(data) == data
+
+    def test_equal_outputs_agree_regardless_of_aliasing(self):
+        """Equal outputs agree whether or not they share sub-objects."""
+        s = "x" * 100
+        copy_of_s = "".join(["x"] * 100)
+        data = [
+            {"input": "x", "output": [s, s]},
+            {"input": "x", "output": [s, copy_of_s]},
+        ]
+        assert _agree(data) == data
