@@ -5,7 +5,6 @@ Concrete sources: web, Wikipedia, Hugging Face, ArXiv, Semantic Scholar.
 
 from __future__ import annotations
 
-import math
 import random
 from abc import ABC, abstractmethod
 from enum import Enum, auto
@@ -13,7 +12,6 @@ from typing import Any
 
 import arxiv
 import requests
-import trafilatura
 from semanticscholar import SemanticScholar  # type: ignore[import-untyped]
 
 from pyforger.utils import get_formatted_logger
@@ -64,16 +62,13 @@ class RetrievalSource(ABC):
 
 
 class WebRetrievalSource(RetrievalSource):
-    """Retrieval source that searches the web via the Brave Search API.
+    """Retrieval source that searches the web via Brave's LLM Context API.
 
-    Supports QUERY mode only.  Returns item dicts with "text" (search snippet
-    or full page content), "id" (page URL), "title", and "url".
-
-    Two content modes controlled by ``fetch_full_content``:
-
-    - ``False`` (default): ``text`` is the Brave search snippet (1-2 sentences).
-    - ``True``: after obtaining search results the source fetches each result
-      URL and extracts plaintext
+    Supports QUERY mode only.  Returns item dicts with "text" (pre-extracted,
+    LLM-ready content chunks joined together), "id" (page URL), "title", and
+    "url".  Unlike a plain search API, the LLM Context API returns extracted
+    page content directly, so no separate page fetch/HTML-extraction step is
+    needed.
 
     Licensing note:
         Brave's Terms of Service require a plan with explicit *storage rights*
@@ -85,17 +80,12 @@ class WebRetrievalSource(RetrievalSource):
     Attributes:
         base_url: Optional domain restriction (e.g. ``"example.com"``).
         _api_key: Brave Search API subscription token.
-        _fetch_full_content: Whether to fetch full page text from result URLs.
         _kwargs: Options passed at construction; merged with per-call kwargs.
         _session: Lazy-initialized requests.Session for Brave API calls.
-        _content_session: Lazy-initialized plain requests.Session for fetching
-            result URLs (no API-key header, to avoid leaking credentials).
     """
 
-    _BRAVE_API_URL = "https://api.search.brave.com/res/v1/web/search"
-    _BRAVE_MAX_COUNT = 20
-    _BRAVE_MAX_OFFSET = 9
-    _DEFAULT_MAX_CONTENT_LENGTH = 1_000_000  # 1 MB
+    _BRAVE_API_URL = "https://api.search.brave.com/res/v1/llm/context"
+    _BRAVE_MAX_RESULTS = 50  # API caps count / maximum_number_of_urls at 50
     _DEFAULT_TIMEOUT = 5  # seconds
 
     def __init__(
@@ -103,30 +93,22 @@ class WebRetrievalSource(RetrievalSource):
         base_url: str | None = None,
         *,
         api_key: str | None = None,
-        fetch_full_content: bool = False,
         **kwargs: Any,
     ) -> None:
-        """Store config for Brave web retrieval.
+        """Store config for Brave LLM Context retrieval.
 
         Args:
             base_url: Optional domain to restrict results to.  When set,
                 ``site:{base_url}`` is prepended to every query.
             api_key: Brave Search API subscription token.  Required for
                 actual API calls; omitting it will cause a 401 error.
-            fetch_full_content: When True, fetch full page text from each
-                result URL after search.  Default False (snippet only).
-            **kwargs: Session / fetch overrides.  Recognised keys:
-                ``timeout`` (float) -- per-request timeout in seconds
-                (default 5);
-                ``max_content_length`` (int) -- max bytes to download per
-                page when *fetch_full_content* is True (default 1 MB).
+            **kwargs: Session overrides.  ``timeout`` (float) -- per-request
+                timeout in seconds (default 5).
         """
         self.base_url = base_url
         self._api_key = api_key
-        self._fetch_full_content = fetch_full_content
         self._kwargs = kwargs
         self._session: requests.Session | None = None
-        self._content_session: requests.Session | None = None
 
     # -- session helpers -----------------------------------------------------
 
@@ -143,128 +125,35 @@ class WebRetrievalSource(RetrievalSource):
             self._session.headers.update(headers)
         return self._session
 
-    def _get_content_session(self) -> requests.Session:
-        """Return a plain session for fetching arbitrary URLs (no API key)."""
-        if self._content_session is None:
-            self._content_session = requests.Session()
-            self._content_session.headers.update(
-                {"User-Agent": "pyforger/0.1 (https://github.com/viswavi/forger)"}
-            )
-        return self._content_session
-
     @classmethod
     def _get_timeout_kw(cls, merged: dict[str, Any]) -> dict[str, Any]:
         """Build keyword args for requests.Session.get with timeout."""
         return {"timeout": merged.get("timeout", cls._DEFAULT_TIMEOUT)}
 
-    # -- text extraction -----------------------------------------------------
-
-    @staticmethod
-    def _extract_text(html: str) -> str | None:
-        """Convert raw HTML to plaintext using trafilatura.
-
-        Trafilatura handles boilerplate removal, navigation stripping,
-        and clean text extraction from arbitrary web pages.
-
-        Args:
-            html: Raw HTML string.
-
-        Returns:
-            Extracted plaintext (may be empty for pages with no body text),
-            or None if trafilatura could not parse the input at all.
-        """
-        return trafilatura.extract(html, include_comments=False, include_tables=True)
-
     # -- result conversion ---------------------------------------------------
 
     @staticmethod
-    def _result_to_item(
-        result: dict[str, Any], full_text: str | None = None
-    ) -> dict[str, Any]:
-        """Convert a Brave search result dict to a standard item dict.
+    def _result_to_item(result: dict[str, Any]) -> dict[str, Any]:
+        """Convert a ``grounding.generic[]`` entry to a standard item dict.
 
         Args:
-            result: Dict from Brave ``web.results[]`` with keys ``title``,
-                ``url``, and optionally ``description``.
-            full_text: When provided (fetch_full_content mode), used as
-                ``text`` instead of the snippet.  Falls back to the Brave
-                ``description`` if *full_text* is None or empty.
+            result: Dict with keys ``url``, ``title``, and ``snippets``
+                (list of extracted text chunks).
 
         Returns:
-            Dict with ``text``, ``id`` (URL), ``title``, ``url``.
+            Dict with ``text`` (snippets joined with blank lines), ``id``
+            (URL), ``title``, ``url``.
         """
-        title = result.get("title", "")
-        url = result.get("url", "")
-        description = result.get("description", "")
-        text = full_text if full_text else description
+        title = result.get("title") or ""
+        url = result.get("url") or ""
+        snippets = result.get("snippets") or []
+        text = "\n\n".join(s for s in snippets if isinstance(s, str))
         return {
             "text": text,
             "id": url,
             "title": title,
             "url": url,
         }
-
-    # -- full-content fetching -----------------------------------------------
-
-    _STREAM_CHUNK_SIZE = 64 * 1024  # 64 KB
-
-    def _fetch_page_content(
-        self,
-        urls: list[str],
-        merged: dict[str, Any],
-    ) -> dict[str, str]:
-        """Fetch and extract plaintext from a list of URLs.
-
-        Per-URL failures (timeout, HTTP errors, decoding errors) are
-        silently skipped so that the caller can fall back to the Brave
-        snippet for that result.
-
-        Args:
-            urls: URLs to fetch.
-            merged: Merged instance and per-call kwargs.
-
-        Returns:
-            Mapping ``{url: extracted_text}`` for URLs that succeeded.
-        """
-        session = self._get_content_session()
-        timeout_kw = self._get_timeout_kw(merged)
-        max_len = merged.get("max_content_length", self._DEFAULT_MAX_CONTENT_LENGTH)
-        content_map: dict[str, str] = {}
-
-        for url in urls:
-            try:
-                resp = session.get(url, stream=True, **timeout_kw)
-                resp.raise_for_status()
-
-                length = resp.headers.get("Content-Length")
-                if length is not None and int(length) > max_len:
-                    resp.close()
-                    continue
-
-                chunks: list[bytes] = []
-                downloaded = 0
-                # Stream in chunks and discard pages whose body exceeds
-                # max_len (servers may omit Content-Length or lie about it).
-                for chunk in resp.iter_content(chunk_size=self._STREAM_CHUNK_SIZE):
-                    downloaded += len(chunk)
-                    if downloaded > max_len:
-                        break
-                    chunks.append(chunk)
-                resp.close()
-
-                if downloaded > max_len:
-                    continue
-
-                html = b"".join(chunks).decode(
-                    resp.apparent_encoding or "utf-8", errors="replace"
-                )
-                text = self._extract_text(html)
-                if text is not None:
-                    content_map[url] = text
-            except (requests.exceptions.RequestException, ValueError):
-                continue
-
-        return content_map
 
     # -- main fetch ----------------------------------------------------------
 
@@ -277,14 +166,13 @@ class WebRetrievalSource(RetrievalSource):
         seed: int | None = None,
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
-        """Return items from the web via the Brave Search API.
+        """Return items from the web via Brave's LLM Context API.
 
         Mode behavior:
-        - QUERY: Searches Brave with ``q={query}`` (prepending
-          ``site:{base_url}`` when set) and returns up to *n* results.
-          When *fetch_full_content* is True, each result URL is fetched
-          and its plaintext extracted; otherwise the Brave snippet is
-          used as ``text``.  Pagination is automatic for *n* > 20.
+        - QUERY: Searches with ``q={query}`` (prepending ``site:{base_url}``
+          when set) and returns up to *n* pre-extracted results.  This is a
+          single-search endpoint (no offset-based pagination); *n* is capped
+          at 50, the API's maximum.
         - RANDOM: Raises ``NotImplementedError`` -- web search has no
           reproducible random corpus.
 
@@ -294,9 +182,9 @@ class WebRetrievalSource(RetrievalSource):
             mode: QUERY or RANDOM.
             query: Search string.  Required; raises ``ValueError`` if
                 empty or None.
-            n: Number of results to return.
+            n: Number of results to return (greater than 0, capped at 50).
             seed: Unused (RANDOM mode unsupported).
-            **kwargs: Overrides (e.g. timeout, max_content_length).
+            **kwargs: Overrides (e.g. timeout).
 
         Returns:
             List of dicts; each has ``text``, ``id`` (URL), ``title``,
@@ -311,6 +199,8 @@ class WebRetrievalSource(RetrievalSource):
                 "WebRetrievalSource does not support RANDOM mode -- "
                 "web search has no reproducible random corpus."
             )
+        if n <= 0:
+            raise ValueError("n must be greater than 0")
 
         merged = {**self._kwargs, **kwargs}
         session = self._get_session()
@@ -321,43 +211,20 @@ class WebRetrievalSource(RetrievalSource):
                 raise ValueError("query is required for WebRetrievalSource QUERY mode")
 
             q = f"site:{self.base_url} {query}" if self.base_url else query
+            result_count = min(n, self._BRAVE_MAX_RESULTS)
 
-            # Brave caps count at 20 and offset at 9.
-            num_pages = min(
-                math.ceil(n / self._BRAVE_MAX_COUNT),
-                self._BRAVE_MAX_OFFSET + 1,
-            )
-            all_results: list[dict[str, Any]] = []
+            params = {
+                "q": q,
+                "count": str(result_count),
+                "maximum_number_of_urls": str(result_count),
+            }
 
-            for page_idx in range(num_pages):
-                remaining = n - len(all_results)
-                if remaining <= 0:
-                    break
-                count = min(remaining, self._BRAVE_MAX_COUNT)
-                resp = session.get(
-                    self._BRAVE_API_URL,
-                    params={
-                        "q": q,
-                        "count": str(count),
-                        "offset": str(page_idx),
-                    },
-                    **timeout_kw,
-                )
-                resp.raise_for_status()
-                page_results = resp.json().get("web", {}).get("results", [])
-                all_results.extend(page_results)
+            resp = session.get(self._BRAVE_API_URL, params=params, **timeout_kw)
+            resp.raise_for_status()
+            grounding = resp.json().get("grounding") or {}
+            generic_results = grounding.get("generic") or []
 
-            all_results = all_results[:n]
-
-            content_map: dict[str, str] = {}
-            if self._fetch_full_content and all_results:
-                urls = [r.get("url", "") for r in all_results if r.get("url")]
-                content_map = self._fetch_page_content(urls, merged)
-
-            return [
-                self._result_to_item(r, full_text=content_map.get(r.get("url", "")))
-                for r in all_results
-            ]
+            return [self._result_to_item(r) for r in generic_results]
 
         return []
 
