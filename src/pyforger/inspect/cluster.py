@@ -248,6 +248,11 @@ def _summarize_shards(
     responses = model.generate_batch(prompts, temperature=0.2)
     shard_topics = [_parse_topics(shard_responses[0]) for shard_responses in responses]
     unparseable = sum(1 for topics in shard_topics if not topics)
+    if unparseable == len(shard_topics):
+        raise RuntimeError(
+            "topic_based_clustering: every shard summary was unparseable, so "
+            "there are no candidate topics to build a codebook from"
+        )
     if unparseable:
         logger.warning(
             "topic_based_clustering: %d shard summaries unparseable", unparseable
@@ -368,19 +373,19 @@ def _assign_topics(
 
 
 def _match_topic(label: str, codebook: dict[str, str]) -> str | None:
-    """Match a label to a codebook key: case-insensitive, then longest whole-word."""
+    """Match a label to a codebook key, or return None if there's no clear match.
+
+    Tries a case-insensitive exact match, then return the longest key whose words
+    all appear in sequence in the label.
+    """
     low = label.lower()
     if not low:
         return None
     for name in codebook:
         if name.lower() == low:
             return name
-    matches = [
-        name
-        for name in codebook
-        if _has_phrase(low, name.lower()) or _has_phrase(name.lower(), low)
-    ]
-    return max(matches, key=len) if matches else None
+    in_label = [name for name in codebook if _has_phrase(low, name.lower())]
+    return max(in_label, key=len) if in_label else None
 
 
 def _has_phrase(text: str, phrase: str) -> bool:

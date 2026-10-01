@@ -162,7 +162,7 @@ def test_too_few_unique_values_raises():
         _cluster(_rows(COOKING_DOCS), num_clusters=3)
 
 
-class _GarbageAssignModel(_FakeClusterModel):
+class _BrokenAssignModel(_FakeClusterModel):
     """Summarizes and aggregates fine but never returns a valid assignment."""
 
     def _respond(self, prompt):
@@ -172,10 +172,26 @@ class _GarbageAssignModel(_FakeClusterModel):
         return super()._respond(prompt)
 
 
+class _BrokenSummaryModel(_FakeClusterModel):
+    """Never returns a parseable shard summary."""
+
+    def _respond(self, prompt):
+        user_content = prompt[-1]["content"] if isinstance(prompt, list) else prompt
+        if "reviewing records" in user_content:
+            return "not json at all"
+        return super()._respond(prompt)
+
+
+def test_all_unparseable_summaries_raise():
+    """With no parseable shard summary, there is nothing to build a codebook from."""
+    with pytest.raises(RuntimeError, match="every shard summary"):
+        _cluster(_rows(COOKING_DOCS + SPACE_DOCS), _BrokenSummaryModel())
+
+
 def test_unclassifiable_docs_fall_back_to_first_topic():
     """Docs that never classify fall back to the first topic."""
     items = _rows(COOKING_DOCS + SPACE_DOCS)
-    clusters = _cluster(items, _GarbageAssignModel(), max_assign_retries=2)
+    clusters = _cluster(items, _BrokenAssignModel(), max_assign_retries=2)
     assert clusters == ["cooking"] * len(items)  # first codebook topic
 
 
@@ -235,6 +251,12 @@ def test_match_topic_prefers_longest_whole_word_match():
     codebook = {"Data": "...", "Data Science": "...", "Art": "..."}
     assert _match_topic("Topic: Data Science", codebook) == "Data Science"
     assert _match_topic("Partial derivatives", codebook) is None
+
+
+def test_match_topic_rejects_ambiguous_partial_label():
+    """A label contained in several topic names is ambiguous, so it's unmatched."""
+    codebook = {"Data Science": "...", "Data Engineering": "...", "Art": "..."}
+    assert _match_topic("Data", codebook) is None
 
 
 def test_default_embed_warns_without_gpu(monkeypatch, caplog):
