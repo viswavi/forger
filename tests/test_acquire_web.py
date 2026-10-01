@@ -90,6 +90,7 @@ class TestWebRetrievalSourceFetch:
             [
                 {"url": "https://a.com", "title": "Has Title"},
                 {"url": "https://b.com", "snippets": ["Has snippet"]},
+                {"url": None, "title": None, "snippets": None},
             ]
         )
 
@@ -101,13 +102,14 @@ class TestWebRetrievalSourceFetch:
         mock_session_cls.return_value = mock_session
 
         source = WebRetrievalSource(api_key="k")
-        items = source.fetch(RetrieveMode.QUERY, query="test", n=2)
+        items = source.fetch(RetrieveMode.QUERY, query="test", n=3)
 
-        assert len(items) == 2
+        assert len(items) == 3
         assert items[0]["title"] == "Has Title"
         assert items[0]["text"] == ""
         assert items[1]["title"] == ""
         assert items[1]["text"] == "Has snippet"
+        assert items[2] == {"text": "", "id": "", "title": "", "url": ""}
 
     @patch("pyforger.acquire.sources.requests.Session")
     def test_respects_base_url(self, mock_session_cls: MagicMock) -> None:

@@ -144,10 +144,10 @@ class WebRetrievalSource(RetrievalSource):
             Dict with ``text`` (snippets joined with blank lines), ``id``
             (URL), ``title``, ``url``.
         """
-        title = result.get("title", "")
-        url = result.get("url", "")
-        snippets = result.get("snippets", [])
-        text = "\n\n".join(snippets)
+        title = result.get("title") or ""
+        url = result.get("url") or ""
+        snippets = result.get("snippets") or []
+        text = "\n\n".join(s for s in snippets if isinstance(s, str))
         return {
             "text": text,
             "id": url,
@@ -221,7 +221,8 @@ class WebRetrievalSource(RetrievalSource):
 
             resp = session.get(self._BRAVE_API_URL, params=params, **timeout_kw)
             resp.raise_for_status()
-            generic_results = resp.json().get("grounding", {}).get("generic", [])
+            grounding = resp.json().get("grounding") or {}
+            generic_results = grounding.get("generic") or []
 
             return [self._result_to_item(r) for r in generic_results]
 
