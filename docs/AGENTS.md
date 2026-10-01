@@ -13,6 +13,7 @@ reference describes the execution model, the public API, and the conventions the
   - [`pyforger.acquire`](#pyforgeracquire)
   - [`pyforger.alter`](#pyforgeralter)
   - [`pyforger.filter`](#pyforgerfilter)
+  - [`pyforger.inspect`](#pyforgerinspect)
 - [Models, prompts, and credentials](#models-prompts-and-credentials)
 - [Caching and tracing with `@op`](#caching-and-tracing-with-op)
 - [Composing a pipeline](#composing-a-pipeline)
@@ -67,17 +68,17 @@ tokens and the model used. For example, gpt-5.4-nano is generally much cheaper t
 
 ### Execution model
 
-A pipeline is a Python function that consists of a sequence of operations. Many useful implementations of operations
-are given in `pyforger.{acquire/alter/filter}`. You can also implement your own operations. Each operation takes an
-optional input list (`list[dict]`) and returns an output list (`list[dict]`). Caching and tracing are enabled by adding
-the `@op` decorator.
+A pipeline is a Python function. It calls operations from `pyforger.acquire`, `pyforger.alter`, `pyforger.filter`,
+and `pyforger.inspect`. Each operation takes a `list[dict]` (or generation parameters). Acquire, alter, and filter
+operations return a `list[dict]`; inspect operations instead return a report about the rows without modifying rows.
+Control flow (`for`, `if`, comprehensions, helper functions) in plain Python can be used
 
 ### Operation reference
 
-All operations are plain functions. Operations that perform LLM calls or expensive in-process work (including almost
-everything in `pyforger.{acquire/alter/filter}`) should be decorated internally with `@op`, so their results are cached on
-disk and traced. The retrieval functions (`retrieve`, `retrieve_from_*`) are not internally cached; wrap them with `@op`
-to cache their results.
+All operations are plain functions. Operations that perform LLM calls or expensive in-process work (`sample_from_LLM`
+every `alter.*` op, every `filter.*` op, every `inspect.*` op) are decorated internally with `@op`, so their results
+are cached on disk and traced. The retrieval functions (`retrieve`, `retrieve_from_*`) are not internally cached; wrap
+them with `@op` to memoize their results.
 
 ### Public API summary
 
@@ -87,7 +88,8 @@ to cache their results.
 | `pyforger.acquire` | `src/pyforger/acquire/` | Generate or retrieve rows. |
 | `pyforger.alter` | `src/pyforger/alter/` | Transform rows without removing items. |
 | `pyforger.filter` | `src/pyforger/filter/` | Remove rows by criterion. |
-| `pyforger.utils` | `src/pyforger/utils.py` | `get_field`, `get_formatted_logger`. |
+| `pyforger.inspect` | `src/pyforger/inspect/` | Examine rows without modifying them; returns a report. |
+| `pyforger.utils` | `src/pyforger/utils.py` | `get_field`, `get_formatted_logger`, `canonical`. |
 
 #### `pyforger.acquire`
 
@@ -106,6 +108,8 @@ Generate or retrieve new rows.
 | `WebRetrievalSource`, `WikiRetrievalSource`, `HFRetrievalSource`, ... |   | Per-backend source classes. |
 | `ArxivRetrievalSource`, `S2RetrievalSource` |   |Per-backend source classes. |
 | `Model` |   | LLM wrapper (initialized by user). Otherwise, LLM generation should be called with `sample_from_LLM`. |
+| `LocalModel` |   | On-GPU vLLM model with `Model`'s interface (needs the `vllm` extra). Zero cost, `<think>` inline. |
+| `split_reasoning` |   | `str -> (thinking, answer)`: splits a reasoning-model completion on `</think>`. |
 
 `sample_from_LLM` performs `n` LLM calls per input and returns parsed dicts. It does under-the-hood batching and
 validation, making this a superior choice to calling `Model` directly.
@@ -121,8 +125,31 @@ Transform rows without removing items.
 | `translate.to_code` | LLM conversion of fields into code in a target programming language. Strips markdown fences. |
 | `execute_code` | Execute Python code in a sandboxed environment and return the result. |
 
-`generate_from_context` performs `samples_per_item` LLM calls per input and returns parsed dicts. We validate against
-an optional JSON schema. If the validated LLM call fails after `num_retries`, we return `None` for the failing slots.
+`generate_from_context` performs `samples_per_item` LLM calls per input and returns parsed dicts, with retry against an
+optional JSON schema. If the validated LLM call fails after `num_retries`, we return `None` for the failing slots.
+
+`self_taught_reasoner` (re-exported from `pyforger.alter`, also in `pyforger.alter.generate`) implements the
+**Self-Taught Reasoner (STaR)** approach ([Zelikman et al., 2022](https://arxiv.org/abs/2203.14465)) -- closely
+related to **On-Policy Distillation** (Agarwal et al., 2023), since both keep SFT traces drawn from the student's own
+distribution rather than a separate teacher: for each input row it samples `n` responses from a student `model` and
+keeps only those whose final answer matches the row's reference answer (`reference_field`, default `"final_answer"`).
+Each kept response becomes one
+output row carrying the student's raw response plus, when `split_thinking=True`, its reasoning and answer in
+`thinking`/`answer` fields (reasoning comes from the provider's separate reasoning field when returned, otherwise from
+the inline `<think>` block); the matched student answer becomes the new ground truth. A row with zero correct
+samples contributes nothing (so 8 samples with 4 correct yield 4 rows). Acceptance defaults to extracting an answer
+with `default_extract_answer` (reads `ANSWER:`/`\boxed{}`/`####` markers) and comparing by normalized string equality;
+pass a custom `extract_answer`, `match_fn`, or a `filter_fn` (any `list[dict] -> list[dict]`, e.g. a `pyforger.filter`
+op bound with `functools.partial`) to override. Pair it with `LocalModel` to generate student traces on-GPU for SFT.
+
+```python
+# LocalModel needs vLLM: pip install "pyforger[vllm]"
+from pyforger.alter import self_taught_reasoner
+from pyforger.acquire import LocalModel
+
+student = LocalModel("Qwen/Qwen3-4B", max_model_len=40960)
+rows = self_taught_reasoner(problems, solver_prompt, student, n=8, reference_field="final_answer")
+```
 
 #### `pyforger.filter`
 
@@ -132,6 +159,7 @@ Remove rows by criterion. If a filter empties the list, downstream operations re
 |---|---|
 | `by_exact_agreement` | Keep rows where two fields agree (or disagree, with `disagree=True`). |
 | `by_rouge_l_agreement` | ROUGE-L similarity gate between two fields. |
+| `by_group_agreement` | Drop groups of rows (by `group_by_input_field`) whose `match_output_field` values differ. |
 | `by_exact_match` | Keep up to `max_count` rows per unique field value. |
 | `by_rouge_l` | Pairwise ROUGE-L diversity filter. |
 | `by_n_gram_overlap` | N-gram overlap diversity filter. |
@@ -145,6 +173,34 @@ These are important for assuring quality and diversity in generated data, and on
 and thresholds to find the right balance for a given use case. For example, `by_rouge_l` with a very low threshold
 produces more diverse outputs but may filter out many rows; `by_llm_score` with multiple judges and a high consensus
 threshold produces higher-quality outputs but at the cost of more LLM calls.
+
+#### `pyforger.inspect`
+
+Examine rows without modifying them: inspect ops return a *report* about the rows (e.g. `list[str]`), not rows. At any
+point, inspection can be performed to generate a report about the current data, without altering the original rows or
+producing new rows in the pipeline.
+
+| Export | Cached | Description |
+|---|---|---|
+| `topic_based_clustering` | yes | Interpretable clustering of contents of one field from the input rows. |
+
+Topic-based clustering uses the ClusterFusion clustering algorithm ([arXiv:2512.04350](https://arxiv.org/abs/2512.04350)),
+a hybrid method in which embeddings guide how rows are partitioned and an LLM summarizes the partitions into
+interpretable topics, then assigns each row to one of them.
+
+```python
+from pyforger.inspect import topic_based_clustering
+
+clusters = topic_based_clustering(
+    rows,
+    field="problem",
+    model=model,
+    context="competition mathematics problems. Topics should describe the "
+            "mathematical subject and technique, NOT the numeric answer.",
+    num_clusters=20,
+)
+# clusters[i] is the topic name of rows[i]
+```
 
 ### Models, prompts, and credentials
 
@@ -308,3 +364,19 @@ outer loop in Python and at each round sample in-context examples from the outpu
 a prompt for the next round. Decorate the inner loop function with `@op` so that improvements to the prompt or
 sampling parameters are cached and reused across rounds. This pattern can improve diversity and quality over multiple
 rounds, as the pool of in-context examples evolves.
+- **Self-Taught Reasoner / STaR (extending thinking for reasoning problems):** This is the Self-Taught Reasoner (STaR)
+approach ([Zelikman et al., 2022](https://arxiv.org/abs/2203.14465)), closely related to On-Policy Distillation
+(Agarwal et al., 2023). When you have prompts paired with *verified*
+answers (e.g. competition-math problems with checked integer answers) but want long chain-of-thought traces for SFT,
+do not copy reasoning from a stronger teacher -- generate it from the *student* you intend to finetune. This is
+generally necessary for training reasoning-style models on tasks that require extended reasoning, such as difficult
+math, programming, or embodied reasoning. Sample `n` solutions per prompt from the student (use `acquire.LocalModel` to
+run an open-weights reasoning model on-GPU via vLLM with a generous `max_tokens`/`max_model_len` so traces are not
+truncated), keep only the solutions whose final answer matches the verified answer, and use each kept trace as a
+training target. `alter.self_taught_reasoner` implements exactly this: it returns one row per correct sample (a prompt
+with 0 correct samples drops out), with the student's reasoning trace and answer split into separate fields. Because the
+traces are in the student's own distribution, this distills the skill of *extending its own thinking to reach the right
+answer* far better than off-policy teacher traces, and answer-verification keeps only correct reasoning. Filtering on
+the final answer alone admits the occasional "right answer, wrong reasoning" trace; add a `by_llm_score` judge over the
+reasoning (passed as `filter_fn`, or as a downstream filter) only if inspection shows this is actually frequent --
+prefer the cheap answer check first.

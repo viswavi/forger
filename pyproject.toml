@@ -16,6 +16,7 @@ dependencies = [
     "huggingface_hub",
     "semanticscholar>=0.11.0",
     "litellm==1.83.0",
+    "tiktoken",
     "RestrictedPython>=7.0",
     "python-dotenv",
 ]
@@ -45,10 +46,18 @@ exclude = [
 only-packages = true
 
 [project.optional-dependencies]
+# Topic-Based Clustering requires K-means clustering and on-device embedding creation.
+clustering = [
+    "numpy",
+    "scikit-learn",
+    "sentence-transformers>=5.6.0",
+]
 test = [
     "pytest>=6.0.0",
     "pyyaml",
     "jsonschema",
+    "numpy",
+    "scikit-learn",
 ]
 dev = [
     "pytest",
@@ -60,6 +69,10 @@ dev = [
 validation = [
     "pyyaml",
     "jsonschema",
+]
+# LocalModel requires on-GPU inference.
+vllm = [
+    "vllm>=0.9.0",
 ]
 
 [tool.hatch.build.targets.wheel]
