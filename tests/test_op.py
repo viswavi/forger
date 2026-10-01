@@ -63,6 +63,31 @@ def test_op_warns_on_closure(caplog: pytest.LogCaptureFixture) -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "a, b",
+    [
+        ({}, []),
+        ({"k": 1}, [("k", 1)]),
+        ({"k": 1}, [["k", 1]]),
+        (set(), []),
+        ({1}, ["__set__", [1]]),
+        ((), []),
+        ((1, 2), [1, 2]),
+        (("__tuple__", [1]), [1]),
+        ((1,), ["__tuple__", [1]]),
+    ],
+)
+def test_op_distinguishes_container_types(a, b) -> None:
+    """Containers of different types get separate cache keys."""
+
+    @op
+    def type_name(x: object) -> str:
+        return type(x).__name__
+
+    assert type_name(a) == type(a).__name__
+    assert type_name(b) == type(b).__name__
+
+
 def test_op_raises_for_unpicklable_arg_without_cache_key() -> None:
     """Unpicklable args with no cache_key() get a clear TypeError, not a silent repr."""
 
