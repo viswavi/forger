@@ -379,6 +379,10 @@ class Model:
             responses = [litellm.completion(messages=all_messages[0], **call_kwargs)]
         else:
             responses = litellm.batch_completion(messages=all_messages, **call_kwargs)
+        for response in responses:
+            # batch_completion returns (rather than raises) per-request exceptions.
+            if isinstance(response, Exception):
+                raise response
 
         results: list[GenerateResult] = []
         for response in responses:
