@@ -99,27 +99,19 @@ def by_group_agreement(
     match_output_field: str,
     max_count: int | None = None,
 ) -> list[dict]:
-    """Drop every group of items whose output values disagree.
+    """Keep only groups of items whose outputs all agree.
 
-    Items are grouped by ``group_by_input_field``, and a group is kept only if
-    all of its ``match_output_field`` values are identical. Useful for
-    filtering (input, output) pairs where one input has conflicting outputs,
-    e.g. checking self-consistency across several samples per input.
-
-    Both fields are compared structurally: string values are stripped of
-    surrounding whitespace and dict and set order is ignored. However, values
-    of different types (``1`` and ``"1"``, ``True`` and ``1``, or ``[1]`` and
-    ``(1,)``) differ.
+    Values are compared by type and structure (``1 != "1"``); strings are
+    stripped, and dict and set order is ignored.
 
     Args:
         items: List of input data items.
         group_by_input_field: Key whose value defines each group.
-        match_output_field: Key whose value must be identical within a group.
-        max_count: If set, keep at most this many items from each agreeing
-            group (``None`` keeps them all).
+        match_output_field: Key whose value must match within a group.
+        max_count: If set, keep at most this many items per group.
 
     Returns:
-        The items from groups whose outputs all agree, in their original order.
+        Items from agreeing groups, in their original order.
     """
     keys = [
         _normalize(get_field(item, group_by_input_field, "by_group_agreement"))
@@ -144,13 +136,7 @@ def by_group_agreement(
 
 
 def _normalize(value: Any) -> Any:
-    """Hashable, type-preserving structural form of ``value`` for comparison.
-
-    Builds on ``canonical`` (so values sharing an ``@op`` cache key compare
-    equal) and tags every node with its type, so ``True``, ``1``, ``1.0`` and
-    ``"1"`` stay distinct. Unlike pickled bytes, the result doesn't depend on
-    whether equal sub-values are the same object.
-    """
+    """Hashable, type-tagged form of ``canonical(value)`` for comparison."""
     if isinstance(value, str):
         value = value.strip()
     return _tag(canonical(value))

@@ -296,14 +296,6 @@ class TestByGroupAgreement:
         with pytest.raises(KeyError, match="missing required field 'output'"):
             _agree([{"input": "x"}])
 
-    def test_does_not_stringify_input(self):
-        """Inputs that differ only by type are separate groups."""
-        data = [
-            {"input": 1, "output": "a"},
-            {"input": "1", "output": "b"},
-        ]
-        assert _agree(data) == data
-
     @pytest.mark.parametrize(
         "a, b",
         [
@@ -313,10 +305,12 @@ class TestByGroupAgreement:
             ([True], [1]),
             ({"k": 1}, {"k": "1"}),
             ([1, 2], (1, 2)),
+            ({"k": 1}, [("k", 1)]),
+            ({}, []),
         ],
     )
     def test_differently_typed_outputs_disagree(self, a, b):
-        """Outputs that differ in type disagree, even if == or str() match."""
+        """Outputs of different types disagree."""
         data = [
             {"input": "x", "output": a},
             {"input": "x", "output": b},
@@ -350,31 +344,9 @@ class TestByGroupAgreement:
         ]
         assert _agree(data) == data
 
-    @pytest.mark.parametrize(
-        "a, b",
-        [
-            ({"k": 1}, [("k", 1)]),
-            ({"k": 1}, [["k", 1]]),
-            ({}, []),
-            ({1}, ["__set__", [1]]),
-        ],
-    )
-    def test_mapping_and_sequence_disagree(self, a, b):
-        """A mapping (or set) never agrees with a sequence of the same content."""
-        data = [
-            {"input": "x", "output": a},
-            {"input": "x", "output": b},
-        ]
-        assert _agree(data) == []
-
     @pytest.mark.parametrize("reverse", [False, True])
     def test_consistent_across_cache(self, reverse):
-        """Inputs sharing an @op cache key give the same result in any order.
-
-        ``@op`` sorts dict entries in its cache key, so these two inputs share
-        a cache entry; whichever call runs second receives the first call's
-        result, which must match what it would have computed itself.
-        """
+        """Inputs sharing an @op cache key give the same result in either order."""
         ordered = [
             {"input": "x", "output": {"a": 1, "b": 2}},
             {"input": "x", "output": {"a": 1, "b": 2}},
@@ -387,14 +359,13 @@ class TestByGroupAgreement:
         for data in calls:
             uncached = _agree(data, _no_cache=True)
             assert _agree(data) == uncached == data
-        # The second cached call must have been served from the first's entry.
         hits = [
             r.cache_hit for r in trace() if r.op_name == "filter.by_group_agreement"
         ]
         assert hits[-1]
 
     def test_max_count_caps_agreeing_groups(self):
-        """max_count caps kept items per group, using the same grouping key."""
+        """max_count caps items per agreeing group."""
         data = [
             {"input": "x", "output": "a"},
             {"input": " x ", "output": "a"},
@@ -410,7 +381,7 @@ class TestByGroupAgreement:
         assert _agree(data, max_count=max_count) == []
 
     def test_unhashable_inputs_are_grouped(self):
-        """List, tuple and dict inputs group by type and value instead of raising."""
+        """Unhashable inputs are grouped by type and value."""
         data = [
             {"input": [1, 2], "output": "a"},
             {"input": (1, 2), "output": "b"},
@@ -420,11 +391,12 @@ class TestByGroupAgreement:
         assert _agree(data) == data[:2]
 
     def test_differently_typed_inputs_are_separate_groups(self):
-        """True and 1 (or 1 and 1.0) are separate groups, each judged alone."""
+        """Inputs of different types form separate groups."""
         data = [
             {"input": True, "output": "a"},
             {"input": 1, "output": "b"},
             {"input": 1.0, "output": "c"},
+            {"input": "1", "output": "d"},
         ]
         assert _agree(data) == data
 
@@ -432,7 +404,6 @@ class TestByGroupAgreement:
         """Equal outputs agree whether or not they share sub-objects."""
         s = "x" * 100
         copy_of_s = "".join(["x"] * 100)
-        assert s == copy_of_s and s is not copy_of_s
         data = [
             {"input": "x", "output": [s, s]},
             {"input": "x", "output": [s, copy_of_s]},

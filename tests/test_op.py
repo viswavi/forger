@@ -72,12 +72,13 @@ def test_op_warns_on_closure(caplog: pytest.LogCaptureFixture) -> None:
         (set(), []),
         ({1}, ["__set__", [1]]),
         ((), []),
+        ((1, 2), [1, 2]),
         (("__tuple__", [1]), [1]),
         ((1,), ["__tuple__", [1]]),
     ],
 )
 def test_op_distinguishes_container_types(a, b) -> None:
-    """Containers of different types never share a cache key, even if equal."""
+    """Containers of different types get separate cache keys."""
 
     @op
     def type_name(x: object) -> str:
@@ -85,21 +86,6 @@ def test_op_distinguishes_container_types(a, b) -> None:
 
     assert type_name(a) == type(a).__name__
     assert type_name(b) == type(b).__name__
-
-
-def test_op_distinguishes_lists_and_tuples() -> None:
-    """Lists and tuples with the same content get separate cache keys."""
-    calls = 0
-
-    @op
-    def count(x: object) -> int:
-        nonlocal calls
-        calls += 1
-        return 1
-
-    count([1, 2])
-    count((1, 2))
-    assert calls == 2
 
 
 def test_op_raises_for_unpicklable_arg_without_cache_key() -> None:
