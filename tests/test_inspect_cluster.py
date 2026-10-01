@@ -213,7 +213,7 @@ def test_codebook_with_wrong_topic_count_is_sent_back():
     model = _ScriptedCodebookModel([_THREE_TOPICS, _TWO_TOPICS])
     codebook = _build_codebook([_THREE_TOPICS], model, CONTEXT, num_clusters=2)
     assert codebook == _TWO_TOPICS
-    assert "That is 3 topics" in model.prompts[-1][-1]["content"]
+    assert "That is 3 distinct topic names" in model.prompts[-1][-1]["content"]
 
 
 def test_codebook_keeps_last_attempt_when_count_never_matches(caplog):
@@ -223,6 +223,15 @@ def test_codebook_keeps_last_attempt_when_count_never_matches(caplog):
         codebook = _build_codebook([_THREE_TOPICS], model, CONTEXT, num_clusters=2)
     assert codebook == _THREE_TOPICS
     assert any("3 topics instead of 2" in record.message for record in caplog.records)
+
+
+def test_codebook_case_duplicates_count_once():
+    """Names differing only in case are one topic, so the count gets corrected."""
+    duplicated = {"Cooking": "Food.", "cooking ": "Also food.", " ": "Blank."}
+    model = _ScriptedCodebookModel([duplicated, _TWO_TOPICS])
+    codebook = _build_codebook([_TWO_TOPICS], model, CONTEXT, num_clusters=2)
+    assert codebook == _TWO_TOPICS
+    assert "That is 1 distinct topic names" in model.prompts[-1][-1]["content"]
 
 
 def test_match_topic_is_lenient():

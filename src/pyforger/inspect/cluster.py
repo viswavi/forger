@@ -61,8 +61,9 @@ _AGGREGATE_USER = (
     "Output only the JSON object."
 )
 _AGGREGATE_RETRY = (
-    "That is {got} topics, but exactly {num_clusters} are required. Merge or "
-    "split topics as needed and output only the corrected JSON object."
+    "That is {got} distinct topic names (ignoring case), but exactly "
+    "{num_clusters} distinct topics are required. Merge or split topics as "
+    "needed and output only the corrected JSON object."
 )
 
 _ASSIGN_SYSTEM = (
@@ -295,7 +296,11 @@ def _build_codebook(
         except ValueError:
             continue
         attempt = {str(name): str(desc) for name, desc in parsed.items()}
-        if len(attempt) == num_clusters:
+        # _match_topic ignores case, so a case-variant duplicate is unreachable.
+        distinct_topics = {name.strip().lower() for name in attempt}
+        if "" in distinct_topics:
+            distinct_topics.remove("")
+        if len(distinct_topics) == len(attempt) == num_clusters:
             return attempt
         if attempt:
             codebook = attempt
@@ -305,7 +310,7 @@ def _build_codebook(
             {
                 "role": "user",
                 "content": _AGGREGATE_RETRY.format(
-                    got=len(attempt), num_clusters=num_clusters
+                    got=len(distinct_topics), num_clusters=num_clusters
                 ),
             },
         ]
