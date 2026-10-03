@@ -97,7 +97,9 @@ def sample_from_LLM(
     Returns:
         List of accepted sample dicts. ``{"text": <raw>}`` when no schema;
         otherwise the parsed JSON objects. When the model returns a reasoning
-        trace for a completion, it is included under the `reasoning` key.
+        trace for a completion, it is included under the `thinking_trace` key
+        (unless the parsed JSON already has one, in which case the trace is
+        dropped).
 
     Note:
         Because this is decorated with `@op`, outputs are memoized on disk by argument
