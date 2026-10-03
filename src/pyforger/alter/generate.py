@@ -86,7 +86,8 @@ def generate_from_context(
         ``(i + 1) * samples_per_item``). Each slot holds the parsed output dict,
         or ``None`` if the prompt failed to parse after ``max_retries``. When the
         model returns a reasoning trace for a completion, the dict also carries
-        that trace under a ``reasoning`` key.
+        that trace under a ``thinking_trace`` key (unless the parsed JSON already
+        has one, in which case the trace is dropped).
     """
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")

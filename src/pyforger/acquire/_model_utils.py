@@ -8,6 +8,9 @@ import json
 from typing import Any
 
 from pyforger.acquire.model import Prompt
+from pyforger.utils import get_formatted_logger
+
+logger = get_formatted_logger(__name__)
 
 
 def _schema_format_instructions(output_schema: dict[str, Any]) -> str:
@@ -56,6 +59,7 @@ def _parse_output(
     output_schema: dict[str, Any] | None,
     reasoning: str | None = None,
 ) -> dict[str, Any] | None:
+    """Parse a completion into a row dict, attaching reasoning trace if provided."""
     if output_schema is None:
         parsed: dict[str, Any] = {"text": raw_text}
     else:
@@ -70,5 +74,11 @@ def _parse_output(
             return None
         parsed = loaded
     if reasoning:
-        parsed["reasoning"] = reasoning
+        if "thinking_trace" in parsed:
+            logger.warning(
+                "Parsed output already has a 'thinking_trace' field; dropping the "
+                "provider reasoning trace instead of overwriting it."
+            )
+        else:
+            parsed["thinking_trace"] = reasoning
     return parsed
