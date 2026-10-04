@@ -276,6 +276,24 @@ class TestSysFacade:
         # safer_getattr returns None for missing attributes.
         assert sb.execute("import sys\ndef f():\n    return sys.modules\n") is None
 
+    def test_sys_via_other_module_is_the_facade(self):
+        """typing.sys gives the facade, not the host sys."""
+        sb = Sandbox()
+        code = "import typing\ndef f():\n    return typing.sys.modules\n"
+        assert sb.execute(code) is None
+
+    def test_disallowed_module_via_attribute_raises(self):
+        """re.enum isn't reachable since enum isn't an allowed import."""
+        sb = Sandbox()
+        with pytest.raises(AttributeError, match="enum"):
+            sb.execute("import re\ndef f():\n    return re.enum\n")
+
+    def test_from_import_of_host_module_raises(self):
+        """`from typing import sys` can't sneak the host sys in."""
+        sb = Sandbox()
+        with pytest.raises(ImportError):
+            sb.execute("from typing import sys\ndef f():\n    return sys\n")
+
     def test_from_sys_import_works(self):
         """`from sys import stdin` resolves against the facade."""
         sb = Sandbox()

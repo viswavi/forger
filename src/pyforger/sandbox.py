@@ -32,6 +32,7 @@ import builtins
 import io
 import signal
 import sys
+import types
 from collections.abc import Callable
 from typing import Any
 
@@ -341,7 +342,29 @@ def _build_globals(
             raise ImportError(f"sandbox: import of {name!r} is not allowed")
         if name == "sys":
             return sys_
-        return __import__(name, globals_, locals_, fromlist, level)
+        mod = __import__(name, globals_, locals_, fromlist, level)
+        # Check the names of imported modules to make sure that sandboxed code
+        # cannot indirectly import protected modules.
+        for attr in fromlist or ():
+            value = getattr(mod, attr, None)
+            if isinstance(value, types.ModuleType) and not _module_ok(value):
+                raise ImportError(f"sandbox: import of {name}.{attr} is not allowed")
+        return mod
+
+    def _module_ok(mod: types.ModuleType) -> bool:
+        return mod is not sys and mod.__name__.split(".")[0] in allowed_imports
+
+    def _getattr_(obj: Any, name: str, default: Any = None) -> Any:
+        # Allowed modules expose others as attributes (e.g. `typing.sys` is
+        # the real sys), so check any module reached this way too.
+        value = safer_getattr(obj, name, default)
+        if isinstance(value, types.ModuleType) and not _module_ok(value):
+            if value is sys and "sys" in allowed_imports:
+                return sys_
+            raise AttributeError(
+                f"sandbox: access to module {value.__name__!r} is not allowed"
+            )
+        return value
 
     # Build on safe_globals so common exception classes (ValueError, ...) exist.
     safe_builtins = dict(safe_globals["__builtins__"])
@@ -356,7 +379,7 @@ def _build_globals(
     g["__name__"] = "sandbox"
     # Required by RestrictedPython's compiled class statements.
     g["__metaclass__"] = type
-    g["_getattr_"] = safer_getattr
+    g["_getattr_"] = _getattr_
     g["_getitem_"] = lambda obj, key: obj[key]
     g["_getiter_"] = iter
     g["_iter_unpack_sequence_"] = guarded_iter_unpack_sequence
