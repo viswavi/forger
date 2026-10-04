@@ -669,6 +669,21 @@ class TestValidateParams:
             )
 
     @patch("pyforger.acquire.model.litellm")
+    def test_thinking_enabled_non_claude_no_temperature_constraint(self, mock_litellm):
+        """Non-Claude model with thinking enabled accepts temperature != 1.0."""
+        mock_litellm.get_supported_openai_params.return_value = [
+            "temperature",
+            "max_tokens",
+            "stop",
+            "thinking",
+        ]
+        _validate_params(
+            "deepseek/deepseek-reasoner",
+            temperature=0.5,
+            thinking={"type": "enabled", "budget_tokens": 1024},
+        )  # no raise
+
+    @patch("pyforger.acquire.model.litellm")
     def test_thinking_disabled_no_temperature_constraint(self, mock_litellm):
         """Thinking disabled no temperature constraint."""
         mock_litellm.get_supported_openai_params.return_value = [
