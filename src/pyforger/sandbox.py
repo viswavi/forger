@@ -261,6 +261,23 @@ _SAFE_OPERATOR = types.SimpleNamespace(
 )
 
 
+class _GuardedStream:
+    """Wraps a stream so sandboxed code can't close or detach it."""
+
+    def __init__(self, stream: Any) -> None:
+        self._stream = stream
+
+    def __getattr__(self, name: str) -> Any:
+        if name in ("close", "detach"):
+            raise AttributeError(f"sandbox: stream.{name}() is not allowed")
+        value = getattr(self._stream, name)
+        # Also guard sys.stdin.buffer, sys.stdout.buffer.raw, etc.
+        return _GuardedStream(value) if isinstance(value, io.IOBase) else value
+
+    def __iter__(self) -> Any:
+        yield from self._stream
+
+
 class _SandboxSys:
     """The subset of ``sys`` that sandboxed code gets from ``import sys``."""
 
@@ -272,15 +289,15 @@ class _SandboxSys:
 
     @property
     def stdin(self) -> Any:
-        return self._stdin if self._stdin is not None else sys.stdin
+        return _GuardedStream(self._stdin if self._stdin is not None else sys.stdin)
 
     @property
     def stdout(self) -> Any:
-        return self._stdout if self._stdout is not None else sys.stdout
+        return _GuardedStream(self._stdout if self._stdout is not None else sys.stdout)
 
     @property
     def stderr(self) -> Any:
-        return sys.stderr
+        return _GuardedStream(sys.stderr)
 
     @staticmethod
     def exit(code: Any = None) -> None:

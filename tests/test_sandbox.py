@@ -363,6 +363,22 @@ class TestSysFacade:
         sb.execute("import sys\ndef f():\n    sys.setrecursionlimit(50)\n")
         assert sys.getrecursionlimit() == before
 
+    def test_host_streams_cannot_be_closed(self):
+        """sys.stdout.close() (and via .buffer) doesn't reach the host stream."""
+        sb = Sandbox()
+        for code in (
+            "import sys\ndef f():\n    sys.stdout.close()\n",
+            "import sys\ndef f():\n    sys.stdout.buffer.close()\n",
+        ):
+            with pytest.raises(TypeError):  # safer_getattr turns it into None
+                sb.execute(code)
+
+    def test_iterating_stdin_works(self):
+        """`for line in sys.stdin` still works through the stream wrapper."""
+        sb = Sandbox()
+        code = "import sys\nfor line in sys.stdin:\n    print(line.strip())\n"
+        assert sb.run_program(code, stdin="a\nb\n") == "a\nb\n"
+
     def test_call_method_rejects_underscore_names(self):
         """call_method won't call dunders like __class__."""
         sb = Sandbox()
