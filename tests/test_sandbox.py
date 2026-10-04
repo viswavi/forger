@@ -328,6 +328,41 @@ class TestSysFacade:
             with pytest.raises(TypeError, match="module attributes"):
                 sb.execute(code)
 
+    def test_imported_class_and_function_assignment_refused(self):
+        """Classes/functions from allowed modules are shared, so also read-only."""
+        sb = Sandbox()
+        for code in (
+            "import json\ndef f():\n    json.JSONDecoder.x = 1\n",
+            "import json\ndef f():\n    json.dumps.x = 1\n",
+        ):
+            with pytest.raises(TypeError, match="module attributes"):
+                sb.execute(code)
+
+    def test_sandbox_class_and_function_assignment_allowed(self):
+        """Classes and functions defined in the snippet stay writable."""
+        sb = Sandbox()
+        code = (
+            "class Node:\n"
+            "    count = 0\n"
+            "def g():\n"
+            "    pass\n"
+            "def f():\n"
+            "    Node.count += 1\n"
+            "    g.memo = 2\n"
+            "    return Node.count + g.memo\n"
+        )
+        assert sb.execute(code) == 3
+        assert sb.run_program(code + "print(f())\n") == "3\n"
+
+    def test_recursion_limit_restored(self):
+        """sys.setrecursionlimit() inside the sandbox doesn't leak out."""
+        import sys
+
+        before = sys.getrecursionlimit()
+        sb = Sandbox()
+        sb.execute("import sys\ndef f():\n    sys.setrecursionlimit(50)\n")
+        assert sys.getrecursionlimit() == before
+
     def test_call_method_rejects_underscore_names(self):
         """call_method won't call dunders like __class__."""
         sb = Sandbox()

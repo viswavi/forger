@@ -316,17 +316,24 @@ class _SandboxPrinter:
         print(*objects, **kwargs)
 
 
+# Sandboxed code runs under "__main__" by default.
+_SANDBOX_MODULES = ("sandbox", "__main__")
+
+
 def _write_(ob: Any) -> Any:
     """Make the RestrictedPython guard allow attribute/item assignment.
 
-    Without this, RestrictedPython's own ``full_write_guard`` refuses
+    Without this, RestrictedPython's own `full_write_guard` refuses
     `obj.attr = value` on any plain object that doesn't define
-    ``__guarded_setattr__`` -- which is every ordinary class, This would make
+    `__guarded_setattr__` -- which is every ordinary class. This would make
     typical ``class Solution:``-style code with instance state uncompilable.
-    certain modules (e.g. libraries) can be accessed, but writes to those
-    modules are never allowed.
+    Certain modules (e.g. libraries) can be accessed, but writes to those
+    modules (or their classes and functions) are never allowed.
     """
-    if isinstance(ob, (types.ModuleType, _SandboxSys)) or ob is _SAFE_OPERATOR:
+    if (
+        isinstance(ob, (types.ModuleType, type, types.FunctionType))
+        and getattr(ob, "__module__", None) not in _SANDBOX_MODULES
+    ) or (isinstance(ob, _SandboxSys) or ob is _SAFE_OPERATOR):
         raise TypeError("sandbox: assigning to module attributes is not allowed")
     return ob
 
@@ -628,12 +635,15 @@ class Sandbox:
                 "sandbox: timeouts require running on the main thread"
             ) from exc
         old_timer = signal.getitimer(itimer_real)
+        # Unset any sys.setrecursionlimit() from the sandboxed code.
+        old_recursion_limit = sys.getrecursionlimit()
         signal.setitimer(itimer_real, budget)
         try:
             return fn(*args, **kwargs)
         except SystemExit as exc:
             raise SandboxExit(exc.code) from None
         finally:
+            sys.setrecursionlimit(old_recursion_limit)
             signal.setitimer(itimer_real, old_timer[0], old_timer[1])
             signal.signal(sigalrm, old_handler)
 
