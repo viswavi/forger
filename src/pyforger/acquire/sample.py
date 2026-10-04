@@ -97,9 +97,10 @@ def sample_from_LLM(
     Returns:
         List of accepted sample dicts. ``{"text": <raw>}`` when no schema;
         otherwise the parsed JSON objects. When the model returns a reasoning
-        trace for a completion, it is included under the `thinking_trace` key
-        (unless the parsed JSON already has one, in which case the trace is
-        dropped).
+        trace separately in `GenerateResult.reasoning`, it is included under
+        the `thinking_trace` key. Inline `<think>` traces (e.g. from `LocalModel`,
+        which supplies `None` for that metadata) are not extracted; use
+        `split_reasoning` to separate them out as needed.
 
     Note:
         Because this is decorated with `@op`, outputs are memoized on disk by argument
