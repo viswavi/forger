@@ -85,8 +85,10 @@ def generate_from_context(
         by item (item ``i``'s samples occupy slots ``i * samples_per_item`` to
         ``(i + 1) * samples_per_item``). Each slot holds the parsed output dict,
         or ``None`` if the prompt failed to parse after ``max_retries``. When the
-        model returns a reasoning trace for a completion, the dict also carries
-        that trace under a ``reasoning`` key.
+        model returns a reasoning trace separately in `GenerateResult.reasoning`,
+        it is included under the `thinking_trace` key. Inline `<think>` traces (e.g.
+        from `LocalModel`, which supplies `None` for that metadata) are not extracted;
+        use `split_reasoning` to separate them out as needed.
     """
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")

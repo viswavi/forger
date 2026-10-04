@@ -119,16 +119,48 @@ class TestSampling:
         assert items == [{"text": "plain text"}]
 
     def test_reasoning_attached_when_model_returns_it(self):
-        """A completion's reasoning trace is carried as a 'reasoning' key."""
+        """A completion's reasoning trace is carried as a 'thinking_trace' key."""
         model = MockModel(responses=["plain text"], reasoning=["the trace"])
         items = sample_from_LLM("Generate", model, n=1)
-        assert items == [{"text": "plain text", "reasoning": "the trace"}]
+        assert items == [{"text": "plain text", "thinking_trace": "the trace"}]
 
-    def test_no_reasoning_key_when_model_has_none(self):
-        """Without reasoning from the model, no 'reasoning' key is added."""
+    def test_no_thinking_trace_key_when_model_has_none(self):
+        """Without reasoning from the model, no 'thinking_trace' key is added."""
         model = MockModel(responses=["plain text"])
         items = sample_from_LLM("Generate", model, n=1)
-        assert "reasoning" not in items[0]
+        assert "thinking_trace" not in items[0]
+
+    def test_reasoning_schema_field_coexists_with_thinking_trace(self):
+        """A parsed 'reasoning' field is left intact alongside the trace."""
+        model = MockModel(
+            responses=['{"reasoning": ["six times seven"], "answer": "42"}'],
+            reasoning=["the trace"],
+        )
+        items = sample_from_LLM(
+            "Generate", model, n=1, output_schema={"reasoning": list, "answer": str}
+        )
+        assert items == [
+            {
+                "reasoning": ["six times seven"],
+                "answer": "42",
+                "thinking_trace": "the trace",
+            }
+        ]
+
+    def test_thinking_trace_does_not_overwrite_schema_field(self, caplog):
+        """A parsed 'thinking_trace' field is kept; the provider trace is dropped."""
+        model = MockModel(
+            responses=['{"thinking_trace": ["six times seven"], "answer": "42"}'],
+            reasoning=["the trace"],
+        )
+        items = sample_from_LLM(
+            "Generate",
+            model,
+            n=1,
+            output_schema={"thinking_trace": list, "answer": str},
+        )
+        assert items == [{"thinking_trace": ["six times seven"], "answer": "42"}]
+        assert "already has a 'thinking_trace' field" in caplog.text
 
     def test_message_list_prompt_end_to_end(self):
         """Message-list prompt with output_schema parses structured output."""

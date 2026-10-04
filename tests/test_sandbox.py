@@ -255,6 +255,87 @@ class TestRunProgram:
         assert sb.run_program(code) == "1\n"
         assert sb.run_program(code) == "1\n"
 
+    def test_host_stdout_is_not_swapped(self, capsys):
+        """run_program leaves the host's sys.stdout alone."""
+        import sys
+
+        host_stdout = sys.stdout
+        sb = Sandbox()
+        code = "import sys\nprint(sys.stdout is not None)\n"
+        assert sb.run_program(code) == "True\n"
+        assert sys.stdout is host_stdout
+        assert capsys.readouterr().out == ""
+
+
+class TestSysFacade:
+    """`import sys` gives a restricted facade, not the host module."""
+
+    def test_sys_modules_unavailable(self):
+        """The facade doesn't expose sys.modules (a route to open/os)."""
+        sb = Sandbox()
+        # safer_getattr returns None for missing attributes.
+        assert sb.execute("import sys\ndef f():\n    return sys.modules\n") is None
+
+    def test_from_sys_import_works(self):
+        """`from sys import stdin` resolves against the facade."""
+        sb = Sandbox()
+        code = "from sys import stdin\nprint(stdin.readline().strip())\n"
+        assert sb.run_program(code, stdin="hello\n") == "hello\n"
+
+
+class TestAugAssignTargets:
+    """d[k] += v and obj.x += v evaluate their target once, as in Python."""
+
+    def test_subscript_key_evaluated_once(self):
+        """d[keys.pop()] += 5 pops once."""
+        sb = Sandbox()
+        code = (
+            "def f():\n"
+            "    keys = [0, 1]\n"
+            "    d = [10, 20]\n"
+            "    d[keys.pop()] += 5\n"
+            "    return d, keys\n"
+        )
+        assert sb.execute(code) == ([10, 25], [0])
+
+    def test_attribute_object_evaluated_once(self):
+        """boxes.pop().x += 1 pops once."""
+        sb = Sandbox()
+        code = (
+            "class Box:\n"
+            "    def __init__(self):\n"
+            "        self.x = 1\n"
+            "def f():\n"
+            "    boxes = [Box(), Box()]\n"
+            "    boxes.pop().x += 1\n"
+            "    return len(boxes), boxes[0].x\n"
+        )
+        assert sb.execute(code) == (1, 1)
+
+    def test_slice_target(self):
+        """a[1:] += [4] works."""
+        sb = Sandbox()
+        code = "def f():\n    a = [1, 2, 3]\n    a[1:] += [4]\n    return a\n"
+        assert sb.execute(code) == [1, 2, 3, 4]
+
+
+class TestCallMethodTimeout:
+    """call_method timeouts."""
+
+    def test_constructor_is_bounded_by_timeout(self):
+        """A non-terminating __init__ hits the timeout too."""
+        sb = Sandbox()
+        code = (
+            "class Solution:\n"
+            "    def __init__(self):\n"
+            "        while True:\n"
+            "            pass\n"
+            "    def f(self):\n"
+            "        return 1\n"
+        )
+        with pytest.raises(SandboxTimeout):
+            sb.call_method(code, "Solution", "f", timeout_s=0.2)
+
 
 class TestErrors:
     """Compile errors raise ValueError; runtime errors propagate verbatim."""
