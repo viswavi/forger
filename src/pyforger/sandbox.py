@@ -30,6 +30,7 @@ from __future__ import annotations
 import ast
 import builtins
 import io
+import operator
 import signal
 import sys
 import types
@@ -249,6 +250,17 @@ class _SandboxPolicy(RestrictingNodeTransformer):
         return stmts
 
 
+# `operator` minus attrgetter/methodcaller, whose attribute lookups enable
+# bypassing _getattr_ (e.g. `attrgetter("__class__")(1)`), which is not good.
+_SAFE_OPERATOR = types.SimpleNamespace(
+    **{
+        k: v
+        for k, v in vars(operator).items()
+        if not k.startswith("_") and k not in ("attrgetter", "methodcaller")
+    }
+)
+
+
 class _SandboxSys:
     """The subset of ``sys`` that sandboxed code gets from ``import sys``."""
 
@@ -340,30 +352,35 @@ def _build_globals(
         root = name.split(".")[0]
         if root not in allowed_imports:
             raise ImportError(f"sandbox: import of {name!r} is not allowed")
-        if name == "sys":
-            return sys_
         mod = __import__(name, globals_, locals_, fromlist, level)
         # Check the names of imported modules to make sure that sandboxed code
         # cannot indirectly import protected modules.
         for attr in fromlist or ():
             value = getattr(mod, attr, None)
-            if isinstance(value, types.ModuleType) and not _module_ok(value):
+            if (
+                isinstance(value, types.ModuleType)
+                and _check_module(value) is not value
+            ):
                 raise ImportError(f"sandbox: import of {name}.{attr} is not allowed")
-        return mod
+        return _check_module(mod)
 
-    def _module_ok(mod: types.ModuleType) -> bool:
-        return mod is not sys and mod.__name__.split(".")[0] in allowed_imports
+    # We define specific modules where the sandboxed code can only access a restricted
+    # stand-in instead of the real thing.
+    stand_ins = {sys: sys_, operator: _SAFE_OPERATOR}
+
+    def _check_module(mod: types.ModuleType) -> Any:
+        if mod.__name__.split(".")[0] not in allowed_imports:
+            raise ImportError(
+                f"sandbox: access to module {mod.__name__!r} is not allowed"
+            )
+        return stand_ins.get(mod, mod)
 
     def _getattr_(obj: Any, name: str, default: Any = None) -> Any:
         # Allowed modules expose others as attributes (e.g. `typing.sys` is
         # the real sys), so check any module reached this way too.
         value = safer_getattr(obj, name, default)
-        if isinstance(value, types.ModuleType) and not _module_ok(value):
-            if value is sys and "sys" in allowed_imports:
-                return sys_
-            raise AttributeError(
-                f"sandbox: access to module {value.__name__!r} is not allowed"
-            )
+        if isinstance(value, types.ModuleType):
+            return _check_module(value)
         return value
 
     # Build on safe_globals so common exception classes (ValueError, ...) exist.
@@ -418,6 +435,15 @@ def _unwrap_main_guard(code: str) -> str:
 
 class SandboxTimeout(TimeoutError):
     """Raised when a sandboxed call exceeds its wall-clock budget."""
+
+
+class SandboxExit(RuntimeError):
+    """Raised in place of SystemExit (e.g. sys.exit()) from sandboxed code."""
+
+    def __init__(self, code: Any) -> None:
+        """Keep the exit code on `.code`, like SystemExit."""
+        super().__init__(f"sandbox: program exited with code {code!r}")
+        self.code = code
 
 
 def _on_alarm(signum: int, frame: Any) -> None:
@@ -569,11 +595,9 @@ class Sandbox:
         ns["__name__"] = "__main__"
         try:
             self._exec_bytecode(bytecode, ns, timeout_s=timeout_s)
-        except SystemExit as exc:
+        except SandboxExit as exc:
             if exc.code not in (None, 0):
-                raise RuntimeError(
-                    f"sandbox: program exited with code {exc.code!r}"
-                ) from None
+                raise
         return captured.getvalue()
 
     def call(
@@ -601,6 +625,8 @@ class Sandbox:
         signal.setitimer(itimer_real, budget)
         try:
             return fn(*args, **kwargs)
+        except SystemExit as exc:
+            raise SandboxExit(exc.code) from None
         finally:
             signal.setitimer(itimer_real, old_timer[0], old_timer[1])
             signal.signal(sigalrm, old_handler)

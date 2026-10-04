@@ -5,7 +5,7 @@ import signal
 
 import pytest
 
-from pyforger.sandbox import Sandbox, SandboxTimeout
+from pyforger.sandbox import Sandbox, SandboxExit, SandboxTimeout
 
 
 class TestCompileAndCall:
@@ -285,7 +285,7 @@ class TestSysFacade:
     def test_disallowed_module_via_attribute_raises(self):
         """re.enum isn't reachable since enum isn't an allowed import."""
         sb = Sandbox()
-        with pytest.raises(AttributeError, match="enum"):
+        with pytest.raises(ImportError, match="enum"):
             sb.execute("import re\ndef f():\n    return re.enum\n")
 
     def test_from_import_of_host_module_raises(self):
@@ -293,6 +293,30 @@ class TestSysFacade:
         sb = Sandbox()
         with pytest.raises(ImportError):
             sb.execute("from typing import sys\ndef f():\n    return sys\n")
+
+    def test_operator_attrgetter_removed(self):
+        """The attrgetter function would bypass _getattr_, so it isn't exposed."""
+        sb = Sandbox()
+        with pytest.raises(ImportError):
+            sb.execute("from operator import attrgetter\ndef f():\n    pass\n")
+        code = "import typing\ndef f():\n    return typing.operator.attrgetter\n"
+        assert sb.execute(code) is None
+
+    def test_operator_basics_work(self):
+        """Ordinary operator functions are still available."""
+        sb = Sandbox()
+        code = (
+            "import functools, operator\n"
+            "def f(xs):\n"
+            "    return functools.reduce(operator.mul, xs)\n"
+        )
+        assert sb.execute(code, (2, 3, 4)) == 24
+
+    def test_exit_outside_run_program_is_contained(self):
+        """sys.exit() in execute raises SandboxExit, not SystemExit."""
+        sb = Sandbox()
+        with pytest.raises(SandboxExit):
+            sb.execute("import sys\ndef f():\n    sys.exit(0)\n")
 
     def test_from_sys_import_works(self):
         """`from sys import stdin` resolves against the facade."""
