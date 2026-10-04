@@ -318,6 +318,22 @@ class TestSysFacade:
         with pytest.raises(SandboxExit):
             sb.execute("import sys\ndef f():\n    sys.exit(0)\n")
 
+    def test_module_attribute_assignment_refused(self):
+        """Snippets can't patch shared modules or the operator stand-in."""
+        sb = Sandbox()
+        for code in (
+            "import json\ndef f():\n    json.dumps = None\n",
+            "import operator\ndef f():\n    operator.mul = None\n",
+        ):
+            with pytest.raises(TypeError, match="module attributes"):
+                sb.execute(code)
+
+    def test_call_method_rejects_underscore_names(self):
+        """call_method won't call dunders like __class__."""
+        sb = Sandbox()
+        with pytest.raises(ValueError, match="starts with"):
+            sb.call_method("class Solution:\n    pass\n", "Solution", "__class__")
+
     def test_from_sys_import_works(self):
         """`from sys import stdin` resolves against the facade."""
         sb = Sandbox()

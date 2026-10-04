@@ -323,7 +323,11 @@ def _write_(ob: Any) -> Any:
     `obj.attr = value` on any plain object that doesn't define
     ``__guarded_setattr__`` -- which is every ordinary class, This would make
     typical ``class Solution:``-style code with instance state uncompilable.
+    certain modules (e.g. libraries) can be accessed, but writes to those
+    modules are never allowed.
     """
+    if isinstance(ob, (types.ModuleType, _SandboxSys)) or ob is _SAFE_OPERATOR:
+        raise TypeError("sandbox: assigning to module attributes is not allowed")
     return ob
 
 
@@ -565,6 +569,8 @@ class Sandbox:
         instantiates it fresh (no constructor args) and calls `method_name`
         on that instance with ``*args``/``**kwargs``.
         """
+        if method_name.startswith("_"):
+            raise ValueError(f"sandbox: method name {method_name!r} starts with '_'")
         ns = self._exec_namespace(code)
         cls: Any = ns.get(class_name)
         if not isinstance(cls, type):
