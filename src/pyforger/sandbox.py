@@ -9,17 +9,18 @@ permissive ``_write_`` guard. Some things not allowed include:
   No open, eval, exec, compile, getattr/setattr, globals, or locals.
 * Underscored attribute access (e.g. x.__class__, self._cache) are not allowed.
 * ``nonlocal`` is rejected at compile time (``global`` is fine).
+* ``import sys`` returns a restricted copy of the module (stdin/stdout/stderr, exit,
+  maxsize, get/setrecursionlimit), not the full thing.
 
-Two execution models are supported through the sandbox:
+Three execution models are supported through the sandbox:
 
-* compile_function/call/execute -- compile once, extract the top-level function,
-  and call it with positional args. Good if your solution is a single function.
-  last top-level function defined, call it directly with positional args.
-* call_method -- compile once (cached, so module-level state is shared across
-  calls, matching how a real grader might compiles a submission once and call it
-  repeatedly for each test case), instantiate the named class fresh each call, and
- call the named. E.g. the class `Solution` might be loaded once and its method (e.g.
- `run_program`) called multiple times.
+* compile_function/call/execute -- compile once, extract the last top-level
+  function, and call it. Good if your solution is a single function.
+* call_method -- compile once, instantiate the named class fresh each call, and
+  call the named method. E.g. `Solution` is loaded once and `solve` called per
+  test case.
+* run_program -- run the code as a script with the given stdin and return what
+  it printed. Good if your solution reads stdin and writes stdout.
 
 Note that this is not a proper security boundary against adversarial input, but
 rather a guardrail against accidental damage from machine-generated code.
@@ -28,7 +29,6 @@ from __future__ import annotations
 
 import ast
 import builtins
-import copy
 import io
 import signal
 import sys
@@ -145,6 +145,30 @@ def _inplacevar(op: str, a: Any, b: Any) -> Any:
         raise NotImplementedError(f"sandbox: in-place op {op!r} not supported")
 
 
+# Temporary variable names for the AugAssign rewrite. Sandboxed code can't reference
+# these since RestrictedPython rejects names starting with "_".
+_AUG_OBJ = "_aug_obj"
+_AUG_KEY = "_aug_key"
+
+
+def _write_call(value: ast.expr) -> ast.Call:
+    return ast.Call(func=ast.Name("_write_", ast.Load()), args=[value], keywords=[])
+
+
+def _slice_to_expr(node: ast.expr) -> ast.expr:
+    """Turn a subscript slice (``a:b``, ``i, a:b``) into a plain expression."""
+    if isinstance(node, ast.Slice):
+        parts = [node.lower, node.upper, node.step]
+        return ast.Call(
+            func=ast.Name("slice", ast.Load()),
+            args=[p if p is not None else ast.Constant(None) for p in parts],
+            keywords=[],
+        )
+    if isinstance(node, ast.Tuple):
+        return ast.Tuple([_slice_to_expr(e) for e in node.elts], ast.Load())
+    return node
+
+
 class _SandboxPolicy(RestrictingNodeTransformer):
     """Expanded policy to allow augmented assignment to subscripts/attributes.
 
@@ -159,48 +183,114 @@ class _SandboxPolicy(RestrictingNodeTransformer):
     restriction would otherwise pose a significant hindrance.
     """
 
-    def visit_AugAssign(self, node: ast.AugAssign) -> ast.stmt:
+    def visit_AugAssign(self, node: ast.AugAssign) -> ast.stmt | list[ast.stmt]:
         node = self.node_contents_visit(node)
         target = node.target
         op_str = ast.Constant(IOPERATOR_TO_STR[type(node.op)])
 
         if isinstance(target, ast.Name):
-            read_target: ast.expr = ast.Name(target.id, ast.Load())
-        elif isinstance(target, ast.Subscript):
-            read_target = ast.Subscript(
-                value=copy.deepcopy(target.value),
-                slice=copy.deepcopy(target.slice),
-                ctx=ast.Load(),
+            new_node = ast.Assign(
+                targets=[target],
+                value=ast.Call(
+                    func=ast.Name("_inplacevar_", ast.Load()),
+                    args=[op_str, ast.Name(target.id, ast.Load()), node.value],
+                    keywords=[],
+                ),
             )
-        elif isinstance(target, ast.Attribute):
-            read_target = ast.Attribute(
-                value=copy.deepcopy(target.value), attr=target.attr, ctx=ast.Load()
-            )
-        else:  # pragma: no cover -- ast.c only ever produces these three target types
+            copy_locations(new_node, node)
+            return new_node
+
+        # Concrete example of how this works: we rewrite `cnt[q.popleft()] += 1` as:
+        #     _aug_obj = cnt
+        #     _aug_key = q.popleft()
+        #     _write_(_aug_obj)[_aug_key] = _inplacevar_("+=", _aug_obj[_aug_key], 1)
+        #     del _aug_obj, _aug_key
+        # so q.popleft() runs once, not twice (once to read, once to write).
+        # target.value.args[0] is `cnt`: the visit above wrapped it in _write_().
+        if not isinstance(target, (ast.Subscript, ast.Attribute)):  # pragma: no cover
             raise NotImplementedError(
                 f"sandbox: unknown AugAssign target type: {type(target)}"
             )
-
-        new_node = ast.Assign(
-            targets=[target],
-            value=ast.Call(
-                func=ast.Name("_inplacevar_", ast.Load()),
-                args=[op_str, read_target, node.value],
-                keywords=[],
-            ),
+        wrapped = target.value
+        assert isinstance(wrapped, ast.Call)
+        obj = ast.Name(_AUG_OBJ, ast.Load())
+        stmts: list[ast.stmt] = [
+            ast.Assign([ast.Name(_AUG_OBJ, ast.Store())], wrapped.args[0])
+        ]
+        if isinstance(target, ast.Subscript):
+            stmts.append(
+                ast.Assign(
+                    [ast.Name(_AUG_KEY, ast.Store())], _slice_to_expr(target.slice)
+                )
+            )
+            key = ast.Name(_AUG_KEY, ast.Load())
+            read_target: ast.expr = ast.Subscript(obj, key, ast.Load())
+            write_target: ast.expr = ast.Subscript(_write_call(obj), key, ast.Store())
+        else:
+            read_target = ast.Attribute(obj, target.attr, ast.Load())
+            write_target = ast.Attribute(_write_call(obj), target.attr, ast.Store())
+        stmts.append(
+            ast.Assign(
+                targets=[write_target],
+                value=ast.Call(
+                    func=ast.Name("_inplacevar_", ast.Load()),
+                    args=[op_str, read_target, node.value],
+                    keywords=[],
+                ),
+            )
         )
-        copy_locations(new_node, node)
-        return new_node
+        temps = [_AUG_OBJ]
+        if isinstance(target, ast.Subscript):
+            temps.append(_AUG_KEY)
+        stmts.append(ast.Delete([ast.Name(t, ast.Del()) for t in temps]))
+        for stmt in stmts:
+            copy_locations(stmt, node)
+        return stmts
+
+
+class _SandboxSys:
+    """The subset of ``sys`` that sandboxed code gets from ``import sys``."""
+
+    maxsize = sys.maxsize
+
+    def __init__(self, stdin: Any = None, stdout: Any = None) -> None:
+        self._stdin = stdin
+        self._stdout = stdout
+
+    @property
+    def stdin(self) -> Any:
+        return self._stdin if self._stdin is not None else sys.stdin
+
+    @property
+    def stdout(self) -> Any:
+        return self._stdout if self._stdout is not None else sys.stdout
+
+    @property
+    def stderr(self) -> Any:
+        return sys.stderr
+
+    @staticmethod
+    def exit(code: Any = None) -> None:
+        raise SystemExit(code)
+
+    @staticmethod
+    def getrecursionlimit() -> int:
+        return sys.getrecursionlimit()
+
+    @staticmethod
+    def setrecursionlimit(limit: int) -> None:
+        sys.setrecursionlimit(limit)
 
 
 class _SandboxPrinter:
-    """# Allow print() to stdout in RestrictedPython without buffering output."""
+    """Allow print() in RestrictedPython, writing to the sandbox's stdout."""
 
-    def __init__(self, _getattr_: Any = None) -> None:
+    def __init__(self, _getattr_: Any, sys_: _SandboxSys) -> None:
         self._getattr_: Any = _getattr_
+        self._sys = sys_
 
     def write(self, text: str) -> None:
-        sys.stdout.write(text)
+        self._sys.stdout.write(text)
 
     def __call__(self) -> str:
         return ""
@@ -224,7 +314,19 @@ def _write_(ob: Any) -> Any:
     return ob
 
 
-def _build_globals(allowed_imports: frozenset[str]) -> dict[str, Any]:
+def _build_globals(
+    allowed_imports: frozenset[str], stdin: Any = None, stdout: Any = None
+) -> dict[str, Any]:
+    sys_ = _SandboxSys(stdin, stdout)
+
+    def _input(prompt: Any = "") -> str:
+        if prompt:
+            sys_.stdout.write(str(prompt))
+        line = sys_.stdin.readline()
+        if not line:
+            raise EOFError("EOF when reading a line")
+        return line.rstrip("\n")
+
     def _restricted_import(
         name: str,
         globals_: dict[str, Any] | None = None,
@@ -237,6 +339,8 @@ def _build_globals(allowed_imports: frozenset[str]) -> dict[str, Any]:
         root = name.split(".")[0]
         if root not in allowed_imports:
             raise ImportError(f"sandbox: import of {name!r} is not allowed")
+        if name == "sys":
+            return sys_
         return __import__(name, globals_, locals_, fromlist, level)
 
     # Build on safe_globals so common exception classes (ValueError, ...) exist.
@@ -245,6 +349,7 @@ def _build_globals(allowed_imports: frozenset[str]) -> dict[str, Any]:
         if n not in safe_builtins and hasattr(builtins, n):
             safe_builtins[n] = getattr(builtins, n)
     safe_builtins["__import__"] = _restricted_import
+    safe_builtins["input"] = _input
 
     g = dict(safe_globals)
     g["__builtins__"] = safe_builtins
@@ -258,7 +363,7 @@ def _build_globals(allowed_imports: frozenset[str]) -> dict[str, Any]:
     g["_unpack_sequence_"] = guarded_unpack_sequence
     g["_inplacevar_"] = _inplacevar
     g["_write_"] = _write_
-    g["_print_"] = _SandboxPrinter
+    g["_print_"] = lambda _getattr_=None: _SandboxPrinter(_getattr_, sys_)
     return g
 
 
@@ -412,14 +517,15 @@ class Sandbox:
         on that instance with ``*args``/``**kwargs``.
         """
         ns = self._exec_namespace(code)
-        cls = ns.get(class_name)
+        cls: Any = ns.get(class_name)
         if not isinstance(cls, type):
             raise ValueError(
                 f"sandbox: {class_name!r} is not a class defined in the given code"
             )
-        instance = cls()
-        method = getattr(instance, method_name)
-        return self.call(method, *args, timeout_s=timeout_s, **kwargs)
+        # Construct inside the timed call so a slow __init__ is also bounded.
+        return self.call(
+            lambda: getattr(cls(), method_name)(*args, **kwargs), timeout_s=timeout_s
+        )
 
     def run_program(
         self, code: str, *, stdin: str = "", timeout_s: float | None = None
@@ -430,27 +536,21 @@ class Sandbox:
         the whole snippet re-execs from scratch every call (fresh globals).
         """
         bytecode = self._compile_restricted(_unwrap_main_guard(code))
-        ns: dict[str, Any] = dict(self._globals)
-        ns["__name__"] = "__main__"
-
-        old_stdin, old_stdout = sys.stdin, sys.stdout
-        # A TextIOWrapper over BytesIO (not a bare StringIO) so `.buffer` is
-        # present, to support reading from `sys.stdin.buffer`.
-        sys.stdin = io.TextIOWrapper(
+        # A TextIOWrapper over BytesIO (not a bare StringIO) so
+        # `sys.stdin.buffer` is present.
+        stdin_stream = io.TextIOWrapper(
             io.BytesIO(stdin.encode("utf-8")), encoding="utf-8"
         )
         captured = io.StringIO()
-        sys.stdout = captured
+        ns = _build_globals(self._allowed_imports, stdin_stream, captured)
+        ns["__name__"] = "__main__"
         try:
-            try:
-                self._exec_bytecode(bytecode, ns, timeout_s=timeout_s)
-            except SystemExit as exc:
-                if exc.code not in (None, 0):
-                    raise RuntimeError(
-                        f"sandbox: program exited with code {exc.code!r}"
-                    ) from None
-        finally:
-            sys.stdin, sys.stdout = old_stdin, old_stdout
+            self._exec_bytecode(bytecode, ns, timeout_s=timeout_s)
+        except SystemExit as exc:
+            if exc.code not in (None, 0):
+                raise RuntimeError(
+                    f"sandbox: program exited with code {exc.code!r}"
+                ) from None
         return captured.getvalue()
 
     def call(
