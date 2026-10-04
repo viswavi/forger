@@ -22,10 +22,10 @@ def _batch_completion_with_progress(
 ) -> list[Any]:
     """Concurrent, progress-tracked replacement for litellm.batch_completion.
 
-    Unlike ``litellm.batch_completion`` -- which retrieves ``future.result()``
+    Unlike `litellm.batch_completion` -- which retrieves `future.result()`
     in submission order, so the whole call looks frozen until the *slowest*
     early-submitted item finishes even if later ones completed first -- this
-    updates a tqdm bar via ``as_completed`` as each call actually finishes.
+    updates a tqdm bar via `as_completed` as each call actually finishes.
     """
     from tqdm import tqdm
 
@@ -52,7 +52,7 @@ def _batch_completion_with_progress(
 
 
 class GenerateResult(list):
-    """list[str] with ``usage`` / ``reasoning`` / ``model_id`` / ``raw`` attributes."""
+    """list[str] with `usage` / `reasoning` / `model_id` / `raw` attributes."""
 
     usage: dict[str, Any]
     reasoning: list[str | None]
@@ -108,7 +108,7 @@ _PROVIDER_PREFIXES = ("openai/", "anthropic/", "gemini/", "xai/", "deepseek/")
 
 
 def _family(model_id: str) -> str:
-    """Strip ``litellm_proxy/`` / ``openrouter/`` gateway + provider prefix."""
+    """Strip `litellm_proxy/` / `openrouter/` gateway + provider prefix."""
     s = model_id
     if s.startswith("litellm_proxy/"):
         s = s[len("litellm_proxy/") :]
@@ -122,7 +122,7 @@ def _family(model_id: str) -> str:
 
 
 def _validate_params(model_id: str, **params: Any) -> None:
-    """Raise ``ValueError`` on unsupported params or constraint violations."""
+    """Raise `ValueError` on unsupported params or constraint violations."""
     supported_set = set(litellm.get_supported_openai_params(model=model_id) or [])
 
     for name, value in params.items():
@@ -158,10 +158,10 @@ def _validate_params(model_id: str, **params: Any) -> None:
 
 
 def _extract_reasoning(response: Any, model_id: str) -> list[str | None]:
-    """Extract reasoning per choice; ``None`` when absent.
+    """Extract reasoning per choice; `None` when absent.
 
-    Skips ``litellm.supports_reasoning`` (false negatives on proxy aliases).
-    OpenRouter uses ``message.reasoning`` instead of ``reasoning_content``.
+    Skips `litellm.supports_reasoning` (false negatives on proxy aliases).
+    OpenRouter uses `message.reasoning` instead of `reasoning_content`.
     """
     s = (
         model_id[len("litellm_proxy/") :]
@@ -187,7 +187,7 @@ _COST_WARNING_SEEN: set[str] = set()
 
 
 def _extract_cost(response: Any, model_id: str) -> float:
-    """Cost in USD; ``0.0`` when unavailable. Warns once per ``model_id`` on miss."""
+    """Cost in USD; `0.0` when unavailable. Warns once per `model_id` on miss."""
     hidden = getattr(response, "_hidden_params", None) or {}
     cost = hidden.get("response_cost")
     if cost is None:
@@ -209,7 +209,7 @@ def _extract_cost(response: Any, model_id: str) -> float:
 
 
 def _extract_usage(response: Any) -> dict[str, int]:
-    """Dict with ``prompt_tokens`` / ``completion_tokens`` / ``reasoning_tokens``."""
+    """Dict with `prompt_tokens` / `completion_tokens` / `reasoning_tokens`."""
     usage = getattr(response, "usage", None)
     if usage is None:
         return {"prompt_tokens": 0, "completion_tokens": 0, "reasoning_tokens": 0}
@@ -478,21 +478,21 @@ def _import_vllm() -> Any:
 
 
 class LocalModel(Model):
-    """On-GPU model served locally via vLLM, with the same interface as ``Model``.
+    """On-GPU model served locally via vLLM, with the same interface as `Model`.
 
     Unlike the LiteLLM-backed :class:`Model`, this loads model weights into GPU
-    memory once (lazily, on the first ``generate``/``generate_batch`` call) and
+    memory once (lazily, on the first `generate`/`generate_batch` call) and
     runs batched inference in-process. This is the efficient path for sampling
     many completions per prompt from an open-weights student model (e.g. for
     on-policy distillation).
 
-    The engine is created lazily so that importing ``pyforger`` -- and even
-    constructing a ``LocalModel`` -- never requires ``vllm`` or a GPU. ``vllm``
+    The engine is created lazily so that importing `pyforger` -- and even
+    constructing a `LocalModel` -- never requires `vllm` or a GPU. `vllm`
     is imported only when generation actually happens; it is an optional
-    dependency, installed with ``pip install "pyforger[vllm]"``.
+    dependency, installed with `pip install "pyforger[vllm]"`.
 
     Chat prompts are rendered with the model's own chat template. For reasoning
-    models (e.g. Qwen3) the generated text contains a ``<think>...</think>``
+    models (e.g. Qwen3) the generated text contains a `<think>...</think>`
     block followed by the answer; callers that need the two separated can use
     :func:`split_reasoning`.
 
@@ -532,16 +532,16 @@ class LocalModel(Model):
             dtype: Engine dtype ("auto", "bfloat16", "float16", ...).
             enable_thinking: For reasoning models, whether the chat template
                 should enable the thinking block. Forwarded via
-                ``chat_template_kwargs={"enable_thinking": ...}`` unless
-                ``chat_template_kwargs`` is given explicitly.
+                `chat_template_kwargs={"enable_thinking": ...}` unless
+                `chat_template_kwargs` is given explicitly.
             chat_template_kwargs: Extra kwargs for the chat template. When set,
-                it is used verbatim and ``enable_thinking`` is ignored.
+                it is used verbatim and `enable_thinking` is ignored.
             seed: Sampling seed for reproducible generation.
             show_progress: When True, display vLLM's per-call progress bar (with
                 live input/output tokens-per-second) during generation. Useful
                 for long batched runs; off by default to keep logs quiet.
-            **engine_kwargs: Extra keyword arguments forwarded to ``vllm.LLM``
-                (e.g. ``max_num_seqs`` to cap concurrent sequences and avoid KV
+            **engine_kwargs: Extra keyword arguments forwarded to `vllm.LLM`
+                (e.g. `max_num_seqs` to cap concurrent sequences and avoid KV
                 cache over-admission on long-generation workloads).
         """
         super().__init__(
@@ -564,13 +564,13 @@ class LocalModel(Model):
         """Stable hash key for @op caching from the functional configuration.
 
         Includes the sampling settings, the chat-template kwargs actually sent,
-        ``dtype`` and every extra ``vllm.LLM`` kwarg (e.g. ``revision``,
-        ``quantization``), since any of those can change outputs; two instances
+        `dtype` and every extra `vllm.LLM` kwarg (e.g. `revision`,
+        `quantization`), since any of those can change outputs; two instances
         that differ in them must not share cached completions.
-        ``gpu_memory_utilization`` and ``tensor_parallel_size`` only affect speed
-        and memory, so they are left out -- except with ``max_model_len=-1``,
+        `gpu_memory_utilization` and `tensor_parallel_size` only affect speed
+        and memory, so they are left out -- except with `max_model_len=-1`,
         where vLLM (0.14+) sizes the context to fit memory and they cap
-        generation length. ``show_progress`` is always left out.
+        generation length. `show_progress` is always left out.
         """
         engine_kwargs = tuple(sorted(self._kwargs.items(), key=lambda kv: str(kv[0])))
         memory = (
@@ -624,7 +624,7 @@ class LocalModel(Model):
         stop: list[str] | None = None,
         show_progress: bool | None = None,
     ) -> list[GenerateResult]:
-        """Generate ``n`` completions per prompt with the local vLLM engine.
+        """Generate `n` completions per prompt with the local vLLM engine.
 
         Args:
             prompts: List of prompts (string or OpenAI-format message list).
@@ -638,9 +638,9 @@ class LocalModel(Model):
 
         Returns:
             List of GenerateResult, one per prompt, in input order. Each is a
-            list of ``n`` completion strings holding the raw generated text
-            (including any ``<think>...</think>`` block for reasoning models;
-            ``reasoning`` is therefore ``None`` per choice -- use
+            list of `n` completion strings holding the raw generated text
+            (including any `<think>...</think>` block for reasoning models;
+            `reasoning` is therefore `None` per choice -- use
             :func:`split_reasoning` to separate it).
         """
         if not prompts:
@@ -707,9 +707,9 @@ _THINK_OPEN = "<think>"
 def split_reasoning(text: str) -> tuple[str, str]:
     """Split a reasoning-model completion into (thinking, answer).
 
-    Reasoning models such as Qwen3 emit ``<think>...</think>`` followed by the
-    final answer. This splits on the closing ``</think>`` tag, stripping an
-    optional leading ``<think>``. When no closing tag is present (e.g. the model
+    Reasoning models such as Qwen3 emit `<think>...</think>` followed by the
+    final answer. This splits on the closing `</think>` tag, stripping an
+    optional leading `<think>`. When no closing tag is present (e.g. the model
     ran out of tokens mid-thought, or thinking was disabled), the whole text is
     returned as the answer with an empty thinking string.
 
@@ -717,7 +717,7 @@ def split_reasoning(text: str) -> tuple[str, str]:
         text: Raw completion text.
 
     Returns:
-        ``(thinking, answer)`` with surrounding whitespace stripped.
+        `(thinking, answer)` with surrounding whitespace stripped.
     """
     if _THINK_CLOSE not in text:
         return "", text.strip()
