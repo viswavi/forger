@@ -326,6 +326,9 @@ class _SandboxPrinter:
     def write(self, text: str) -> None:
         self._sys.stdout.write(text)
 
+    def flush(self) -> None:
+        self._sys.stdout.flush()
+
     def __call__(self) -> str:
         return ""
 
@@ -514,6 +517,7 @@ class Sandbox:
         self._compile_cache: dict[str, Callable[..., Any]] = {}
         self._namespace_cache: dict[str, dict[str, Any]] = {}
         self._result_cache: dict[tuple, Any] | None = {} if cache_results else None
+        self._in_call = False
 
     def cache_key(self) -> tuple:
         """Stable hash key for @op caching (excludes the mutable compile cache)."""
@@ -544,9 +548,7 @@ class Sandbox:
         """``exec(bytecode, ns)`` under the same SIGALRM budget as ``call``."""
         self.call(lambda: exec(bytecode, ns), timeout_s=timeout_s)
 
-    def _exec_namespace(
-        self, code: str, timeout_s: float | None = None
-    ) -> dict[str, Any]:
+    def _exec_namespace(self, code: str) -> dict[str, Any]:
         """Exec ``code`` once (cached by source) into a fresh namespace, and return it.
 
         Namespace is seeded from the sandbox's globals. Module-level
@@ -559,13 +561,11 @@ class Sandbox:
             return cached
         bytecode = self._compile_restricted(code)
         ns: dict[str, Any] = dict(self._globals)
-        self._exec_bytecode(bytecode, ns, timeout_s=timeout_s)
+        self._exec_bytecode(bytecode, ns)
         self._namespace_cache[code] = ns
         return ns
 
-    def compile_function(
-        self, code: str, timeout_s: float | None = None
-    ) -> Callable[..., Any]:
+    def compile_function(self, code: str) -> Callable[..., Any]:
         """Compile ``code`` and return the last function defined; cached by source."""
         cached = self._compile_cache.get(code)
         if cached is not None:
@@ -576,7 +576,7 @@ class Sandbox:
         # can see each other via __globals__.
         ns: dict[str, Any] = dict(self._globals)
         baseline = set(self._globals)
-        self._exec_bytecode(bytecode, ns, timeout_s=timeout_s)
+        self._exec_bytecode(bytecode, ns)
         for name in reversed(list(ns)):
             if name in baseline:
                 continue
@@ -603,16 +603,18 @@ class Sandbox:
         """
         if method_name.startswith("_"):
             raise ValueError(f"sandbox: method name {method_name!r} starts with '_'")
-        ns = self._exec_namespace(code, timeout_s)
-        cls: Any = ns.get(class_name)
-        if not isinstance(cls, type):
-            raise ValueError(
-                f"sandbox: {class_name!r} is not a class defined in the given code"
-            )
-        # Construct inside the timed call so a slow __init__ is also bounded.
-        return self.call(
-            lambda: getattr(cls(), method_name)(*args, **kwargs), timeout_s=timeout_s
-        )
+
+        def run() -> Any:
+            ns = self._exec_namespace(code)
+            cls = ns.get(class_name)
+            if not isinstance(cls, type):
+                raise ValueError(
+                    f"sandbox: {class_name!r} is not a class defined in the given code"
+                )
+            return getattr(cls(), method_name)(*args, **kwargs)
+
+        # One timed call, so top-level code, __init__ and the method share a budget.
+        return self.call(run, timeout_s=timeout_s)
 
     def run_program(
         self, code: str, *, stdin: str = "", timeout_s: float | None = None
@@ -646,6 +648,8 @@ class Sandbox:
         **kwargs: Any,
     ) -> Any:
         """Call ``fn`` with a SIGALRM wall-clock timeout. Main thread only."""
+        if self._in_call:
+            return fn(*args, **kwargs)
         budget = timeout_s if timeout_s is not None else self._default_timeout_s
         sigalrm = getattr(signal, "SIGALRM", None)
         itimer_real = getattr(signal, "ITIMER_REAL", None)
@@ -663,12 +667,14 @@ class Sandbox:
         # Unset any sys.setrecursionlimit() from the sandboxed code.
         old_recursion_limit = sys.getrecursionlimit()
         signal.setitimer(itimer_real, budget)
+        self._in_call = True
         try:
             return fn(*args, **kwargs)
         except SystemExit as exc:
             raise SandboxExit(exc.code) from None
         finally:
             sys.setrecursionlimit(old_recursion_limit)
+            self._in_call = False
             signal.setitimer(itimer_real, old_timer[0], old_timer[1])
             signal.signal(sigalrm, old_handler)
 
@@ -679,15 +685,14 @@ class Sandbox:
         timeout_s: float | None = None,
         **kwargs: Any,
     ) -> Any:
-        """Compile (or cache-hit) then call."""
+        """Compile (or cache-hit) then call, all within one timeout."""
+
+        def run() -> Any:
+            return self.compile_function(code)(*args, **kwargs)
+
         cache = self._result_cache
         if cache is None:
-            return self.call(
-                self.compile_function(code, timeout_s),
-                *args,
-                timeout_s=timeout_s,
-                **kwargs,
-            )
+            return self.call(run, timeout_s=timeout_s)
 
         cache_key: tuple | None = None
         if not kwargs:
@@ -699,12 +704,7 @@ class Sandbox:
                 pass  # unhashable arg; fall through without caching
         if cache_key is not None and cache_key in cache:
             return cache[cache_key]
-        result = self.call(
-            self.compile_function(code, timeout_s),
-            *args,
-            timeout_s=timeout_s,
-            **kwargs,
-        )
+        result = self.call(run, timeout_s=timeout_s)
         if cache_key is not None:
             cache[cache_key] = result
         return result

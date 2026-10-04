@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import signal
+import time
 
 import pytest
 
@@ -42,6 +43,33 @@ class TestCompileAndCall:
 
 class TestTimeouts:
     """SIGALRM-based wall-clock budgets per call."""
+
+    def test_nested_call_stays_within_outer_budget(self):
+        """An inner call with a longer timeout still stops at the outer one."""
+        sb = Sandbox(default_timeout_s=60)
+
+        def spin():
+            while True:
+                pass
+
+        start = time.monotonic()
+        with pytest.raises(SandboxTimeout):
+            sb.call(lambda: sb.call(spin), timeout_s=0.2)
+        assert time.monotonic() - start < 5
+
+    def test_nested_call_time_counts_against_outer_budget(self):
+        """Time spent in an inner call isn't given back to the outer call."""
+        sb = Sandbox()
+
+        def phases():
+            sb.call(time.sleep, 0.5)
+            while True:
+                pass
+
+        start = time.monotonic()
+        with pytest.raises(SandboxTimeout):
+            sb.call(phases, timeout_s=0.6)
+        assert time.monotonic() - start < 0.9
 
     def test_default_timeout_fires(self):
         """Without per-call override, default_timeout_s ends a runaway call."""
@@ -212,6 +240,11 @@ class TestWriteGuardAndClasses:
 
 class TestRunProgram:
     """Standalone-script execution with real stdin/stdout."""
+
+    def test_print_flush(self):
+        """print(..., flush=True) works like regular print."""
+        sb = Sandbox()
+        assert sb.run_program("print('x', flush=True)\n") == "x\n"
 
     def test_stdin_and_print_round_trip(self):
         """input()/print() read from and write to the given stdin/captured stdout."""
