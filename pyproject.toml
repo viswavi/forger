@@ -19,6 +19,7 @@ dependencies = [
     "tiktoken",
     "RestrictedPython>=7.0",
     "python-dotenv",
+    "tqdm",
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
