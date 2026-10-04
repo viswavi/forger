@@ -95,6 +95,53 @@ class TestGenerateFromContextExecution:
         assert result == []
         assert model._call_count == 0
 
+    def test_reasoning_attached_when_model_returns_it(self):
+        """A completion's reasoning trace is carried as a 'thinking_trace' key."""
+        model = MockModel(responses=["world"], reasoning=["thinking about it"])
+        result = generate_from_context([{"text": "hello"}], "prompt: {text}", model)
+        assert result == [{"text": "world", "thinking_trace": "thinking about it"}]
+
+    def test_no_thinking_trace_key_when_model_has_none(self):
+        """Without reasoning from the model, no 'thinking_trace' key is added."""
+        model = MockModel(responses=["world"])
+        result = generate_from_context([{"text": "hello"}], "prompt: {text}", model)
+        assert result == [{"text": "world"}]
+
+    def test_reasoning_schema_field_coexists_with_thinking_trace(self):
+        """A parsed 'reasoning' field is left intact alongside the trace."""
+        model = MockModel(
+            responses=['{"reasoning": ["six times seven"], "answer": "42"}'],
+            reasoning=["thinking about it"],
+        )
+        result = generate_from_context(
+            [{"text": "hello"}],
+            "prompt: {text}",
+            model,
+            output_schema={"reasoning": list, "answer": str},
+        )
+        assert result == [
+            {
+                "reasoning": ["six times seven"],
+                "answer": "42",
+                "thinking_trace": "thinking about it",
+            }
+        ]
+
+    def test_thinking_trace_does_not_overwrite_schema_field(self, caplog):
+        """A parsed 'thinking_trace' field is kept; the provider trace is dropped."""
+        model = MockModel(
+            responses=['{"thinking_trace": ["six times seven"], "answer": "42"}'],
+            reasoning=["thinking about it"],
+        )
+        result = generate_from_context(
+            [{"text": "hello"}],
+            "prompt: {text}",
+            model,
+            output_schema={"thinking_trace": list, "answer": str},
+        )
+        assert result == [{"thinking_trace": ["six times seven"], "answer": "42"}]
+        assert "already has a 'thinking_trace' field" in caplog.text
+
 
 # ---------------------------------------------------------------------------
 # Execution — prompt building
