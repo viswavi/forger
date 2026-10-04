@@ -262,16 +262,20 @@ _SAFE_OPERATOR = types.SimpleNamespace(
 
 
 class _GuardedStream:
-    """Wraps a stream so sandboxed code can't close or detach it."""
+    """Wraps a stream to expose only reading, writing, and flushing."""
+
+    _ALLOWED = frozenset(
+        {"read", "readline", "readlines", "write", "writelines", "flush", "buffer"}
+    )
 
     def __init__(self, stream: Any) -> None:
         self._stream = stream
 
     def __getattr__(self, name: str) -> Any:
-        if name in ("close", "detach"):
-            raise AttributeError(f"sandbox: stream.{name}() is not allowed")
+        if name not in self._ALLOWED:
+            raise AttributeError(f"sandbox: stream.{name} is not allowed")
         value = getattr(self._stream, name)
-        # Also guard sys.stdin.buffer, sys.stdout.buffer.raw, etc.
+        # Also guard sys.stdin.buffer.
         return _GuardedStream(value) if isinstance(value, io.IOBase) else value
 
     def __iter__(self) -> Any:

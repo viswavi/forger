@@ -364,14 +364,22 @@ class TestSysFacade:
         assert sys.getrecursionlimit() == before
 
     def test_host_streams_cannot_be_closed(self):
-        """sys.stdout.close() (and via .buffer) doesn't reach the host stream."""
+        """Only read/write/flush can be used on the underlying host streams."""
         sb = Sandbox()
         for code in (
             "import sys\ndef f():\n    sys.stdout.close()\n",
             "import sys\ndef f():\n    sys.stdout.buffer.close()\n",
+            "import sys\ndef f():\n    sys.stdin.seek(0)\n",
+            "import sys\ndef f():\n    sys.stdout.reconfigure()\n",
         ):
             with pytest.raises(TypeError):  # safer_getattr turns it into None
                 sb.execute(code)
+
+    def test_stdin_buffer_reads_work(self):
+        """sys.stdin.buffer.read() (common in fast-IO solutions) still works."""
+        sb = Sandbox()
+        code = "import sys\nprint(sys.stdin.buffer.read().split())\n"
+        assert sb.run_program(code, stdin="1 2\n") == "[b'1', b'2']\n"
 
     def test_iterating_stdin_works(self):
         """`for line in sys.stdin` still works through the stream wrapper."""
