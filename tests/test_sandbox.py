@@ -379,6 +379,15 @@ class TestSysFacade:
         code = "import sys\nfor line in sys.stdin:\n    print(line.strip())\n"
         assert sb.run_program(code, stdin="a\nb\n") == "a\nb\n"
 
+    def test_timeout_covers_top_level_code(self):
+        """timeout_s also bounds the first exec of the snippet's top level."""
+        sb = Sandbox(default_timeout_s=60)
+        loop = "while True:\n    pass\n"
+        with pytest.raises(SandboxTimeout):
+            sb.call_method(loop + "class S:\n    pass\n", "S", "f", timeout_s=0.2)
+        with pytest.raises(SandboxTimeout):
+            sb.execute(loop + "def f():\n    pass\n", timeout_s=0.2)
+
     def test_call_method_rejects_underscore_names(self):
         """call_method won't call dunders like __class__."""
         sb = Sandbox()

@@ -540,7 +540,9 @@ class Sandbox:
         """``exec(bytecode, ns)`` under the same SIGALRM budget as ``call``."""
         self.call(lambda: exec(bytecode, ns), timeout_s=timeout_s)
 
-    def _exec_namespace(self, code: str) -> dict[str, Any]:
+    def _exec_namespace(
+        self, code: str, timeout_s: float | None = None
+    ) -> dict[str, Any]:
         """Exec ``code`` once (cached by source) into a fresh namespace, and return it.
 
         Namespace is seeded from the sandbox's globals. Module-level
@@ -553,11 +555,13 @@ class Sandbox:
             return cached
         bytecode = self._compile_restricted(code)
         ns: dict[str, Any] = dict(self._globals)
-        self._exec_bytecode(bytecode, ns)
+        self._exec_bytecode(bytecode, ns, timeout_s=timeout_s)
         self._namespace_cache[code] = ns
         return ns
 
-    def compile_function(self, code: str) -> Callable[..., Any]:
+    def compile_function(
+        self, code: str, timeout_s: float | None = None
+    ) -> Callable[..., Any]:
         """Compile ``code`` and return the last function defined; cached by source."""
         cached = self._compile_cache.get(code)
         if cached is not None:
@@ -568,7 +572,7 @@ class Sandbox:
         # can see each other via __globals__.
         ns: dict[str, Any] = dict(self._globals)
         baseline = set(self._globals)
-        self._exec_bytecode(bytecode, ns)
+        self._exec_bytecode(bytecode, ns, timeout_s=timeout_s)
         for name in reversed(list(ns)):
             if name in baseline:
                 continue
@@ -595,7 +599,7 @@ class Sandbox:
         """
         if method_name.startswith("_"):
             raise ValueError(f"sandbox: method name {method_name!r} starts with '_'")
-        ns = self._exec_namespace(code)
+        ns = self._exec_namespace(code, timeout_s)
         cls: Any = ns.get(class_name)
         if not isinstance(cls, type):
             raise ValueError(
@@ -675,7 +679,10 @@ class Sandbox:
         cache = self._result_cache
         if cache is None:
             return self.call(
-                self.compile_function(code), *args, timeout_s=timeout_s, **kwargs
+                self.compile_function(code, timeout_s),
+                *args,
+                timeout_s=timeout_s,
+                **kwargs,
             )
 
         cache_key: tuple | None = None
@@ -689,7 +696,10 @@ class Sandbox:
         if cache_key is not None and cache_key in cache:
             return cache[cache_key]
         result = self.call(
-            self.compile_function(code), *args, timeout_s=timeout_s, **kwargs
+            self.compile_function(code, timeout_s),
+            *args,
+            timeout_s=timeout_s,
+            **kwargs,
         )
         if cache_key is not None:
             cache[cache_key] = result
