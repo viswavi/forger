@@ -30,8 +30,11 @@ from __future__ import annotations
 import ast
 import builtins
 import io
+import operator
+import random
 import signal
 import sys
+import threading
 import types
 from collections.abc import Callable
 from typing import Any
@@ -249,6 +252,46 @@ class _SandboxPolicy(RestrictingNodeTransformer):
         return stmts
 
 
+# `operator` minus attrgetter/methodcaller, whose attribute lookups enable
+# bypassing _getattr_ (e.g. `attrgetter("__class__")(1)`), which is not good.
+_SAFE_OPERATOR = types.SimpleNamespace(
+    **{
+        k: v
+        for k, v in vars(operator).items()
+        if not k.startswith("_") and k not in ("attrgetter", "methodcaller")
+    }
+)
+
+
+def _make_random() -> types.SimpleNamespace:
+    """`random` backed by its own Random(), so seeding doesn't touch the host's."""
+    rng = random.Random()
+    return types.SimpleNamespace(
+        **{k: getattr(rng, k, getattr(random, k)) for k in random.__all__}
+    )
+
+
+class _GuardedStream:
+    """Wraps a stream to expose only reading, writing, and flushing."""
+
+    _ALLOWED = frozenset(
+        {"read", "readline", "readlines", "write", "writelines", "flush", "buffer"}
+    )
+
+    def __init__(self, stream: Any) -> None:
+        self._stream = stream
+
+    def __getattr__(self, name: str) -> Any:
+        if name not in self._ALLOWED:
+            raise AttributeError(f"sandbox: stream.{name} is not allowed")
+        value = getattr(self._stream, name)
+        # Also guard sys.stdin.buffer.
+        return _GuardedStream(value) if isinstance(value, io.IOBase) else value
+
+    def __iter__(self) -> Any:
+        yield from self._stream
+
+
 class _SandboxSys:
     """The subset of ``sys`` that sandboxed code gets from ``import sys``."""
 
@@ -260,15 +303,15 @@ class _SandboxSys:
 
     @property
     def stdin(self) -> Any:
-        return self._stdin if self._stdin is not None else sys.stdin
+        return _GuardedStream(self._stdin if self._stdin is not None else sys.stdin)
 
     @property
     def stdout(self) -> Any:
-        return self._stdout if self._stdout is not None else sys.stdout
+        return _GuardedStream(self._stdout if self._stdout is not None else sys.stdout)
 
     @property
     def stderr(self) -> Any:
-        return sys.stderr
+        return _GuardedStream(sys.stderr)
 
     @staticmethod
     def exit(code: Any = None) -> None:
@@ -293,6 +336,9 @@ class _SandboxPrinter:
     def write(self, text: str) -> None:
         self._sys.stdout.write(text)
 
+    def flush(self) -> None:
+        self._sys.stdout.flush()
+
     def __call__(self) -> str:
         return ""
 
@@ -304,14 +350,25 @@ class _SandboxPrinter:
         print(*objects, **kwargs)
 
 
+# Sandboxed code runs under "__main__" by default.
+_SANDBOX_MODULES = ("sandbox", "__main__")
+
+
 def _write_(ob: Any) -> Any:
     """Make the RestrictedPython guard allow attribute/item assignment.
 
-    Without this, RestrictedPython's own ``full_write_guard`` refuses
+    Without this, RestrictedPython's own `full_write_guard` refuses
     `obj.attr = value` on any plain object that doesn't define
-    ``__guarded_setattr__`` -- which is every ordinary class, This would make
+    `__guarded_setattr__` -- which is every ordinary class. This would make
     typical ``class Solution:``-style code with instance state uncompilable.
+    Certain modules (e.g. libraries) can be accessed, but writes to those
+    modules (or their classes and functions) are never allowed.
     """
+    if (
+        isinstance(ob, (types.ModuleType, type, types.FunctionType))
+        and getattr(ob, "__module__", None) not in _SANDBOX_MODULES
+    ) or isinstance(ob, (_SandboxSys, types.SimpleNamespace)):
+        raise TypeError("sandbox: assigning to module attributes is not allowed")
     return ob
 
 
@@ -340,30 +397,35 @@ def _build_globals(
         root = name.split(".")[0]
         if root not in allowed_imports:
             raise ImportError(f"sandbox: import of {name!r} is not allowed")
-        if name == "sys":
-            return sys_
         mod = __import__(name, globals_, locals_, fromlist, level)
         # Check the names of imported modules to make sure that sandboxed code
         # cannot indirectly import protected modules.
         for attr in fromlist or ():
             value = getattr(mod, attr, None)
-            if isinstance(value, types.ModuleType) and not _module_ok(value):
+            if (
+                isinstance(value, types.ModuleType)
+                and _check_module(value) is not value
+            ):
                 raise ImportError(f"sandbox: import of {name}.{attr} is not allowed")
-        return mod
+        return _check_module(mod)
 
-    def _module_ok(mod: types.ModuleType) -> bool:
-        return mod is not sys and mod.__name__.split(".")[0] in allowed_imports
+    # We define specific modules where the sandboxed code can only access a restricted
+    # stand-in instead of the real thing.
+    stand_ins = {sys: sys_, operator: _SAFE_OPERATOR, random: _make_random()}
+
+    def _check_module(mod: types.ModuleType) -> Any:
+        if mod.__name__.split(".")[0] not in allowed_imports:
+            raise ImportError(
+                f"sandbox: access to module {mod.__name__!r} is not allowed"
+            )
+        return stand_ins.get(mod, mod)
 
     def _getattr_(obj: Any, name: str, default: Any = None) -> Any:
         # Allowed modules expose others as attributes (e.g. `typing.sys` is
         # the real sys), so check any module reached this way too.
         value = safer_getattr(obj, name, default)
-        if isinstance(value, types.ModuleType) and not _module_ok(value):
-            if value is sys and "sys" in allowed_imports:
-                return sys_
-            raise AttributeError(
-                f"sandbox: access to module {value.__name__!r} is not allowed"
-            )
+        if isinstance(value, types.ModuleType):
+            return _check_module(value)
         return value
 
     # Build on safe_globals so common exception classes (ValueError, ...) exist.
@@ -418,6 +480,19 @@ def _unwrap_main_guard(code: str) -> str:
 
 class SandboxTimeout(TimeoutError):
     """Raised when a sandboxed call exceeds its wall-clock budget."""
+
+
+class SandboxExit(RuntimeError):
+    """Raised in place of SystemExit (e.g. sys.exit()) from sandboxed code."""
+
+    def __init__(self, code: Any) -> None:
+        """Keep the exit code on `.code`, like SystemExit."""
+        super().__init__(f"sandbox: program exited with code {code!r}")
+        self.code = code
+
+
+# SIGALRM is a process-wide timer, so track which thread owns the active one.
+_timer_thread: int | None = None
 
 
 def _on_alarm(signum: int, frame: Any) -> None:
@@ -539,16 +614,20 @@ class Sandbox:
         instantiates it fresh (no constructor args) and calls `method_name`
         on that instance with ``*args``/``**kwargs``.
         """
-        ns = self._exec_namespace(code)
-        cls: Any = ns.get(class_name)
-        if not isinstance(cls, type):
-            raise ValueError(
-                f"sandbox: {class_name!r} is not a class defined in the given code"
-            )
-        # Construct inside the timed call so a slow __init__ is also bounded.
-        return self.call(
-            lambda: getattr(cls(), method_name)(*args, **kwargs), timeout_s=timeout_s
-        )
+        if method_name.startswith("_"):
+            raise ValueError(f"sandbox: method name {method_name!r} starts with '_'")
+
+        def run() -> Any:
+            ns = self._exec_namespace(code)
+            cls = ns.get(class_name)
+            if not isinstance(cls, type):
+                raise ValueError(
+                    f"sandbox: {class_name!r} is not a class defined in the given code"
+                )
+            return getattr(cls(), method_name)(*args, **kwargs)
+
+        # One timed call, so top-level code, __init__ and the method share a budget.
+        return self.call(run, timeout_s=timeout_s)
 
     def run_program(
         self, code: str, *, stdin: str = "", timeout_s: float | None = None
@@ -559,22 +638,21 @@ class Sandbox:
         the whole snippet re-execs from scratch every call (fresh globals).
         """
         bytecode = self._compile_restricted(_unwrap_main_guard(code))
-        # A TextIOWrapper over BytesIO (not a bare StringIO) so
-        # `sys.stdin.buffer` is present.
+        # TextIOWrappers over BytesIO (not bare StringIOs) so `sys.stdin.buffer`
+        # and `sys.stdout.buffer` are present.
         stdin_stream = io.TextIOWrapper(
             io.BytesIO(stdin.encode("utf-8")), encoding="utf-8"
         )
-        captured = io.StringIO()
+        out = io.BytesIO()
+        captured = io.TextIOWrapper(out, encoding="utf-8", write_through=True)
         ns = _build_globals(self._allowed_imports, stdin_stream, captured)
         ns["__name__"] = "__main__"
         try:
             self._exec_bytecode(bytecode, ns, timeout_s=timeout_s)
-        except SystemExit as exc:
+        except SandboxExit as exc:
             if exc.code not in (None, 0):
-                raise RuntimeError(
-                    f"sandbox: program exited with code {exc.code!r}"
-                ) from None
-        return captured.getvalue()
+                raise
+        return out.getvalue().decode("utf-8", errors="replace")
 
     def call(
         self,
@@ -584,6 +662,9 @@ class Sandbox:
         **kwargs: Any,
     ) -> Any:
         """Call ``fn`` with a SIGALRM wall-clock timeout. Main thread only."""
+        global _timer_thread
+        if _timer_thread == threading.get_ident():  # Nested call: use active timer.
+            return fn(*args, **kwargs)
         budget = timeout_s if timeout_s is not None else self._default_timeout_s
         sigalrm = getattr(signal, "SIGALRM", None)
         itimer_real = getattr(signal, "ITIMER_REAL", None)
@@ -598,10 +679,17 @@ class Sandbox:
                 "sandbox: timeouts require running on the main thread"
             ) from exc
         old_timer = signal.getitimer(itimer_real)
+        # Unset any sys.setrecursionlimit() from the sandboxed code.
+        old_recursion_limit = sys.getrecursionlimit()
         signal.setitimer(itimer_real, budget)
+        _timer_thread = threading.get_ident()
         try:
             return fn(*args, **kwargs)
+        except SystemExit as exc:
+            raise SandboxExit(exc.code) from None
         finally:
+            sys.setrecursionlimit(old_recursion_limit)
+            _timer_thread = None
             signal.setitimer(itimer_real, old_timer[0], old_timer[1])
             signal.signal(sigalrm, old_handler)
 
@@ -612,12 +700,14 @@ class Sandbox:
         timeout_s: float | None = None,
         **kwargs: Any,
     ) -> Any:
-        """Compile (or cache-hit) then call."""
+        """Compile (or cache-hit) then call, all within one timeout."""
+
+        def run() -> Any:
+            return self.compile_function(code)(*args, **kwargs)
+
         cache = self._result_cache
         if cache is None:
-            return self.call(
-                self.compile_function(code), *args, timeout_s=timeout_s, **kwargs
-            )
+            return self.call(run, timeout_s=timeout_s)
 
         cache_key: tuple | None = None
         if not kwargs:
@@ -629,9 +719,7 @@ class Sandbox:
                 pass  # unhashable arg; fall through without caching
         if cache_key is not None and cache_key in cache:
             return cache[cache_key]
-        result = self.call(
-            self.compile_function(code), *args, timeout_s=timeout_s, **kwargs
-        )
+        result = self.call(run, timeout_s=timeout_s)
         if cache_key is not None:
             cache[cache_key] = result
         return result

@@ -144,7 +144,7 @@ def _validate_params(model_id: str, **params: Any) -> None:
     if (
         isinstance(thinking, dict)
         and thinking.get("type") == "enabled"
-        and family.startswith("claude")
+        and (family.lower().startswith("claude-") or "-claude-" in family.lower())
     ):
         required.setdefault("temperature", 1.0)
 
