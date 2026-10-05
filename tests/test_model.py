@@ -445,6 +445,16 @@ class TestShowProgress:
         ]
         mock_litellm.batch_completion.assert_called_once()
 
+    @patch("pyforger.acquire.model.litellm")
+    def test_instance_setting_used_when_call_omits_it(self, mock_litellm):
+        """Model(show_progress=True) shows bar even if LLM call doesn't specify it."""
+        mock_litellm.completion.side_effect = lambda messages, **kwargs: (
+            make_litellm_response([f"r-{messages[0]['content']}"])
+        )
+        model = Model("gpt-4o", api_key="sk-test", show_progress=True)
+        assert model.generate_batch(["Q1", "Q2"]) == [["r-Q1"], ["r-Q2"]]
+        mock_litellm.batch_completion.assert_not_called()
+
 
 class TestEdgeCases:
     """Edge cases and boundary conditions."""
