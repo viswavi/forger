@@ -31,6 +31,7 @@ import ast
 import builtins
 import io
 import operator
+import random
 import signal
 import sys
 import threading
@@ -262,6 +263,14 @@ _SAFE_OPERATOR = types.SimpleNamespace(
 )
 
 
+def _make_random() -> types.SimpleNamespace:
+    """`random` backed by its own Random(), so seeding doesn't touch the host's."""
+    rng = random.Random()
+    return types.SimpleNamespace(
+        **{k: getattr(rng, k, getattr(random, k)) for k in random.__all__}
+    )
+
+
 class _GuardedStream:
     """Wraps a stream to expose only reading, writing, and flushing."""
 
@@ -358,7 +367,7 @@ def _write_(ob: Any) -> Any:
     if (
         isinstance(ob, (types.ModuleType, type, types.FunctionType))
         and getattr(ob, "__module__", None) not in _SANDBOX_MODULES
-    ) or (isinstance(ob, _SandboxSys) or ob is _SAFE_OPERATOR):
+    ) or isinstance(ob, (_SandboxSys, types.SimpleNamespace)):
         raise TypeError("sandbox: assigning to module attributes is not allowed")
     return ob
 
@@ -402,7 +411,7 @@ def _build_globals(
 
     # We define specific modules where the sandboxed code can only access a restricted
     # stand-in instead of the real thing.
-    stand_ins = {sys: sys_, operator: _SAFE_OPERATOR}
+    stand_ins = {sys: sys_, operator: _SAFE_OPERATOR, random: _make_random()}
 
     def _check_module(mod: types.ModuleType) -> Any:
         if mod.__name__.split(".")[0] not in allowed_imports:
@@ -629,12 +638,13 @@ class Sandbox:
         the whole snippet re-execs from scratch every call (fresh globals).
         """
         bytecode = self._compile_restricted(_unwrap_main_guard(code))
-        # A TextIOWrapper over BytesIO (not a bare StringIO) so
-        # `sys.stdin.buffer` is present.
+        # TextIOWrappers over BytesIO (not bare StringIOs) so `sys.stdin.buffer`
+        # and `sys.stdout.buffer` are present.
         stdin_stream = io.TextIOWrapper(
             io.BytesIO(stdin.encode("utf-8")), encoding="utf-8"
         )
-        captured = io.StringIO()
+        out = io.BytesIO()
+        captured = io.TextIOWrapper(out, encoding="utf-8", write_through=True)
         ns = _build_globals(self._allowed_imports, stdin_stream, captured)
         ns["__name__"] = "__main__"
         try:
@@ -642,7 +652,7 @@ class Sandbox:
         except SandboxExit as exc:
             if exc.code not in (None, 0):
                 raise
-        return captured.getvalue()
+        return out.getvalue().decode("utf-8", errors="replace")
 
     def call(
         self,

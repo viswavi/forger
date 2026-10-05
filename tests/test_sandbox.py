@@ -442,6 +442,32 @@ class TestSysFacade:
         code = "import sys\nprint(sys.stdin.buffer.read().split())\n"
         assert sb.run_program(code, stdin="1 2\n") == "[b'1', b'2']\n"
 
+    def test_stdout_buffer_write(self):
+        """sys.stdout.buffer.write() works and stays in order with print()."""
+        sb = Sandbox()
+        code = "import sys\nprint('a')\nsys.stdout.buffer.write(b'b\\n')\nprint('c')\n"
+        assert sb.run_program(code) == "a\nb\nc\n"
+
+    def test_random_seed_does_not_touch_host_rng(self):
+        """random.seed() in the sandbox leaves the host's global RNG alone."""
+        import random
+
+        random.seed(0)
+        expected = random.random()
+        random.seed(0)
+        sb = Sandbox()
+        code = "import random\nrandom.seed(1)\nprint(random.randint(1, 6))\n"
+        assert sb.run_program(code) == sb.run_program(code)
+        assert random.random() == expected
+
+    def test_random_class_still_available(self):
+        """random.Random(seed) still works for code that makes its own RNG."""
+        sb = Sandbox()
+        code = "import random\ndef f():\n    return random.Random(3).random()\n"
+        import random
+
+        assert sb.execute(code) == random.Random(3).random()
+
     def test_iterating_stdin_works(self):
         """`for line in sys.stdin` still works through the stream wrapper."""
         sb = Sandbox()
