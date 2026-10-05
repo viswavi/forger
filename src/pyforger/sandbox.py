@@ -33,6 +33,7 @@ import io
 import operator
 import signal
 import sys
+import threading
 import types
 from collections.abc import Callable
 from typing import Any
@@ -481,8 +482,8 @@ class SandboxExit(RuntimeError):
         self.code = code
 
 
-# Mark SIGALRM as a process-wide timer for sandboxed activity.
-_in_call = False
+# SIGALRM is a process-wide timer, so track which thread owns the active one.
+_timer_thread: int | None = None
 
 
 def _on_alarm(signum: int, frame: Any) -> None:
@@ -651,8 +652,8 @@ class Sandbox:
         **kwargs: Any,
     ) -> Any:
         """Call ``fn`` with a SIGALRM wall-clock timeout. Main thread only."""
-        global _in_call
-        if _in_call:  # Nested call: run under the already-active timer.
+        global _timer_thread
+        if _timer_thread == threading.get_ident():  # Nested call: use active timer.
             return fn(*args, **kwargs)
         budget = timeout_s if timeout_s is not None else self._default_timeout_s
         sigalrm = getattr(signal, "SIGALRM", None)
@@ -671,14 +672,14 @@ class Sandbox:
         # Unset any sys.setrecursionlimit() from the sandboxed code.
         old_recursion_limit = sys.getrecursionlimit()
         signal.setitimer(itimer_real, budget)
-        _in_call = True
+        _timer_thread = threading.get_ident()
         try:
             return fn(*args, **kwargs)
         except SystemExit as exc:
             raise SandboxExit(exc.code) from None
         finally:
             sys.setrecursionlimit(old_recursion_limit)
-            _in_call = False
+            _timer_thread = None
             signal.setitimer(itimer_real, old_timer[0], old_timer[1])
             signal.signal(sigalrm, old_handler)
 

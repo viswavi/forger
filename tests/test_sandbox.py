@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import signal
+import threading
 import time
 
 import pytest
@@ -64,6 +65,25 @@ class TestTimeouts:
         with pytest.raises(SandboxTimeout):
             outer.call(lambda: inner.call(time.sleep, 5), timeout_s=0.2)
         assert time.monotonic() - start < 1
+
+    def test_other_thread_cannot_ride_on_active_timer(self):
+        """A worker thread calling in mid-call is rejected, not left unbounded."""
+        sb = Sandbox()
+        errors = []
+
+        def worker():
+            try:
+                sb.call(lambda: None)
+            except RuntimeError as exc:
+                errors.append(exc)
+
+        def outer():
+            t = threading.Thread(target=worker)
+            t.start()
+            t.join()
+
+        sb.call(outer)
+        assert len(errors) == 1 and "main thread" in str(errors[0])
 
     def test_nested_call_time_counts_against_outer_budget(self):
         """Time spent in an inner call isn't given back to the outer call."""
