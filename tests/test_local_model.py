@@ -211,6 +211,12 @@ class TestChatCall:
         LocalModel("Qwen/Qwen3-4B", show_progress=show_progress).generate("a")
         assert engines[0].chat_calls[0].kwargs["use_tqdm"] is show_progress
 
+    def test_per_call_show_progress_overrides_instance(self, engines):
+        """show_progress passed to generate_batch beats the instance setting."""
+        model = LocalModel("Qwen/Qwen3-4B", show_progress=True)
+        model.generate_batch(["a"], show_progress=False)
+        assert engines[0].chat_calls[0].kwargs["use_tqdm"] is False
+
 
 class TestSamplingParams:
     """Arguments passed to ``vllm.SamplingParams``."""

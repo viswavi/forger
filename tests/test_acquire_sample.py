@@ -130,6 +130,16 @@ class TestSampling:
         items = sample_from_LLM("Generate", model, n=1)
         assert "thinking_trace" not in items[0]
 
+    def test_plain_list_model_gets_no_thinking_trace(self):
+        """A Model subclass returning plain lists (no .reasoning) still works."""
+
+        class PlainListModel(MockModel):
+            def generate_batch(self, prompts, **kwargs):
+                return [list(r) for r in super().generate_batch(prompts, **kwargs)]
+
+        items = sample_from_LLM("Generate", PlainListModel(responses=["hi"]), n=1)
+        assert items == [{"text": "hi"}]
+
     def test_reasoning_schema_field_coexists_with_thinking_trace(self):
         """A parsed 'reasoning' field is left intact alongside the trace."""
         model = MockModel(

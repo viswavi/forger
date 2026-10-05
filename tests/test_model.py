@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import pickle
+import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -390,6 +391,69 @@ class TestErrorHandling:
             model.generate_batch(["Q1", "Q2"])
         assert excinfo.value is error
         assert model.history == []
+
+
+class TestShowProgress:
+    """show_progress=True runs calls in a thread pool instead of batch_completion."""
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_out_of_order_completions_keep_prompt_order(self, mock_litellm):
+        """Q1 finishes after Q2, but results still follow prompt order."""
+        q2_done = threading.Event()
+
+        def fake_completion(messages, **kwargs):
+            text = messages[0]["content"]
+            if text == "Q1":
+                assert q2_done.wait(timeout=5)
+            else:
+                q2_done.set()
+            return make_litellm_response([f"r-{text}"])
+
+        mock_litellm.completion.side_effect = fake_completion
+        model = Model("gpt-4o", api_key="sk-test")
+        result = model.generate_batch(["Q1", "Q2"], show_progress=True)
+        assert result == [["r-Q1"], ["r-Q2"]]
+        mock_litellm.batch_completion.assert_not_called()
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_worker_exception_is_raised(self, mock_litellm):
+        """An exception from one call is raised as-is."""
+        error = ValueError("context window exceeded")
+
+        def fake_completion(messages, **kwargs):
+            if messages[0]["content"] == "Q2":
+                raise error
+            return make_litellm_response(["ok"])
+
+        mock_litellm.completion.side_effect = fake_completion
+        model = Model("gpt-4o", api_key="sk-test")
+        with pytest.raises(ValueError) as excinfo:
+            model.generate_batch(["Q1", "Q2"], show_progress=True)
+        assert excinfo.value is error
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_per_call_override_beats_instance_setting(self, mock_litellm):
+        """show_progress=False on the call falls back to batch_completion."""
+        mock_litellm.batch_completion.return_value = [
+            make_litellm_response(["r1"]),
+            make_litellm_response(["r2"]),
+        ]
+        model = Model("gpt-4o", api_key="sk-test", show_progress=True)
+        assert model.generate_batch(["Q1", "Q2"], show_progress=False) == [
+            ["r1"],
+            ["r2"],
+        ]
+        mock_litellm.batch_completion.assert_called_once()
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_instance_setting_used_when_call_omits_it(self, mock_litellm):
+        """Model(show_progress=True) shows bar even if LLM call doesn't specify it."""
+        mock_litellm.completion.side_effect = lambda messages, **kwargs: (
+            make_litellm_response([f"r-{messages[0]['content']}"])
+        )
+        model = Model("gpt-4o", api_key="sk-test", show_progress=True)
+        assert model.generate_batch(["Q1", "Q2"]) == [["r-Q1"], ["r-Q2"]]
+        mock_litellm.batch_completion.assert_not_called()
 
 
 class TestEdgeCases:
