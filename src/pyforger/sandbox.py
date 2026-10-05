@@ -481,6 +481,10 @@ class SandboxExit(RuntimeError):
         self.code = code
 
 
+# Mark SIGALRM as a process-wide timer for sandboxed activity.
+_in_call = False
+
+
 def _on_alarm(signum: int, frame: Any) -> None:
     raise SandboxTimeout("sandbox execution timed out")
 
@@ -517,7 +521,6 @@ class Sandbox:
         self._compile_cache: dict[str, Callable[..., Any]] = {}
         self._namespace_cache: dict[str, dict[str, Any]] = {}
         self._result_cache: dict[tuple, Any] | None = {} if cache_results else None
-        self._in_call = False
 
     def cache_key(self) -> tuple:
         """Stable hash key for @op caching (excludes the mutable compile cache)."""
@@ -648,7 +651,8 @@ class Sandbox:
         **kwargs: Any,
     ) -> Any:
         """Call ``fn`` with a SIGALRM wall-clock timeout. Main thread only."""
-        if self._in_call:
+        global _in_call
+        if _in_call:  # Nested call: run under the already-active timer.
             return fn(*args, **kwargs)
         budget = timeout_s if timeout_s is not None else self._default_timeout_s
         sigalrm = getattr(signal, "SIGALRM", None)
@@ -667,14 +671,14 @@ class Sandbox:
         # Unset any sys.setrecursionlimit() from the sandboxed code.
         old_recursion_limit = sys.getrecursionlimit()
         signal.setitimer(itimer_real, budget)
-        self._in_call = True
+        _in_call = True
         try:
             return fn(*args, **kwargs)
         except SystemExit as exc:
             raise SandboxExit(exc.code) from None
         finally:
             sys.setrecursionlimit(old_recursion_limit)
-            self._in_call = False
+            _in_call = False
             signal.setitimer(itimer_real, old_timer[0], old_timer[1])
             signal.signal(sigalrm, old_handler)
 

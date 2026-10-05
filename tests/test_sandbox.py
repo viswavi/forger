@@ -57,6 +57,14 @@ class TestTimeouts:
             sb.call(lambda: sb.call(spin), timeout_s=0.2)
         assert time.monotonic() - start < 5
 
+    def test_nested_call_on_another_sandbox_keeps_outer_budget(self):
+        """The outer timeout holds even if the inner call is a different Sandbox."""
+        outer, inner = Sandbox(), Sandbox(default_timeout_s=60)
+        start = time.monotonic()
+        with pytest.raises(SandboxTimeout):
+            outer.call(lambda: inner.call(time.sleep, 5), timeout_s=0.2)
+        assert time.monotonic() - start < 1
+
     def test_nested_call_time_counts_against_outer_budget(self):
         """Time spent in an inner call isn't given back to the outer call."""
         sb = Sandbox()
