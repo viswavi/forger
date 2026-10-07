@@ -1,0 +1,12 @@
+diff --git a/lcb_runner/evaluation/compute_code_generation_metrics.py b/lcb_runner/evaluation/compute_code_generation_metrics.py
+--- a/lcb_runner/evaluation/compute_code_generation_metrics.py
++++ b/lcb_runner/evaluation/compute_code_generation_metrics.py
+@@ -54,7 +54,7 @@
+         metadata_list = [{}]
+         if debug:
+             print(f"global timeout")
+-    return result[0], metadata_list[0]
++    return result[0], (metadata_list[0] if len(metadata_list) else {})
+ 
+ 
+ def evaluate_generations_by_problem(args):

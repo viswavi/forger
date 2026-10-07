@@ -1,0 +1,36 @@
+# Runtime datasets and credentials are provisioned separately.
+.env
+.env.*
+*.jsonl
+*.csv
+private_test_cases.txt
+.hidden/
+.hidden_agents/
+# Training, evaluation and build outputs
+__pycache__/
+logs/
+model_outputs*/
+workspace/
+*.log
+*.out
+*.err
+*.sif
+*.tar
+*.tgz
+*.bak
+backup_*/
+copies/
+# Local investigations and session transcripts
+data_quality_estimation/
+codex-session-*.md
+
+# Local reviewer context and generated diagnostics
+eval_reviewer_guide/
+*_outputs/
+tests/manual/*_result.json
+
+# Transactional benchmark-build scratch and source provenance
+.build-*
+.build_pending.*
+.build.lock
+*.jsonl.revision
