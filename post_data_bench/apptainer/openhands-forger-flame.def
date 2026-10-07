@@ -1,0 +1,137 @@
+Bootstrap: localimage
+From: /data/user_data/vijayv/containers/slime.sif
+# Combined Slime/TRL image for flame (8x H100).
+# The pinned Slime base supplies CUDA and avoids relocating editable installs.
+# Keep stacks separate: /usr/bin/python3 runs Slime; the trl env runs
+# vLLM/OpenHands without system dist-packages.
+
+%setup
+    mkdir -p "${APPTAINER_ROOTFS}/home/vijayv/miniconda3/envs"
+
+%files
+    /scratch/vijayv/apptainer_build/trl_env.tar /opt/trl_env.tar
+
+    # Bake only packaging metadata and source stubs; runtime binds supply
+    # allowlisted snapshots. Missing binds must never expose secrets or hidden
+    # libraries. uv_build requires pyproject.toml, README.md, and LICENSE.
+    /home/vijayv/forger/pyproject.toml    /home/vijayv/forger/pyproject.toml
+    /home/vijayv/forger/README.md         /home/vijayv/forger/README.md
+    /home/vijayv/forger/LICENSE           /home/vijayv/forger/LICENSE
+    # curator: poetry-core needs pyproject.toml and readme="README.md".
+    # license = "Apache-2.0" is an SPDX string, so no LICENSE file is required.
+    /home/vijayv/curator/pyproject.toml   /home/vijayv/curator/pyproject.toml
+    /home/vijayv/curator/README.md        /home/vijayv/curator/README.md
+
+%post
+    set -e
+    # Build must never contain benchmark artifacts, trajectories, or nested images.
+    leaked=$(find /home/vijayv -type f \( -name 'private_test_cases*' -o -name 'perturbed_cases*' -o -name 'gold_responses*' -o -name 'test*.jsonl' -o -name '*.sif' -o -path '*/.hidden*/*' \) -print -quit)
+    [ -z "$leaked" ] || { echo "Refusing image containing benchmark artifacts" >&2; exit 1; }
+
+    # tini reaps orphan processes because --compat disables Apptainer’s init.
+    apt-get update
+    apt-get install -y --no-install-recommends tini
+    rm -rf /var/lib/apt/lists/*
+    [ -x /usr/bin/tini ] || { echo "FATAL: tini not at /usr/bin/tini"; exit 1; }
+
+    # libgomp1 / libnuma1 are already present in this base, unlike the Debian
+    # one -- deliberately not reinstalled here.
+
+    # Preserve the host working-directory mount point; fakeroot HOME is /root.
+    mkdir -p /home/vijayv
+
+    # The launcher binds /tmp to per-run scratch storage.
+    mkdir -p /tmp /var/tmp
+
+    tar -xf /opt/trl_env.tar -C /
+    rm /opt/trl_env.tar
+
+    # Root-own the tarred env: flame fakeroot cannot map its original owner UID.
+    chown -R 0:0 /home/vijayv/miniconda3
+    chmod -R go+rX /home/vijayv/miniconda3
+
+    # Move editable sources outside /root, which --containall hides with tmpfs.
+    # Retain symlinks for callers without --containall.
+    for d in slime Megatron-LM; do
+        mv "/root/$d" "/opt/$d"
+        ln -s "/opt/$d" "/root/$d"
+    done
+    DP=/usr/local/lib/python3.12/dist-packages
+    grep -lE '/root/(slime|Megatron-LM)' "$DP"/__editable__* "$DP"/*.dist-info/direct_url.json \
+        | xargs -r sed -i 's#/root/slime#/opt/slime#g; s#/root/Megatron-LM#/opt/Megatron-LM#g'
+
+    # Also relocate upstream example/runtime scripts, not just editable imports.
+    grep -rlE '/root/(slime|Megatron-LM)' /opt/slime/scripts | xargs -r sed -i 's#/root/slime#/opt/slime#g; s#/root/Megatron-LM#/opt/Megatron-LM#g'
+    if grep -qRE '/root/(slime|Megatron-LM)' "$DP"/__editable__* "$DP"/*.pth; then
+        echo "Unrelocated editable import path" >&2; exit 1
+    fi
+    # Test with compatibility links absent, as they are under --compat at runtime.
+    rm /root/slime /root/Megatron-LM
+    /usr/bin/python3 - <<'PYTHON'
+from importlib.metadata import version
+import slime, megatron.core, torch
+assert torch.__version__ == '2.11.0+cu129'
+for package, expected in {'sglang':'0.5.15.post1','transformer-engine':'2.16.1','megatron-core':'0.16.0rc0'}.items():
+    assert version(package) == expected, package
+assert slime.__file__.startswith('/opt/slime/')
+assert megatron.core.__file__.startswith('/opt/Megatron-LM/')
+PYTHON
+    ln -s /opt/slime /root/slime
+    ln -s /opt/Megatron-LM /root/Megatron-LM
+
+    # Expose a Slime wrapper: the agent’s default PATH selects TRL Python.
+    # Mention this wrapper in launch_agent.py’s instructions.
+    cat > /usr/local/bin/slime-python <<'EOF'
+#!/bin/sh
+# The slime stack: torch 2.11.0+cu129, sglang 0.5.15.post1, TransformerEngine
+# 2.16.1, megatron-core, apex. Lives in system dist-packages, NOT in the trl
+# conda env. Source trees are at /opt/slime and /opt/Megatron-LM.
+exec /usr/bin/python3 "$@"
+EOF
+    chmod +x /usr/local/bin/slime-python
+    /usr/local/bin/slime-python -c "import slime, sglang, megatron.core" \
+        || { echo "FATAL: slime-python wrapper cannot import the slime stack"; exit 1; }
+
+    # Empty package stubs satisfy editable-install backends; runtime binds
+    # supply actual sources via their .pth entries.
+    mkdir -p /home/vijayv/forger/src/pyforger /home/vijayv/curator/src/bespokelabs
+    touch /home/vijayv/forger/src/pyforger/__init__.py
+    touch /home/vijayv/curator/src/bespokelabs/__init__.py
+
+    # Absolute pip path on purpose -- the trl env is deliberately NOT on the
+    # global PATH (see %runscript).
+    TRL=/home/vijayv/miniconda3/envs/trl
+    "$TRL/bin/pip" install --no-deps -e /home/vijayv/forger
+    "$TRL/bin/pip" install --no-deps -e /home/vijayv/curator
+
+    /home/vijayv/miniconda3/envs/trl/bin/python -c "from importlib.metadata import version; assert version('openhands-sdk') == '1.36.0'; assert version('openhands-agent-server') == '1.36.0'"
+
+    # Build-time smoke tests: fail the BUILD, not the first six-hour agent run.
+    "$TRL/bin/agent-server" --help > /dev/null \
+        || { echo "FATAL: trl-env agent-server is broken"; exit 1; }
+    "$TRL/bin/python" -c "import torch, vllm; print('trl  ', torch.__version__)" \
+        || { echo "FATAL: trl stack broken"; exit 1; }
+    /usr/bin/python3 -c "import torch, sglang, megatron.core; print('slime', torch.__version__)" \
+        || { echo "FATAL: slime stack broken"; exit 1; }
+    tmux -V || { echo "FATAL: tmux missing -- TerminalTool would degrade to subprocess"; exit 1; }
+
+%environment
+    # Keep TRL off the global PATH so apptainer exec selects Slime Python.
+    # Leave NCCL_P2P_DISABLE to GPU-specific launcher logic; H100 uses NVLink.
+
+%runscript
+    # Replace the OCI entrypoint, forwarding server host/port arguments.
+    # Prepend TRL only for the agent-server process tree; apptainer exec
+    # continues to use Slime’s interpreter.
+    export PATH=/home/vijayv/miniconda3/envs/trl/bin:$PATH
+
+    # Skip a ~2s chromium preload that always fails here, and the VSCode probe.
+    # Both are caught and non-fatal either way; browser tools are not registered
+    # under cli_mode=True (only TerminalTool, FileEditorTool, TaskTrackerTool).
+    export OH_PRELOAD_TOOLS=false
+    export OH_ENABLE_VSCODE=false
+
+    # exec keeps tini as the top of the tree rather than leaving /bin/sh.
+    # -s: under root-mapped fakeroot (Orchard) apptainer wraps the payload in
+    # fakeroot(1), so tini is NOT PID 1; as a subreaper it still reaps orphans.
+    exec /usr/bin/tini -s -- /home/vijayv/miniconda3/envs/trl/bin/agent-server "$@"
