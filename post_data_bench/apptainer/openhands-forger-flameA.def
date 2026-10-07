@@ -1,0 +1,76 @@
+Bootstrap: docker
+From: ghcr.io/openhands/agent-server:latest-python
+
+# TRL-only agent sandbox for flame; host Slime lives in
+# /project/flame/vijayv/envs/slime. Use --server-backend sglang for host
+# evaluation because its Torch version is incompatible with vLLM.
+# For a combined image, see openhands-forger-flame.def.
+# Extract TRL at its original absolute path; conda-pack relocation can
+# drop conflicting conda/pip files.
+
+%setup
+    mkdir -p "${APPTAINER_ROOTFS}/home/vijayv/miniconda3/envs"
+
+%files
+    /scratch/vijayv/apptainer_build/trl_env.tar /opt/trl_env.tar
+
+    # Bake packaging metadata and stubs only; runtime binds supply public
+    # source snapshots. Missing binds must never expose secrets or hidden
+    # libraries. uv_build requires pyproject.toml, README.md, and LICENSE.
+    /home/vijayv/forger/pyproject.toml    /home/vijayv/forger/pyproject.toml
+    /home/vijayv/forger/README.md         /home/vijayv/forger/README.md
+    /home/vijayv/forger/LICENSE           /home/vijayv/forger/LICENSE
+    # curator: poetry-core needs pyproject.toml and readme="README.md".
+    # license = "Apache-2.0" is an SPDX string, so no LICENSE file is required.
+    /home/vijayv/curator/pyproject.toml   /home/vijayv/curator/pyproject.toml
+    /home/vijayv/curator/README.md        /home/vijayv/curator/README.md
+
+%post
+    set -e
+    # Build must never contain benchmark artifacts, trajectories, or nested images.
+    leaked=$(find /home/vijayv -type f \( -name 'private_test_cases*' -o -name 'perturbed_cases*' -o -name 'gold_responses*' -o -name 'test*.jsonl' -o -name '*.sif' -o -path '*/.hidden*/*' \) -print -quit)
+    [ -z "$leaked" ] || { echo "Refusing image containing benchmark artifacts" >&2; exit 1; }
+
+    apt-get update
+    apt-get install -y --no-install-recommends libgomp1 libnuma1 tini
+    rm -rf /var/lib/apt/lists/*
+
+    # The launcher binds /tmp to per-run scratch storage.
+    mkdir -p /tmp /var/tmp
+
+    tar -xf /opt/trl_env.tar -C /
+    rm /opt/trl_env.tar
+    export PATH=/home/vijayv/miniconda3/envs/trl/bin:$PATH
+
+    # Empty package stubs satisfy editable installs; runtime binds supply sources.
+    mkdir -p /home/vijayv/forger/src/pyforger /home/vijayv/curator/src/bespokelabs
+    touch /home/vijayv/forger/src/pyforger/__init__.py
+    touch /home/vijayv/curator/src/bespokelabs/__init__.py
+
+    pip install --no-deps -e /home/vijayv/forger
+    pip install --no-deps -e /home/vijayv/curator
+
+    /home/vijayv/miniconda3/envs/trl/bin/python -c "from importlib.metadata import version; assert version('openhands-sdk') == '1.36.0'; assert version('openhands-agent-server') == '1.36.0'"
+
+    # Build-time smoke tests: fail the BUILD, not the first six-hour agent run.
+    agent-server --help > /dev/null || { echo "FATAL: agent-server broken"; exit 1; }
+    python -c "import torch, vllm; print('trl', torch.__version__)" \
+        || { echo "FATAL: trl stack broken"; exit 1; }
+    tmux -V || { echo "FATAL: tmux missing -- TerminalTool degrades to subprocess"; exit 1; }
+
+    # /etc/profile unconditionally resets PATH and then sources /etc/profile.d/*.sh,
+    # clobbering the %environment export whenever a command runs through a login
+    # shell (e.g. `bash -lc ...`). Put the override there too so it wins either way.
+    cat > /etc/profile.d/trl_env_path.sh <<'EOF'
+export PATH=/home/vijayv/miniconda3/envs/trl/bin:$PATH
+EOF
+
+%environment
+    export PATH=/home/vijayv/miniconda3/envs/trl/bin:$PATH
+    # Leave NCCL_P2P_DISABLE to GPU-specific launcher logic; H100 uses NVLink.
+
+%runscript
+    export PATH=/home/vijayv/miniconda3/envs/trl/bin:$PATH
+    export OH_PRELOAD_TOOLS=false
+    export OH_ENABLE_VSCODE=false
+    exec /usr/bin/tini -s -- /home/vijayv/miniconda3/envs/trl/bin/agent-server "$@"
