@@ -1,0 +1,19 @@
+# Full-shard FSDP splits model, gradients, and optimizer state across GPUs.
+# The launcher sets num_processes. FULL_STATE_DICT saves loadable HF checkpoints.
+compute_environment: LOCAL_MACHINE
+distributed_type: FSDP
+mixed_precision: bf16
+machine_rank: 0
+num_machines: 1
+rdzv_backend: static
+same_network: true
+use_cpu: false
+downcast_bf16: 'no'
+fsdp_config:
+  fsdp_version: 2
+  fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
+  fsdp_reshard_after_forward: true
+  fsdp_state_dict_type: FULL_STATE_DICT
+  fsdp_cpu_ram_efficient_loading: true
+  fsdp_offload_params: false
+  fsdp_activation_checkpointing: false
