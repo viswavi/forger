@@ -1,0 +1,43 @@
+# Task: Cultural Commonsense Reasoning
+
+You must generate a training dataset to help models like yourself improve at the task of cultural commonsense reasoning. In this setting, the task is to classify whether a given scenario depicts characters acting in ways aligned with known cultural norms in that country ("Yes"), violating a social norm in that country ("No"), or neither adhering to nor violating any significant social norms in that country ("Neutral"). Models are currently fairly good at identifying "Yes" or "No" cases; our goal is to maintain or improve models' precision in this setting while significantly improving our ability to identify "Neutral" cases.
+
+Public validation examples are shown in {TASK_DIR}/validation_tasks_de_obfuscated.jsonl -- use these however you like. Each contains the following keys: ["id", "country",  "situation", "gold_label", "task_text", "axis", "subaxis", "value", "rule_of_thumb"]. If compatible baseline outputs are available, you will also find model output files {TASK_DIR}/model_outputs/Qwen__Qwen3-4B/val/metrics.json (summary metrics) and {TASK_DIR}/model_outputs/Qwen__Qwen3-4B/val/predictions.jsonl (per-row predictions on the validation set). Feel free to use these predictions/summary metrics to inform your data generation approach.
+
+While the validation rows contain many keys, the ones you actually need are "country", "situation", and "gold_label" (as the source of the target answer). You may generate others as support if helpful, but they will be ignored during training. Concretely, our output data only need to have the following keys:
+{{"country": ..., "situation": ..., "question": ..., "thinking": ..., "answer": ...}}
+where "answer" is the plain-text label ("yes"/"no"/"neutral", matching "gold_label" from the validation rows) -- NOT the key name "gold_label" itself.
+
+Note that this the output described here must include long-form "thinking" traces that are well-suited to the student model we are finetuning ({STUDENT_MODEL}) to help us train on this data in "thinking" mode. You should generate no more than 2000 generated datapoints -- below that, you can choose which examples to generate to maximize the accuracy of the model. The training script is shown in "{TASK_DIR}/train_model.sh". Max sequence length for training is {MAX_SFT_LENGTH} tokens -- longer rows are dropped before training, so avoid generating overly-long thinking traces when possible.
+
+# LLM API Usage
+
+You have a total LLM API budget of ${GENERATION_BUDGET} (token ID `{LITELLM_TOKEN_ID}`) – you don't have direct API access to check your own spend, since that's tracked for you outside this sandbox. To get a fresh number, create the file `{AGENT_DATA_DIR}/check_llm_spend` (e.g. `touch {AGENT_DATA_DIR}/check_llm_spend`), then a few seconds later read `{AGENT_DATA_DIR}/llm_spend.txt` for the result (right now it says 0.0 – note that checks are rate-limited to at most once per 30 seconds, and the file auto-refreshes at least every 10 minutes even if you don't ask).  You are welcome to generate small amounts of data (e.g. 2-3 examples) as you iterate many times (perhaps up to a dozen iterations) before launching your final dataset generation.
+
+LLMs will almost always be accessed via LiteLLM, via a LITELLM_API_KEY environment variable and a model identifier in the prompt. The model identifier typically includes both account/routing info and a model name, and within that structure you can try other models in the same account if the user-provided one is undesirable or unavailable. We strongly prefer using gemini models, because we have ample API credits for those models. Gemini model identifiers:  "wine-gemini-3.1-flash-lite" (fast, cheap), "wine-gemini-3.5-flash" (most capable, more expensive), "wine-gemini-3.1-flash-image-preview" (image generation), "wine-gemini-embedding-001" (text embeddings).
+
+If these don't work, you can use other models: "wine-claude-haiku-4-5" (fast), "wine-claude-sonnet-4-5" (medium speed/cost),"wine-claude-opus-4-6" (strongest/most expensive), "wine-deepseek-r1", "wine-qwen3-32b", "wine-qwen3-vl-235b-a22b".
+
+You can use this API Key and Base URL:
+export LITELLM_API_KEY={LITELLM_API_KEY}
+export LITELLM_BASE_URL="{LITELLM_BASE_URL}".
+
+Use the model `openai/wine-gemini-3.1-flash-lite` for LLM-based generation ($0.25/1M input tokens or $1.50/1M output tokens), or its larger variant `wine-gemini-3.5-flash` when greater capability is needed ($1.50/1M input tokens or $9.00/1M output tokens). Note that Gemini, Claude, and OpenAI models, if you use them, require temperature=1.0. Gemini and OpenAI disallow the n>1 argument – here, if necessary, use sample_from_LLM cleverly to manually get around this limitation.
+
+You can also access web search via the retrieve_from_web API using the BRAVE_API_KEY environment variable and Semantic Scholar using the following API key: the S2_API_KEY environment variable. The other retrieval sources (e.g. Wikipedia, Semantic Scholar) do not require API keys.
+
+# Local GPU Access
+
+If, for any reason, you need access to local models for inference (not to be used for training), I've given you {TIMEOUT_HOURS} hours of access to {GPU_DESCRIPTION}, which should be sufficient for running the student model.
+
+# High-Level Approach
+
+Ignore the “{FORGER_REPO}/examples/” directory. You are not allowed to look at this at all. Moreover, never open any directories containing the phrase ".hidden/".
+
+You are encouraged to run things and iterate on the data you receive in writing your pipeline. Put all your data in {AGENT_DATA_DIR}/. You can write your pipeline as {AGENT_DATA_DIR}/pipeline_{{1,2,3,4,...}}.py (writing a new script for every iteration, if you iterate multiple times). It is strongly encouraged to make multiple iterations over your dataset, in this way -- you should write and execute _at minimum_ 2 or 3 small-scale iterations of your data pipeline (each saved as pipeline_{{1,2,3}}/py) (and as many as 20 or 30 iterations total) before launching your large-scale run.
+
+# Scaffold
+
+You should use the Forger data generation framework to  this by writing a data generation pipeline using the Forger framework. See {FORGER_REPO}/docs/AGENTS.md for detailed information on this. Forger offers a rich set of functionality for data generation, and you are expected to use this functionality to its fullest extent whenever possible. For example, use pyforger.acquire.sample_from_llm/pyforger.alter.generate_from_context instead of using an LLM library or even using the pyforger.model class directly, when possible. You will be docked points for ignoring this library and doing things yourselv. Forger offers powerful caching functionality to help you iterate through versions of your data generation pipeline. Keep each new iteration of a data generation pipeline fully self-contained -- rather than loading the previous iteration's output and mutating it, instead rely on the cache to avoid wasted computation.
+
+You have {TIMEOUT_HOURS} hours to do your work. After this, we will automatically move to the training phase. While you get no points for finishing early, if your data generation is complete, then you are free to move on to the next problem. Now let’s get started!
