@@ -126,6 +126,8 @@ Transform rows without removing items.
 | `translate.to_language` | LLM translation of selected fields into a target natural language. |
 | `translate.to_code` | LLM conversion of fields into code in a target programming language. Strips markdown fences. |
 | `execute_code` | Execute Python code in a sandboxed environment and return the result. |
+| `dynamic_step` | Run dynamic input-specific sub-pipelines that return string outputs. |
+| `dynamic_step_source` | Generate or inspect sub-pipeline generated for a single input. |
 
 `generate_from_context` performs `samples_per_item` LLM calls per input and returns parsed dicts, with retry against an
 optional JSON schema. If the validated LLM call fails after `num_retries`, we return `None` for the failing slots.
@@ -399,8 +401,8 @@ returning a string. The last defined function is the entry point.
 
 ```python
 outputs = alter.dynamic_step(
-    ["https://example.org/docs", "https://example.net/about"],
-    "Extract the hostname from the URL", model, max_parallel=2,
+    ["Alice <alice@example.org>", "Bob <bob@example.net>"],
+    "Return the domain of the email address", model, max_parallel=2,
 )
 ```
 
@@ -417,25 +419,34 @@ successful source from other inputs is retained.
 previously generated programs and their `@op` cache-hit status without opening
 cache files directly. As with any
 `@op`, changing the decorated function body invalidates its earlier cache entries.
+Pass a new `source_version` to either operation to generate and cache a fresh
+program for an input when its earlier source is stale.
 
-`max_parallel` bounds active sessions, `max_iterations` bounds conversation turns,
+`max_parallel` bounds active sessions, `max_iterations` bounds agent steps,
 and `execution_timeout_s` bounds each generated-code execution in a subprocess.
 The Model supplies its LiteLLM identifier, API key, temperature, max tokens, and
 `api_base`; credentials and base URL otherwise fall back to the LiteLLM environment.
-The operation loads `.env` with `python-dotenv` before resolving credentials.
+The operation reads `.env` from the current working directory without changing
+the process environment.
 Credentials are passed to the SDK as secrets and excluded from worker environments.
-Only `json`, `re`, `math`, `string`, and `html` imports are available to generated
+Only `json`, `re`, `math`, and `html` imports are available to generated
 code. For HTTPS HTML and PDF inputs, Forger retrieves and extracts text before
 calling that code. For HTTPS `.git` inputs on GitHub or GitLab, it shallow-clones
 the repository into a temporary directory and passes a bounded snapshot of text
 files. The generated function receives a JSON string with `kind`, `url`, and
-either `content` (HTML/PDF) or `files` (Git); other inputs remain raw strings.
+either `content` (HTML/PDF/plain text) or `files` (Git); other inputs remain raw strings.
 OpenHands has read-only resource and Git list/read tools to inspect the same
 snapshot during construction. The Git snapshot includes at most 200 files,
-64 KiB per file, and 1 MiB total text; download size, clone time, and redirects
-are bounded. Source remains cached by `@op`, while the URL is fetched or cloned
-again whenever the generated step executes. Direct Forger calls, network access,
-shell commands, and filesystem tools are unavailable to generated Python code.
+64 KiB per file, and 1 MiB total text. HTTP downloads have a 10 MiB body cap;
+Git clones have a 60-second timeout, but no transfer-size cap. Source remains
+cached by `@op`, while the URL is fetched or cloned again whenever the generated
+step executes. The generated Python worker runs without credentials or direct
+network, shell, and filesystem tools. OpenHands runs on the host; SDK-discovered
+plugins and their hooks may still be loaded, so use an isolated account for
+untrusted inputs.
+Public-address checks on HTTPS hosts are best effort; DNS changes and Git
+redirects remain outside this guardrail. PDF parsing runs before the generated
+Python timeout starts.
 PDF extraction uses `pypdf.PdfReader` on up to 100 pages; image-only scans need
 OCR, which this operation does not provide.
 RestrictedPython provides accidental-damage guardrails, not isolation against

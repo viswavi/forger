@@ -12,10 +12,10 @@ dependencies = [
     "arxiv>=2.0",
     "requests>=2.20",
     "trafilatura>=1.6",
-    "datasets>=2.19",
+    "datasets",
     "huggingface_hub",
     "semanticscholar>=0.11.0",
-    "litellm>=1.93.0,<2",
+    "litellm>=1.83.0,<2",
     "tiktoken",
     "RestrictedPython>=7.0",
     "python-dotenv",
@@ -47,7 +47,7 @@ exclude = [
 only-packages = true
 
 [project.optional-dependencies]
-dynamic = ["openhands-sdk>=1.51.0,<2", "pypdf>=5,<7"]
+dynamic = ["openhands-sdk>=1.51.0,<2", "litellm>=1.93.0,<2", "RestrictedPython>=8.4", "pypdf>=5,<7"]
 # Topic-Based Clustering requires K-means clustering and on-device embedding creation.
 clustering = [
     "numpy",

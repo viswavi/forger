@@ -217,6 +217,8 @@ def op(
                     kwargs = bound.kwargs
                     normalized = dict(bound.arguments)
                 except TypeError:
+                    if _cache_only:
+                        raise
                     # If the arguments don't match the signature, use them directly.
                     normalized = {"args": list(args), "kwargs": dict(kwargs)}
             else:
@@ -251,6 +253,10 @@ def op(
                         result = pickle.load(f)
                     cache_hit = True
                 except Exception as exc:
+                    if _cache_only:
+                        raise RuntimeError(
+                            f"Cannot read cached result for {op_name}"
+                        ) from exc
                     # Cache file is unreadable or incompatible with the current
                     # code version; fall through to executing the op directly.
                     # The cache will be overwritten with a new result.

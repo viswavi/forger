@@ -95,7 +95,9 @@ class PythonExecutor(ToolExecutor):
         if action.submit:
             self.accepted[:] = [action.code]
         return ResultObservation(
-            result_text=json.dumps({"output": output, "submitted": action.submit})
+            result_text=json.dumps(
+                {"output": output, "submitted": action.submit}, ensure_ascii=False
+            )
         )
 
 
@@ -126,7 +128,9 @@ class ResourceExecutor(ToolExecutor):
                         "url": resource["url"],
                         "content": resource["content"][:20000],
                     }
-            return ResultObservation(result_text=json.dumps(summary))
+            return ResultObservation(
+                result_text=json.dumps(summary, ensure_ascii=False)
+            )
         except Exception as exc:
             return ResultObservation(result_text=f"{type(exc).__name__}: {exc}")
 
@@ -141,6 +145,8 @@ class GitExecutor(ToolExecutor):
     def __call__(self, action, conversation=None):
         """List or read text files from the cloned repository snapshot."""
         try:
+            if not self.session.item.startswith("https://"):
+                raise ValueError("The input is not a Git repository")
             resource = json.loads(self.session.prepared_input())
             if resource["kind"] != "git":
                 raise ValueError("The input is not a Git repository")
@@ -153,7 +159,7 @@ class GitExecutor(ToolExecutor):
                 raise FileNotFoundError(
                     "File is not in the bounded repository snapshot"
                 )
-            return ResultObservation(result_text=json.dumps(result))
+            return ResultObservation(result_text=json.dumps(result, ensure_ascii=False))
         except Exception as exc:
             return ResultObservation(result_text=f"{type(exc).__name__}: {exc}")
 
@@ -172,7 +178,7 @@ class PythonTool(ToolDefinition):
                     "with one string argument and a string return value. HTTPS "
                     "inputs are JSON text with kind/url/content or kind/url/files; "
                     "other inputs are raw strings. Imports: json, re, math, "
-                    "string, html only. No files, network, shell, or environment "
+                    "html only. No files, network, shell, or environment "
                     "access."
                 ),
                 action_type=PythonAction,
@@ -212,8 +218,8 @@ class GitTool(ToolDefinition):
             cls(
                 description=(
                     "Read-only Git repository inspection for the current HTTPS "
-                    ".git input. The repository is cloned once with bounded size "
-                    "and no credentials. Use operation='list' to see files, then "
+                    ".git input. The repository is shallow-cloned and a bounded "
+                    "text snapshot is kept. Use operation='list' to see files, then "
                     "operation='read' and path to inspect a source file. The "
                     "Python tool receives these files as JSON text."
                 ),

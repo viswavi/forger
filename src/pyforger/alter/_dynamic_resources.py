@@ -9,6 +9,7 @@ import os
 import socket
 import subprocess
 import tempfile
+import time
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
@@ -61,27 +62,37 @@ def _public_https(url: str) -> str:
 def _download(url: str) -> tuple[bytes, str]:
     import requests
 
-    for _ in range(4):
-        _public_https(url)
-        response = requests.get(
-            url, stream=True, timeout=(5, 20), allow_redirects=False
-        )
-        try:
-            if 300 <= response.status_code < 400:
-                location = response.headers.get("location")
-                if not location:
-                    raise ValueError("Resource redirect is missing a location")
-                url = urljoin(url, location)
-                continue
-            response.raise_for_status()
-            data = bytearray()
-            for chunk in response.iter_content(64 * 1024):
-                data.extend(chunk)
-                if len(data) > _MAX_DOWNLOAD:
-                    raise ValueError("Resource exceeds the download limit")
-            return bytes(data), response.headers.get("content-type", "").lower()
-        finally:
-            response.close()
+    deadline = time.monotonic() + 60
+    session = requests.Session()
+    try:
+        session.trust_env = False  # No ambient .netrc credentials or proxies.
+        for _ in range(4):
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Resource download deadline exceeded")
+            _public_https(url)
+            response = session.get(
+                url, stream=True, timeout=(5, 5), allow_redirects=False
+            )
+            try:
+                if 300 <= response.status_code < 400:
+                    location = response.headers.get("location")
+                    if not location:
+                        raise ValueError("Resource redirect is missing a location")
+                    url = urljoin(url, location)
+                    continue
+                response.raise_for_status()
+                data = bytearray()
+                for chunk in response.iter_content(64 * 1024):
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("Resource download deadline exceeded")
+                    data.extend(chunk)
+                    if len(data) > _MAX_DOWNLOAD:
+                        raise ValueError("Resource exceeds the download limit")
+                return bytes(data), response.headers.get("content-type", "").lower()
+            finally:
+                response.close()
+    finally:
+        session.close()
     raise ValueError("Too many resource redirects")
 
 
@@ -90,7 +101,7 @@ def _clone_files(url: str) -> dict[str, str]:
     parts = urlsplit(url)
     if (
         host not in {"github.com", "gitlab.com"}
-        or not parts.path.endswith(".git")
+        or not parts.path.lower().endswith(".git")
         or parts.query
         or parts.fragment
     ):
@@ -170,9 +181,17 @@ def prepare_input(item: str) -> str:
         reader = PdfReader(io.BytesIO(data))
         text = "\n".join((page.extract_text() or "") for page in reader.pages[:100])
         kind = "pdf"
-    else:
+    elif "text/html" in content_type or "application/xhtml+xml" in content_type:
         extractor = _TextExtractor()
-        extractor.feed(data.decode("utf-8", errors="replace"))
+        charset = content_type.partition("charset=")[2].split(";")[0].strip()
+        extractor.feed(data.decode(charset or "utf-8", errors="replace"))
         text = " ".join(extractor.parts)
         kind = "html"
-    return json.dumps({"kind": kind, "url": item, "content": text[:_MAX_TEXT]})
+    else:
+        charset = content_type.partition("charset=")[2].split(";")[0].strip()
+        text = data.decode(charset or "utf-8", errors="replace")
+        kind = "text"
+    return json.dumps(
+        {"kind": kind, "url": item, "content": text[:_MAX_TEXT]},
+        ensure_ascii=False,
+    )

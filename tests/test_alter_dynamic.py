@@ -1,6 +1,7 @@
 """Tests for dynamic pipeline operations."""
 
 import importlib
+import json
 import threading
 import time
 from types import SimpleNamespace
@@ -78,9 +79,7 @@ def test_worker_restrictions_and_timeout():
         dynamic._execute("import os\ndef run(item):\n    return os.environ", "hello", 5)
     with pytest.raises(ValueError, match="string"):
         dynamic._execute("def run(item):\n    return 3", "hello", 5)
-    from subprocess import TimeoutExpired
-
-    with pytest.raises(TimeoutExpired):
+    with pytest.raises(ValueError, match="SandboxTimeout"):
         dynamic._execute("def run(item):\n    while True:\n        pass", "hello", 0.5)
 
 
@@ -121,6 +120,23 @@ def test_source_is_returned_with_standard_op_cache_hit(tmp_path, monkeypatch):
     assert hits == [False, True]
 
 
+def test_source_version_refreshes_generated_program(monkeypatch):
+    """A new source version bypasses a stale cached program."""
+    calls = []
+
+    def generate(*args):
+        calls.append(None)
+        return f"def run(item): return {len(calls)!r}"
+
+    monkeypatch.setattr(dynamic, "_generate", generate)
+    model = SimpleNamespace(_model_id="test")
+    first = dynamic_step_source("a", "goal", model)
+    assert dynamic_step_source("a", "goal", model) == first
+    refreshed = dynamic_step_source("a", "goal", model, source_version="refresh-1")
+    assert refreshed != first
+    assert len(calls) == 2
+
+
 def test_source_inspection_never_generates_when_disabled(tmp_path, monkeypatch):
     """Test source inspection never generates when disabled."""
     monkeypatch.setattr(
@@ -130,3 +146,82 @@ def test_source_inspection_never_generates_when_disabled(tmp_path, monkeypatch):
         dynamic_step_source(
             "a", "goal", SimpleNamespace(_model_id="test"), _cache_only=True
         )
+
+
+def test_execution_timeout_reaches_worker(monkeypatch):
+    """Pass the requested sandbox timeout with a subprocess cleanup margin."""
+
+    def run(*args, **kwargs):
+        """Inspect the worker request without launching the process."""
+        assert json.loads(kwargs["input"])["timeout_s"] == 30
+        assert kwargs["timeout"] == 32
+        return SimpleNamespace(returncode=0, stdout='"ok"', stderr="")
+
+    monkeypatch.setattr(dynamic.subprocess, "run", run)
+    assert dynamic._execute("def run(item): return 'ok'", "plain", 30) == "ok"
+
+
+def test_agent_retries_text_and_keeps_successful_submission(monkeypatch):
+    """Retry a text-only turn and retain code after a later SDK error."""
+    sdk = pytest.importorskip("openhands.sdk")
+    from pyforger.alter import _dynamic_tool as tool
+
+    calls = []
+
+    class FakeConversation:
+        def __init__(self, *, agent, **kwargs):
+            self.agent = agent
+            self.state = SimpleNamespace(events=[])
+            assert kwargs["max_iteration_per_run"] == 3
+            assert "ForgerGitTool" in agent.filter_tools_regex
+            assert "TerminalTool" not in agent.filter_tools_regex
+
+        def send_message(self, text):
+            calls.append(("message", text))
+
+        def run(self):
+            calls.append(("run", None))
+            self.state.events.append(
+                SimpleNamespace(
+                    source="agent", llm_response_id=str(len(self.state.events))
+                )
+            )
+            if len([x for x in calls if x[0] == "run"]) == 2:
+                session_id = self.agent.tools[0].params["session_id"]
+                tool._session(session_id).accepted[:] = ["def run(item): return item"]
+                raise RuntimeError("SDK failed after submission")
+
+        def close(self):
+            calls.append(("close", None))
+
+    monkeypatch.setattr(sdk, "Conversation", FakeConversation)
+    monkeypatch.setattr(sdk, "LLM", lambda **kwargs: object())
+    monkeypatch.setattr(sdk, "Agent", lambda **kwargs: SimpleNamespace(**kwargs))
+    monkeypatch.setattr(dynamic, "prepare_input", lambda item: item)
+    monkeypatch.setattr(tool, "prepare_input", lambda item: item)
+    model = SimpleNamespace(
+        _model_id="test", _temperature=0, _kwargs={}, _api_key=None, _max_tokens=None
+    )
+    assert dynamic._generate("goal", "input", model, 3, 5).startswith("def run")
+    assert len([x for x in calls if x[0] == "run"]) == 2
+    assert len([x for x in calls if x[0] == "message"]) == 2
+
+
+def test_bad_resource_fails_before_agent_creation(monkeypatch):
+    """Invalid input should not incur LLM turns."""
+    sdk = pytest.importorskip("openhands.sdk")
+    from pyforger.alter import _dynamic_tool as tool
+
+    monkeypatch.setattr(
+        tool,
+        "prepare_input",
+        lambda item: (_ for _ in ()).throw(ValueError("bad resource")),
+    )
+    monkeypatch.setattr(
+        sdk,
+        "LLM",
+        lambda **kwargs: pytest.fail("LLM must not be created"),
+    )
+    model = SimpleNamespace(_model_id="test")
+    with pytest.raises(ValueError, match="bad resource"):
+        dynamic._generate("goal", "https://example.org/missing", model, 3, 5)

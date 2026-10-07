@@ -25,20 +25,24 @@ def main() -> None:
 
     load_dotenv()
     model = Model(
-        os.environ["LLM_MODEL"],
+        os.environ.get("MODEL_ID") or os.environ["LLM_MODEL"],
         api_key=os.environ.get("LITELLM_API_KEY"),
         api_base=os.environ.get("LITELLM_BASE_URL"),
         max_tokens=args.max_tokens,
     )
     clear_trace()
     for item in args.inputs:
-        code = dynamic_step_source(
-            item,
-            args.goal,
-            model,
-            max_iterations=args.max_iterations,
-            _cache_only=True,
-        )
+        try:
+            code = dynamic_step_source(
+                item,
+                args.goal,
+                model,
+                max_iterations=args.max_iterations,
+                _cache_only=True,
+            )
+        except FileNotFoundError:
+            print(f"input: {item}\ncache_hit: False\n")
+            continue
         record = trace()[-1]
         print(f"input: {item}\ncache_hit: {record.cache_hit}\ncode:\n{code}\n")
 

@@ -102,6 +102,37 @@ def test_git_rejects_other_hosts(monkeypatch):
         resources.prepare_input("https://example.org/repo.git")
 
 
+def test_uppercase_git_suffix_is_accepted(monkeypatch):
+    """Treat uppercase .GIT suffix as a repository URL."""
+    monkeypatch.setattr(resources, "_public_https", lambda url: "github.com")
+
+    def fake_run(command, **kwargs):
+        """Create a tiny snapshot instead of cloning."""
+        repo = Path(command[-1])
+        repo.mkdir()
+        (repo / "README.md").write_text("ok")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(resources.subprocess, "run", fake_run)
+    result = json.loads(resources.prepare_input("https://github.com/acme/repo.GIT"))
+    assert result["files"] == {"README.md": "ok"}
+
+
+def test_plain_text_url_preserves_code(monkeypatch):
+    """Do not strip comparison operators from source served as text/plain."""
+    monkeypatch.setattr(
+        resources,
+        "_download",
+        lambda url: (b"if a<b and b>0:", "text/plain; charset=utf-8"),
+    )
+    result = json.loads(resources.prepare_input("https://example.org/source.py"))
+    assert result == {
+        "kind": "text",
+        "url": "https://example.org/source.py",
+        "content": "if a<b and b>0:",
+    }
+
+
 def test_https_rejects_private_addresses(monkeypatch):
     """Test https rejects private addresses."""
     monkeypatch.setattr(
@@ -132,13 +163,25 @@ def test_download_validates_redirect_target(monkeypatch):
         def close(self):
             """Close the mocked response."""
 
-    monkeypatch.setattr("requests.get", lambda *args, **kwargs: Response())
+    class Session:
+        trust_env = True
+
+        def close(self):
+            """Close the mock session."""
+
+        def get(self, *args, **kwargs):
+            """Return a redirect without ambient credentials."""
+            assert self.trust_env is False
+            return Response()
+
+    monkeypatch.setattr("requests.Session", Session)
     with pytest.raises(ValueError, match="blocked"):
         resources._download("https://example.org/start")
 
 
 def test_git_tool_lists_and_reads_prepared_files(monkeypatch):
     """Test git tool lists and reads prepared files."""
+    pytest.importorskip("openhands.sdk")
     from pyforger.alter import _dynamic_tool as tool
 
     prepared = json.dumps(
@@ -160,6 +203,7 @@ def test_git_tool_lists_and_reads_prepared_files(monkeypatch):
 
 def test_sdk_resolves_all_restricted_tools():
     """Test sdk resolves all restricted tools."""
+    pytest.importorskip("openhands.sdk")
     from openhands.sdk.tool import Tool
     from openhands.sdk.tool.registry import resolve_tool
 
