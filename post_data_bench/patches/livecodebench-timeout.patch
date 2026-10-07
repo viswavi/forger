@@ -1,0 +1,15 @@
+diff --git a/lcb_runner/evaluation/compute_code_generation_metrics.py b/lcb_runner/evaluation/compute_code_generation_metrics.py
+index b8de33e..6883750 100644
+--- a/lcb_runner/evaluation/compute_code_generation_metrics.py
++++ b/lcb_runner/evaluation/compute_code_generation_metrics.py
+@@ -48,6 +48,10 @@ def check_correctness(sample, generation, timeout, debug=True):
+         in_outs = json.loads(sample["input_output"])
+         # consider that all tests failed
+         result = [[-1 for i in range(len(in_outs["inputs"]))]]
++        # The killed child process never got to append here either -- without this,
++        # metadata_list[0] below raises IndexError on every global-timeout case,
++        # crashing the caller instead of returning the all-failed result just built.
++        metadata_list = [{}]
+         if debug:
+             print(f"global timeout")
+     return result[0], metadata_list[0]

@@ -19,7 +19,8 @@ If you're a developer, it's recommended to install
 pre-commit hooks before starting your development
 work. These hooks ensure code formatting, linting,
 and type-checking. To install the pre-commit hooks,
-run the following command:
+run the following command. The pinned hooks require Python 3.11 on `PATH`,
+even when the training environment uses another Python version:
 
 ```bash
 pre-commit install
