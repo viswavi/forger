@@ -70,12 +70,14 @@ tokens and the model used. For example, gpt-5.4-nano is generally much cheaper t
 
 A pipeline is a Python function. It calls operations from `pyforger.acquire`, `pyforger.alter`, `pyforger.filter`,
 and `pyforger.inspect`. Each operation takes a `list[dict]` (or generation parameters). Acquire, alter, and filter
-operations return a `list[dict]`; inspect operations instead return a report about the rows without modifying rows.
+operations generally return a `list[dict]`; `acquire.generate_custom_rubric_criteria` instead maps
+`list[str]` to `list[list[tuple[str, float]]]`. Inspect operations return a report about the rows without modifying rows.
 Control flow (`for`, `if`, comprehensions, helper functions) in plain Python can be used
 
 ### Operation reference
 
-All operations are plain functions. Operations that perform LLM calls or expensive in-process work (`sample_from_LLM`
+All operations are plain functions. Operations that perform LLM calls or expensive in-process work (`sample_from_LLM`,
+`generate_custom_rubric_criteria`,
 every `alter.*` op, every `filter.*` op, every `inspect.*` op) are decorated internally with `@op`, so their results
 are cached on disk and traced. The retrieval functions (`retrieve`, `retrieve_from_*`) are not internally cached; wrap
 them with `@op` to memoize their results.
@@ -98,6 +100,7 @@ Generate or retrieve new rows.
 | Export | Cached | Description |
 |---|---|---|
 | `sample_from_LLM` | yes | Sample data from an LLM with a prompt. Supports schema-based validation and retries. |
+| `generate_custom_rubric_criteria` | yes | Generate weighted textual rubrics with optional context and candidates. |
 | `retrieve` | no | Generic retrieval against a `RetrievalSource`. |
 | `retrieve_from_web` | no | Brave Search backend (QUERY only). |
 | `retrieve_from_wiki` | no | Wikipedia backend (QUERY or RANDOM). |
@@ -115,6 +118,37 @@ Generate or retrieve new rows.
 validation, making this a superior choice to calling `Model` directly. Any reasoning traces contained in a completion are
 contained in the output dict under a `thinking_trace` key. Inline traces are not extracted: `LocalModel` leaves `<think>`
 blocks in the completion text and supplies `None` for that metadata; use `split_reasoning` to separate them out.
+
+`generate_custom_rubric_criteria` supports open-ended evaluation (e.g. personal advice, creative writing,
+or deep research). Pass a caller-configured `model` and a list of strings containing task descriptions,
+prompts, serialized conversations, or documents. `meta_description` provides optional shared evaluation
+context. `candidate_responses`, when provided, must contain one list of strings per input; use `[]` for
+inputs without candidates. Candidates help identify failure modes and are not treated as ground truth.
+
+```python
+from pyforger.acquire import generate_custom_rubric_criteria
+
+rubrics = generate_custom_rubric_criteria(
+    ["Write a story about starting a new job.", "Explain how rainbows form."],
+    model=model,
+    meta_description="Evaluate writing for a non-native English speaking audience",
+    candidate_responses=[["On my first day ...", "I began work ..."], []],
+)
+# rubrics[i] is [(criterion_text, weight), ...] for input i.
+```
+
+Weights are independent finite floats in `[0, 100]`, not percentages summing to 100. An empty input list
+returns `[]`; a model may return an empty rubric when no meaningful criteria can be grounded in the context.
+`batch_size` (default 10) limits prompts per batch, `temperature` defaults to 0.7, and `max_retries`
+(default 3) gives additional attempts for malformed outputs, including invalid nested pairs or weights.
+Exhaustion raises `ValueError` identifying zero-based input indices; failed inputs are never silently dropped.
+Results are cached with `@op`; `_no_cache=True` forces fresh generation.
+
+The output is an intermediate textual rubric. For `rl.agent_training validate`, a later dataset adapter
+must wrap each criterion as `{"prompt": criterion_text}` (or convert it to `{"code": source}`),
+ensure a nonempty rubric with positive total weight, and supply the required `prompt` and `ground_truth`
+fields. The current RL validator requires `ground_truth` to include nonempty `<think>...</think>` reasoning
+and a final answer. This building block does not generate those fields or execute criteria.
 
 #### `pyforger.alter`
 
@@ -357,8 +391,8 @@ then apply `pyforger.filter` operations to assure quality and diversity. For exa
 filter with `by_llm_score` to keep the best according to a consensus of 5 judge calls, and then filter with
 `by_rouge_l` to keep a subset with sufficient lexical diversity.
 - **Rubric-based filtering:** For complex tasks where quality is hard to assure with simple heuristics, generate a
-rubric (using `pyforger.alter.generate_from_context`) and then use multiple `by_llm_score` calls with each rubric item
-as a separate judge to filter for high-quality outputs that meet multiple criteria.
+rubric (using `pyforger.acquire.generate_custom_rubric_criteria`) and then use multiple `by_llm_score` calls
+with each rubric item as a separate judge to filter for high-quality outputs that meet multiple criteria.
 - **Strong-vs-weak gap:** For a given input, generate one output with a "weak" model (e.g. "gemini-3.1") and one with
 multiple "expert" models (e.g. multiple calls of "gemini-3.5" with slightly different
 prompts or another strong model). Then choose only the rows where the expert models agree with each other (answer is
