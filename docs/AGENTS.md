@@ -393,7 +393,7 @@ prefer the cheap answer check first.
 
 `alter.dynamic_step(inputs, goal, model, max_parallel=4, max_iterations=20)`
 returns a `list[str]` in input order. Install `pyforger[dynamic]` (OpenHands SDK;
-Python 3.12+ required for this extra).
+Python 3.12+ and Unix signal timers required for execution).
 Each uncached unique input gets its own bare-metal OpenHands conversation with
 restricted Python, resource inspection, Git inspection, and finish tools. Agents revise code
 against execution feedback and submit a function accepting one string and
@@ -438,15 +438,16 @@ either `content` (HTML/PDF/plain text) or `files` (Git); other inputs remain raw
 OpenHands has read-only resource and Git list/read tools to inspect the same
 snapshot during construction. The Git snapshot includes at most 200 files,
 64 KiB per file, and 1 MiB total text. HTTP downloads have a 10 MiB body cap;
-Git clones have a 60-second timeout, but no transfer-size cap. Source remains
+Git clones have a 60-second timeout, a 32 MiB tunnel transfer cap, and a
+64 MiB monitored temporary disk cap. Source remains
 cached by `@op`, while the URL is fetched or cloned again whenever the generated
 step executes. The generated Python worker runs without credentials or direct
 network, shell, and filesystem tools. OpenHands runs on the host; SDK-discovered
 plugins and their hooks may still be loaded, so use an isolated account for
 untrusted inputs.
-Public-address checks on HTTPS hosts are best effort; DNS changes and Git
-redirects remain outside this guardrail. PDF parsing runs before the generated
-Python timeout starts.
+HTTP and Git connections use validated public IP addresses while preserving
+TLS hostname checks; Git tunnels only GitHub and GitLab. PDF parsing runs
+before the generated Python timeout starts.
 PDF extraction uses `pypdf.PdfReader` on up to 100 pages; image-only scans need
 OCR, which this operation does not provide.
 RestrictedPython provides accidental-damage guardrails, not isolation against

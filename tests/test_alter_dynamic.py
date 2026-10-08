@@ -1,6 +1,7 @@
 """Tests for dynamic pipeline operations."""
 
 import importlib
+import importlib.metadata
 import json
 import threading
 import time
@@ -71,6 +72,13 @@ def test_parallel_limit(tmp_path, monkeypatch):
 
 def test_worker_restrictions_and_timeout():
     """Test worker restrictions and timeout."""
+    version = importlib.metadata.version("RestrictedPython")
+    if tuple(map(int, version.split(".")[:2])) < (8, 4):
+        pytest.skip("Dynamic worker requires RestrictedPython >=8.4")
+    try:
+        dynamic._require_dynamic_platform()
+    except NotImplementedError:
+        pytest.skip("Dynamic worker requires Unix signal timers")
     assert (
         dynamic._execute("def run(item):\n    return item.upper()", "hello", 5)
         == "HELLO"
@@ -173,7 +181,7 @@ def test_agent_retries_text_and_keeps_successful_submission(monkeypatch):
             self.agent = agent
             self.state = SimpleNamespace(events=[])
             assert kwargs["max_iteration_per_run"] == 3
-            assert "ForgerGitTool" in agent.filter_tools_regex
+            assert "git" in agent.filter_tools_regex
             assert "TerminalTool" not in agent.filter_tools_regex
 
         def send_message(self, text):
@@ -225,3 +233,39 @@ def test_bad_resource_fails_before_agent_creation(monkeypatch):
     model = SimpleNamespace(_model_id="test")
     with pytest.raises(ValueError, match="bad resource"):
         dynamic._generate("goal", "https://example.org/missing", model, 3, 5)
+
+
+def test_unsupported_platform_fails_before_agent(monkeypatch):
+    """Reject missing Unix timers before any SDK or resource work."""
+    monkeypatch.delattr(dynamic.signal, "setitimer", raising=False)
+    with pytest.raises(NotImplementedError, match="setitimer"):
+        dynamic._generate("goal", "input", None, 3, 5)
+
+
+def test_real_agent_retains_restricted_tools(monkeypatch):
+    """Check resolved SDK tool names survive the agent's actual filter."""
+    pytest.importorskip("openhands.sdk")
+    from openhands.sdk import Agent
+    from openhands.sdk.testing import TestLLM
+    from openhands.sdk.tool import Tool
+
+    from pyforger.alter import _dynamic_tool as tool
+
+    monkeypatch.setattr(
+        "openhands.sdk.agent.base.has_vision_profile_available", lambda: False
+    )
+    session_id = tool.register_executor(tool.PythonExecutor("plain input", 5))
+    try:
+        agent = Agent(
+            llm=TestLLM.from_messages([]),
+            tools=[
+                Tool(name=name, params={"session_id": session_id})
+                for name in ("ForgerPythonTool", "ForgerResourceTool", "ForgerGitTool")
+            ],
+            include_default_tools=["FinishTool"],
+            filter_tools_regex=r"^(python|resource|git)$",
+        )
+        agent._initialize(None)
+        assert {"python", "resource", "git", "finish"} <= set(agent._tools)
+    finally:
+        tool.unregister_executor(session_id)

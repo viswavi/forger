@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -23,9 +24,18 @@ from pyforger.op import op
 _SOURCE_VERSION = "resource-v2"  # Bump when agent instructions or tools change.
 
 
+def _require_dynamic_platform() -> None:
+    """Fail before agent work on platforms without sandbox wall-clock timers."""
+    if not all(
+        hasattr(signal, name) for name in ("SIGALRM", "ITIMER_REAL", "setitimer")
+    ):
+        raise NotImplementedError("dynamic_step requires Unix signal.setitimer/SIGALRM")
+
+
 def _execute(
     code: str, item: str, timeout: float, *, prepared_input: str | None = None
 ) -> str:
+    _require_dynamic_platform()
     # Do not inherit credentials into the generated-code process.
     env = {"PYTHONPATH": str(Path(__file__).resolve().parents[2])}
     with tempfile.TemporaryDirectory(prefix="forger-execute-") as workspace:
@@ -57,6 +67,7 @@ def _execute(
 
 
 def _generate(goal, item, model, max_iterations, execution_timeout_s):
+    _require_dynamic_platform()
     if isinstance(model, LocalModel):
         raise TypeError("dynamic_step requires a LiteLLM-backed Model")
     try:
@@ -116,10 +127,7 @@ def _generate(goal, item, model, max_iterations, execution_timeout_s):
                         Tool(name="ForgerGitTool", params={"session_id": session_id}),
                     ],
                     include_default_tools=["FinishTool"],
-                    filter_tools_regex=(
-                        r"^(ForgerPythonTool|ForgerResourceTool|"
-                        r"ForgerGitTool|FinishTool)$"
-                    ),
+                    filter_tools_regex=(r"^(python|resource|git)$"),
                 ),
                 workspace=workspace,
                 visualizer=None,
@@ -162,7 +170,7 @@ def _generate(goal, item, model, max_iterations, execution_timeout_s):
                     if remaining > 0:
                         conversation.send_message(
                             "You have not submitted a working pipeline yet. "
-                            "Use ForgerPythonTool with submit=true after testing."
+                            "Use the python tool with submit=true after testing."
                         )
             finally:
                 conversation.close()

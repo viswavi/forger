@@ -1,8 +1,9 @@
 """Tests for dynamic pipeline operations."""
 
+import importlib.metadata
 import json
-from pathlib import Path
-from types import SimpleNamespace
+import socket
+from contextlib import contextmanager
 
 import pytest
 
@@ -34,6 +35,7 @@ def test_pdf_url_is_parsed(monkeypatch):
     # A small valid PDF with an actual text drawing operation. A blank PDF
     # would check parsing but would not exercise PdfReader.extract_text().
     """Test pdf url is parsed."""
+    pytest.importorskip("pypdf")
     message = b"BT /F1 12 Tf 20 100 Td (Hello from PDF) Tj ET"
     objects = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
@@ -79,17 +81,16 @@ def test_git_url_is_cloned_to_bounded_text_bundle(monkeypatch):
     monkeypatch.setattr(resources, "_public_https", lambda url: "github.com")
     monkeypatch.setenv("LITELLM_API_KEY", "dummy")
 
-    def fake_run(command, *, cwd, env, capture_output, text, timeout):
-        assert "LITELLM_API_KEY" not in env
-        repo = Path(command[-1])
+    def fake_clone(url, root):
+        """Create a small repository snapshot."""
+        repo = root / "repo"
         repo.mkdir()
         (repo / "main.py").write_text("def parse(): return 42")
         (repo / "binary.bin").write_bytes(b"\0binary")
         (repo / ".git").mkdir()
         (repo / ".git" / "config").write_text("internal")
-        return SimpleNamespace(returncode=0)
 
-    monkeypatch.setattr(resources.subprocess, "run", fake_run)
+    monkeypatch.setattr(resources, "_clone_repo", fake_clone)
     result = json.loads(resources.prepare_input("https://github.com/acme/repo.git"))
     assert result["kind"] == "git"
     assert result["files"] == {"main.py": "def parse(): return 42"}
@@ -106,14 +107,13 @@ def test_uppercase_git_suffix_is_accepted(monkeypatch):
     """Treat uppercase .GIT suffix as a repository URL."""
     monkeypatch.setattr(resources, "_public_https", lambda url: "github.com")
 
-    def fake_run(command, **kwargs):
+    def fake_clone(url, root):
         """Create a tiny snapshot instead of cloning."""
-        repo = Path(command[-1])
+        repo = root / "repo"
         repo.mkdir()
         (repo / "README.md").write_text("ok")
-        return SimpleNamespace(returncode=0)
 
-    monkeypatch.setattr(resources.subprocess, "run", fake_run)
+    monkeypatch.setattr(resources, "_clone_repo", fake_clone)
     result = json.loads(resources.prepare_input("https://github.com/acme/repo.GIT"))
     assert result["files"] == {"README.md": "ok"}
 
@@ -148,35 +148,139 @@ def test_download_validates_redirect_target(monkeypatch):
     """Test download validates redirect target."""
     monkeypatch.setattr(
         resources,
-        "_public_https",
+        "_public_https_address",
         lambda url: (
             (_ for _ in ()).throw(ValueError("blocked"))
             if "internal" in url
-            else "example.org"
+            else ("example.org", "93.184.215.14")
         ),
     )
 
     class Response:
-        status_code = 302
+        status = 302
         headers = {"location": "http://internal/file"}
 
         def close(self):
             """Close the mocked response."""
 
-    class Session:
-        trust_env = True
+    class Pool:
+        def __init__(self, address, **kwargs):
+            assert address == "93.184.215.14"
+            assert kwargs["assert_hostname"] == "example.org"
+            assert kwargs["server_hostname"] == "example.org"
 
         def close(self):
-            """Close the mock session."""
+            """Close the mock pool."""
 
-        def get(self, *args, **kwargs):
-            """Return a redirect without ambient credentials."""
-            assert self.trust_env is False
+        def urlopen(self, *args, **kwargs):
+            """Return a redirect for the pinned address."""
+            assert kwargs["headers"]["Host"] == "example.org"
             return Response()
 
-    monkeypatch.setattr("requests.Session", Session)
+    monkeypatch.setattr("urllib3.HTTPSConnectionPool", Pool)
     with pytest.raises(ValueError, match="blocked"):
         resources._download("https://example.org/start")
+
+
+def test_download_uses_validated_ip_without_reresolving(monkeypatch):
+    """Pin the connection target while preserving the HTTPS hostname."""
+    lookups = []
+
+    def getaddrinfo(host, port, **kwargs):
+        """Return a public address once, then a private rebinding answer."""
+        lookups.append(host)
+        address = "93.184.215.14" if len(lookups) == 1 else "127.0.0.1"
+        return [(None, None, None, None, (address, port))]
+
+    class Response:
+        status = 200
+        headers = {"content-type": "text/plain"}
+
+        def stream(self, *args, **kwargs):
+            """Return one response chunk."""
+            yield b"hello"
+
+        def close(self):
+            """Close the mocked response."""
+
+    class Pool:
+        def __init__(self, address, **kwargs):
+            assert address == "93.184.215.14"
+            assert kwargs["assert_hostname"] == "example.org"
+            assert kwargs["server_hostname"] == "example.org"
+
+        def urlopen(self, method, target, **kwargs):
+            """Return a response for the pinned address."""
+            assert target == "/page?q=1"
+            assert kwargs["headers"]["Host"] == "example.org"
+            return Response()
+
+        def close(self):
+            """Close the mocked pool."""
+
+    monkeypatch.setattr(resources.socket, "getaddrinfo", getaddrinfo)
+    monkeypatch.setattr("urllib3.HTTPSConnectionPool", Pool)
+    assert resources._download("https://example.org/page?q=1") == (
+        b"hello",
+        "text/plain",
+    )
+    assert lookups == ["example.org"]
+
+
+def test_git_proxy_rejects_other_hosts():
+    """Do not let Git redirects tunnel to arbitrary hosts."""
+    from pyforger.alter._dynamic_git_proxy import git_proxy
+
+    try:
+        with git_proxy() as proxy:
+            port = int(proxy.rsplit(":", 1)[1])
+            with socket.create_connection(("127.0.0.1", port)) as connection:
+                connection.sendall(b"CONNECT internal.example:443 HTTP/1.1\r\n\r\n")
+                assert b"403 Forbidden" in connection.recv(1024)
+    except PermissionError:
+        pytest.skip("Local socket binding is unavailable in this sandbox")
+
+
+def test_clone_stops_at_disk_limit(tmp_path, monkeypatch):
+    """Stop Git before a checkout fills unbounded temporary storage."""
+    with (tmp_path / "large.bin").open("wb") as stream:
+        stream.truncate(resources._MAX_GIT_DISK + 1)
+    killed = []
+
+    @contextmanager
+    def fake_proxy():
+        """Avoid binding a real local socket."""
+        yield "http://127.0.0.1:12345"
+
+    class Process:
+        pid = 12345
+        returncode = None
+
+        def poll(self):
+            """Report an active clone."""
+            return self.returncode
+
+        def wait(self, timeout):
+            """Mark the clone reaped."""
+            self.returncode = -9
+
+        def kill(self):
+            """Mark the clone killed on non-POSIX platforms."""
+            killed.append(self.pid)
+
+    def fake_popen(command, **kwargs):
+        """Verify Git is forced through the bounded local proxy."""
+        assert "http.proxy=http://127.0.0.1:12345" in command
+        assert "http.followRedirects=false" in command
+        assert "LITELLM_API_KEY" not in kwargs["env"]
+        return Process()
+
+    monkeypatch.setattr(resources, "git_proxy", fake_proxy)
+    monkeypatch.setattr(resources.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(resources.os, "killpg", lambda pid, sig: killed.append(pid))
+    with pytest.raises(ValueError, match="disk limit"):
+        resources._clone_repo("https://github.com/acme/repo.git", tmp_path)
+    assert killed == [12345]
 
 
 def test_git_tool_lists_and_reads_prepared_files(monkeypatch):
@@ -224,7 +328,15 @@ def test_sdk_resolves_all_restricted_tools():
 
 def test_generated_program_receives_prepared_url(monkeypatch):
     """Test generated program receives prepared url."""
+    version = importlib.metadata.version("RestrictedPython")
+    if tuple(map(int, version.split(".")[:2])) < (8, 4):
+        pytest.skip("Dynamic worker requires RestrictedPython >=8.4")
     from pyforger.alter import dynamic
+
+    try:
+        dynamic._require_dynamic_platform()
+    except NotImplementedError:
+        pytest.skip("Dynamic worker requires Unix signal timers")
 
     prepared = json.dumps(
         {"kind": "html", "url": "https://example.org", "content": "hello"}
