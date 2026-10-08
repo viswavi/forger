@@ -1,0 +1,67 @@
+# Task: Code Generation
+
+You must generate a training dataset to help models like yourself improve at the task of code generation. Specifically,  our goal is to maintain or improve models' ability to generate working code when possible while avoiding generating code for tasks that are literally impossible to solve.
+
+In this code generation setup, a user provides a problem description to a model is along with public test cases (input-output pairs) that must be passed in order for the solution to be correct. The user will secretly have private test cases, not shown to the model, and if the model generates a solution that passes all of the user's public and private test cases, then the model has succeeded. The model must produce a self-contained snippet of Python code (including standard imports if necessary, e.g. builtin functions like sys or standard libraries like numpy). Sometimes a user will provide test cases that are intractable or impossible to pass (e.g. the problem is indeterminate, ill-posed, or undecidable/uncomputable, or there is no solution that matches the user's problem description but also passes the provided test cases). In this case, the model should simply return "This task is impossible to complete given the provided tests." instead of returning any code. Currently, models struggle at determining whether a task is impossible; we wish to improve at this ability, while also improving at generating functional code when applicable.
+
+Public validation examples are shown in {TASK_DIR}/validation_tasks_de_obfuscated.jsonl -- use these however you like. Each contains the following keys: ["question_content", "starter_code", "public_test_cases", "gold_response", "question_title", "contest_date", "contest_id", "difficulty", "metadata", "platform", "private_test_case_idx", "question_id", "task_text"]. If compatible baseline outputs are available, you will also find model output files {TASK_DIR}/model_outputs/Qwen__Qwen3-4B/val/metrics.json (summary metrics) and {TASK_DIR}/model_outputs/Qwen__Qwen3-4B/val/predictions.jsonl (per-row predictions on the validation set). Feel free to use these predictions/summary metrics to inform your data generation approach.
+
+"task_text" (and the "question" field in model_outputs/Qwen__Qwen3-4B/val/predictions.jsonl) is the exact user-turn prompt text shown to a candidate model at evaluation time: a "### Question:" section (the raw question_content), a "### Format:" section (starter-code instructions plus the starter code block when starter_code is non-empty, otherwise generic stdin/stdout instructions), a "### Public Test Cases" section (each test case rendered as "Input:"/"Output:" lines), and a final "### Answer:" prompt. A system message, separate from task_text, identifies the model as an expert Python programmer and adds the instruction to respond with exactly "This task is impossible to complete given the provided tests." when genuinely convinced a task is unsolvable. The downstream training pipeline (convert_to_trl.py) renders this exact same structure automatically from whatever question_content/starter_code/public_test_cases you generate, so training and evaluation prompts stay byte-for-byte identical -- just make sure those fields are accurate and complete.
+
+While the validation rows contain many keys, you only need to generate data containing the first 4 of these keys: ["question_content", "public_test_cases", "gold_response"]. For "public_test_cases", we only care about .input and .output keys. You may generate others as support if helpful, but they will be ignored during training. Concretely, our output data only need to have the following keys:
+{{"question_content": ..., "public_test_cases": ..., "thinking": ..., "gold_response": ...}}
+
+Note that this the output described here must include long-form "thinking" traces that are well-suited to the student model we are finetuning ({STUDENT_MODEL}) to help us train on this data in "thinking" mode. You should generate no more than 2000 generated datapoints -- below that, you can choose which examples to generate to maximize the accuracy of the model. The training script is shown in "{TASK_DIR}/train_model.sh". Max sequence length for training is {MAX_SFT_LENGTH} tokens -- longer rows are dropped before training, so avoid generating overly-long thinking traces when possible.
+
+# LLM API Usage
+
+You have a total LLM API budget of ${GENERATION_BUDGET} (token ID `{LITELLM_TOKEN_ID}`) – you don't have direct API access to check your own spend, since that's tracked for you outside this sandbox. To get a fresh number, create the file `{AGENT_DATA_DIR}/check_llm_spend` (e.g. `touch {AGENT_DATA_DIR}/check_llm_spend`), then a few seconds later read `{AGENT_DATA_DIR}/llm_spend.txt` for the result (right now it says 0.0, so make sure this never exceeds {GENERATION_BUDGET} – note that checks are rate-limited to at most once per 30 seconds, and the file auto-refreshes at least every 10 minutes even if you don't ask).  You are welcome to generate small amounts of data (e.g. 2-3 examples) as you iterate many times (perhaps up to a dozen iterations) before launching your final dataset generation.
+
+LLMs will almost always be accessed via LiteLLM, via a LITELLM_API_KEY environment variable and a model identifier in the prompt. The model identifier typically includes both account/routing info and a model name, and within that structure you can try other models in the same account if the user-provided one is undesirable or unavailable. We strongly prefer using gemini models, because we have ample API credits for those models. Gemini model identifiers:  "gemini/gemini-3.1-flash-lite" (fast, cheap), "gemini/gemini-3.5-flash" (most capable, more expensive), "azure_ai/text-embedding-3-large" (text embeddings). With LiteLLM, you will need to prefix these model identifiers with "litellm_proxy/"
+
+If these don't work, you can use other models: "azure_ai/gpt-5.6-terra" (fast), "azure_ai/gpt-5.6-luna" (medium speed/cost),"azure_ai/gpt-5.6-sol" (strongest/most expensive), "azure_ai/DeepSeek-R1".
+
+You can use this API Key and Base URL:
+export LITELLM_API_KEY={LITELLM_API_KEY}
+export LITELLM_BASE_URL="{LITELLM_BASE_URL}".
+
+Here is an example for using the LiteLLM API (using gemini-3.1-flash-lite here):
+```
+import os
+import litellm
+
+client = litellm.completion(
+  api_key=os.environ.get("LITELLM_API_KEY"),
+  base_url=os.environ.get("LITELLM_BASE_URL"),
+  model="litellm_proxy/gemini/gemini-3.1-flash-lite",
+  messages=[
+    {{"role": "system", "content": "You are a helpful assistant."}},
+    {{"role": "user", "content": "Who won the world series in 2020?"}},
+    {{"role": "assistant", "content": "The Los Angeles Dodgers won the World Series in 2020."}},
+    {{"role": "user", "content": "Where was it played?"}}
+  ]
+)
+```
+
+
+Use the model `litellm_proxy/gemini/gemini-3.1-flash-lite` for LLM-based generation ($0.25/1M input tokens or $1.50/1M output tokens), or its larger variant `litellm_proxy/gemini/gemini-3.5-flash` when greater capability is needed ($1.50/1M input tokens or $9.00/1M output tokens). Note that Gemini, Claude, and OpenAI models, if you use them, require temperature=1.0. Gemini and OpenAI disallow the n>1 argument – here, if necessary, use sample_from_LLM cleverly to manually get around this limitation.
+
+You can also access web search via the retrieve_from_web API using the BRAVE_API_KEY environment variable and Semantic Scholar using the following API key: the S2_API_KEY environment variable. The other retrieval sources (e.g. Wikipedia, Semantic Scholar) do not require API keys.
+
+# Local GPU Access
+
+If, for any reason, you need access to local models for inference (not to be used for training), I've given you {TIMEOUT_HOURS} hours of access to {GPU_DESCRIPTION}, which should be sufficient for running the student model.
+
+# High-Level Approach
+
+You are encouraged to run things and iterate on the data you receive in writing your pipeline. Put all your data in {AGENT_DATA_DIR}/. You can write your pipeline as {AGENT_DATA_DIR}/pipeline_{{1,2,3,4,...}}.py (writing a new script for every iteration, if you iterate multiple times). It is strongly encouraged to make multiple iterations over your dataset, in this way -- you should make _at minimum_ write and execute 2 or 3 small-scale iterations of your data pipeline (each saved as pipeline_{{1,2,3}}/py) (and as many as 20 or 30 iterations total or more) before launching your large-scale run.
+
+When you run your large-scale run, you should save your generated data as generated_raw.jsonl.
+
+# Scaffold
+
+You are allowed to use any publicly available tools and libraries, including LLM libraries, Brave Search API, Semantic Scholar API, or any other library/API that does not require a paid subscription.
+
+There are two open-source libraries which you are NOT allowed to use. You are not allowed to use the Forger data generation framework (pyforger in pypi) or the Bespoke Curator library (bespokelabs.curator in pypi). If you try to download or use either of these libraries, you will instantly be terminated and fail the task. Otherwise, you are free to use any other libraries or tools that you wish.
+
+You have {TIMEOUT_HOURS} hours to do your work. After this, we will automatically move to the training phase. While you get no points for finishing early, if your data generation is complete, then you are free to move on to the next problem. Now let's get started!
