@@ -1,4 +1,6 @@
 repos:
+# Benchmark and training scripts are autoformatted below; strict lint and type
+# checks apply to the library and its tests while those scripts are migrated.
   - repo: https://github.com/python/black.git
     rev: 22.3.0
     hooks:
@@ -15,6 +17,7 @@ repos:
           - flake8-pep585>=0.1.6
         entry: flake8
         files: '\.py$'
+        exclude: '^(post_data_bench/|examples/training/)'
       - id: flake8
         name: docstring
         additional_dependencies:
@@ -24,6 +27,7 @@ repos:
           - --select=D
         entry: flake8
         files: '\.py$'
+        exclude: '^(post_data_bench/|examples/training/)'
       - id: flake8
         name: future-import
         additional_dependencies:
@@ -52,6 +56,7 @@ repos:
         additional_dependencies:
           - types-requests
         files: '\.py$'
+        exclude: '^(post_data_bench/|examples/training/)'
   - repo: https://github.com/DavidAnson/markdownlint-cli2
     rev: v0.5.1
     hooks:
