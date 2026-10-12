@@ -13,6 +13,7 @@ Used by approach #6 (pipeline-as-function): pipelines are plain Python,
 control flow is plain Python, but the expensive boundaries (LLM calls,
 filtering passes) get cached at the @op layer.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -168,6 +169,8 @@ def op(
         def debug_op(x): ...
 
     Pass ``_no_cache=True`` at call time to bypass the cache for one call.
+    Pass ``_cache_only=True`` to return only an existing cached result, raising
+    ``FileNotFoundError`` on a miss without executing the function.
     """
 
     def decorate(fn: Callable[..., T]) -> Callable[..., T]:
@@ -178,13 +181,14 @@ def op(
             logger.debug("inspect.signature failed for %s: %s", fn, exc)
             sig = None
         else:
-            # Functions decorated with @op cannot use the reserved argument '_no_cache'.
+            # These names are reserved for per-call cache controls.
             assert sig is not None  # mypy hint
-            if "_no_cache" in sig.parameters:
-                raise TypeError(
-                    "Forger functions decorated with @op cannot use the reserved "
-                    + "argument name '_no_cache'."
-                )
+            for reserved in ("_no_cache", "_cache_only"):
+                if reserved in sig.parameters:
+                    raise TypeError(
+                        "Forger functions decorated with @op cannot use the reserved "
+                        + f"argument name '{reserved}'."
+                    )
 
         op_name = name or f"{fn.__module__}.{fn.__qualname__}"
         # Sanitize op_name to be a safe directory name
@@ -194,7 +198,14 @@ def op(
             _warn_unstable_refs(fn, op_name)
 
         @wraps(fn)
-        def wrapper(*args: Any, _no_cache: bool = False, **kwargs: Any) -> T:
+        def wrapper(
+            *args: Any,
+            _no_cache: bool = False,
+            _cache_only: bool = False,
+            **kwargs: Any,
+        ) -> T:
+            if _cache_only and (_no_cache or not cache):
+                raise ValueError("_cache_only requires an enabled cache")
             start = time.time()
             if sig is not None:
                 try:
@@ -206,6 +217,8 @@ def op(
                     kwargs = bound.kwargs
                     normalized = dict(bound.arguments)
                 except TypeError:
+                    if _cache_only:
+                        raise
                     # If the arguments don't match the signature, use them directly.
                     normalized = {"args": list(args), "kwargs": dict(kwargs)}
             else:
@@ -240,6 +253,10 @@ def op(
                         result = pickle.load(f)
                     cache_hit = True
                 except Exception as exc:
+                    if _cache_only:
+                        raise RuntimeError(
+                            f"Cannot read cached result for {op_name}"
+                        ) from exc
                     # Cache file is unreadable or incompatible with the current
                     # code version; fall through to executing the op directly.
                     # The cache will be overwritten with a new result.
@@ -251,6 +268,10 @@ def op(
                     )
 
             if not cache_hit:
+                if _cache_only:
+                    raise FileNotFoundError(
+                        f"No cached result for {op_name} with these arguments"
+                    )
                 result = fn(*args, **kwargs)
 
                 if use_cache:

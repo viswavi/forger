@@ -160,6 +160,8 @@ Transform rows without removing items.
 | `translate.to_language` | LLM translation of selected fields into a target natural language. |
 | `translate.to_code` | LLM conversion of fields into code in a target programming language. Strips markdown fences. |
 | `execute_code` | Execute Python code in a sandboxed environment and return the result. |
+| `dynamic_step` | Run dynamic input-specific sub-pipelines that return string outputs. |
+| `dynamic_step_source` | Generate or inspect sub-pipeline generated for a single input. |
 
 `generate_from_context` performs `samples_per_item` LLM calls per input and returns parsed dicts, with retry against an
 optional JSON schema. If the validated LLM call fails after `num_retries`, we return `None` for the failing slots.
@@ -300,6 +302,8 @@ unrelated helper does not.
 can redirect it.
 
 **Per-call bypass.** Pass `_no_cache=True` at the call site to skip the cache for a single invocation.
+Pass `_cache_only=True` to retrieve an existing result without executing the function;
+a miss raises `FileNotFoundError`.
 
 **Custom hash keys for objects.** If an argument defines `cache_key() -> Any`, this is used in place of the argument's
 canonical form. This is useful for objects that are expensive to serialize or contain ever-changing state. Here is
@@ -418,3 +422,67 @@ answer* far better than off-policy teacher traces, and answer-verification keeps
 the final answer alone admits the occasional "right answer, wrong reasoning" trace; add a `by_llm_score` judge over the
 reasoning (passed as `filter_fn`, or as a downstream filter) only if inspection shows this is actually frequent --
 prefer the cheap answer check first.
+
+### Dynamic input-specific pipelines
+
+`alter.dynamic_step(inputs, goal, model, max_parallel=4, max_iterations=20)`
+returns a `list[str]` in input order. Install `pyforger[dynamic]` (OpenHands SDK;
+Python 3.12+ and Unix signal timers required for execution).
+Each uncached unique input gets its own bare-metal OpenHands conversation with
+restricted Python, resource inspection, Git inspection, and finish tools. Agents revise code
+against execution feedback and submit a function accepting one string and
+returning a string. The last defined function is the entry point.
+
+```python
+outputs = alter.dynamic_step(
+    ["Alice <alice@example.org>", "Bob <bob@example.net>"],
+    "Return the domain of the email address", model, max_parallel=2,
+)
+```
+
+`dynamic_step_source(item, goal, model)` stores generated source through standard
+`@op` caching under `$FORGER_CACHE` (otherwise `~/.cache/forger`). Use `trace()`
+to inspect hits and `_cache_only=True` to inspect source without launching an
+agent on a miss. Reordered or overlapping batches reuse source, and cached code
+executes again on every call. Duplicate inputs share generation and execution
+within a batch. `@op` writes atomically, but simultaneous calls for the same
+uncached input in separate batches may each start an agent. Failures raise;
+successful source from other inputs is retained.
+
+`examples/show_dynamic_step_source.py` accepts a goal and inputs, then prints
+previously generated programs and their `@op` cache-hit status without opening
+cache files directly. As with any
+`@op`, changing the decorated function body invalidates its earlier cache entries.
+Pass a new `source_version` to either operation to generate and cache a fresh
+program for an input when its earlier source is stale.
+
+`max_parallel` bounds active sessions, `max_iterations` bounds agent steps,
+and `execution_timeout_s` bounds each generated-code execution in a subprocess.
+The Model supplies its LiteLLM identifier, API key, temperature, max tokens, and
+`api_base`; credentials and base URL otherwise fall back to the LiteLLM environment.
+The operation reads `.env` from the current working directory without changing
+the process environment.
+Credentials are passed to the SDK as secrets and excluded from worker environments.
+Only `json`, `re`, `math`, and `html` imports are available to generated
+code. For HTTPS HTML and PDF inputs, Forger retrieves and extracts text before
+calling that code. For HTTPS `.git` inputs on GitHub or GitLab, it shallow-clones
+the repository into a temporary directory and passes a bounded snapshot of text
+files. The generated function receives a JSON string with `kind`, `url`, and
+either `content` (HTML/PDF/plain text) or `files` (Git); other inputs remain raw strings.
+OpenHands has read-only resource and Git list/read tools to inspect the same
+snapshot during construction. The Git snapshot includes at most 200 files,
+64 KiB per file, and 1 MiB total text. HTTP downloads have a 10 MiB body cap;
+Git clones have a 60-second timeout, a 32 MiB tunnel transfer cap, and a
+64 MiB monitored temporary disk cap. Source remains
+cached by `@op`, while the URL is fetched or cloned again whenever the generated
+step executes. The generated Python worker runs without credentials or direct
+network, shell, and filesystem tools. OpenHands runs on the host; SDK-discovered
+plugins and their hooks may still be loaded, so use an isolated account for
+untrusted inputs.
+HTTP and Git connections use validated public IP addresses while preserving
+TLS hostname checks; Git tunnels only GitHub and GitLab. PDF parsing runs
+before the generated Python timeout starts.
+PDF extraction uses `pypdf.PdfReader` on up to 100 pages; image-only scans need
+OCR, which this operation does not provide.
+RestrictedPython provides accidental-damage guardrails, not isolation against
+adversarial code. Cache directories must be trusted.
