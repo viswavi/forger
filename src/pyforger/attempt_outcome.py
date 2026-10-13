@@ -1,7 +1,6 @@
 """Explicit attempt outcomes shared by runtime adapters and filters."""
 from __future__ import annotations
 
-
 from pydantic import BaseModel, ConfigDict, StrictBool, model_validator
 
 
