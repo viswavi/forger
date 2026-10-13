@@ -393,8 +393,9 @@ prefer the cheap answer check first.
 
 `alter.dynamic_step(inputs, goal, model, max_parallel=4, max_iterations=20)`
 returns a `list[list[str]]` in input order. Each inner list contains the strings
-produced for one input and may be empty. Install `pyforger[dynamic]` (OpenHands SDK;
-Python 3.12+ and Unix signal timers required for execution).
+produced for one input and may be empty. The default `pyforger` install includes
+OpenHands SDK and its dynamic-step dependencies; Python 3.12+ and Unix signal
+timers are required for execution.
 Inputs are JSON-compatible records (`list[dict]`). Each uncached unique input
 gets its own bare-metal OpenHands conversation with
 restricted Python, resource inspection, Git inspection, and finish tools. Agents revise code

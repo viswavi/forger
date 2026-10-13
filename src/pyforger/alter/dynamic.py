@@ -99,7 +99,7 @@ def _generate(goal, item, model, max_iterations, execution_timeout_s):
         from openhands.sdk import LLM, Agent, Conversation
         from pydantic import SecretStr
     except ImportError as exc:
-        raise ImportError("Install pyforger[dynamic] to use dynamic_step") from exc
+        raise ImportError("OpenHands SDK is required; reinstall pyforger") from exc
 
     from openhands.sdk.tool import Tool
 
