@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import ipaddress
 import os
+import re
 import signal
 import socket
 import ssl
@@ -43,8 +44,23 @@ class _TextExtractor(HTMLParser):
             self.parts.append(data)
 
 
+def public_address(address: str) -> bool:
+    ip = ipaddress.ip_address(address)
+    if isinstance(ip, ipaddress.IPv6Address) and (
+        ip.ipv4_mapped or ip.sixtofour or ip.teredo
+    ):
+        return False
+    return ip.is_global and not ip.is_multicast and not ip.is_reserved
+
+
 def _public_https_address(url: str) -> tuple[str, str]:
     """Resolve and validate an HTTPS origin, returning its host and pinned IP."""
+    if (
+        not isinstance(url, str)
+        or len(url) > 8192
+        or re.search(r"[\s\\\x00-\x1f\x7f]", url)
+    ):
+        raise ValueError("Invalid public HTTPS URL")
     parts = urlsplit(url)
     if (
         parts.scheme != "https"
@@ -57,9 +73,7 @@ def _public_https_address(url: str) -> tuple[str, str]:
     addresses = socket.getaddrinfo(
         parts.hostname, parts.port or 443, type=socket.SOCK_STREAM
     )
-    if not addresses or any(
-        not ipaddress.ip_address(entry[4][0]).is_global for entry in addresses
-    ):
+    if not addresses or any(not public_address(entry[4][0]) for entry in addresses):
         raise ValueError("Resource URL resolves to a non-public address")
     return parts.hostname.lower(), addresses[0][4][0]
 
@@ -69,9 +83,11 @@ def _public_https(url: str) -> str:
     return _public_https_address(url)[0]
 
 
-def _download(url: str) -> tuple[bytes, str]:
+def fetch_public(url: str, max_bytes: int = _MAX_DOWNLOAD) -> tuple[str, bytes, str]:
     import urllib3
 
+    if type(max_bytes) is not int or not 0 < max_bytes <= 32 * 1024 * 1024:
+        raise ValueError("Invalid download byte limit")
     deadline = time.monotonic() + 60
     for _ in range(4):
         if time.monotonic() >= deadline:
@@ -112,14 +128,23 @@ def _download(url: str) -> tuple[bytes, str]:
                     if time.monotonic() >= deadline:
                         raise TimeoutError("Resource download deadline exceeded")
                     data.extend(chunk)
-                    if len(data) > _MAX_DOWNLOAD:
+                    if len(data) > max_bytes:
                         raise ValueError("Resource exceeds the download limit")
-                return bytes(data), response.headers.get("content-type", "").lower()
+                return (
+                    url,
+                    bytes(data),
+                    response.headers.get("content-type", "").lower(),
+                )
             finally:
                 response.close()
         finally:
             pool.close()
     raise ValueError("Too many resource redirects")
+
+
+def _download(url: str) -> tuple[bytes, str]:
+    _, data, content_type = fetch_public(url)
+    return data, content_type
 
 
 def _tree_size(root: Path) -> int:

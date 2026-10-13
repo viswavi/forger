@@ -6,7 +6,6 @@ import socket
 from contextlib import contextmanager
 
 import pytest
-
 from pyforger.alter import _dynamic_resources as resources
 
 
@@ -318,7 +317,6 @@ def test_sdk_resolves_all_restricted_tools():
     pytest.importorskip("openhands.sdk")
     from openhands.sdk.tool import Tool
     from openhands.sdk.tool.registry import resolve_tool
-
     from pyforger.alter import _dynamic_tool as tool
 
     session = tool.PythonExecutor({"text": "plain input"}, 5)
@@ -350,3 +348,23 @@ def test_generated_program_receives_prepared_url(monkeypatch):
     monkeypatch.setattr(dynamic, "prepare_input", lambda item: prepared)
     code = 'def run(item):\n    return [item["content"]]'
     assert dynamic._execute(code, {"url": "https://example.org"}, 5) == ["hello"]
+
+
+def test_public_fetch_rejects_invalid_limits_before_network():
+    for limit in (0, -1, True, 33 * 1024 * 1024):
+        with pytest.raises(ValueError, match="byte limit"):
+            resources.fetch_public("https://example.org/data", limit)
+
+
+@pytest.mark.parametrize(
+    "address",
+    ["127.0.0.1", "10.0.0.1", "224.0.0.1", "::ffff:8.8.8.8", "2002:0808:0808::1"],
+)
+def test_public_address_rejects_special_networks(address):
+    assert not resources.public_address(address)
+
+
+def test_public_fetch_is_shared_with_dynamic_download():
+    from pyforger.acquire.resources import fetch_public
+
+    assert fetch_public is resources.fetch_public
