@@ -538,12 +538,11 @@ Pass a new `source_version` to either operation to generate and cache a fresh
 program for an input when its earlier source is stale.
 
 `max_parallel` bounds active sessions, `max_iterations` bounds agent steps,
-and `execution_timeout_s` bounds each generated-code execution in a subprocess.
-The Model supplies its LiteLLM identifier, API key, temperature, max tokens, and
-`api_base`; credentials and base URL otherwise fall back to the LiteLLM environment.
-The operation reads `.env` from the current working directory without changing
-the process environment.
-Credentials are passed to the SDK as secrets and excluded from worker environments.
+and `execution_timeout_s` bounds each generated-code execution in a subprocess. `dynamic_step` works best with fast models
+suited to agent workflows (e.g. DeepSeek-v4-flash or gpt-5.6-luna) to avoid timeouts.
+All model information (LiteLLM model ID, base URL, and API key, as well as hyperparameters) can come from the Model class.
+Credentials and base URL fall back to the LiteLLM environment, which reads `.env` from the current working directory without
+changing the process environment. Credentials are passed to the SDK as secrets and excluded from worker environments.
 Only `json`, `re`, `math`, and `html` imports are available to generated
 code. A URL-only record such as `{"url": "https://example.org/page"}` is
 expanded before calling that code. For HTTPS HTML and PDF URLs, Forger retrieves
