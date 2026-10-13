@@ -353,6 +353,7 @@ def test_generated_program_receives_prepared_url(monkeypatch):
 
 
 def test_public_fetch_rejects_invalid_limits_before_network():
+    """Reject malformed limits without opening a connection."""
     for limit in (0, -1, True, 33 * 1024 * 1024):
         with pytest.raises(ValueError, match="byte limit"):
             resources.fetch_public("https://example.org/data", limit)
@@ -363,10 +364,12 @@ def test_public_fetch_rejects_invalid_limits_before_network():
     ["127.0.0.1", "10.0.0.1", "224.0.0.1", "::ffff:8.8.8.8", "2002:0808:0808::1"],
 )
 def test_public_address_rejects_special_networks(address):
+    """Transition and private addresses cannot be public resources."""
     assert not resources.public_address(address)
 
 
 def test_public_fetch_is_shared_with_dynamic_download():
+    """Acquisition and dynamic inspection share the same fetch implementation."""
     from pyforger.acquire.resources import fetch_public
 
     assert fetch_public is resources.fetch_public

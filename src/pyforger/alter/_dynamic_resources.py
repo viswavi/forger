@@ -45,6 +45,7 @@ class _TextExtractor(HTMLParser):
 
 
 def public_address(address: str) -> bool:
+    """Reject local and transition-network addresses before resource access."""
     ip = ipaddress.ip_address(address)
     if isinstance(ip, ipaddress.IPv6Address) and (
         ip.ipv4_mapped or ip.sixtofour or ip.teredo
@@ -84,6 +85,7 @@ def _public_https(url: str) -> str:
 
 
 def fetch_public(url: str, max_bytes: int = _MAX_DOWNLOAD) -> tuple[str, bytes, str]:
+    """Fetch a public HTTPS resource with bounded bytes and pinned DNS."""
     import urllib3
 
     if type(max_bytes) is not int or not 0 < max_bytes <= 32 * 1024 * 1024:
