@@ -113,33 +113,12 @@ def _execute(
     return output
 
 
-def _generate(goal, item, model, max_iterations, execution_timeout_s):
-    _require_dynamic_platform()
-    if isinstance(model, LocalModel):
-        raise TypeError("dynamic_step requires a LiteLLM-backed Model")
-    try:
-        from openhands.sdk import LLM, Agent, Conversation
-        from pydantic import SecretStr
-    except ImportError as exc:
-        raise ImportError("OpenHands SDK is required; reinstall pyforger") from exc
-
-    from openhands.sdk.tool import Tool
-
-    _require_plugin_control()
-
-    from pyforger.alter._dynamic_tool import (
-        PythonExecutor,
-        register_executor,
-        unregister_executor,
-    )
-
-    executor = PythonExecutor(item, execution_timeout_s)
-    # Surface bad URLs before constructing an agent or spending LLM calls.
-    executor.prepared_input()
-    session_id = register_executor(executor)
-
+def agent_llm(model):
+    """Construct the SDK model shared by dynamic and artifact-aware agents."""
     # Read the caller's .env without mutating process-wide environment in threads.
     from dotenv import dotenv_values
+    from openhands.sdk import LLM
+    from pydantic import SecretStr
 
     dotenv = dotenv_values(Path.cwd() / ".env")
     key = (
@@ -168,8 +147,38 @@ def _generate(goal, item, model, max_iterations, execution_timeout_s):
             config[option] = model._kwargs[option]
     if "extra_body" in model._kwargs:
         config["litellm_extra_body"] = model._kwargs["extra_body"]
+    for option in ("api_mode", "capability_overrides"):
+        if option in model._kwargs:
+            config[option] = model._kwargs[option]
+    return LLM(**config)
+
+
+def _generate(goal, item, model, max_iterations, execution_timeout_s):
+    _require_dynamic_platform()
+    if isinstance(model, LocalModel):
+        raise TypeError("dynamic_step requires a LiteLLM-backed Model")
     try:
-        llm = LLM(**config)
+        from openhands.sdk import Agent, Conversation
+    except ImportError as exc:
+        raise ImportError("OpenHands SDK is required; reinstall pyforger") from exc
+
+    from openhands.sdk.tool import Tool
+
+    _require_plugin_control()
+
+    from pyforger.alter._dynamic_tool import (
+        PythonExecutor,
+        register_executor,
+        unregister_executor,
+    )
+
+    executor = PythonExecutor(item, execution_timeout_s)
+    # Surface bad URLs before constructing an agent or spending LLM calls.
+    executor.prepared_input()
+    session_id = register_executor(executor)
+
+    try:
+        llm = agent_llm(model)
         with tempfile.TemporaryDirectory(prefix="forger-agent-") as workspace:
             conversation = Conversation(
                 agent=Agent(

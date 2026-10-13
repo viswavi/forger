@@ -86,3 +86,7 @@ packages = ["forger"]
 [tool.pytest.ini_options]
 pythonpath = ["src", "test_helpers"]
 testpaths = ["tests"]
+
+[tool.isort]
+profile = "black"
+known_first_party = ["pyforger"]
