@@ -255,7 +255,7 @@ def prepare_input(item: dict) -> dict:
         try:
             from pypdf import PdfReader
         except ImportError as exc:
-            raise ImportError("Install pyforger[dynamic] for PDF inputs") from exc
+            raise ImportError("pypdf is required; reinstall pyforger") from exc
         reader = PdfReader(io.BytesIO(data))
         text = "\n".join((page.extract_text() or "") for page in reader.pages[:100])
         kind = "pdf"
