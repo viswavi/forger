@@ -232,6 +232,7 @@ def test_agent_retries_text_and_keeps_successful_submission(monkeypatch):
 
     class FakeConversation:
         def __init__(self, *, agent, **kwargs):
+            self._plugins_loaded = False
             self.agent = agent
             self.state = SimpleNamespace(events=[])
             assert kwargs["max_iteration_per_run"] == 3
@@ -239,6 +240,7 @@ def test_agent_retries_text_and_keeps_successful_submission(monkeypatch):
             assert "TerminalTool" not in agent.filter_tools_regex
 
         def send_message(self, text):
+            assert self._plugins_loaded is True
             calls.append(("message", text))
 
         def run(self):
@@ -325,3 +327,55 @@ def test_real_agent_retains_restricted_tools(monkeypatch):
         assert {"python", "resource", "git", "finish"} <= set(agent._tools)
     finally:
         tool.unregister_executor(session_id)
+
+
+def test_real_conversation_skips_ambient_plugins(tmp_path, monkeypatch):
+    """Neither the first message nor a run may discover plugins or start hooks."""
+    sdk = pytest.importorskip("openhands.sdk")
+    from openhands.sdk.conversation.impl import local_conversation
+    from openhands.sdk.llm import Message, TextContent
+    from openhands.sdk.testing import TestLLM
+
+    dynamic._require_plugin_control()
+    monkeypatch.setattr(
+        "openhands.sdk.agent.base.has_vision_profile_available", lambda: False
+    )
+    calls = []
+
+    def discovery(**kwargs):
+        calls.append("discovery")
+        return {}
+
+    def hooks(**kwargs):
+        calls.append("hooks")
+        raise AssertionError("host hooks must never be configured")
+
+    monkeypatch.setattr(local_conversation, "load_available_plugins", discovery)
+    monkeypatch.setattr(local_conversation, "create_hook_callback", hooks)
+    llm = TestLLM.from_messages(
+        [Message(role="assistant", content=[TextContent(text="Done")])]
+    )
+    conversation = sdk.Conversation(
+        agent=sdk.Agent(llm=llm, tools=[], include_default_tools=["FinishTool"]),
+        workspace=tmp_path,
+        visualizer=None,
+        max_iteration_per_run=1,
+    )
+    try:
+        dynamic._disable_plugins(conversation)
+        conversation.send_message("Untrusted input")
+        conversation.run()
+        assert llm.call_count == 1
+        assert conversation._hook_processor is None
+        assert calls == []
+    finally:
+        conversation.close()
+
+
+def test_plugin_control_fails_closed(monkeypatch):
+    """An SDK upgrade must not silently restore host plugin execution."""
+    monkeypatch.setattr(dynamic.importlib.metadata, "version", lambda name: "1.55.0")
+    with pytest.raises(RuntimeError, match="plugin control"):
+        dynamic._generate("goal", {"text": "input"}, None, 3, 5)
+    with pytest.raises(RuntimeError, match="safely disabled"):
+        dynamic._disable_plugins(SimpleNamespace())

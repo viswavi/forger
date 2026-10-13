@@ -7,6 +7,7 @@ Python runs without terminal, filesystem, network, or unrestricted Python access
 
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import math
 import os
@@ -24,6 +25,27 @@ from pyforger.op import op
 _SOURCE_VERSION = (
     "resource-v4-record"  # Bump when the agent or output contract changes.
 )
+
+
+def _require_plugin_control() -> None:
+    """Fail closed if the SDK's audited lazy-plugin contract changes."""
+    if importlib.metadata.version("openhands-sdk") != "1.54.0":
+        raise RuntimeError(
+            "dynamic_step requires openhands-sdk==1.54.0 for plugin control"
+        )
+
+
+def _disable_plugins(conversation) -> None:
+    """Skip SDK plugin discovery and hook setup for this conversation only.
+
+    SDK 1.54 has no public ambient-plugin switch: even plugins=[] discovers
+    installed/user/project plugins. Its lazy loader checks this flag before
+    loading any plugins or setting up hooks. Keep the SDK pinned and exercise
+    the real send_message/run paths in regression tests when upgrading.
+    """
+    if getattr(conversation, "_plugins_loaded", None) is not False:
+        raise RuntimeError("OpenHands plugin loading cannot be safely disabled")
+    conversation._plugins_loaded = True
 
 
 def _record_key(item: dict) -> str:
@@ -103,6 +125,8 @@ def _generate(goal, item, model, max_iterations, execution_timeout_s):
 
     from openhands.sdk.tool import Tool
 
+    _require_plugin_control()
+
     from pyforger.alter._dynamic_tool import (
         PythonExecutor,
         register_executor,
@@ -167,6 +191,7 @@ def _generate(goal, item, model, max_iterations, execution_timeout_s):
                 max_iteration_per_run=max_iterations,
             )
             try:
+                _disable_plugins(conversation)
                 conversation.send_message(
                     "Build a reusable Python sub-pipeline for this goal and input. "
                     "Use the resource tool to inspect the input or the Git tool to "

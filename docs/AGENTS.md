@@ -426,8 +426,8 @@ successful source from other inputs is retained.
 previously generated programs and their `@op` cache-hit status without opening
 cache files directly. As with any
 `@op`, changing the decorated function body invalidates its earlier cache entries.
-The default source version was advanced for the record input contract, so
-previously cached string-input programs are regenerated on first use.
+Disabling ambient plugins preserves the default source version and existing
+cached programs; cached source is re-executed without launching an agent.
 Pass a new `source_version` to either operation to generate and cache a fresh
 program for an input when its earlier source is stale.
 
@@ -453,9 +453,11 @@ Git clones have a 60-second timeout, a 32 MiB tunnel transfer cap, and a
 64 MiB monitored temporary disk cap. Source remains
 cached by `@op`, while the URL is fetched or cloned again whenever the generated
 step executes. The generated Python worker runs without credentials or direct
-network, shell, and filesystem tools. OpenHands runs on the host; SDK-discovered
-plugins and their hooks may still be loaded, so use an isolated account for
-untrusted inputs.
+network, shell, and filesystem tools. OpenHands runs on the host with plugin
+discovery and plugin hooks disabled before the first input message. This uses
+a per-conversation lazy-loading guard in the pinned OpenHands SDK 1.54.0;
+other SDK versions fail before resource preparation or agent creation.
+Use an isolated account for adversarial inputs.
 HTTP and Git connections use validated public IP addresses while preserving
 TLS hostname checks; Git tunnels only GitHub and GitLab. PDF parsing runs
 before the generated Python timeout starts.
