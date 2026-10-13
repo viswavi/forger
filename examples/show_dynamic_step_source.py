@@ -5,6 +5,7 @@ Use the same model settings, goal, inputs, and FORGER_CACHE as the pipeline run.
 """
 
 import argparse
+import json
 import os
 
 from dotenv import load_dotenv
@@ -20,7 +21,7 @@ def main() -> None:
     parser.add_argument("--goal", required=True)
     parser.add_argument("--max-iterations", type=int, default=20)
     parser.add_argument("--max-tokens", type=int)
-    parser.add_argument("inputs", nargs="+")
+    parser.add_argument("inputs", nargs="+", help="JSON object for each input record")
     args = parser.parse_args()
 
     load_dotenv()
@@ -31,7 +32,10 @@ def main() -> None:
         max_tokens=args.max_tokens,
     )
     clear_trace()
-    for item in args.inputs:
+    for raw in args.inputs:
+        item = json.loads(raw)
+        if not isinstance(item, dict):
+            parser.error("each input must be a JSON object")
         try:
             code = dynamic_step_source(
                 item,
