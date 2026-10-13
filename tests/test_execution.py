@@ -9,7 +9,13 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from pyforger.execution import DockerBackend, ExecutionSpec
+from pyforger.artifacts import ArtifactRef
+from pyforger.execution import (
+    DockerBackend,
+    DockerEnvironmentFactory,
+    EnvironmentSpec,
+    ExecutionSpec,
+)
 
 
 @pytest.mark.parametrize(
@@ -396,3 +402,58 @@ def test_docker_rejects_output_hardlinks(docker_image, tmp_path):
     assert result.status == "infrastructure_error", result.stderr
     assert result.artifacts is None
     assert not (tmp_path / "output").exists()
+
+
+def test_shared_environment_lifecycle(docker_image, tmp_path):
+    """One context supports multiple commands, stdin, staging and collection."""
+    root = tmp_path / "inputs"
+    root.mkdir()
+    (root / "seed").write_text("seed")
+    factory = DockerEnvironmentFactory()
+    with factory.open(
+        EnvironmentSpec(docker_image, inputs=ArtifactRef.capture(root))
+    ) as env:
+        env.write_files({"nested/input": b"value"})
+        result = env.run(
+            ("python", "-c", "import sys; print(sys.stdin.read())"), 10, b"stdin"
+        )
+        assert result.status == "completed"
+        assert result.stdout == "stdin\n"
+        result = env.run(
+            (
+                "python",
+                "-c",
+                "from pathlib import Path; "
+                "Path('out').write_text(Path('seed').read_text()+"
+                "Path('nested/input').read_text())",
+            ),
+            10,
+        )
+        assert result.status == "completed"
+        artifact = env.collect(("out",), tmp_path / "output")
+        assert artifact.path("out").read_text() == "seedvalue"
+        container = env.container
+    env.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        env.run(("true",), 10)
+    inspected = subprocess.run(["docker", "inspect", container], capture_output=True)
+    assert inspected.returncode != 0
+
+
+def test_context_exception_cleanup(docker_image):
+    """Exceptions from callers still remove the live container."""
+    with pytest.raises(ValueError, match="caller error"):
+        with DockerEnvironmentFactory().open(EnvironmentSpec(docker_image)) as env:
+            container = env.container
+            raise ValueError("caller error")
+    inspected = subprocess.run(["docker", "inspect", container], capture_output=True)
+    assert inspected.returncode != 0
+
+
+def test_shared_timeout_closes_environment(docker_image):
+    """A timed-out command cannot leave subprocesses for the next command."""
+    with DockerEnvironmentFactory().open(EnvironmentSpec(docker_image)) as env:
+        result = env.run(("python", "-c", "while True: pass"), 0.1)
+        assert result.status == "timed_out"
+        with pytest.raises(RuntimeError, match="closed"):
+            env.run(("true",), 10)

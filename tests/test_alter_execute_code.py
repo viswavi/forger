@@ -132,3 +132,30 @@ class TestEmpty:
     def test_empty_input_returns_empty(self):
         """Empty input produces empty output without touching the Sandbox."""
         assert execute_code([], code_field="code", arg_field="value") == []
+
+
+def test_executor_alias_conflict():
+    """The legacy sandbox and executor keywords cannot be used together."""
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        execute_code(
+            [],
+            code_field="code",
+            arg_field="value",
+            sandbox=Sandbox(),
+            executor=Sandbox(),
+        )
+
+
+def test_executor_is_not_implicitly_cached():
+    """Repeated operation calls execute again even with the same source and inputs."""
+    executor = Sandbox()
+    rows = [
+        {
+            "code": "state=[]\ndef solve(x):\n state.append(x)\n return len(state)",
+            "value": 1,
+        }
+    ]
+    first = execute_code(rows, code_field="code", arg_field="value", executor=executor)
+    second = execute_code(rows, code_field="code", arg_field="value", executor=executor)
+    assert first[0]["result"] == 1
+    assert second[0]["result"] == 2

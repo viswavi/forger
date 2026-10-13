@@ -1,12 +1,13 @@
 """Run each item's code snippet through a Sandbox; record the result."""
 from __future__ import annotations
 
+from pyforger.executors import PythonExecutor
 from pyforger.op import op
 from pyforger.sandbox import Sandbox
 from pyforger.utils import get_field
 
 
-@op(name="alter.execute_code")
+@op(name="alter.execute_code", cache=False)
 def execute_code(
     items: list[dict],
     *,
@@ -15,22 +16,24 @@ def execute_code(
     output_field: str = "result",
     error_field: str | None = "error",
     sandbox: Sandbox | None = None,
+    executor: PythonExecutor | None = None,
     timeout_s: float | None = None,
 ) -> list[dict]:
-    """Compile each item's code and call it with ``arg_field``'s value.
+    """Execute each snippet with a swappable executor and record row errors.
 
-    The Sandbox caches by source string, so a snippet reused across items
-    pays compile cost once. Exceptions land in ``error_field`` (set to
-    ``None`` to omit) rather than raising, so one bad row doesn't kill
-    the batch.
-
-    ``timeout_s`` is the per-item wall-clock cap: a snippet that runs
-    longer raises ``SandboxTimeout``, caught here and recorded in
-    ``error_field`` like any other exception. ``None`` falls back to
-    the Sandbox's ``default_timeout_s``. SIGALRM-based, so Unix only
-    and main thread only.
+    ``sandbox`` is a legacy alias, mutually exclusive with ``executor``. Defaults
+    to Sandbox. Operation results are never implicitly cached; executor state and
+    stochastic source may change between calls. Timeout policy is executor-owned.
     """
-    sb = sandbox if sandbox is not None else Sandbox()
+    if sandbox is not None and executor is not None:
+        raise ValueError("sandbox and executor are mutually exclusive")
+    sb = (
+        executor
+        if executor is not None
+        else sandbox
+        if sandbox is not None
+        else Sandbox()
+    )
     out: list[dict] = []
     for item in items:
         code = get_field(item, code_field, "alter.execute_code")

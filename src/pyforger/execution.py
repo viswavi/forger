@@ -16,9 +16,11 @@ import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Literal, Optional, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 if TYPE_CHECKING:
     from pyforger.artifacts import ArtifactRef
@@ -47,7 +49,7 @@ class ExecutionSpec:
 
     image: str
     command: tuple[str, ...]
-    inputs: Optional[ArtifactRef] = None
+    inputs: ArtifactRef | None = None
     outputs: tuple[str, ...] = ()
     timeout_s: float = 60.0
     memory_mb: int = 256
@@ -99,14 +101,76 @@ class ExecutionSpec:
 
 
 @dataclass(frozen=True)
+class EnvironmentSpec:
+    """Trusted local image, initial artifacts, and per-environment limits."""
+
+    image: str
+    inputs: ArtifactRef | None = None
+    timeout_s: float = 60.0
+    memory_mb: int = 256
+    cpus: float = 1.0
+    pids_limit: int = 64
+    workdir: str = "/work"
+
+    def __post_init__(self) -> None:
+        """Validate limits using the backward-compatible execution spec."""
+        ExecutionSpec(**self.__dict__, command=("true",))
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    """Bounded command logs and wall-clock duration, without artifact collection."""
+
+    status: ExecutionStatus
+    exit_code: int | None
+    stdout: str
+    stderr: str
+    duration_s: float
+
+
+class Environment(Protocol):
+    """A shared command and artifact lifecycle, never a host execution fallback."""
+
+    def run(
+        self, command: tuple[str, ...], timeout_s: float, stdin: bytes | None = None
+    ) -> CommandResult:
+        """Run a command with a wall-clock deadline and optional standard input."""
+        ...
+
+    def write_files(self, files: dict[str, bytes]) -> None:
+        """Stage relative regular files without mounting host paths."""
+        ...
+
+    def stage(self, inputs: ArtifactRef) -> None:
+        """Verify and copy an artifact into the environment."""
+        ...
+
+    def collect(self, outputs: tuple[str, ...], output: Path) -> ArtifactRef:
+        """Publish declared regular files from a validated archive."""
+        ...
+
+    def close(self) -> None:
+        """Remove the environment, including all its child processes."""
+        ...
+
+
+class EnvironmentFactory(Protocol):
+    """Open fresh environments whose context always closes them."""
+
+    def open(self, spec: EnvironmentSpec) -> AbstractContextManager[Environment]:
+        """Create an environment and arrange unconditional cleanup."""
+        ...
+
+
+@dataclass(frozen=True)
 class ExecutionResult:
     """Command status, bounded logs, retained outputs, and elapsed time."""
 
     status: ExecutionStatus
-    exit_code: Optional[int]
+    exit_code: int | None
     stdout: str
     stderr: str
-    artifacts: Optional[ArtifactRef]
+    artifacts: ArtifactRef | None
     duration_s: float
 
 
@@ -126,7 +190,7 @@ class _Infrastructure(Exception):
     pass
 
 
-class DockerBackend:
+class DockerEnvironmentFactory:
     """Run commands in fresh containers using trusted local Docker images."""
 
     def __init__(
@@ -154,9 +218,9 @@ class DockerBackend:
         args: list[str],
         deadline: float,
         *,
-        archive: Optional[Path] = None,
+        archive: Path | None = None,
         archive_limit: int = 0,
-        stdin_file: Optional[Path] = None,
+        stdin_file: Path | None = None,
     ) -> tuple[int, str, str]:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -346,158 +410,268 @@ class DockerBackend:
         # symlink at the publication leaf.
         return output.parent.resolve() / output.name
 
-    def execute(self, spec: ExecutionSpec, output: Path) -> ExecutionResult:
-        """Execute once; nonzero exits skip collection and remain failed.
-
-        Successful commands with missing/unsafe outputs are infrastructure
-        errors. Timeout and cleanup errors take precedence over command status.
-        The caller must prevent concurrent mutation of input/output directories.
-        Collection is not a point-in-time snapshot of background container writers;
-        tar errors fail closed and every received member is validated on host.
-        """
-        from pyforger.artifacts import ArtifactRef
-
-        started = time.monotonic()
-        deadline = started + spec.timeout_s
-        container = "forger-" + uuid.uuid4().hex
-        status: ExecutionStatus = "infrastructure_error"
-        code = None
-        stdout = stderr = ""
-        artifacts = None
-        create_attempted = False
+    @contextmanager
+    def open(self, spec: EnvironmentSpec) -> Iterator[Environment]:
+        """Open a fresh hardened container; cleanup also covers failed startup."""
+        environment = DockerEnvironment(self, spec)
         try:
-            output = self._output_path(output)
-            if output.exists() or output.is_symlink():
-                if output.is_symlink() or not output.is_dir() or any(output.iterdir()):
-                    raise ValueError("output must be absent or an empty directory")
-            with tempfile.TemporaryDirectory(prefix="forger-execution-") as temporary:
-                temp = Path(temporary)
-                stage = temp / "inputs"
-                stage.mkdir()
-                if spec.inputs is not None:
-                    self._stage_inputs(spec.inputs, stage)
-                details = json.loads(
-                    self._check(
-                        [
-                            "image",
-                            "inspect",
-                            "--format",
-                            '{"Id":{{json .Id}},"Config":{'
-                            '"Volumes":{{json (index .Config "Volumes")}}}}',
-                            spec.image,
-                        ],
-                        deadline,
-                    )
+            environment._start()
+            yield environment
+        finally:
+            environment.close()
+
+
+class DockerEnvironment:
+    """Live Docker environment with bounded transport and safe tar publication.
+
+    Calls are sequential. A command timeout destroys the environment so surviving
+    container processes cannot interfere with later commands.
+    """
+
+    def __init__(self, factory: DockerEnvironmentFactory, spec: EnvironmentSpec):
+        """Store lifecycle state without starting a container."""
+        self.factory = factory
+        self.spec = spec
+        self.container = "forger-" + uuid.uuid4().hex
+        self._create_attempted = False
+        self._closed = False
+
+    def _deadline(self) -> float:
+        if self._closed:
+            raise RuntimeError("environment is closed")
+        return time.monotonic() + self.spec.timeout_s
+
+    def _start(self) -> None:
+        details = json.loads(
+            self.factory._check(
+                [
+                    "image",
+                    "inspect",
+                    "--format",
+                    '{"Id":{{json .Id}},"Config":{'
+                    '"Volumes":{{json (index .Config "Volumes")}}}}',
+                    self.spec.image,
+                ],
+                self._deadline(),
+            )
+        )
+        if details.get("Config", {}).get("Volumes"):
+            raise ValueError("images declaring volumes are not supported")
+        image = details["Id"]
+        self._create_attempted = True
+        self.factory._check(
+            [
+                "create",
+                "--pull=never",
+                "--name",
+                self.container,
+                "--network=none",
+                "--read-only",
+                "--cap-drop=ALL",
+                "--security-opt=no-new-privileges",
+                "--user=65534:65534",
+                "--memory",
+                str(self.spec.memory_mb) + "m",
+                "--memory-swap",
+                str(self.spec.memory_mb) + "m",
+                "--cpus",
+                str(self.spec.cpus),
+                "--pids-limit",
+                str(self.spec.pids_limit),
+                "--tmpfs",
+                "/work:rw,nosuid,nodev,mode=1777,size="
+                + str(self.spec.memory_mb)
+                + "m",
+                "--workdir=/work",
+                "--log-driver=none",
+                "--entrypoint=/bin/sh",
+                image,
+                "-c",
+                "while :; do sleep 3600; done",
+            ],
+            self._deadline(),
+        )
+        self.factory._check(["start", self.container], self._deadline())
+        if self.spec.inputs is not None:
+            self.stage(self.spec.inputs)
+
+    def _upload(self, stage: Path, archive: Path) -> None:
+        self.factory._input_archive(stage, archive)
+        self.factory._check(
+            [
+                "exec",
+                "-i",
+                "--workdir=/work",
+                self.container,
+                "tar",
+                "--no-same-owner",
+                "-xf",
+                "-",
+            ],
+            self._deadline(),
+            stdin_file=archive,
+        )
+
+    def stage(self, inputs: ArtifactRef) -> None:
+        """Verify artifacts before and after transport preparation."""
+        with tempfile.TemporaryDirectory(prefix="forger-stage-") as temporary:
+            root = Path(temporary)
+            stage = root / "files"
+            stage.mkdir()
+            self.factory._stage_inputs(inputs, stage)
+            self._upload(stage, root / "inputs.tar")
+
+    def write_files(self, files: dict[str, bytes]) -> None:
+        """Write byte-valued relative files using the same safe tar transport."""
+        self._deadline()
+        for name, data in files.items():
+            _relative_file(name)
+            if not isinstance(data, bytes):
+                raise TypeError("file content must be bytes")
+        with tempfile.TemporaryDirectory(prefix="forger-files-") as temporary:
+            root = Path(temporary)
+            stage = root / "files"
+            stage.mkdir()
+            for name, data in files.items():
+                target = stage / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
+            self._upload(stage, root / "inputs.tar")
+
+    def run(
+        self, command: tuple[str, ...], timeout_s: float, stdin: bytes | None = None
+    ) -> CommandResult:
+        """Run without a shell; timeouts close the entire environment."""
+        ExecutionSpec(self.spec.image, command, timeout_s=timeout_s)
+        if stdin is not None and not isinstance(stdin, bytes):
+            raise TypeError("stdin must be bytes or None")
+        self._deadline()
+        started = time.monotonic()
+        code = None
+        status: ExecutionStatus
+        stdout = stderr = ""
+        try:
+            with tempfile.TemporaryDirectory(prefix="forger-stdin-") as temporary:
+                source = None
+                args = ["exec", "--workdir=/work"]
+                if stdin is not None:
+                    source = Path(temporary) / "stdin"
+                    source.write_bytes(stdin)
+                    args.append("-i")
+                code, stdout, stderr = self.factory._run(
+                    [*args, self.container, *command],
+                    started + timeout_s,
+                    stdin_file=source,
                 )
-                if details.get("Config", {}).get("Volumes"):
-                    raise ValueError("images declaring volumes are not supported")
-                image = details["Id"]
-                create_attempted = True
-                self._check(
-                    [
-                        "create",
-                        "--pull=never",
-                        "--name",
-                        container,
-                        "--network=none",
-                        "--read-only",
-                        "--cap-drop=ALL",
-                        "--security-opt=no-new-privileges",
-                        "--user=65534:65534",
-                        "--memory",
-                        str(spec.memory_mb) + "m",
-                        "--memory-swap",
-                        str(spec.memory_mb) + "m",
-                        "--cpus",
-                        str(spec.cpus),
-                        "--pids-limit",
-                        str(spec.pids_limit),
-                        "--tmpfs",
-                        "/work:rw,nosuid,nodev,mode=1777,size="
-                        + str(spec.memory_mb)
-                        + "m",
-                        "--workdir=/work",
-                        "--log-driver=none",
-                        "--entrypoint=/bin/sh",
-                        image,
-                        "-c",
-                        "while :; do sleep 3600; done",
-                    ],
-                    deadline,
-                )
-                self._check(["start", container], deadline)
-                if spec.inputs is not None:
-                    input_archive = temp / "inputs.tar"
-                    self._input_archive(stage, input_archive)
-                    self._check(
-                        [
-                            "exec",
-                            "-i",
-                            "--workdir=/work",
-                            container,
-                            "tar",
-                            "--no-same-owner",
-                            "-xf",
-                            "-",
-                        ],
-                        deadline,
-                        stdin_file=input_archive,
-                    )
-                code, stdout, stderr = self._run(
-                    ["exec", "--workdir=/work", container, *spec.command], deadline
-                )
-                status = "completed" if code == 0 else "failed"
-                if spec.outputs and code == 0:
-                    archive = temp / "outputs.tar"
-                    # Docker cp reads the underlying rootfs, not the live tmpfs.
-                    # Tar does not dereference links; its entire untrusted stream
-                    # is validated before any declared file is written on host.
-                    self._check(
-                        [
-                            "exec",
-                            "--workdir=/work",
-                            container,
-                            "tar",
-                            "-cf",
-                            "-",
-                            "--",
-                            ".",
-                        ],
-                        deadline,
-                        archive=archive,
-                        archive_limit=spec.memory_mb * 1024 * 1024 * 2 + 1048576,
-                    )
-                    collected = temp / "collected"
-                    collected.mkdir()
-                    self._extract(
-                        archive, collected, spec.outputs, spec.memory_mb * 1024 * 1024
-                    )
-                    ArtifactRef.capture(collected).verify()
-                    output.parent.mkdir(parents=True, exist_ok=True)
-                    if output.exists():
-                        output.rmdir()
-                    shutil.move(str(collected), str(output))
-                    artifacts = ArtifactRef.capture(output)
-                    artifacts.verify()
+            status = "completed" if code == 0 else "failed"
         except _Deadline as exc:
-            status = "timed_out"
             if exc.args:
                 stdout, stderr = exc.args
-        except Exception as exc:
+            self.close()
+            status = "timed_out"
+        except (OSError, _Infrastructure) as exc:
             status = "infrastructure_error"
-            stderr = (stderr + "\n" + str(exc))[-self.max_log_bytes :]
-        finally:
-            if create_attempted:
-                try:
-                    self._check(
-                        ["rm", "--force", container],
-                        time.monotonic() + self.cleanup_timeout_s,
-                    )
-                except (OSError, _Deadline, _Infrastructure) as exc:
-                    status = "infrastructure_error"
-                    stderr = (stderr + "\nContainer cleanup failed: " + str(exc))[
-                        -self.max_log_bytes :
-                    ]
+            stderr = str(exc)
+        return CommandResult(status, code, stdout, stderr, time.monotonic() - started)
+
+    def collect(self, outputs: tuple[str, ...], output: Path) -> ArtifactRef:
+        """Validate every tar member before atomically publishing selected files."""
+        from pyforger.artifacts import ArtifactRef
+
+        ExecutionSpec(self.spec.image, ("true",), outputs=outputs)
+        output = self.factory._output_path(output)
+        if output.exists() and (not output.is_dir() or any(output.iterdir())):
+            raise ValueError("output must be absent or an empty directory")
+        with tempfile.TemporaryDirectory(prefix="forger-collect-") as temporary:
+            root = Path(temporary)
+            archive = root / "outputs.tar"
+            self.factory._check(
+                [
+                    "exec",
+                    "--workdir=/work",
+                    self.container,
+                    "tar",
+                    "-cf",
+                    "-",
+                    "--",
+                    ".",
+                ],
+                self._deadline(),
+                archive=archive,
+                archive_limit=self.spec.memory_mb * 1024 * 1024 * 2 + 1048576,
+            )
+            collected = root / "collected"
+            collected.mkdir()
+            self.factory._extract(
+                archive, collected, outputs, self.spec.memory_mb * 1024 * 1024
+            )
+            ArtifactRef.capture(collected).verify()
+            output.parent.mkdir(parents=True, exist_ok=True)
+            if output.exists():
+                output.rmdir()
+            shutil.move(str(collected), str(output))
+        artifacts = ArtifactRef.capture(output)
+        artifacts.verify()
+        return artifacts
+
+    def close(self) -> None:
+        """Idempotently remove the container; report cleanup failures to callers."""
+        if self._closed:
+            return
+        if self._create_attempted:
+            self.factory._check(
+                ["rm", "--force", self.container],
+                time.monotonic() + self.factory.cleanup_timeout_s,
+            )
+        self._closed = True
+
+
+class DockerBackend(DockerEnvironmentFactory):
+    """Backward-compatible one-shot commands built on the shared lifecycle."""
+
+    def execute(self, spec: ExecutionSpec, output: Path) -> ExecutionResult:
+        """Run once, collect only successful outputs, and always clean up."""
+        started = time.monotonic()
+        artifacts = None
+        result = CommandResult("infrastructure_error", None, "", "", 0)
+        try:
+            output = self._output_path(output)
+            if output.exists() and (not output.is_dir() or any(output.iterdir())):
+                raise ValueError("output must be absent or an empty directory")
+            environment_spec = EnvironmentSpec(
+                **{
+                    name: getattr(spec, name)
+                    for name in EnvironmentSpec.__dataclass_fields__
+                }
+            )
+            with self.open(environment_spec) as environment:
+                result = environment.run(spec.command, spec.timeout_s)
+                if spec.outputs and result.status == "completed":
+                    artifacts = environment.collect(spec.outputs, output)
+        except _Deadline:
+            result = CommandResult(
+                "timed_out", result.exit_code, result.stdout, result.stderr, 0
+            )
+        except Exception as exc:
+            result = CommandResult(
+                "infrastructure_error",
+                result.exit_code,
+                result.stdout,
+                (result.stderr + "\n" + str(exc))[-self.max_log_bytes :],
+                0,
+            )
         return ExecutionResult(
-            status, code, stdout, stderr, artifacts, time.monotonic() - started
+            result.status,
+            result.exit_code,
+            result.stdout,
+            result.stderr,
+            artifacts,
+            time.monotonic() - started,
         )
+
+
+# Share fail-closed artifact transport with other environment factories.
+extract_output_archive = DockerEnvironmentFactory._extract
+stage_artifact_inputs = DockerEnvironmentFactory._stage_inputs
+create_input_archive = DockerEnvironmentFactory._input_archive
+validate_relative_file = _relative_file
