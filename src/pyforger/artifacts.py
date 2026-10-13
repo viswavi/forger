@@ -9,9 +9,10 @@ import re
 import shutil
 import stat
 import tempfile
-from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
-from typing import Any
+from typing import Self
+
+from pydantic import BaseModel, ConfigDict, StrictInt, model_validator
 
 _MAX_ENTRIES = 100_000
 _MAX_DEPTH = 100
@@ -58,20 +59,23 @@ def _directory(root: Path) -> Path:
     return root
 
 
-@dataclass(frozen=True)
-class ArtifactFile:
+class ArtifactFile(BaseModel):
     """One immutable manifest entry; paths use forward slashes."""
 
+    model_config = ConfigDict(frozen=True)
+
     path: str
-    size: int
+    size: StrictInt
     sha256: str
 
-    def __post_init__(self) -> None:
+    @model_validator(mode="after")
+    def validate_manifest(self) -> Self:
         """Validate the relative path, byte count, and content digest."""
         _relative(self.path)
         if type(self.size) is not int or self.size < 0:
             raise ValueError("Artifact file size must be a nonnegative integer")
         _sha256(self.sha256)
+        return self
 
 
 def _digest(files: tuple[ArtifactFile, ...]) -> str:
@@ -133,9 +137,9 @@ def _manifest(root: Path) -> tuple[ArtifactFile, ...]:
                             )
                         files.append(
                             ArtifactFile(
-                                path.relative_to(root).as_posix(),
-                                size,
-                                digest.hexdigest(),
+                                path=path.relative_to(root).as_posix(),
+                                size=size,
+                                sha256=digest.hexdigest(),
                             )
                         )
                     else:
@@ -147,8 +151,7 @@ def _manifest(root: Path) -> tuple[ArtifactFile, ...]:
         raise ValueError(f"Cannot read artifact {root}: {exc}") from exc
 
 
-@dataclass(frozen=True)
-class ArtifactRef:
+class ArtifactRef(BaseModel):
     """A snapshot of regular files, independent of root and timestamps.
 
     Empty directories are excluded. Verification is not a filesystem lock:
@@ -157,11 +160,14 @@ class ArtifactRef:
     symlinks are rejected during verification.
     """
 
+    model_config = ConfigDict(frozen=True)
+
     root: Path
     digest: str
     files: tuple[ArtifactFile, ...]
 
-    def __post_init__(self) -> None:
+    @model_validator(mode="after")
+    def validate_manifest(self) -> Self:
         """Normalize the root and validate the immutable manifest and digest."""
         object.__setattr__(self, "root", _normalize_root(self.root))
         object.__setattr__(self, "files", tuple(self.files))
@@ -175,13 +181,14 @@ class ArtifactRef:
             raise ValueError("Artifact manifest paths must be unique and sorted")
         if _digest(self.files) != self.digest:
             raise ValueError("Artifact manifest digest mismatch")
+        return self
 
     @classmethod
     def capture(cls, root: Path) -> ArtifactRef:
         """Hash regular files under a validated root into an immutable reference."""
         root = _normalize_root(root)
         files = _manifest(root)
-        return cls(root, _digest(files), files)
+        return cls(root=root, digest=_digest(files), files=files)
 
     def verify(self) -> None:
         """Reject missing, additional, or changed files against the manifest."""
@@ -210,30 +217,6 @@ class ArtifactRef:
         if relative not in {f.path for f in self.files}:
             raise ValueError(f"File is not in artifact manifest: {relative!r}")
         return self.root / relative
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize the root, digest, and manifest as JSON-compatible values."""
-        return {
-            "root": str(self.root),
-            "digest": self.digest,
-            "files": [
-                {"path": f.path, "size": f.size, "sha256": f.sha256} for f in self.files
-            ],
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> ArtifactRef:
-        """Restore manifest metadata without reading artifact files."""
-        try:
-            if not isinstance(data["root"], str) or not isinstance(data["files"], list):
-                raise ValueError("Invalid artifact ledger root or files")
-            return cls(
-                Path(data["root"]),
-                data["digest"],
-                tuple(ArtifactFile(**f) for f in data["files"]),
-            )
-        except (KeyError, TypeError) as exc:
-            raise ValueError(f"Invalid artifact ledger: {exc}") from exc
 
 
 class ArtifactStore:
@@ -283,7 +266,7 @@ class ArtifactStore:
                 ):
                     shutil.copyfileobj(stream, output, _CHUNK_SIZE)
             ref.verify()
-            ArtifactRef(staged, ref.digest, ref.files).verify()
+            ArtifactRef(root=staged, digest=ref.digest, files=ref.files).verify()
             try:
                 staged.rename(destination)
             except OSError:
