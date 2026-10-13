@@ -457,3 +457,4 @@ def test_shared_timeout_closes_environment(docker_image):
         assert result.status == "timed_out"
         with pytest.raises(RuntimeError, match="closed"):
             env.run(("true",), 10)
+

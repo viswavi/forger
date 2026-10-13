@@ -575,7 +575,14 @@ class DockerEnvironment:
         return CommandResult(status, code, stdout, stderr, time.monotonic() - started)
 
     def collect(self, outputs: tuple[str, ...], output: Path) -> ArtifactRef:
-        """Validate every tar member before atomically publishing selected files."""
+        """Validate every tar member before atomically publishing selected files.
+
+        The whole workdir is archived on purpose: ``_extract`` must see (and
+        reject) symlinked/hardlinked ancestors and stray link members, not
+        just the declared outputs. A consequence is that undeclared scratch
+        files count against ``archive_limit`` (~2x ``memory_mb``); workloads
+        should declare large intermediates as outputs or clean them up.
+        """
         from pyforger.artifacts import ArtifactRef
 
         ExecutionSpec(self.spec.image, ("true",), outputs=outputs)

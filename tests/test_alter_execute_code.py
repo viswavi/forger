@@ -159,3 +159,15 @@ def test_executor_is_not_implicitly_cached():
     second = execute_code(rows, code_field="code", arg_field="value", executor=executor)
     assert first[0]["result"] == 1
     assert second[0]["result"] == 2
+
+
+def test_sandbox_path_is_cached(tmp_path, monkeypatch):
+    """Default Sandbox calls retain @op caching; executor calls above do not."""
+    monkeypatch.setenv("FORGER_CACHE", str(tmp_path / "cache"))
+    from pyforger.op import clear_trace, trace
+
+    rows = [{"code": "def f(x):\n    return x + 1", "value": 1}]
+    clear_trace()
+    assert execute_code(rows, code_field="code", arg_field="value")[0]["result"] == 2
+    assert execute_code(rows, code_field="code", arg_field="value")[0]["result"] == 2
+    assert [record.cache_hit for record in trace()] == [False, True]
