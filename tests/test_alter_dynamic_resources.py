@@ -1,5 +1,7 @@
 """Tests for dynamic pipeline operations."""
 
+import importlib.metadata
+import json
 import socket
 import socketserver
 import threading
@@ -292,6 +294,65 @@ def test_clone_stops_at_disk_limit(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="disk limit"):
         resources._clone_repo("https://github.com/acme/repo.git", tmp_path)
     assert killed == [12345]
+
+
+def test_git_tool_lists_and_reads_prepared_files(monkeypatch):
+    """Test git tool lists and reads prepared files."""
+    pytest.importorskip("openhands.sdk")
+    from pyforger.alter import _dynamic_tool as tool
+
+    prepared = {
+        "kind": "git",
+        "url": "https://github.com/a/b.git",
+        "files": {"README.md": "hello", "src/a.py": "x = 1"},
+    }
+    monkeypatch.setattr(tool, "prepare_input", lambda item: prepared)
+    session = tool.PythonExecutor({"url": "https://github.com/a/b.git"}, 5)
+    git = tool.GitExecutor(session)
+    listing = git(tool.GitAction(operation="list"))
+    assert json.loads(listing.result_text)["files"] == ["README.md", "src/a.py"]
+    content = git(tool.GitAction(operation="read", path="src/a.py"))
+    assert json.loads(content.result_text)["content"] == "x = 1"
+    assert session.prepared_input() == prepared
+
+
+def test_sdk_resolves_all_restricted_tools():
+    """Test sdk resolves all restricted tools."""
+    pytest.importorskip("openhands.sdk")
+    from openhands.sdk.tool import Tool
+    from openhands.sdk.tool.registry import resolve_tool
+
+    from pyforger.alter import _dynamic_tool as tool
+
+    session = tool.PythonExecutor({"text": "plain input"}, 5)
+    session_id = tool.register_executor(session)
+    try:
+        for name in ("ForgerPythonTool", "ForgerResourceTool", "ForgerGitTool"):
+            resolved = resolve_tool(
+                Tool(name=name, params={"session_id": session_id}), None
+            )
+            assert len(resolved) == 1
+            assert resolved[0].executor is not None
+    finally:
+        tool.unregister_executor(session_id)
+
+
+def test_generated_program_receives_prepared_url(monkeypatch):
+    """Test generated program receives prepared url."""
+    version = importlib.metadata.version("RestrictedPython")
+    if tuple(map(int, version.split(".")[:2])) < (8, 4):
+        pytest.skip("Dynamic worker requires RestrictedPython >=8.4")
+    from pyforger.alter import dynamic
+
+    try:
+        dynamic._require_dynamic_platform()
+    except NotImplementedError:
+        pytest.skip("Dynamic worker requires Unix signal timers")
+
+    prepared = {"kind": "html", "url": "https://example.org", "content": "hello"}
+    monkeypatch.setattr(dynamic, "prepare_input", lambda item: prepared)
+    code = 'def run(item):\n    return [item["content"]]'
+    assert dynamic._execute(code, {"url": "https://example.org"}, 5) == ["hello"]
 
 
 def test_public_fetch_rejects_invalid_limits_before_network():

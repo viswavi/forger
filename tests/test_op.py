@@ -1,4 +1,5 @@
 """Tests for pyforger.op."""
+
 from __future__ import annotations
 
 import logging
@@ -19,6 +20,43 @@ def test_op_rejects_reserved_cache_arg_name() -> None:
         @op
         def _sample(x: int, *, _no_cache: bool = False) -> int:
             return x
+
+
+def test_cache_only_never_executes_on_miss(tmp_path, monkeypatch) -> None:
+    """Test cache only never executes on miss."""
+    monkeypatch.setenv("FORGER_CACHE", str(tmp_path))
+    calls = []
+
+    @op
+    def sample(x: int) -> int:
+        calls.append(x)
+        return x * 2
+
+    with pytest.raises(FileNotFoundError, match="No cached result"):
+        sample(3, _cache_only=True)
+    assert calls == []
+    assert sample(3) == 6
+    assert sample(3, _cache_only=True) == 6
+    assert calls == [3]
+
+
+def test_cache_only_reports_invalid_call_and_corrupt_entry(
+    tmp_path, monkeypatch
+) -> None:
+    """Cache inspection reports binding and read failures accurately."""
+    monkeypatch.setenv("FORGER_CACHE", str(tmp_path))
+
+    @op
+    def sample(x: int) -> int:
+        return x * 2
+
+    with pytest.raises(TypeError):
+        sample(_cache_only=True)
+    assert sample(3) == 6
+    entry = next(tmp_path.rglob("*.pkl"))
+    entry.write_bytes(b"corrupt")
+    with pytest.raises(RuntimeError, match="Cannot read cached result"):
+        sample(3, _cache_only=True)
 
 
 def test_op_warns_on_unstable_refs(caplog: pytest.LogCaptureFixture) -> None:
