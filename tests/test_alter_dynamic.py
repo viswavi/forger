@@ -8,7 +8,9 @@ import time
 from types import SimpleNamespace
 
 import pytest
+from completion import completion_server
 
+from pyforger.acquire import Model
 from pyforger.alter import dynamic_step, dynamic_step_source
 from pyforger.op import clear_trace, trace
 
@@ -250,7 +252,9 @@ def test_agent_retries_text_and_keeps_successful_submission(monkeypatch):
             )
             if len([x for x in calls if x[0] == "run"]) == 2:
                 session_id = self.agent.tools[0].params["session_id"]
-                tool._session(session_id).accepted[:] = ["def run(item): return [item]"]
+                tool._session(session_id).accepted[:] = [
+                    "def run(item): return [item['text']]"
+                ]
                 raise RuntimeError("SDK failed after submission")
 
         def close(self):
@@ -325,3 +329,78 @@ def test_real_agent_retains_restricted_tools(monkeypatch):
         assert {"python", "resource", "git", "finish"} <= set(agent._tools)
     finally:
         tool.unregister_executor(session_id)
+
+
+def test_real_sdk_corrects_code_and_reexecutes_cached_source(tmp_path, monkeypatch):
+    """Only the paid API is scripted; tools, workers, and caching are real."""
+    invalid = "def run(item): return 3"
+    corrected = "def run(item): return [item['text'].upper()]"
+
+    def submit(code, call_id):
+        return {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": "python",
+                        "arguments": json.dumps({"code": code, "submit": True}),
+                    },
+                }
+            ],
+        }
+
+    executions = []
+    real_run = dynamic.subprocess.run
+
+    def record_run(command, **kwargs):
+        if command[-1].endswith("_dynamic_worker.py"):
+            executions.append(json.loads(kwargs["input"])["code"])
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr(dynamic.subprocess, "run", record_run)
+    clear_trace()
+    with completion_server(
+        [
+            submit(invalid, "invalid"),
+            submit(corrected, "corrected"),
+            {"role": "assistant", "content": "Finished."},
+        ]
+    ) as (url, requests):
+        model = Model(
+            "openai/test",
+            api_key="test-not-a-real-secret",
+            api_base=url,
+            num_retries=0,
+            timeout=5,
+            temperature=None,
+            capability_overrides={"supports_vision": True},
+        )
+        options = {"max_iterations": 3, "execution_timeout_s": 5}
+        assert dynamic_step(
+            [{"text": "hello"}], "Uppercase text", model, **options
+        ) == [["HELLO"]]
+        assert len(requests) == 3
+        assert "list of strings" in json.dumps(requests[1]["messages"])
+        assert executions == [invalid, corrected, corrected]
+        tools = {entry["function"]["name"] for entry in requests[0]["tools"]}
+        assert tools == {"python", "resource", "git", "finish"}
+
+    # The API is closed: a cache miss cannot silently generate another program.
+    assert dynamic_step([{"text": "hello"}], "Uppercase text", model, **options) == [
+        ["HELLO"]
+    ]
+    assert executions == [invalid, corrected, corrected, corrected]
+    assert (
+        dynamic_step_source(
+            {"text": "hello"}, "Uppercase text", model, _cache_only=True, **options
+        )
+        == corrected
+    )
+    assert [
+        entry.cache_hit
+        for entry in trace()
+        if entry.op_name == "alter.dynamic_step_source"
+    ] == [False, True, True]

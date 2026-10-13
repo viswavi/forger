@@ -3,10 +3,13 @@
 import importlib.metadata
 import json
 import socket
+import socketserver
+import threading
 from contextlib import contextmanager
 
 import pytest
 
+from pyforger.alter import _dynamic_git_proxy as proxy_module
 from pyforger.alter import _dynamic_resources as resources
 
 
@@ -373,3 +376,95 @@ def test_public_fetch_is_shared_with_dynamic_download():
     from pyforger.acquire.resources import fetch_public
 
     assert fetch_public is resources.fetch_public
+
+
+@contextmanager
+def local_git_tunnel(monkeypatch):
+    """Route an allowed CONNECT destination to a real loopback echo server."""
+    received = []
+    destinations = []
+
+    class Echo(socketserver.BaseRequestHandler):
+        def handle(self):
+            while data := self.request.recv(1024):
+                received.append(data)
+                self.request.sendall(data)
+
+    real_connect = socket.create_connection
+    with socketserver.ThreadingTCPServer(("127.0.0.1", 0), Echo) as server:
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        def destination(url):
+            destinations.append(url)
+            return "github.com", "93.184.216.34"
+
+        def connect(address, *args, **kwargs):
+            if address == ("93.184.216.34", 443):
+                address = server.server_address
+            return real_connect(address, *args, **kwargs)
+
+        # Substitute only destination discovery/routing, not sockets or relay I/O.
+        monkeypatch.setattr(resources, "_public_https_address", destination)
+        monkeypatch.setattr(proxy_module.socket, "create_connection", connect)
+        try:
+            with proxy_module.git_proxy() as proxy:
+                yield (
+                    "127.0.0.1",
+                    int(proxy.rsplit(":", 1)[1]),
+                ), received, destinations
+        finally:
+            server.shutdown()
+            thread.join(timeout=2)
+
+
+def open_git_tunnel(address):
+    """Complete CONNECT before sending tunnel data."""
+    connection = socket.create_connection(address, timeout=3)
+    connection.sendall(b"CONNECT github.com:443 HTTP/1.1\r\nHost: github.com\r\n\r\n")
+    response = bytearray()
+    while not response.endswith(b"\r\n\r\n"):
+        chunk = connection.recv(1)
+        assert chunk, "Proxy closed before completing CONNECT"
+        response.extend(chunk)
+    assert bytes(response) == b"HTTP/1.1 200 Connection Established\r\n\r\n"
+    return connection
+
+
+def test_git_proxy_forwards_real_socket_bytes(monkeypatch):
+    """CONNECT relays exact bytes in both directions to the pinned destination."""
+    with local_git_tunnel(monkeypatch) as (address, received, destinations):
+        with open_git_tunnel(address) as connection:
+            payload = b"git upload-pack\x00\xff\n"
+            connection.sendall(payload)
+            response = bytearray()
+            while len(response) < len(payload):
+                chunk = connection.recv(len(payload) - len(response))
+                assert chunk
+                response.extend(chunk)
+            assert bytes(response) == payload
+        assert b"".join(received) == payload
+        assert destinations == ["https://github.com"]
+
+
+@pytest.mark.parametrize("reconnect", [False, True])
+def test_git_proxy_cuts_off_aggregate_transfer(monkeypatch, reconnect):
+    """The budget counts both directions and is shared across CONNECT sessions."""
+    monkeypatch.setattr(proxy_module, "_MAX_TRANSFER", 8)
+    with local_git_tunnel(monkeypatch) as (address, received, _):
+        with open_git_tunnel(address) as connection:
+            connection.sendall(b"1234")
+            response = bytearray()
+            while len(response) < 4:
+                chunk = connection.recv(4 - len(response))
+                assert chunk
+                response.extend(chunk)
+            assert bytes(response) == b"1234"
+            if not reconnect:
+                connection.sendall(b"x")
+                assert connection.recv(1) == b""
+        if reconnect:
+            with open_git_tunnel(address) as connection:
+                connection.sendall(b"x")
+                assert connection.recv(1) == b""
+        assert b"".join(received) == b"1234"
