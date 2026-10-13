@@ -292,3 +292,22 @@ def test_bounded_text_reads_regular_files_only(tmp_path):
     for limit in (0, -1, True):
         with pytest.raises(ValueError):
             read_text(path, limit)
+
+
+@pytest.mark.parametrize("relative", [False, True])
+def test_bounded_text_read_rejects_symlinked_ancestors(tmp_path, monkeypatch, relative):
+    """Reject directory aliases even when the final component is a regular file."""
+    from pyforger.artifacts import read_text
+
+    root = tmp_path / "real"
+    (root / "nested").mkdir(parents=True)
+    (root / "nested/text").write_text("example")
+    alias = tmp_path / "alias"
+    alias.symlink_to(root, target_is_directory=True)
+    monkeypatch.chdir(tmp_path)
+    path = alias / "nested/text"
+    if relative:
+        path = path.relative_to(tmp_path)
+    with pytest.raises(ValueError, match="symlink"):
+        read_text(path)
+    assert read_text(root / "nested/text") == "example"

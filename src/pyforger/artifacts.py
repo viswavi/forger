@@ -293,11 +293,15 @@ class ArtifactStore:
 
 
 def read_text(path: Path, max_bytes: int = 2 * 1024 * 1024) -> str:
-    """Read a bounded regular UTF-8 file without following symlinks."""
+    """Read bounded regular UTF-8 content, rejecting symlinked path components.
+
+    Callers must prevent concurrent path or content mutation during the read.
+    """
     if type(max_bytes) is not int or max_bytes < 1:
         raise ValueError("max_bytes must be positive")
     path = Path(path)
     try:
+        path = _directory(path.parent) / path.name
         with _open_file(path) as stream:
             data = stream.read(max_bytes + 1)
     except OSError as exc:
