@@ -126,7 +126,7 @@ Transform rows without removing items.
 | `translate.to_language` | LLM translation of selected fields into a target natural language. |
 | `translate.to_code` | LLM conversion of fields into code in a target programming language. Strips markdown fences. |
 | `execute_code` | Execute Python code in a sandboxed environment and return the result. |
-| `dynamic_step` | Run dynamic input-specific sub-pipelines that return string outputs. |
+| `dynamic_step` | Run dynamic input-specific sub-pipelines that return a string list per input. |
 | `dynamic_step_source` | Generate or inspect sub-pipeline generated for a single input. |
 
 `generate_from_context` performs `samples_per_item` LLM calls per input and returns parsed dicts, with retry against an
@@ -392,18 +392,20 @@ prefer the cheap answer check first.
 ### Dynamic input-specific pipelines
 
 `alter.dynamic_step(inputs, goal, model, max_parallel=4, max_iterations=20)`
-returns a `list[str]` in input order. Install `pyforger[dynamic]` (OpenHands SDK;
+returns a `list[list[str]]` in input order. Each inner list contains the strings
+produced for one input and may be empty. Install `pyforger[dynamic]` (OpenHands SDK;
 Python 3.12+ and Unix signal timers required for execution).
 Each uncached unique input gets its own bare-metal OpenHands conversation with
 restricted Python, resource inspection, Git inspection, and finish tools. Agents revise code
 against execution feedback and submit a function accepting one string and
-returning a string. The last defined function is the entry point.
+returning a list of strings. The last defined function is the entry point.
 
 ```python
 outputs = alter.dynamic_step(
     ["Alice <alice@example.org>", "Bob <bob@example.net>"],
-    "Return the domain of the email address", model, max_parallel=2,
+    "Return a list containing the email address's domain", model, max_parallel=2,
 )
+# Example output: [["example.org"], ["example.net"]]
 ```
 
 `dynamic_step_source(item, goal, model)` stores generated source through standard
@@ -419,6 +421,8 @@ successful source from other inputs is retained.
 previously generated programs and their `@op` cache-hit status without opening
 cache files directly. As with any
 `@op`, changing the decorated function body invalidates its earlier cache entries.
+The default source version was advanced for the list-returning contract, so
+previously cached scalar-returning programs are regenerated on first use.
 Pass a new `source_version` to either operation to generate and cache a fresh
 program for an input when its earlier source is stale.
 

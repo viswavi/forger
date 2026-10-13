@@ -175,7 +175,8 @@ class PythonTool(ToolDefinition):
                 description=(
                     "Test Python code on the prepared input. Set submit=true to "
                     "save a working pipeline. Define the entry function last, "
-                    "with one string argument and a string return value. HTTPS "
+                    "with one string argument and a list of string results "
+                    "(which may be empty). HTTPS "
                     "inputs are JSON text with kind/url/content or kind/url/files; "
                     "other inputs are raw strings. Imports: json, re, math, "
                     "html only. No files, network, shell, or environment "

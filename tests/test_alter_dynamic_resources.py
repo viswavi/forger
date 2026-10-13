@@ -342,5 +342,5 @@ def test_generated_program_receives_prepared_url(monkeypatch):
         {"kind": "html", "url": "https://example.org", "content": "hello"}
     )
     monkeypatch.setattr(dynamic, "prepare_input", lambda item: prepared)
-    code = 'import json\ndef run(item):\n    return json.loads(item)["content"]'
-    assert dynamic._execute(code, "https://example.org", 5) == "hello"
+    code = 'import json\ndef run(item):\n    return [json.loads(item)["content"]]'
+    assert dynamic._execute(code, "https://example.org", 5) == ["hello"]

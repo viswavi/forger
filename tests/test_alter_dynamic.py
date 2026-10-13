@@ -28,17 +28,22 @@ def test_source_cache_order_and_overlap(tmp_path, monkeypatch):
 
     def generate(goal, item, *args):
         calls.append(item)
-        return "def run(item):\n    return item.upper()"
+        return "def run(item):\n    return [item.upper(), item.lower()]"
 
     def execute(code, item, timeout):
         executions.append(item)
-        return item.upper()
+        return [item.upper(), item.lower()]
 
     monkeypatch.setattr(dynamic, "_generate", generate)
     monkeypatch.setattr(dynamic, "_execute", execute)
     model = SimpleNamespace(_model_id="test")
-    assert dynamic_step(["a", "b", "a"], "uppercase", model) == ["A", "B", "A"]
-    assert dynamic_step(["b", "c"], "uppercase", model) == ["B", "C"]
+    first = dynamic_step(["a", "b", "a"], "uppercase", model)
+    assert first == [["A", "a"], ["B", "b"], ["A", "a"]]
+    assert first[0] is not first[2]
+    assert dynamic_step(["b", "c"], "uppercase", model) == [
+        ["B", "b"],
+        ["C", "c"],
+    ]
     assert sorted(calls) == ["a", "b", "c"]
     assert sorted(executions) == ["a", "b", "b", "c"]
     assert (
@@ -63,10 +68,10 @@ def test_parallel_limit(tmp_path, monkeypatch):
         return "code"
 
     monkeypatch.setattr(dynamic, "_generate", generate)
-    monkeypatch.setattr(dynamic, "_execute", lambda code, item, timeout: item)
+    monkeypatch.setattr(dynamic, "_execute", lambda code, item, timeout: [item])
     assert dynamic_step(
         list("abcd"), "goal", SimpleNamespace(_model_id="test"), max_parallel=2
-    ) == list("abcd")
+    ) == [[item] for item in "abcd"]
     assert peak == 2
 
 
@@ -79,14 +84,16 @@ def test_worker_restrictions_and_timeout():
         dynamic._require_dynamic_platform()
     except NotImplementedError:
         pytest.skip("Dynamic worker requires Unix signal timers")
-    assert (
-        dynamic._execute("def run(item):\n    return item.upper()", "hello", 5)
-        == "HELLO"
-    )
+    assert dynamic._execute(
+        "def run(item):\n    return [item.lower(), item.upper()]", "hello", 5
+    ) == ["hello", "HELLO"]
+    assert dynamic._execute("def run(item):\n    return []", "hello", 5) == []
     with pytest.raises(ValueError, match="not allowed"):
         dynamic._execute("import os\ndef run(item):\n    return os.environ", "hello", 5)
-    with pytest.raises(ValueError, match="string"):
+    with pytest.raises(ValueError, match="list of strings"):
         dynamic._execute("def run(item):\n    return 3", "hello", 5)
+    with pytest.raises(ValueError, match="list of strings"):
+        dynamic._execute("def run(item):\n    return ['ok', 3]", "hello", 5)
     with pytest.raises(ValueError, match="SandboxTimeout"):
         dynamic._execute("def run(item):\n    while True:\n        pass", "hello", 0.5)
 
@@ -113,13 +120,13 @@ def test_failed_generation_is_not_cached(tmp_path, monkeypatch):
 def test_source_is_returned_with_standard_op_cache_hit(tmp_path, monkeypatch):
     """Test source is returned with standard op cache hit."""
     monkeypatch.setattr(
-        dynamic, "_generate", lambda *args: "def run(item):\n    return item"
+        dynamic, "_generate", lambda *args: "def run(item):\n    return [item]"
     )
     model = SimpleNamespace(_model_id="test")
     clear_trace()
     first = dynamic_step_source("a", "goal", model)
     second = dynamic_step_source("a", "goal", model)
-    assert first == second == "def run(item):\n    return item"
+    assert first == second == "def run(item):\n    return [item]"
     hits = [
         record.cache_hit
         for record in trace()
@@ -134,7 +141,7 @@ def test_source_version_refreshes_generated_program(monkeypatch):
 
     def generate(*args):
         calls.append(None)
-        return f"def run(item): return {len(calls)!r}"
+        return f"def run(item): return [{str(len(calls))!r}]"
 
     monkeypatch.setattr(dynamic, "_generate", generate)
     model = SimpleNamespace(_model_id="test")
@@ -163,10 +170,10 @@ def test_execution_timeout_reaches_worker(monkeypatch):
         """Inspect the worker request without launching the process."""
         assert json.loads(kwargs["input"])["timeout_s"] == 30
         assert kwargs["timeout"] == 32
-        return SimpleNamespace(returncode=0, stdout='"ok"', stderr="")
+        return SimpleNamespace(returncode=0, stdout='["ok"]', stderr="")
 
     monkeypatch.setattr(dynamic.subprocess, "run", run)
-    assert dynamic._execute("def run(item): return 'ok'", "plain", 30) == "ok"
+    assert dynamic._execute("def run(item): return ['ok']", "plain", 30) == ["ok"]
 
 
 def test_agent_retries_text_and_keeps_successful_submission(monkeypatch):
@@ -196,7 +203,7 @@ def test_agent_retries_text_and_keeps_successful_submission(monkeypatch):
             )
             if len([x for x in calls if x[0] == "run"]) == 2:
                 session_id = self.agent.tools[0].params["session_id"]
-                tool._session(session_id).accepted[:] = ["def run(item): return item"]
+                tool._session(session_id).accepted[:] = ["def run(item): return [item]"]
                 raise RuntimeError("SDK failed after submission")
 
         def close(self):
