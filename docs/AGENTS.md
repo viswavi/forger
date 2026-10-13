@@ -70,7 +70,8 @@ tokens and the model used. For example, gpt-5.4-nano is generally much cheaper t
 
 A pipeline is a Python function. It calls operations from `pyforger.acquire`, `pyforger.alter`, `pyforger.filter`,
 and `pyforger.inspect`. Each operation takes a `list[dict]` (or generation parameters). Acquire, alter, and filter
-operations generally return a `list[dict]`; `acquire.generate_custom_rubric_criteria` instead maps
+operations generally return a `list[dict]`; rubric generation returns one rubric per input.
+`acquire.generate_custom_rubric_criteria` maps
 `list[str]` to `list[list[tuple[str, float]]]`. Inspect operations return a report about the rows without modifying rows.
 Control flow (`for`, `if`, comprehensions, helper functions) in plain Python can be used
 
@@ -100,6 +101,8 @@ Generate or retrieve new rows.
 | Export | Cached | Description |
 |---|---|---|
 | `sample_from_LLM` | yes | Sample data from an LLM with a prompt. Supports schema-based validation and retries. |
+| `generate_custom_rubric` | per stage | Recommended: generate mixed code/prompt rubrics ready for the RL executor. |
+| `convert_rubric_criteria` | yes | Convert existing textual rubrics, preserving order and weights. |
 | `generate_custom_rubric_criteria` | yes | Generate weighted textual rubrics with optional context and candidates. |
 | `retrieve` | no | Generic retrieval against a `RetrievalSource`. |
 | `retrieve_from_web` | no | Brave Search backend (QUERY only). |
@@ -118,6 +121,48 @@ Generate or retrieve new rows.
 validation, making this a superior choice to calling `Model` directly. Any reasoning traces contained in a completion are
 contained in the output dict under a `thinking_trace` key. Inline traces are not extracted: `LocalModel` leaves `<think>`
 blocks in the completion text and supplies `None` for that metadata; use `split_reasoning` to separate them out.
+
+`generate_custom_rubric` is the recommended entry point for humans and agents.
+It first generates textual criteria, then converts deterministic requirements
+(such as exact counts or JSON structure) to code while retaining semantic and
+subjective requirements as prompted judges. For example, Arabic-language
+identification stays prompted, while an explicit Unicode range requirement uses
+code; sharing a script does not establish language. No mode flag is needed:
+
+```python
+from pyforger.acquire import generate_custom_rubric
+
+rubrics = generate_custom_rubric(
+    ["Write a 400–600-word story about a shy dragon for children aged 6–8."],
+    model=model,
+)
+# rubrics[i] is [[{"code": "def grade(prompt, response, ground_truth): ..."}, 100.0],
+#                [{"prompt": "Is the story suitable for ages 6–8?"}, 75.0], ...]
+```
+
+The result uses JSON lists and single-key `code`/`prompt` objects accepted by
+`rl.rubric_data.validate_rubric`. Each code criterion defines a synchronous
+`grade(prompt, response, ground_truth)` returning a numeric score in `[0, 1]`.
+Weights and criterion order are preserved; prompted criteria keep their exact
+text. Ambiguous requirements and combined objective/subjective criteria stay
+prompted rather than being approximated by heuristics. The main entry point
+rejects empty or zero-total-weight rubrics; an empty input list returns `[]`.
+
+To inspect or reuse stages independently, keep using the textual generator below
+and then call `convert_rubric_criteria(text_rubrics, model, inputs=task_strings)`.
+The optional aligned `inputs` and shared `meta_description` provide context.
+Conversion preserves empty rubrics, retries malformed output or invalid code,
+and raises with `(rubric, criterion)` indices on exhaustion. Provider errors
+propagate. Conversion statically checks the signature, allowlisted imports (at top level
+or inside the grader), and
+RestrictedPython compilation; it does **not** execute generated code or establish
+semantic correctness. Test generated graders with known passing/failing cases
+before using them for training. Default word counts use `len(response.split())`.
+
+Both stages are cached independently. `_no_cache=True` on the main entry point
+refreshes both; `_cache_only=True` requires both cached stages. The result is a
+rubric, not a full training row: callers still supply `prompt` and `ground_truth`.
+The RL validator requires the latter to contain reasoning and a final answer.
 
 `generate_custom_rubric_criteria` supports open-ended evaluation (e.g. personal advice, creative writing,
 or deep research). Pass a caller-configured `model` and a list of strings containing task descriptions,
