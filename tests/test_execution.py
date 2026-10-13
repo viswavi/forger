@@ -8,6 +8,7 @@ import tarfile
 from dataclasses import FrozenInstanceError
 
 import pytest
+
 from pyforger.execution import DockerBackend, ExecutionSpec
 
 
@@ -36,6 +37,7 @@ from pyforger.execution import DockerBackend, ExecutionSpec
     ],
 )
 def test_spec_validation(field, value):
+    """Specifications reject invalid commands, output paths, and resource limits."""
     kwargs = {"image": "python:3.12-slim", "command": ("python", "-V"), field: value}
     with pytest.raises(ValueError):
         ExecutionSpec(**kwargs)
@@ -46,11 +48,13 @@ def test_spec_validation(field, value):
     ["", "/etc/passwd", "../escape", "a/../b", "./a", "a//b", "a/", "a\\b", "a\x00b"],
 )
 def test_unsafe_output_paths(path):
+    """Declared outputs reject traversal and malformed relative paths."""
     with pytest.raises(ValueError):
         ExecutionSpec("python:3.12-slim", ("python",), outputs=(path,))
 
 
 def test_spec_is_frozen():
+    """Execution specifications cannot be reassigned after construction."""
     spec = ExecutionSpec("python:3.12-slim", ("python",), outputs=("a/b.txt",))
     with pytest.raises(FrozenInstanceError):
         spec.image = "other"
@@ -66,11 +70,13 @@ def test_spec_is_frozen():
     ],
 )
 def test_backend_validation(kwargs):
+    """Log limits and cleanup deadlines must be positive and finite."""
     with pytest.raises(ValueError):
         DockerBackend(**kwargs)
 
 
 def make_archive(path, entries):
+    """Build a real tar archive from file and link entry descriptions."""
     with tarfile.open(path, "w") as tar:
         for name, kind, data in entries:
             member = tarfile.TarInfo(name)
@@ -96,6 +102,7 @@ def make_archive(path, entries):
     ],
 )
 def test_archive_rejected_before_writing(tmp_path, entries):
+    """Unsafe archives fail validation without publishing any files."""
     archive = tmp_path / "archive.tar"
     destination = tmp_path / "output"
     destination.mkdir()
@@ -106,6 +113,7 @@ def test_archive_rejected_before_writing(tmp_path, entries):
 
 
 def test_archive_selects_only_declared_files(tmp_path):
+    """Safe extraction publishes only explicitly declared output files."""
     archive = tmp_path / "archive.tar"
     destination = tmp_path / "output"
     destination.mkdir()
@@ -124,6 +132,7 @@ def test_archive_selects_only_declared_files(tmp_path):
 
 @pytest.mark.parametrize("outputs,limit", [(("missing",), 1024), (("out",), 1)])
 def test_missing_or_oversized_output(tmp_path, outputs, limit):
+    """Missing outputs and oversized archives leave the destination empty."""
     archive = tmp_path / "archive.tar"
     destination = tmp_path / "output"
     destination.mkdir()
@@ -135,6 +144,7 @@ def test_missing_or_oversized_output(tmp_path, outputs, limit):
 
 @pytest.fixture
 def docker_image():
+    """Provide an installed trusted image when real Docker tests are enabled."""
     if os.environ.get("FORGER_DOCKER_TESTS") != "1":
         pytest.skip("real Docker execution requires FORGER_DOCKER_TESTS=1")
     image = os.environ.get("FORGER_DOCKER_IMAGE", "python:3.12-slim")
@@ -151,6 +161,7 @@ def docker_image():
 
 
 def execute(image, tmp_path, script, **kwargs):
+    """Execute a Python command in Docker with bounded logs."""
     return DockerBackend(max_log_bytes=1024).execute(
         ExecutionSpec(image, ("python", "-c", script), timeout_s=20, **kwargs),
         tmp_path / "output",
@@ -158,6 +169,7 @@ def execute(image, tmp_path, script, **kwargs):
 
 
 def test_docker_round_trip(docker_image, tmp_path):
+    """Real execution stages inputs and publishes only declared outputs."""
     from pyforger.artifacts import ArtifactRef
 
     root = tmp_path / "input"
@@ -182,6 +194,7 @@ def test_docker_round_trip(docker_image, tmp_path):
 
 
 def test_docker_failure_and_bounded_logs(docker_image, tmp_path):
+    """Nonzero exits remain failures with bounded stdout and stderr."""
     result = execute(
         docker_image,
         tmp_path,
@@ -195,6 +208,7 @@ def test_docker_failure_and_bounded_logs(docker_image, tmp_path):
 
 
 def test_docker_timeout_and_cleanup(docker_image, tmp_path):
+    """Timed-out commands leave no additional Forger containers behind."""
     before = subprocess.check_output(
         ["docker", "ps", "-aq", "--filter", "name=forger-"]
     )
@@ -221,6 +235,7 @@ def test_docker_timeout_and_cleanup(docker_image, tmp_path):
     ],
 )
 def test_docker_rejects_unsafe_or_missing_outputs(docker_image, tmp_path, script):
+    """Invalid command outputs become infrastructure errors."""
     result = execute(docker_image, tmp_path, script, outputs=("out",))
     assert result.status == "infrastructure_error"
     assert result.artifacts is None
@@ -228,6 +243,7 @@ def test_docker_rejects_unsafe_or_missing_outputs(docker_image, tmp_path, script
 
 
 def test_docker_isolation(docker_image, tmp_path):
+    """Containers lack root privileges, host secrets, and network access."""
     script = """
 import os, socket
 from pathlib import Path
@@ -250,6 +266,7 @@ Path('out').write_text('isolated')
 
 
 def test_docker_fresh_workdir(docker_image, tmp_path):
+    """Each execution starts without files from the previous container."""
     first = execute(
         docker_image, tmp_path, "from pathlib import Path; Path('marker').touch()"
     )
@@ -263,6 +280,7 @@ def test_docker_fresh_workdir(docker_image, tmp_path):
 
 
 def test_stage_matches_manifest(tmp_path):
+    """Staging preserves manifested content and omits empty directories."""
     from pyforger.artifacts import ArtifactRef
 
     root = tmp_path / "source"
@@ -278,6 +296,7 @@ def test_stage_matches_manifest(tmp_path):
 
 
 def test_stage_rejects_changed_inputs(tmp_path):
+    """Changed inputs fail verification before staged files are written."""
     from pyforger.artifacts import ArtifactRef
 
     root = tmp_path / "source"
@@ -293,6 +312,7 @@ def test_stage_rejects_changed_inputs(tmp_path):
 
 
 def test_output_parent_alias_and_leaf_symlink(tmp_path):
+    """Output paths normalize ancestors but reject leaf symlinks."""
     real = tmp_path / "real"
     real.mkdir()
     alias = tmp_path / "alias"
@@ -305,6 +325,7 @@ def test_output_parent_alias_and_leaf_symlink(tmp_path):
 
 
 def test_docker_failure_missing_outputs_stays_failed(docker_image, tmp_path):
+    """Missing outputs cannot override a nonzero command exit status."""
     result = execute(
         docker_image, tmp_path, "import sys; sys.exit(7)", outputs=("missing",)
     )
@@ -315,6 +336,7 @@ def test_docker_failure_missing_outputs_stays_failed(docker_image, tmp_path):
 
 
 def test_input_archive_normalizes_permissions(tmp_path):
+    """Input archives grant write access without copying host ownership."""
     stage = tmp_path / "stage"
     (stage / "nested").mkdir(parents=True)
     (stage / "nested/file").write_text("input")
@@ -328,6 +350,7 @@ def test_input_archive_normalizes_permissions(tmp_path):
 
 
 def test_docker_nested_inputs_are_writable(docker_image, tmp_path):
+    """Staged nested inputs are writable without changing their sources."""
     from pyforger.artifacts import ArtifactRef
 
     root = tmp_path / "input"
@@ -349,6 +372,7 @@ def test_docker_nested_inputs_are_writable(docker_image, tmp_path):
 
 
 def test_docker_rejects_linked_output_ancestor(docker_image, tmp_path):
+    """Linked output ancestors cannot expose files outside the work directory."""
     result = execute(
         docker_image,
         tmp_path,
@@ -361,6 +385,7 @@ def test_docker_rejects_linked_output_ancestor(docker_image, tmp_path):
 
 
 def test_docker_rejects_output_hardlinks(docker_image, tmp_path):
+    """Hardlinked output files are rejected without artifact publication."""
     result = execute(
         docker_image,
         tmp_path,

@@ -43,6 +43,8 @@ def _relative_file(value: str) -> str:
 
 @dataclass(frozen=True)
 class ExecutionSpec:
+    """Immutable command, artifact paths, and limits for isolated execution."""
+
     image: str
     command: tuple[str, ...]
     inputs: Optional[ArtifactRef] = None
@@ -54,6 +56,7 @@ class ExecutionSpec:
     workdir: str = "/work"
 
     def __post_init__(self) -> None:
+        """Validate command arguments, output paths, and resource limits."""
         if (
             not isinstance(self.image, str)
             or not self.image
@@ -97,6 +100,8 @@ class ExecutionSpec:
 
 @dataclass(frozen=True)
 class ExecutionResult:
+    """Command status, bounded logs, retained outputs, and elapsed time."""
+
     status: ExecutionStatus
     exit_code: Optional[int]
     stdout: str
@@ -106,7 +111,10 @@ class ExecutionResult:
 
 
 class ExecutionBackend(Protocol):
+    """Contract for executing specifications and publishing output evidence."""
+
     def execute(self, spec: ExecutionSpec, output: Path) -> ExecutionResult:
+        """Execute the specification and return status and retained outputs."""
         ...
 
 
@@ -119,6 +127,8 @@ class _Infrastructure(Exception):
 
 
 class DockerBackend:
+    """Run commands in fresh containers using trusted local Docker images."""
+
     def __init__(
         self,
         docker: str = "docker",
@@ -126,6 +136,7 @@ class DockerBackend:
         max_log_bytes: int = 65536,
         cleanup_timeout_s: float = 10.0,
     ) -> None:
+        """Configure the Docker executable, log limit, and cleanup deadline."""
         if (
             isinstance(max_log_bytes, bool)
             or not isinstance(max_log_bytes, int)
