@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -419,3 +420,37 @@ def load_trial(record: ArtifactRef, relative: str = "trial.json") -> TrialResult
     result = TrialResult.from_dict(value)
     record.verify()
     return result
+
+
+class SubmissionEvaluator:
+    """Adapt submission callbacks to the runtime-neutral TrialEvaluator API."""
+
+    def __init__(
+        self, extract: Callable, validate: Callable, grade: Callable, checks=()
+    ):
+        """Bind request-aware extraction, validation, grading, and optional checks."""
+        self.extract, self.validate, self.grade, self.checks = (
+            extract,
+            validate,
+            grade,
+            checks,
+        )
+
+    def evaluate(self, request, rollout, output):
+        """Grade retained evidence without conflating grader errors and answers."""
+        from pyforger.evaluation import evaluate_submission
+
+        outcome = evaluate_submission(
+            lambda: self.extract(request, rollout),
+            lambda value: self.validate(request, value),
+            lambda value: self.grade(request, value),
+            checks=[
+                lambda value, check=check: check(request, rollout, value)
+                for check in self.checks
+            ],
+        )
+        return EvaluationResult(
+            passed=outcome.passed,
+            attribution=outcome.attribution,
+            reason=outcome.reason,
+        )
