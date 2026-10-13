@@ -1,7 +1,6 @@
 """Explicit attempt outcomes shared by runtime adapters and filters."""
 from __future__ import annotations
 
-from typing import Self
 
 from pydantic import BaseModel, ConfigDict, StrictBool, model_validator
 
@@ -16,7 +15,7 @@ class AttemptOutcome(BaseModel):
     reason: str
 
     @model_validator(mode="after")
-    def validate_outcome(self) -> Self:
+    def validate_outcome(self) -> AttemptOutcome:
         """Reject ambiguous grades and unsupported attribution values."""
         if self.attribution not in {"model", "infrastructure", "task", "unknown"}:
             raise ValueError("Unsupported attempt attribution")
