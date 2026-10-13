@@ -276,6 +276,7 @@ def test_store_missing_digest(tmp_path):
 
 
 def test_bounded_text_reads_regular_files_only(tmp_path):
+    """Read only regular UTF-8 files within the explicit byte limit."""
     from pyforger.artifacts import read_text
 
     path = tmp_path / "text"
