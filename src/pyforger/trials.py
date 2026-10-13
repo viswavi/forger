@@ -6,7 +6,7 @@ import math
 from contextlib import nullcontext
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Protocol, Self
+from typing import Any, Protocol
 
 from pydantic import (
     BaseModel,
@@ -66,7 +66,7 @@ class TrialRequest(BaseModel):
     configuration: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def validate_record(self) -> Self:
+    def validate_record(self) -> TrialRequest:
         """Validate sample identity and snapshot JSON-compatible configuration."""
         if not isinstance(self.trial_id, str) or not self.trial_id.strip():
             raise ValueError("trial_id must be nonempty")
@@ -100,7 +100,7 @@ class RolloutResult(BaseModel):
     usage: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def validate_record(self) -> Self:
+    def validate_record(self) -> RolloutResult:
         """Validate status, snapshot metadata, and check usage quantities."""
         if self.status not in _ROLLOUT_STATUSES:
             raise ValueError(f"Unknown rollout status: {self.status}")
@@ -139,7 +139,7 @@ class EvaluationResult(BaseModel):
     reason: str | None = None
 
     @model_validator(mode="after")
-    def validate_record(self) -> Self:
+    def validate_record(self) -> EvaluationResult:
         """Validate optional outcomes and snapshot grading metadata."""
         if self.score is not None and (
             type(self.score) not in (int, float) or not math.isfinite(self.score)
@@ -169,7 +169,7 @@ class TrialResult(BaseModel):
     evaluation: EvaluationResult | None = None
 
     @model_validator(mode="after")
-    def validate_evidence(self) -> Self:
+    def validate_evidence(self) -> TrialResult:
         """Verify referenced files whenever a trial result is validated."""
         self.verify()
         return self

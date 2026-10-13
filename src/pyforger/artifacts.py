@@ -10,7 +10,6 @@ import shutil
 import stat
 import tempfile
 from pathlib import Path, PureWindowsPath
-from typing import Self
 
 from pydantic import BaseModel, ConfigDict, StrictInt, model_validator
 
@@ -69,7 +68,7 @@ class ArtifactFile(BaseModel):
     sha256: str
 
     @model_validator(mode="after")
-    def validate_manifest(self) -> Self:
+    def validate_manifest(self) -> ArtifactFile:
         """Validate the relative path, byte count, and content digest."""
         _relative(self.path)
         if type(self.size) is not int or self.size < 0:
@@ -167,7 +166,7 @@ class ArtifactRef(BaseModel):
     files: tuple[ArtifactFile, ...]
 
     @model_validator(mode="after")
-    def validate_manifest(self) -> Self:
+    def validate_manifest(self) -> ArtifactRef:
         """Normalize the root and validate the immutable manifest and digest."""
         object.__setattr__(self, "root", _normalize_root(self.root))
         object.__setattr__(self, "files", tuple(self.files))
