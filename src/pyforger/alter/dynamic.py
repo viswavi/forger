@@ -94,8 +94,11 @@ def _execute(
 def agent_llm(model):
     """Construct the SDK model shared by dynamic and artifact-aware agents."""
     # Read the caller's .env without mutating process-wide environment in threads.
+    from dataclasses import replace
+
     from dotenv import dotenv_values
     from openhands.sdk import LLM
+    from openhands.sdk.llm import LLMCallContext
     from pydantic import SecretStr
 
     dotenv = dotenv_values(Path.cwd() / ".env")
@@ -128,7 +131,19 @@ def agent_llm(model):
     for option in ("api_mode", "capability_overrides"):
         if option in model._kwargs:
             config[option] = model._kwargs[option]
-    return LLM(**config)
+
+    if not model._kwargs.get("disable_prompt_cache_key"):
+        return LLM(**config)
+
+    class ConfiguredLLM(LLM):
+        def generate(self, *args, call_context=None, **kwargs):
+            if model._kwargs.get("disable_prompt_cache_key"):
+                call_context = replace(
+                    call_context or LLMCallContext(), prompt_cache_key=None
+                )
+            return super().generate(*args, call_context=call_context, **kwargs)
+
+    return ConfiguredLLM(**config)
 
 
 def _generate(goal, item, model, max_iterations, execution_timeout_s):
