@@ -34,6 +34,50 @@ allocation, and `AGENT_MODEL_OUTPUT_DIR` controls persistent outputs. Each run's
 checkpoints and generated data live below the large model-output volume rather
 than the repository on `/home`.
 
+## Token-unit quotas
+
+Generation/SFT has 230M token units. RL has 75M for Impossible-LiveCodeBench
+and NormAD, and 230M for PRBench and HealthBench. The launcher currently supports
+coding and culture; unified RL currently supports coding only.
+
+| Model family | Input token units | Output token units |
+|---|---:|---:|
+| DeepSeek-V4-Flash | 1 | 3 |
+| GLM-5.3 | 4 | 12.5 |
+
+These weights are fixed policy, independent of provider prices. Cached input
+tokens have full weight; completion tokens include reasoning once. Each run
+stores `generation_token_usage.json` and `judge_token_usage.json` under its
+persistent agent directory. Their `token_units` and `remaining_token_units`
+fields update after each completed API response, across processes. Judge probes
+and final RL share the same ledger, including recovery runs.
+Ledgers also track `cost_usd` and `unpriced_calls`, overall and per model. Dollars
+use available provider or LiteLLM pricing; unpriced calls still consume token units.
+Existing ledgers keep their token usage and mark earlier calls as unpriced.
+Forger models expose both `total_token_units` and `total_cost`; unsupported models
+report `NaN` units and cannot make calls against a fixed token-unit quota.
+`token_budget_config.json` preserves the task, limits, judge alias, and reasoning
+effort for recovery without storing credentials.
+`AGENT_MODEL_OUTPUT_DIR` must use persistent local storage or NFS with POSIX file
+locks and atomic rename; GCS FUSE is unsuitable for these ledgers. Standalone
+jobs using `FORGER_TOKEN_USAGE_FILE` or `JUDGE_TOKEN_USAGE_FILE` have the same
+filesystem requirement.
+
+Forger Model calls account automatically. Plain Python pipelines, including
+`--hide-forger` baselines, must import `completion`/`acompletion` from the supplied
+`rl.token_budget` helper, adding the task directory to `sys.path` if needed.
+Use `budget="judge"` for judge experiments. Other libraries must route their API
+calls through these helpers. Direct provider calls bypass this cooperative
+accounting; the ledger is not a proxy-enforced cap. Calls already in flight may
+exceed a quota, so batches need headroom. The OpenHands model driving agent turns
+is separate from data generation and reports `AGENT_TURN_COST_USD` for reference.
+
+The RL judge defaults to `litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731`.
+`JUDGE_MODEL` may select an alias containing `DeepSeek-V4-Flash` (case-insensitive).
+`JUDGE_REASONING_EFFORT` accepts `none`, `low` (default), or `high` and is passed as
+`reasoning={"effort": ...}`. See the [unified contract](coding/rl/UNIFIED_TRAINING.md)
+for judge quota recovery.
+
 ## Benchmark data
 
 Keep frozen inputs and previous benchmark versions. Neither datasets nor private

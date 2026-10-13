@@ -13,8 +13,40 @@ from typing import TypedDict
 
 # Supports both `rl` CLI imports and `coding.rl` library imports.
 from .rubric_data import score, validate_rubric  # noqa: ABS101
+from .token_budget import (  # noqa: ABS101
+    DEFAULT_JUDGE_MODEL,
+    TokenUnitBudget,
+    TokenUnitQuotaExceeded,
+    default_rl_limit,
+    response_cost_usd,
+    response_token_counts,
+    validate_judge_model,
+    validate_reasoning_effort,
+)
 
-JUDGE_MODEL = "litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731"
+JUDGE_MODEL = DEFAULT_JUDGE_MODEL
+JUDGE_MAX_TOKENS = 4096
+
+
+def judge_configuration(default_usage_file=None, task=None, overrides=None):
+    """Resolve non-secret settings shared by probes and the final RL run."""
+    env = {**os.environ, **(overrides or {})}
+    task = task or env.get("PDB_TASK", "coding")
+    model = validate_judge_model(env.get("JUDGE_MODEL", JUDGE_MODEL))
+    effort = validate_reasoning_effort(env.get("JUDGE_REASONING_EFFORT", "low"))
+    limit = float(env.get("JUDGE_TOKEN_UNIT_LIMIT", default_rl_limit(task)))
+    filename = env.get("JUDGE_TOKEN_USAGE_FILE") or default_usage_file
+    if not filename:
+        raise ValueError("Set JUDGE_TOKEN_USAGE_FILE to the shared RL usage ledger")
+    filename = str(Path(filename).resolve())
+    TokenUnitBudget(filename, limit)
+    return {
+        "PDB_TASK": task,
+        "JUDGE_MODEL": model,
+        "JUDGE_REASONING_EFFORT": effort,
+        "JUDGE_TOKEN_UNIT_LIMIT": str(limit),
+        "JUDGE_TOKEN_USAGE_FILE": filename,
+    }
 
 
 class JudgeState(TypedDict):
@@ -40,7 +72,7 @@ class JudgeUnavailable(RuntimeError):
 
 
 class JudgeQuotaExhausted(JudgeUnavailable):
-    """The judge's credit/quota budget was exhausted repeatedly."""
+    """The judge's token allowance or provider quota was exhausted."""
 
 
 def quota_error(exc):
@@ -130,8 +162,6 @@ def code_score(code, prompt, response, ground_truth):
 
 async def prompt_score(criterion, prompt, response, ground_truth):
     """Score one prompt criterion with the separately budgeted LM judge."""
-    import litellm
-
     if not os.environ.get("LITELLM_JUDGE_API_KEY"):
         raise JudgeUnavailable("LM rubrics require a separate LITELLM_JUDGE_API_KEY")
     base_url = os.environ.get("LITELLM_JUDGE_BASE_URL") or os.environ.get(
@@ -141,6 +171,12 @@ async def prompt_score(criterion, prompt, response, ground_truth):
         raise JudgeUnavailable(
             "LM rubrics require LITELLM_JUDGE_BASE_URL or LITELLM_BASE_URL"
         )
+    config = judge_configuration()
+    budget = TokenUnitBudget(
+        config["JUDGE_TOKEN_USAGE_FILE"], float(config["JUDGE_TOKEN_UNIT_LIMIT"])
+    )
+    import litellm
+
     threshold = int(os.environ.get("JUDGE_MAX_CONSECUTIVE_FAILURES", "5"))
     if threshold < 1:
         raise ValueError("JUDGE_MAX_CONSECUTIVE_FAILURES must be positive")
@@ -157,8 +193,14 @@ async def prompt_score(criterion, prompt, response, ground_truth):
             if state["open"]:
                 break
             try:
+                budget.check()
+            except TokenUnitQuotaExceeded:
+                state["open"] = state["quota"] = True
+                record_quota_stop()
+                raise JudgeQuotaExhausted("Judge token-unit quota exhausted") from None
+            try:
                 result = await litellm.acompletion(
-                    model=JUDGE_MODEL,
+                    model=config["JUDGE_MODEL"],
                     messages=[
                         {
                             "role": "system",
@@ -185,14 +227,34 @@ async def prompt_score(criterion, prompt, response, ground_truth):
                     api_key=os.environ["LITELLM_JUDGE_API_KEY"],
                     api_base=base_url,
                     temperature=1.0,
-                    reasoning={"effort": "high"},
+                    reasoning={"effort": config["JUDGE_REASONING_EFFORT"]},
                     n=1,
+                    max_tokens=JUDGE_MAX_TOKENS,
                     timeout=120,
                     num_retries=2,
                 )
             except Exception as exc:
                 quota = quota_error(exc)
             else:
+                try:
+                    prompt_tokens, completion_tokens = response_token_counts(result)
+                except (ValueError, TypeError, KeyError, AttributeError):
+                    budget.mark_unmetered()
+                    state["open"] = True
+                    raise JudgeUnavailable(
+                        "Judge response has missing or invalid token usage; "
+                        "cannot enforce token-unit quota"
+                    ) from None
+                usage = budget.record(
+                    config["JUDGE_MODEL"],
+                    prompt_tokens,
+                    completion_tokens,
+                    cost_usd=response_cost_usd(result, config["JUDGE_MODEL"]),
+                )
+                if usage["remaining_token_units"] <= 0:
+                    state["open"] = state["quota"] = True
+                    record_quota_stop()
+                    raise JudgeQuotaExhausted("Judge token-unit quota exhausted")
                 # Parsing errors originate in untrusted model text and are never quota
                 # errors.
                 quota = False

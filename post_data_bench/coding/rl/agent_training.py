@@ -16,8 +16,16 @@ from pathlib import Path
 
 # Supports both `rl` CLI imports and `coding.rl` library imports.
 from .rubric_data import compile_data, validate_dataset, validate_rubric  # noqa: ABS101
+from .rubric_rm import judge_configuration  # noqa: ABS101
 
 CODING = Path(__file__).resolve().parents[1]
+JUDGE_FLAGS = {
+    "PDB_TASK": "--task",
+    "JUDGE_MODEL": "--judge-model",
+    "JUDGE_REASONING_EFFORT": "--judge-reasoning-effort",
+    "JUDGE_TOKEN_UNIT_LIMIT": "--judge-token-unit-limit",
+    "JUDGE_TOKEN_USAGE_FILE": "--judge-token-usage-file",
+}
 
 
 def run(command, cwd=CODING):
@@ -239,7 +247,9 @@ def freeze(data, submission, agent_dir, output):
     return output / "data", output / "initial_checkpoint"
 
 
-def rl_command(data, checkpoint, output, slime_env, slime_deps, probe=False):
+def rl_command(
+    data, checkpoint, output, slime_env, slime_deps, probe=False, judge_config=None
+):
     """Build the fixed Slime command for a probe or final run."""
     command = [
         "bash",
@@ -256,6 +266,9 @@ def rl_command(data, checkpoint, output, slime_env, slime_deps, probe=False):
         "--slime-deps",
         slime_deps,
     ]
+    if judge_config:
+        for key, flag in JUDGE_FLAGS.items():
+            command.extend([flag, judge_config[key]])
     if probe:
         command += [
             "--num-rollout",
@@ -269,10 +282,14 @@ def rl_command(data, checkpoint, output, slime_env, slime_deps, probe=False):
     return command
 
 
-def reward_preflight(directory):
+def reward_preflight(directory, judge_config=None):
     # Check both partitions before allocating GPU work. No credentials are read
     # into messages or logs; only their presence is checked here.
     """Validate compiled rubrics and check required reward dependencies."""
+    judge_configuration(
+        Path(directory).resolve().parent / "judge_token_usage.json",
+        overrides=judge_config,
+    )
     has_prompt = has_code = False
     for name in ("train.jsonl", "val.jsonl"):
         with (Path(directory) / name).open() as stream:
@@ -302,6 +319,10 @@ def reward_preflight(directory):
 def finalize(args):
     """Freeze the submission and optionally start the host final RL run."""
     args.output_dir = str(Path(args.output_dir).resolve())
+    judge_config = judge_configuration(
+        Path(args.data).resolve().parent / "judge_token_usage.json",
+        task=getattr(args, "task", None),
+    )
     data, checkpoint = freeze(
         args.data, args.submission, args.agent_dir, args.output_dir
     )
@@ -312,14 +333,19 @@ def finalize(args):
     )
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
     command = rl_command(
-        data, checkpoint, Path(args.output_dir) / "rl", args.slime_env, args.slime_deps
+        data,
+        checkpoint,
+        Path(args.output_dir) / "rl",
+        args.slime_env,
+        args.slime_deps,
+        judge_config=judge_config,
     )
     # A resumable host-only entry point; contains no credentials.
     (Path(args.output_dir) / "final_command.json").write_text(
         json.dumps(command, indent=2) + "\n"
     )
     if not args.prepare_only:
-        reward_preflight(data)
+        reward_preflight(data, judge_config)
         run(command)
 
 
@@ -337,8 +363,18 @@ def run_final(args):
         for name, expected in manifest.items():
             if Path(name).name != name or digest(directory / name) != expected:
                 raise ValueError(f"frozen submission changed: {name}")
-    reward_preflight(bundle / "data")
     command = json.loads((bundle / "final_command.json").read_text())
+    saved_config = {
+        key: command[command.index(flag) + 1]
+        for key, flag in JUDGE_FLAGS.items()
+        if flag in command
+    }
+    if set(saved_config) != set(JUDGE_FLAGS):
+        raise ValueError(
+            "Final bundle lacks saved judge token settings; finalize again"
+        )
+    judge_config = judge_configuration(overrides=saved_config)
+    reward_preflight(bundle / "data", judge_config)
     # Do not execute a command stored by the agent; this file is host-produced.
     # Rebuild from fixed trusted code, taking only the recorded environment paths.
     run(
@@ -348,6 +384,7 @@ def run_final(args):
             bundle / "rl",
             command[command.index("--slime-env") + 1],
             command[command.index("--slime-deps") + 1],
+            judge_config=judge_config,
         )
     )
 
@@ -400,6 +437,7 @@ def main():
         command = commands.add_parser(name)
         command.add_argument("--data", required=True)
         command.add_argument("--output-dir", required=True)
+        command.add_argument("--task", default=os.environ.get("PDB_TASK", "coding"))
         command.add_argument(
             "--slime-env",
             default=os.environ.get("SLIME_ENV", "/home/vijayv/miniconda3/envs/slime"),
@@ -429,9 +467,13 @@ def main():
 def probe(args):
     """Run a short RL trial without secret benchmark evaluation."""
     args.output_dir = str(Path(args.output_dir).resolve())
+    judge_config = judge_configuration(
+        Path(args.data).resolve().parent / "judge_token_usage.json",
+        task=getattr(args, "task", None),
+    )
     checkpoint = checkpoint_files(args.checkpoint)
     data = prepare(args.data, str(args.output_dir) + ".data", checkpoint)
-    reward_preflight(data)
+    reward_preflight(data, judge_config)
     run(
         rl_command(
             data,
@@ -440,6 +482,7 @@ def probe(args):
             args.slime_env,
             args.slime_deps,
             probe=True,
+            judge_config=judge_config,
         )
     )
 

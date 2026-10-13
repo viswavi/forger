@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import sys
 import types
 from types import SimpleNamespace
@@ -273,7 +274,8 @@ class TestGenerateResults:
                 f"<think>t{i}.0</think>a{i}.0",
                 f"<think>t{i}.1</think>a{i}.1",
             ]
-            assert result.usage == {
+            assert math.isnan(result.usage["token_units"])
+            assert {k: v for k, v in result.usage.items() if k != "token_units"} == {
                 "prompt_tokens": i + 3,
                 "completion_tokens": 2 * i + 3,  # (i + 1) + (i + 2) token ids
                 "reasoning_tokens": 0,

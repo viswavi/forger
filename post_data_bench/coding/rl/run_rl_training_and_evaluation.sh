@@ -83,6 +83,11 @@ EXTRA_SLIME_ARGS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --rubric-rewards) RUBRIC_REWARDS=1; shift ;;
+    --task) PDB_TASK="$2"; shift 2 ;;
+    --judge-model) JUDGE_MODEL="$2"; shift 2 ;;
+    --judge-reasoning-effort) JUDGE_REASONING_EFFORT="$2"; shift 2 ;;
+    --judge-token-unit-limit) JUDGE_TOKEN_UNIT_LIMIT="$2"; shift 2 ;;
+    --judge-token-usage-file) JUDGE_TOKEN_USAGE_FILE="$2"; shift 2 ;;
     --rl-data-dir) RL_DATA_DIR="$2"; shift 2 ;;
     --init-checkpoint) INIT_CHECKPOINT="$2"; shift 2 ;;
     --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
@@ -129,6 +134,17 @@ if [ -z "$RL_DATA_DIR" ]; then
   exit 1
 fi
 RL_DATA_DIR="$(cd "$RL_DATA_DIR" && pwd)"
+if [ "$RUBRIC_REWARDS" -eq 1 ]; then
+  export PDB_TASK="${PDB_TASK:-coding}"
+  export JUDGE_MODEL="${JUDGE_MODEL:-litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731}"
+  export JUDGE_REASONING_EFFORT="${JUDGE_REASONING_EFFORT:-low}"
+  if [ -z "${JUDGE_TOKEN_UNIT_LIMIT:-}" ]; then
+    JUDGE_TOKEN_UNIT_LIMIT="$(python3 -c 'import os; from rl.token_budget import default_rl_limit; print(default_rl_limit(os.environ["PDB_TASK"]))')"
+  fi
+  export JUDGE_TOKEN_UNIT_LIMIT
+  export JUDGE_TOKEN_USAGE_FILE="${JUDGE_TOKEN_USAGE_FILE:-$RL_DATA_DIR/../judge_token_usage.json}"
+  python3 -c 'from rl.rubric_rm import judge_configuration; judge_configuration()'
+fi
 for f in train.jsonl val.jsonl; do
   [ -f "$RL_DATA_DIR/$f" ] || { echo "!!! missing $RL_DATA_DIR/$f (run rl/build_rl_data.py)" >&2; exit 1; }
 done
@@ -214,6 +230,11 @@ if [ -n "$SIF" ]; then
       --env "JUDGE_MAX_CONSECUTIVE_FAILURES=${JUDGE_MAX_CONSECUTIVE_FAILURES:-5}" \
       --env "LITELLM_BASE_URL=${LITELLM_BASE_URL:-}" \
       --env "JUDGE_QUOTA_STOP_FILE=${JUDGE_QUOTA_STOP_FILE:-}" \
+      --env "JUDGE_MODEL=${JUDGE_MODEL:-}" \
+      --env "JUDGE_REASONING_EFFORT=${JUDGE_REASONING_EFFORT:-}" \
+      --env "JUDGE_TOKEN_UNIT_LIMIT=${JUDGE_TOKEN_UNIT_LIMIT:-}" \
+      --env "JUDGE_TOKEN_USAGE_FILE=${JUDGE_TOKEN_USAGE_FILE:-}" \
+      --env "PDB_TASK=${PDB_TASK:-coding}" \
       --env "RUBRIC_REWARDS=$RUBRIC_REWARDS" \
       --env "LCB_RM_WORKERS=${LCB_RM_WORKERS:-16}" \
       --env "LCB_RM_DUMP=${LCB_RM_DUMP:-}" \

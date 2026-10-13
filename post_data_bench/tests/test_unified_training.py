@@ -147,6 +147,24 @@ class CodeTests(unittest.TestCase):
 class RewardTests(unittest.IsolatedAsyncioTestCase):
     """Regression checks for reward."""
 
+    def setUp(self):
+        """Isolate persistent judge usage and environment settings."""
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.usage_file = Path(temporary.name) / "judge_usage.json"
+        environment = patch.dict(
+            os.environ,
+            {
+                "JUDGE_TOKEN_USAGE_FILE": str(self.usage_file),
+                "JUDGE_TOKEN_UNIT_LIMIT": "75000000",
+                "JUDGE_MODEL": rm.JUDGE_MODEL,
+                "JUDGE_REASONING_EFFORT": "low",
+                "PDB_TASK": "coding",
+            },
+        )
+        environment.start()
+        self.addCleanup(environment.stop)
+
     async def test_mixed_weighted_reward_and_original_prompt(self):
         """Verify mixed weighted reward and original prompt."""
         sample = SimpleNamespace(
@@ -173,9 +191,10 @@ class RewardTests(unittest.IsolatedAsyncioTestCase):
     async def test_judge_model_and_separate_key(self):
         """Verify judge model and separate key."""
         response = SimpleNamespace(
+            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=2),
             choices=[
                 SimpleNamespace(message=SimpleNamespace(content='{"score": 0.75}'))
-            ]
+            ],
         )
         with patch.dict(
             os.environ,
@@ -193,7 +212,7 @@ class RewardTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(completion.call_args.kwargs["api_key"], "test-judge")
             self.assertEqual(completion.call_args.kwargs["model"], rm.JUDGE_MODEL)
             self.assertEqual(
-                completion.call_args.kwargs["reasoning"], {"effort": "high"}
+                completion.call_args.kwargs["reasoning"], {"effort": "low"}
             )
 
     async def test_consecutive_failure_circuit_and_no_secret_in_error(self):
@@ -222,7 +241,8 @@ class RewardTests(unittest.IsolatedAsyncioTestCase):
     async def test_success_resets_failures(self):
         """Verify success resets failures."""
         success = SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content='{"score": 1}'))]
+            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=2),
+            choices=[SimpleNamespace(message=SimpleNamespace(content='{"score": 1}'))],
         )
         with patch.dict(
             os.environ,
@@ -317,11 +337,31 @@ class FinalizationTests(unittest.TestCase):
                 (root / "final/initial_checkpoint/model.safetensors").read_bytes(),
                 b"test fixture weights",
             )
-            with patch.object(training, "run") as run:
+            with patch.dict(
+                os.environ,
+                {
+                    "PDB_TASK": "HealthBench",
+                    "JUDGE_MODEL": "custom/DeepSeek-V4-Flash-changed",
+                    "JUDGE_REASONING_EFFORT": "high",
+                    "JUDGE_TOKEN_UNIT_LIMIT": "230000000",
+                    "JUDGE_TOKEN_USAGE_FILE": str(root / "different.json"),
+                },
+            ), patch.object(training, "run") as run:
                 training.run_final(argparse.Namespace(bundle=root / "final"))
                 command = run.call_args.args[0]
                 self.assertIn("--rubric-rewards", command)
                 self.assertNotIn("--no-thinking", command)
+                self.assertEqual(command[command.index("--task") + 1], "coding")
+                self.assertEqual(
+                    command[command.index("--judge-token-unit-limit") + 1], "75000000.0"
+                )
+                self.assertEqual(
+                    command[command.index("--judge-token-usage-file") + 1],
+                    str(agent / "judge_token_usage.json"),
+                )
+                self.assertEqual(
+                    command[command.index("--judge-reasoning-effort") + 1], "low"
+                )
             (root / "final/data/train.jsonl").write_text("tampered")
             with self.assertRaisesRegex(ValueError, "changed"):
                 training.run_final(argparse.Namespace(bundle=root / "final"))
@@ -337,6 +377,26 @@ class FinalizationTests(unittest.TestCase):
 
 class RecipeTests(unittest.TestCase):
     """Regression checks for recipe."""
+
+    def test_invalid_judge_config_fails_before_gpu_startup(self):
+        """Validate the judge before checking GPU or training dependencies."""
+        with tempfile.TemporaryDirectory() as temporary:
+            data = Path(temporary) / "data"
+            data.mkdir()
+            command = [
+                "bash",
+                str(ROOT / "coding/rl/run_rl_training_and_evaluation.sh"),
+                "--rubric-rewards",
+                "--rl-data-dir",
+                str(data),
+                "--judge-model",
+                "azure_ai/FW-GLM-5.3",
+                "--dry-run",
+            ]
+            result = subprocess.run(command, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("JUDGE_MODEL must contain DeepSeek-V4-Flash", result.stderr)
+            self.assertNotIn("nvidia-smi", result.stderr)
 
     def test_dry_run_builds_fixed_reward_and_valid_shell_without_credentials(self):
         """Verify dry run builds fixed reward and valid shell without credentials."""
