@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import FrozenInstanceError
 
 import pytest
+
 from pyforger.artifacts import ArtifactRef, ArtifactStore
 from pyforger.op import clear_trace, op, trace
 
