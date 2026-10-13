@@ -11,7 +11,6 @@ from pyforger.evaluation import (
     apply_checks,
     evaluate_submission,
 )
-from pyforger.trials import EvaluationResult
 
 
 def test_success_failure_and_roundtrip():
@@ -21,10 +20,7 @@ def test_success_failure_and_roundtrip():
             lambda: "answer", lambda x: None, lambda x: passed
         )
         assert outcome.counted and outcome.passed is passed
-        result = EvaluationResult(
-            passed=passed, attribution=outcome.attribution, reason=outcome.reason
-        )
-        assert EvaluationResult.from_dict(result.to_dict()) == result
+        assert AttemptOutcome.from_dict(outcome.to_dict()) == outcome
 
 
 @pytest.mark.parametrize(

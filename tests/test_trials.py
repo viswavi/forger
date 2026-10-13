@@ -230,3 +230,10 @@ def test_verified_record_binds_grading_metadata(tmp_path):
     (record.root / "trial.json").write_text(json.dumps(data))
     with pytest.raises(ValueError, match="tampered"):
         load_trial(record)
+
+
+@pytest.mark.parametrize("passed", [True, False])
+def test_attributed_evaluation_roundtrip(passed):
+    """Trial evaluation preserves generic outcome attribution."""
+    result = EvaluationResult(passed=passed, attribution="model", reason="graded")
+    assert EvaluationResult.from_dict(result.to_dict()) == result
