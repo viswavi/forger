@@ -133,6 +133,48 @@ class TestRetrieve:
         assert all(isinstance(r, dict) for r in results)
 
 
+class TestRetrieveCaching:
+    """retrieve_from_* wrappers default to uncached; cache=True memoizes via @op."""
+
+    @patch("pyforger.acquire.sources.WebRetrievalSource.fetch")
+    def test_cache_false_by_default_refetches_every_call(self, mock_fetch):
+        """With the default cache=False, repeated calls hit the source again."""
+        mock_fetch.side_effect = [
+            [{"text": "first"}],
+            [{"text": "second"}],
+        ]
+        first = retrieve_from_web(queries=["x"])
+        second = retrieve_from_web(queries=["x"])
+        assert first == [{"text": "first", "query": "x"}]
+        assert second == [{"text": "second", "query": "x"}]
+        assert mock_fetch.call_count == 2
+
+    @patch("pyforger.acquire.sources.WebRetrievalSource.fetch")
+    def test_cache_true_memoizes_identical_calls(self, mock_fetch):
+        """With cache=True, a second identical call is served from disk cache."""
+        mock_fetch.side_effect = [
+            [{"text": "first"}],
+            [{"text": "second"}],
+        ]
+        first = retrieve_from_web(queries=["x"], cache=True)
+        second = retrieve_from_web(queries=["x"], cache=True)
+        assert first == second == [{"text": "first", "query": "x"}]
+        assert mock_fetch.call_count == 1
+
+    @patch("pyforger.acquire.sources.WebRetrievalSource.fetch")
+    def test_cache_true_still_distinguishes_different_args(self, mock_fetch):
+        """cache=True keys on call arguments, so a different query still refetches."""
+        mock_fetch.side_effect = [
+            [{"text": "for-x"}],
+            [{"text": "for-y"}],
+        ]
+        for_x = retrieve_from_web(queries=["x"], cache=True)
+        for_y = retrieve_from_web(queries=["y"], cache=True)
+        assert for_x == [{"text": "for-x", "query": "x"}]
+        assert for_y == [{"text": "for-y", "query": "y"}]
+        assert mock_fetch.call_count == 2
+
+
 class TestMultiQueryRetrieve:
     """Multi-query retrieval returns flat rows with a 'query' field."""
 
