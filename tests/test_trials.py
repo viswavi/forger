@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from pyforger.artifacts import ArtifactRef
 from pyforger.trials import (
@@ -60,7 +61,10 @@ def request(tmp_path, **configuration):
     task.mkdir()
     (task / "input.json").write_text("[1, 2, 3]")
     return TrialRequest(
-        "trial-0", ArtifactRef.capture(task), "arithmetic", configuration
+        trial_id="trial-0",
+        task=ArtifactRef.capture(task),
+        model="arithmetic",
+        configuration=configuration,
     )
 
 
@@ -71,10 +75,14 @@ def test_real_rollout_evaluation_and_serialization(tmp_path, offset, passed):
     result = run_trial(req, ArithmeticRunner(), ArithmeticEvaluator(), tmp_path / "run")
     assert result.evaluation.passed is passed
     assert result.evaluation.score == float(passed)
-    restored = TrialResult.from_dict(json.loads(json.dumps(result.to_dict())))
-    assert restored.to_dict() == result.to_dict()
+    restored = TrialResult.model_validate(
+        json.loads(json.dumps(result.model_dump(mode="json")))
+    )
+    assert restored.model_dump(mode="json") == result.model_dump(mode="json")
     assert restored.request.cache_key() == req.cache_key()
-    assert json.loads((tmp_path / "run" / "trial.json").read_text()) == result.to_dict()
+    assert json.loads(
+        (tmp_path / "run" / "trial.json").read_text()
+    ) == result.model_dump(mode="json")
 
 
 def test_infrastructure_failure_preserves_evidence(tmp_path):
@@ -84,7 +92,9 @@ def test_infrastructure_failure_preserves_evidence(tmp_path):
         def run(self, request, output, *, environment=None):
             output.mkdir()
             (output / "log.txt").write_text("Transport failed")
-            return RolloutResult("infrastructure_error", ArtifactRef.capture(output))
+            return RolloutResult(
+                status="infrastructure_error", artifacts=ArtifactRef.capture(output)
+            )
 
     result = run_trial(
         request(tmp_path), FailedRunner(), ArithmeticEvaluator(), tmp_path / "run"
@@ -112,7 +122,12 @@ def test_changed_task_fails_closed(tmp_path):
 def test_trial_identity_distinguishes_fresh_samples(tmp_path):
     """Different sample identifiers produce distinct trial cache keys."""
     req = request(tmp_path)
-    another = TrialRequest("trial-1", req.task, req.model, req.configuration)
+    another = TrialRequest(
+        trial_id="trial-1",
+        task=req.task,
+        model=req.model,
+        configuration=req.configuration,
+    )
     assert req.cache_key() != another.cache_key()
 
 
@@ -142,13 +157,13 @@ def test_malformed_adapter_types_fail_closed(tmp_path):
 def test_invalid_usage_is_rejected(value):
     """Usage records reject nonnumeric, negative, and nonfinite costs."""
     with pytest.raises(ValueError):
-        RolloutResult("completed", usage={"cost_usd": value})
+        RolloutResult(status="completed", usage={"cost_usd": value})
 
 
 @pytest.mark.parametrize("value", [1, "true", [], {}])
 def test_outcomes_require_actual_booleans(value):
     """Evaluation outcomes reject values that merely resemble booleans."""
-    with pytest.raises(TypeError):
+    with pytest.raises(ValidationError):
         EvaluationResult(passed=value)
 
 
@@ -157,10 +172,10 @@ def test_restored_evidence_must_still_match(tmp_path):
     result = run_trial(
         request(tmp_path), ArithmeticRunner(), ArithmeticEvaluator(), tmp_path / "run"
     )
-    encoded = result.to_dict()
+    encoded = result.model_dump(mode="json")
     (result.rollout.artifacts.root / "answer.json").write_text("99")
     with pytest.raises(ValueError):
-        TrialResult.from_dict(encoded)
+        TrialResult.model_validate(encoded)
 
 
 def test_evaluator_cannot_mutate_rollout_evidence(tmp_path):
@@ -184,18 +199,25 @@ def test_evaluator_cannot_mutate_rollout_evidence(tmp_path):
 def test_only_lossless_json_configuration_is_accepted(tmp_path, configuration):
     """Configuration rejects tuples and nonstring JSON object keys."""
     req = request(tmp_path)
-    with pytest.raises(TypeError):
-        TrialRequest("fresh", req.task, req.model, configuration)
+    with pytest.raises(ValidationError):
+        TrialRequest(
+            trial_id="fresh",
+            task=req.task,
+            model=req.model,
+            configuration=configuration,
+        )
 
 
 def test_configuration_is_defensively_snapshotted(tmp_path):
     """External mutations cannot change captured trial configuration."""
     configuration = {"parameters": [0.7]}
     req = request(tmp_path)
-    req = TrialRequest("fresh", req.task, req.model, configuration)
+    req = TrialRequest(
+        trial_id="fresh", task=req.task, model=req.model, configuration=configuration
+    )
     original = req.cache_key()
     configuration["parameters"].append(1)
-    req.to_dict()["configuration"]["parameters"].append(2)
+    req.model_dump(mode="json")["configuration"]["parameters"].append(2)
     assert req.cache_key() == original
 
 
@@ -225,7 +247,7 @@ def test_verified_record_binds_grading_metadata(tmp_path):
     )
     record = ArtifactRef.capture(tmp_path / "run")
     assert load_trial(record).evaluation.passed is False
-    data = result.to_dict()
+    data = result.model_dump(mode="json")
     data["evaluation"].update(passed=True, score=1.0)
     (record.root / "trial.json").write_text(json.dumps(data))
     with pytest.raises(ValueError, match="tampered"):
@@ -236,4 +258,4 @@ def test_verified_record_binds_grading_metadata(tmp_path):
 def test_attributed_evaluation_roundtrip(passed):
     """Trial evaluation preserves generic outcome attribution."""
     result = EvaluationResult(passed=passed, attribution="model", reason="graded")
-    assert EvaluationResult.from_dict(result.to_dict()) == result
+    assert EvaluationResult.model_validate(result.model_dump(mode="json")) == result

@@ -4,9 +4,19 @@ from __future__ import annotations
 import json
 import math
 from contextlib import nullcontext
-from dataclasses import dataclass, field
+from copy import deepcopy
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, Self
+
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictFloat,
+    StrictInt,
+    model_validator,
+)
 
 from pyforger.artifacts import ArtifactRef
 from pyforger.attempt_outcome import AttemptOutcome
@@ -24,43 +34,39 @@ def _json_object(value: dict[str, Any], name: str) -> dict[str, Any]:
     def validate(item: Any) -> None:
         if isinstance(item, dict):
             if any(not isinstance(key, str) for key in item):
-                raise TypeError(f"{name} keys must be strings")
+                raise ValueError(f"{name} keys must be strings")
             for child in item.values():
                 validate(child)
         elif isinstance(item, list):
             for child in item:
                 validate(child)
+        elif isinstance(item, float) and not math.isfinite(item):
+            raise ValueError(f"{name} must contain finite numbers")
         elif item is not None and type(item) not in (str, bool, int, float):
-            raise TypeError(f"{name} must contain JSON values")
+            raise ValueError(f"{name} must contain JSON values")
 
     if not isinstance(value, dict):
-        raise TypeError(f"{name} must be a JSON object")
+        raise ValueError(f"{name} must be a JSON object")
     validate(value)
-    return json.loads(json.dumps(value, allow_nan=False))
+    return deepcopy(value)
 
 
-def _artifact_dict(artifact: ArtifactRef | None) -> dict[str, Any] | None:
-    return artifact.to_dict() if artifact is not None else None
-
-
-def _artifact(value: dict[str, Any] | None) -> ArtifactRef | None:
-    return ArtifactRef.from_dict(value) if value is not None else None
-
-
-@dataclass(frozen=True)
-class TrialRequest:
+class TrialRequest(BaseModel):
     """Identity of one independent sample against a frozen task artifact.
 
     Configuration contains public execution parameters, not credential values.
     A different ``trial_id`` requests a fresh sample rather than a cached repeat.
     """
 
+    model_config = ConfigDict(frozen=True)
+
     trial_id: str
     task: ArtifactRef
     model: str
-    configuration: dict[str, Any] = field(default_factory=dict)
+    configuration: dict[str, Any] = Field(default_factory=dict)
 
-    def __post_init__(self) -> None:
+    @model_validator(mode="after")
+    def validate_record(self) -> Self:
         """Validate sample identity and snapshot JSON-compatible configuration."""
         if not isinstance(self.trial_id, str) or not self.trial_id.strip():
             raise ValueError("trial_id must be nonempty")
@@ -71,6 +77,7 @@ class TrialRequest:
         object.__setattr__(
             self, "configuration", _json_object(self.configuration, "configuration")
         )
+        return self
 
     def cache_key(self) -> tuple:
         """Include sample identity and all public execution configuration."""
@@ -81,36 +88,19 @@ class TrialRequest:
             json.dumps(self.configuration, sort_keys=True, allow_nan=False),
         )
 
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize the request for a durable experiment ledger."""
-        return {
-            "trial_id": self.trial_id,
-            "task": self.task.to_dict(),
-            "model": self.model,
-            "configuration": _json_object(self.configuration, "configuration"),
-        }
 
-    @classmethod
-    def from_dict(cls, value: dict[str, Any]) -> TrialRequest:
-        """Restore a recorded request without executing its runner."""
-        return cls(
-            value["trial_id"],
-            ArtifactRef.from_dict(value["task"]),
-            value["model"],
-            value["configuration"],
-        )
-
-
-@dataclass(frozen=True)
-class RolloutResult:
+class RolloutResult(BaseModel):
     """Execution status and full artifacts, independent of scientific grading."""
+
+    model_config = ConfigDict(frozen=True)
 
     status: str
     artifacts: ArtifactRef | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
-    usage: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    usage: dict[str, Any] = Field(default_factory=dict)
 
-    def __post_init__(self) -> None:
+    @model_validator(mode="after")
+    def validate_record(self) -> Self:
         """Validate status, snapshot metadata, and check usage quantities."""
         if self.status not in _ROLLOUT_STATUSES:
             raise ValueError(f"Unknown rollout status: {self.status}")
@@ -132,40 +122,24 @@ class RolloutResult:
                     or value < 0
                 ):
                     raise ValueError(f"{key} must be finite and nonnegative")
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize status, evidence references, and provider usage."""
-        return {
-            "status": self.status,
-            "artifacts": _artifact_dict(self.artifacts),
-            "metadata": _json_object(self.metadata, "metadata"),
-            "usage": _json_object(self.usage, "usage"),
-        }
-
-    @classmethod
-    def from_dict(cls, value: dict[str, Any]) -> RolloutResult:
-        """Restore a rollout record."""
-        return cls(
-            value["status"],
-            _artifact(value.get("artifacts")),
-            value.get("metadata", {}),
-            value.get("usage", {}),
-        )
+        return self
 
 
-@dataclass(frozen=True)
-class EvaluationResult:
+class EvaluationResult(BaseModel):
     """Generic grading; domain-specific integrity flags belong in metadata."""
 
-    score: float | None = None
-    passed: bool | None = None
+    model_config = ConfigDict(frozen=True)
+
+    score: StrictFloat | StrictInt | None = None
+    passed: StrictBool | None = None
     evidence: ArtifactRef | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
     attribution: str | None = None
     reason: str | None = None
 
-    def __post_init__(self) -> None:
+    @model_validator(mode="after")
+    def validate_record(self) -> Self:
         """Validate optional outcomes and snapshot grading metadata."""
         if self.score is not None and (
             type(self.score) not in (int, float) or not math.isfinite(self.score)
@@ -178,40 +152,27 @@ class EvaluationResult:
         if self.attribution is not None:
             if self.reason is None:
                 raise ValueError("Attributed evaluation requires a reason")
-            AttemptOutcome(self.passed, self.attribution, self.reason)
+            AttemptOutcome(
+                passed=self.passed, attribution=self.attribution, reason=self.reason
+            )
         object.__setattr__(self, "metadata", _json_object(self.metadata, "metadata"))
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize generic outcomes and retained evidence."""
-        return {
-            "score": self.score,
-            "passed": self.passed,
-            "attribution": self.attribution,
-            "reason": self.reason,
-            "evidence": _artifact_dict(self.evidence),
-            "metadata": _json_object(self.metadata, "metadata"),
-        }
-
-    @classmethod
-    def from_dict(cls, value: dict[str, Any]) -> EvaluationResult:
-        """Restore evaluation metadata and evidence references."""
-        return cls(
-            score=value.get("score"),
-            attribution=value.get("attribution"),
-            reason=value.get("reason"),
-            passed=value.get("passed"),
-            evidence=_artifact(value.get("evidence")),
-            metadata=value.get("metadata", {}),
-        )
+        return self
 
 
-@dataclass(frozen=True)
-class TrialResult:
+class TrialResult(BaseModel):
     """One execution with optional grading, without admission policy."""
+
+    model_config = ConfigDict(frozen=True)
 
     request: TrialRequest
     rollout: RolloutResult
     evaluation: EvaluationResult | None = None
+
+    @model_validator(mode="after")
+    def validate_evidence(self) -> Self:
+        """Verify referenced files whenever a trial result is validated."""
+        self.verify()
+        return self
 
     def verify(self) -> None:
         """Verify task and retained rollout/evaluation evidence before reuse."""
@@ -222,33 +183,6 @@ class TrialResult:
         ):
             if artifact is not None:
                 artifact.verify()
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize a durable execution record, optionally with grading."""
-        return {
-            "request": self.request.to_dict(),
-            "rollout": self.rollout.to_dict(),
-            "evaluation": self.evaluation.to_dict()
-            if self.evaluation is not None
-            else None,
-        }
-
-    @classmethod
-    def from_dict(cls, value: dict[str, Any]) -> TrialResult:
-        """Restore trusted ledger metadata and verify referenced evidence.
-
-        Use ``load_trial`` for persisted JSON: its enclosing verified artifact
-        binds outcome metadata as well as the referenced files.
-        """
-        result = cls(
-            TrialRequest.from_dict(value["request"]),
-            RolloutResult.from_dict(value["rollout"]),
-            EvaluationResult.from_dict(value["evaluation"])
-            if value.get("evaluation") is not None
-            else None,
-        )
-        result.verify()
-        return result
 
 
 AgentRequest = TrialRequest
@@ -292,17 +226,20 @@ class ReplayRunner(Protocol):
 def _persist(result: TrialResult, output: Path) -> None:
     result.verify()
     (output / "trial.json").write_text(
-        json.dumps(result.to_dict(), sort_keys=True, indent=2, allow_nan=False) + "\n",
+        json.dumps(
+            result.model_dump(mode="json"), sort_keys=True, indent=2, allow_nan=False
+        )
+        + "\n",
         encoding="utf-8",
     )
 
 
 def _execute(request, runner, output, environment_factory, source=None):
     identity = request.cache_key()
-    source_snapshot = source.to_dict() if source is not None else None
+    source_snapshot = source.model_dump(mode="json") if source is not None else None
     request.task.verify()
     if source is not None:
-        TrialResult(request, source).verify()
+        TrialResult(request=request, rollout=source).verify()
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)
     context = nullcontext(None)
@@ -327,10 +264,10 @@ def _execute(request, runner, output, environment_factory, source=None):
     if request.cache_key() != identity:
         raise ValueError("Runner changed trial request identity")
     if source is not None:
-        if source.to_dict() != source_snapshot:
+        if source.model_dump(mode="json") != source_snapshot:
             raise ValueError("Replay runner changed retained rollout metadata")
-        TrialResult(request, source).verify()
-    _persist(TrialResult(request, rollout), output)
+        TrialResult(request=request, rollout=source).verify()
+    _persist(TrialResult(request=request, rollout=rollout), output)
     return rollout
 
 
@@ -358,16 +295,18 @@ def evaluate_agent(
 ) -> EvaluationResult:
     """Grade a retained rollout separately, checking identity and evidence."""
     identity = request.cache_key()
-    snapshot = rollout.to_dict()
-    TrialResult(request, rollout).verify()
+    snapshot = rollout.model_dump(mode="json")
+    TrialResult(request=request, rollout=rollout).verify()
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)
     evaluation = evaluator.evaluate(request, rollout, output / "evaluation")
     if not isinstance(evaluation, EvaluationResult):
         raise TypeError("TrialEvaluator.evaluate must return EvaluationResult")
-    if request.cache_key() != identity or rollout.to_dict() != snapshot:
+    if request.cache_key() != identity or rollout.model_dump(mode="json") != snapshot:
         raise ValueError("Evaluator changed trial request identity or rollout metadata")
-    _persist(TrialResult(request, rollout, evaluation), output)
+    _persist(
+        TrialResult(request=request, rollout=rollout, evaluation=evaluation), output
+    )
     return evaluation
 
 
@@ -403,7 +342,7 @@ def run_trial(
     evaluation = None
     if rollout.status == "completed":
         evaluation = evaluate_agent(request, rollout, evaluator, output / "grading")
-    result = TrialResult(request, rollout, evaluation)
+    result = TrialResult(request=request, rollout=rollout, evaluation=evaluation)
     _persist(result, output)
     return result
 
@@ -415,6 +354,6 @@ def load_trial(record: ArtifactRef, relative: str = "trial.json") -> TrialResult
     loading it. A durable RunLedger can supply this enclosing artifact reference.
     """
     value = json.loads(record.path(relative).read_text(encoding="utf-8"))
-    result = TrialResult.from_dict(value)
+    result = TrialResult.model_validate(value)
     record.verify()
     return result

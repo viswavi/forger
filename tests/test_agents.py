@@ -61,9 +61,9 @@ class CommandAgentRunner:
         if result.status == "completed":
             _collect(environment, request, output)
         return RolloutResult(
-            result.status,
-            ArtifactRef.capture(output),
-            {"exit_code": result.exit_code, "duration_s": result.duration_s},
+            status=result.status,
+            artifacts=ArtifactRef.capture(output),
+            metadata={"exit_code": result.exit_code, "duration_s": result.duration_s},
         )
 
     def replay(self, request, rollout, output, *, environment=None) -> RolloutResult:
@@ -73,7 +73,10 @@ class CommandAgentRunner:
         command = json.loads(rollout.artifacts.path("command.json").read_text())
         configuration = {**request.configuration, "command": command}
         replay_request = AgentRequest(
-            request.trial_id, request.task, request.model, configuration
+            trial_id=request.trial_id,
+            task=request.task,
+            model=request.model,
+            configuration=configuration,
         )
         return self.run(replay_request, output, environment=environment)
 
@@ -152,10 +155,10 @@ def request(tmp_path, **configuration):
         "Compute the sum in input.json and write answer.txt."
     )
     return AgentRequest(
-        "sample-1",
-        ArtifactRef.capture(task),
-        "local/arithmetic",
-        {
+        trial_id="sample-1",
+        task=ArtifactRef.capture(task),
+        model="local/arithmetic",
+        configuration={
             "environment": {
                 "image": "test-local",
                 "memory_mb": 128,
@@ -222,7 +225,9 @@ def test_execute_then_grade_and_fresh_replay(tmp_path):
     assert replay.artifacts.path("files/answer.txt").read_text() == "6"
     assert len(factory.environments) == 2
     assert all(environment.closed for environment in factory.environments)
-    assert load_trial(record).to_dict() == TrialResult(req, rollout).to_dict()
+    assert load_trial(record).model_dump(mode="json") == TrialResult(
+        request=req, rollout=rollout
+    ).model_dump(mode="json")
 
 
 def test_no_environment_fallback(tmp_path):
@@ -236,8 +241,13 @@ def test_rows_are_not_cached_and_outputs_have_safe_explicit_identity(tmp_path):
     from pyforger.alter.agent import execute_agent as execute_rows
 
     req = request(tmp_path)
-    req = AgentRequest("../../escape", req.task, req.model, req.configuration)
-    items = [{"request": req.to_dict(), "upstream": 3}]
+    req = AgentRequest(
+        trial_id="../../escape",
+        task=req.task,
+        model=req.model,
+        configuration=req.configuration,
+    )
+    items = [{"request": req.model_dump(mode="json"), "upstream": 3}]
     factory = LocalFactory(tmp_path / "envs")
     runner = CommandAgentRunner()
     one = execute_rows(
@@ -274,7 +284,9 @@ def test_provider_owned_lifecycle(tmp_path):
             assert environment is None
             output.mkdir()
             (output / "result.txt").write_text("provider execution")
-            return RolloutResult("completed", ArtifactRef.capture(output))
+            return RolloutResult(
+                status="completed", artifacts=ArtifactRef.capture(output)
+            )
 
         def replay(self, request, rollout, output, *, environment=None):
             assert environment is None
@@ -340,7 +352,12 @@ def test_row_evaluation_and_provider_replay(tmp_path):
         tmp_path / "execute",
         environment_factory=LocalFactory(tmp_path / "envs"),
     )
-    rows = [{"request": req.to_dict(), "rollout": rollout.to_dict()}]
+    rows = [
+        {
+            "request": req.model_dump(mode="json"),
+            "rollout": rollout.model_dump(mode="json"),
+        }
+    ]
     graded = grade_rows(rows, evaluator=Evaluator(), output=tmp_path / "grade")
     assert graded[0]["evaluation"]["score"] == 1.0
     assert "evaluation" not in rows[0]
@@ -349,7 +366,9 @@ def test_row_evaluation_and_provider_replay(tmp_path):
         def replay(self, request, rollout, output, *, environment=None):
             assert environment is None
             output.mkdir()
-            return RolloutResult("completed", ArtifactRef.capture(output))
+            return RolloutResult(
+                status="completed", artifacts=ArtifactRef.capture(output)
+            )
 
     replayed = replay_rows(graded, runner=ProviderReplay(), output=tmp_path / "replay")
     assert replayed[0]["replay"]["status"] == "completed"
@@ -359,7 +378,9 @@ def test_row_evaluation_and_provider_replay(tmp_path):
 def test_environment_factory_requires_environment_configuration(tmp_path):
     """A factory without configuration['environment'] fails with guidance."""
     req = request(tmp_path)
-    req = AgentRequest(req.trial_id, req.task, req.model, {})
+    req = AgentRequest(
+        trial_id=req.trial_id, task=req.task, model=req.model, configuration={}
+    )
     with pytest.raises(ValueError, match="environment"):
         execute_agent(
             req,

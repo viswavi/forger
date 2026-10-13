@@ -16,7 +16,9 @@ def _requests(items, request_field):
     for item in items:
         value = get_field(item, request_field, "alter.agent")
         requests.append(
-            value if isinstance(value, TrialRequest) else TrialRequest.from_dict(value)
+            value
+            if isinstance(value, TrialRequest)
+            else TrialRequest.model_validate(value)
         )
     identities = [request.trial_id for request in requests]
     if len(set(identities)) != len(identities):
@@ -46,7 +48,7 @@ def execute_agent(
                 runner,
                 _output(output, request),
                 environment_factory=environment_factory,
-            ).to_dict(),
+            ).model_dump(mode="json"),
         }
         for item, request in zip(items, _requests(items, request_field))
     ]
@@ -67,10 +69,12 @@ def evaluate_agent(
             **item,
             output_field: evaluate_one(
                 request,
-                RolloutResult.from_dict(get_field(item, rollout_field, "alter.agent")),
+                RolloutResult.model_validate(
+                    get_field(item, rollout_field, "alter.agent")
+                ),
                 evaluator,
                 _output(output, request),
-            ).to_dict(),
+            ).model_dump(mode="json"),
         }
         for item, request in zip(items, _requests(items, request_field))
     ]
@@ -92,11 +96,13 @@ def replay_agent(
             **item,
             output_field: replay_one(
                 request,
-                RolloutResult.from_dict(get_field(item, rollout_field, "alter.agent")),
+                RolloutResult.model_validate(
+                    get_field(item, rollout_field, "alter.agent")
+                ),
                 runner,
                 _output(output, request),
                 environment_factory=environment_factory,
-            ).to_dict(),
+            ).model_dump(mode="json"),
         }
         for item, request in zip(items, _requests(items, request_field))
     ]
