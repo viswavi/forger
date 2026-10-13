@@ -112,24 +112,20 @@ class ResourceExecutor(ToolExecutor):
         """Return a bounded summary of the prepared input."""
         try:
             prepared = self.session.prepared_input()
-            if not self.session.item.startswith("https://"):
-                summary = {"kind": "text", "content": prepared[:20000]}
+            if prepared.get("kind") == "git" and isinstance(
+                prepared.get("files"), dict
+            ):
+                summary = {
+                    "kind": "git",
+                    "url": prepared["url"],
+                    "files": sorted(prepared["files"]),
+                }
             else:
-                resource = json.loads(prepared)
-                if resource["kind"] == "git":
-                    summary = {
-                        "kind": "git",
-                        "url": resource["url"],
-                        "files": sorted(resource["files"]),
-                    }
-                else:
-                    summary = {
-                        "kind": resource["kind"],
-                        "url": resource["url"],
-                        "content": resource["content"][:20000],
-                    }
+                summary = json.dumps(prepared, ensure_ascii=False)[:20000]
             return ResultObservation(
-                result_text=json.dumps(summary, ensure_ascii=False)
+                result_text=summary
+                if isinstance(summary, str)
+                else json.dumps(summary, ensure_ascii=False)
             )
         except Exception as exc:
             return ResultObservation(result_text=f"{type(exc).__name__}: {exc}")
@@ -145,10 +141,10 @@ class GitExecutor(ToolExecutor):
     def __call__(self, action, conversation=None):
         """List or read text files from the cloned repository snapshot."""
         try:
-            if not self.session.item.startswith("https://"):
-                raise ValueError("The input is not a Git repository")
-            resource = json.loads(self.session.prepared_input())
-            if resource["kind"] != "git":
+            resource = self.session.prepared_input()
+            if resource.get("kind") != "git" or not isinstance(
+                resource.get("files"), dict
+            ):
                 raise ValueError("The input is not a Git repository")
             files = resource["files"]
             if action.operation == "list":
@@ -175,10 +171,10 @@ class PythonTool(ToolDefinition):
                 description=(
                     "Test Python code on the prepared input. Set submit=true to "
                     "save a working pipeline. Define the entry function last, "
-                    "with one string argument and a list of string results "
-                    "(which may be empty). HTTPS "
-                    "inputs are JSON text with kind/url/content or kind/url/files; "
-                    "other inputs are raw strings. Imports: json, re, math, "
+                    "with one dict argument and a list of string results "
+                    "(which may be empty). URL-only HTTPS records gain "
+                    "kind/content or kind/files; other records retain their fields. "
+                    "Imports: json, re, math, "
                     "html only. No files, network, shell, or environment "
                     "access."
                 ),
@@ -198,8 +194,9 @@ class ResourceTool(ToolDefinition):
         return [
             cls(
                 description=(
-                    "Inspect the prepared input. HTML and PDF return extracted "
-                    "text; Git returns a bounded file listing. The Python tool "
+                    "Inspect the prepared input record. URL-only HTML and PDF "
+                    "records gain extracted text; Git returns a bounded file "
+                    "listing. The Python tool "
                     "receives the same prepared input."
                 ),
                 action_type=ResourceAction,
@@ -218,11 +215,11 @@ class GitTool(ToolDefinition):
         return [
             cls(
                 description=(
-                    "Read-only Git repository inspection for the current HTTPS "
-                    ".git input. The repository is shallow-cloned and a bounded "
+                    "Read-only Git repository inspection for a URL-only HTTPS "
+                    ".git record. The repository is shallow-cloned and a bounded "
                     "text snapshot is kept. Use operation='list' to see files, then "
                     "operation='read' and path to inspect a source file. The "
-                    "Python tool receives these files as JSON text."
+                    "Python tool receives these files in the input dict."
                 ),
                 action_type=GitAction,
                 observation_type=ResultObservation,

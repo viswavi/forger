@@ -10,9 +10,19 @@ import pytest
 from pyforger.alter import _dynamic_resources as resources
 
 
-def test_raw_text_is_unchanged():
-    """Test raw text is unchanged."""
-    assert resources.prepare_input("plain input") == "plain input"
+def test_existing_record_is_unchanged(monkeypatch):
+    """A retrieved search result's URL must not trigger another download."""
+    monkeypatch.setattr(
+        resources, "_download", lambda url: pytest.fail("unexpected fetch")
+    )
+    item = {
+        "text": "# Python Challenges\nIs Disarium Number?",
+        "id": "https://programiz.pro/community-challenges/python",
+        "title": "Python Coding Challenges",
+        "url": "https://programiz.pro/community-challenges/python",
+        "query": "Very hard programming challenges in Python",
+    }
+    assert resources.prepare_input(item) is item
 
 
 def test_html_url_is_extracted(monkeypatch):
@@ -25,7 +35,7 @@ def test_html_url_is_extracted(monkeypatch):
             "text/html",
         ),
     )
-    result = json.loads(resources.prepare_input("https://example.org/page"))
+    result = resources.prepare_input({"url": "https://example.org/page"})
     assert result["kind"] == "html"
     assert "Hello" in result["content"]
     assert "hidden" not in result["content"]
@@ -71,7 +81,7 @@ def test_pdf_url_is_parsed(monkeypatch):
             "application/pdf",
         ),
     )
-    result = json.loads(resources.prepare_input("https://example.org/file.pdf"))
+    result = resources.prepare_input({"url": "https://example.org/file.pdf"})
     assert result["kind"] == "pdf"
     assert result["content"].strip() == "Hello from PDF"
 
@@ -91,7 +101,7 @@ def test_git_url_is_cloned_to_bounded_text_bundle(monkeypatch):
         (repo / ".git" / "config").write_text("internal")
 
     monkeypatch.setattr(resources, "_clone_repo", fake_clone)
-    result = json.loads(resources.prepare_input("https://github.com/acme/repo.git"))
+    result = resources.prepare_input({"url": "https://github.com/acme/repo.git"})
     assert result["kind"] == "git"
     assert result["files"] == {"main.py": "def parse(): return 42"}
 
@@ -100,7 +110,7 @@ def test_git_rejects_other_hosts(monkeypatch):
     """Test git rejects other hosts."""
     monkeypatch.setattr(resources, "_public_https", lambda url: "example.org")
     with pytest.raises(ValueError, match="GitHub or GitLab"):
-        resources.prepare_input("https://example.org/repo.git")
+        resources.prepare_input({"url": "https://example.org/repo.git"})
 
 
 def test_uppercase_git_suffix_is_accepted(monkeypatch):
@@ -114,7 +124,7 @@ def test_uppercase_git_suffix_is_accepted(monkeypatch):
         (repo / "README.md").write_text("ok")
 
     monkeypatch.setattr(resources, "_clone_repo", fake_clone)
-    result = json.loads(resources.prepare_input("https://github.com/acme/repo.GIT"))
+    result = resources.prepare_input({"url": "https://github.com/acme/repo.GIT"})
     assert result["files"] == {"README.md": "ok"}
 
 
@@ -125,7 +135,7 @@ def test_plain_text_url_preserves_code(monkeypatch):
         "_download",
         lambda url: (b"if a<b and b>0:", "text/plain; charset=utf-8"),
     )
-    result = json.loads(resources.prepare_input("https://example.org/source.py"))
+    result = resources.prepare_input({"url": "https://example.org/source.py"})
     assert result == {
         "kind": "text",
         "url": "https://example.org/source.py",
@@ -288,15 +298,13 @@ def test_git_tool_lists_and_reads_prepared_files(monkeypatch):
     pytest.importorskip("openhands.sdk")
     from pyforger.alter import _dynamic_tool as tool
 
-    prepared = json.dumps(
-        {
-            "kind": "git",
-            "url": "https://github.com/a/b.git",
-            "files": {"README.md": "hello", "src/a.py": "x = 1"},
-        }
-    )
+    prepared = {
+        "kind": "git",
+        "url": "https://github.com/a/b.git",
+        "files": {"README.md": "hello", "src/a.py": "x = 1"},
+    }
     monkeypatch.setattr(tool, "prepare_input", lambda item: prepared)
-    session = tool.PythonExecutor("https://github.com/a/b.git", 5)
+    session = tool.PythonExecutor({"url": "https://github.com/a/b.git"}, 5)
     git = tool.GitExecutor(session)
     listing = git(tool.GitAction(operation="list"))
     assert json.loads(listing.result_text)["files"] == ["README.md", "src/a.py"]
@@ -313,7 +321,7 @@ def test_sdk_resolves_all_restricted_tools():
 
     from pyforger.alter import _dynamic_tool as tool
 
-    session = tool.PythonExecutor("plain input", 5)
+    session = tool.PythonExecutor({"text": "plain input"}, 5)
     session_id = tool.register_executor(session)
     try:
         for name in ("ForgerPythonTool", "ForgerResourceTool", "ForgerGitTool"):
@@ -338,9 +346,7 @@ def test_generated_program_receives_prepared_url(monkeypatch):
     except NotImplementedError:
         pytest.skip("Dynamic worker requires Unix signal timers")
 
-    prepared = json.dumps(
-        {"kind": "html", "url": "https://example.org", "content": "hello"}
-    )
+    prepared = {"kind": "html", "url": "https://example.org", "content": "hello"}
     monkeypatch.setattr(dynamic, "prepare_input", lambda item: prepared)
-    code = 'import json\ndef run(item):\n    return [json.loads(item)["content"]]'
-    assert dynamic._execute(code, "https://example.org", 5) == ["hello"]
+    code = 'def run(item):\n    return [item["content"]]'
+    assert dynamic._execute(code, {"url": "https://example.org"}, 5) == ["hello"]

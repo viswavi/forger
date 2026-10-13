@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import io
 import ipaddress
-import json
 import os
 import signal
 import socket
@@ -241,14 +240,17 @@ def _clone_files(url: str) -> dict[str, str]:
         return files
 
 
-def prepare_input(item: str) -> str:
-    """Return raw non-URLs or a JSON text bundle for supported HTTPS resources."""
-    if not item.startswith("https://"):
+def prepare_input(item: dict) -> dict:
+    """Preserve a record, or expand a URL-only record into resource fields."""
+    if set(item) != {"url"} or not isinstance(item["url"], str):
         return item
-    path = urlsplit(item).path.lower()
+    url = item["url"]
+    if not url.startswith("https://"):
+        return item
+    path = urlsplit(url).path.lower()
     if path.endswith(".git"):
-        return json.dumps({"kind": "git", "url": item, "files": _clone_files(item)})
-    data, content_type = _download(item)
+        return {"kind": "git", "url": url, "files": _clone_files(url)}
+    data, content_type = _download(url)
     if path.endswith(".pdf") or "application/pdf" in content_type:
         try:
             from pypdf import PdfReader
@@ -267,7 +269,4 @@ def prepare_input(item: str) -> str:
         charset = content_type.partition("charset=")[2].split(";")[0].strip()
         text = data.decode(charset or "utf-8", errors="replace")
         kind = "text"
-    return json.dumps(
-        {"kind": kind, "url": item, "content": text[:_MAX_TEXT]},
-        ensure_ascii=False,
-    )
+    return {"kind": kind, "url": url, "content": text[:_MAX_TEXT]}
