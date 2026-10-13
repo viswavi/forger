@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable
-from typing import Any, cast
+from typing import Any
 
 import tiktoken
 
@@ -399,7 +399,9 @@ def _parse_json(text: str) -> dict[str, Any]:
     decoder = json.JSONDecoder()
     for match in re.finditer(r"\{", text):
         try:
-            return cast(dict[str, Any], decoder.raw_decode(text, match.start())[0])
+            value: object = decoder.raw_decode(text, match.start())[0]
+            if isinstance(value, dict):
+                return {str(key): item for key, item in value.items()}
         except json.JSONDecodeError:
             continue
     raise ValueError(f"no JSON object in response: {text[:200]!r}")

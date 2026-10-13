@@ -37,14 +37,15 @@ import sys
 import threading
 import types
 from collections.abc import Callable
-from typing import Any, cast
+from typing import Any
 
-from RestrictedPython import compile_restricted, safe_globals
+from RestrictedPython.compile import compile_restricted
 from RestrictedPython.Guards import (
     guarded_iter_unpack_sequence,
     guarded_unpack_sequence,
-    safer_getattr,
+    safe_globals,
 )
+from RestrictedPython.Guards import safer_getattr as _safer_getattr
 from RestrictedPython.transformer import (
     IOPERATOR_TO_STR,
     RestrictingNodeTransformer,
@@ -173,8 +174,7 @@ def _slice_to_expr(node: ast.expr) -> ast.expr:
     return node
 
 
-# RestrictedPython does not provide type information.
-class _SandboxPolicy(RestrictingNodeTransformer):  # type: ignore[misc]
+class _SandboxPolicy(RestrictingNodeTransformer):
     """Expanded policy to allow augmented assignment to subscripts/attributes.
 
     RestrictedPython's default policy rejects ALL augmented assignment to
@@ -381,7 +381,7 @@ def _build_globals(
     def _input(prompt: Any = "") -> str:
         if prompt:
             sys_.stdout.write(str(prompt))
-        line = cast(str, sys_.stdin.readline())
+        line: str = sys_.stdin.readline()
         if not line:
             raise EOFError("EOF when reading a line")
         return line.rstrip("\n")
@@ -424,7 +424,8 @@ def _build_globals(
     def _getattr_(obj: Any, name: str, default: Any = None) -> Any:
         # Allowed modules expose others as attributes (e.g. `typing.sys` is
         # the real sys), so check any module reached this way too.
-        value = safer_getattr(obj, name, default)
+        get_attribute: Callable[[Any, str, Any], Any] = _safer_getattr
+        value = get_attribute(obj, name, default)
         if isinstance(value, types.ModuleType):
             return _check_module(value)
         return value
@@ -437,7 +438,7 @@ def _build_globals(
     safe_builtins["__import__"] = _restricted_import
     safe_builtins["input"] = _input
 
-    g = dict(safe_globals)
+    g: dict[str, Any] = dict(safe_globals)
     g["__builtins__"] = safe_builtins
     g["__name__"] = "sandbox"
     # Required by RestrictedPython's compiled class statements.
@@ -596,11 +597,10 @@ class Sandbox:
         for name in reversed(list(ns)):
             if name in baseline:
                 continue
-            obj = ns[name]
+            obj: object = ns[name]
             if callable(obj) and hasattr(obj, "__code__"):
-                fn = cast(Callable[..., Any], obj)
-                self._compile_cache[code] = fn
-                return fn
+                self._compile_cache[code] = obj
+                return obj
         raise ValueError("sandbox: code did not define any function to call")
 
     def call_method(

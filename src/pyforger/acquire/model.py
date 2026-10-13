@@ -9,7 +9,7 @@ from __future__ import annotations
 import warnings
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Union, cast
+from typing import Any, Union
 
 import litellm
 
@@ -325,7 +325,7 @@ class Model:
     @property
     def total_cost(self) -> float:
         """Sum of cost_usd across every call in this Model's history."""
-        return sum(cast(float, r.usage.get("cost_usd", 0.0)) for r in self.history)
+        return sum(float(r.usage.get("cost_usd", 0.0)) for r in self.history)
 
     @property
     def total_usage(self) -> dict[str, int]:

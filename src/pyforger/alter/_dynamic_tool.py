@@ -39,27 +39,27 @@ def _session(session_id: str) -> PythonExecutor:
         return _EXECUTORS[session_id]
 
 
-class PythonAction(Action):  # type: ignore[misc]
+class PythonAction(Action):
     """Code to test and optionally submit as a pipeline."""
 
     code: str
     submit: bool = False
 
 
-class ResourceAction(Action):  # type: ignore[misc]
+class ResourceAction(Action):
     """Request a summary of the current prepared input."""
 
     pass
 
 
-class GitAction(Action):  # type: ignore[misc]
+class GitAction(Action):
     """List or read files from the current Git snapshot."""
 
     operation: Literal["list", "read"]
     path: str = ""
 
 
-class ResultObservation(Observation):  # type: ignore[misc]
+class ResultObservation(Observation):
     """Text returned by a restricted OpenHands tool."""
 
     result_text: str
@@ -70,9 +70,7 @@ class ResultObservation(Observation):  # type: ignore[misc]
         return [TextContent(text=self.result_text)]
 
 
-class PythonExecutor(
-    ToolExecutor[PythonAction, ResultObservation]  # type: ignore[misc]
-):
+class PythonExecutor(ToolExecutor[PythonAction, ResultObservation]):
     """Test generated Python and retain a successful submission."""
 
     def __init__(self, item: dict[str, Any], timeout: float) -> None:
@@ -110,9 +108,7 @@ class PythonExecutor(
         )
 
 
-class ResourceExecutor(
-    ToolExecutor[ResourceAction, ResultObservation]  # type: ignore[misc]
-):
+class ResourceExecutor(ToolExecutor[ResourceAction, ResultObservation]):
     """Summarize the session's prepared input for the agent."""
 
     def __init__(self, session: PythonExecutor) -> None:
@@ -137,15 +133,17 @@ class ResourceExecutor(
             else:
                 summary = json.dumps(prepared, ensure_ascii=False)[:20000]
             return ResultObservation(
-                result_text=summary
-                if isinstance(summary, str)
-                else json.dumps(summary, ensure_ascii=False)
+                result_text=(
+                    summary
+                    if isinstance(summary, str)
+                    else json.dumps(summary, ensure_ascii=False)
+                )
             )
         except Exception as exc:
             return ResultObservation(result_text=f"{type(exc).__name__}: {exc}")
 
 
-class GitExecutor(ToolExecutor[GitAction, ResultObservation]):  # type: ignore[misc]
+class GitExecutor(ToolExecutor[GitAction, ResultObservation]):
     """Expose read-only list and read operations on a Git snapshot."""
 
     def __init__(self, session: PythonExecutor) -> None:
@@ -177,7 +175,7 @@ class GitExecutor(ToolExecutor[GitAction, ResultObservation]):  # type: ignore[m
             return ResultObservation(result_text=f"{type(exc).__name__}: {exc}")
 
 
-class PythonTool(ToolDefinition):  # type: ignore[misc]
+class PythonTool(ToolDefinition[PythonAction, ResultObservation]):
     """Register the restricted Python test and submit tool."""
 
     @classmethod
@@ -204,7 +202,7 @@ class PythonTool(ToolDefinition):  # type: ignore[misc]
         ]
 
 
-class ResourceTool(ToolDefinition):  # type: ignore[misc]
+class ResourceTool(ToolDefinition[ResourceAction, ResultObservation]):
     """Register read-only resource inspection."""
 
     @classmethod
@@ -227,7 +225,7 @@ class ResourceTool(ToolDefinition):  # type: ignore[misc]
         ]
 
 
-class GitTool(ToolDefinition):  # type: ignore[misc]
+class GitTool(ToolDefinition[GitAction, ResultObservation]):
     """Register read-only Git inspection."""
 
     @classmethod

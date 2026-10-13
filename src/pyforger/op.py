@@ -27,7 +27,7 @@ from collections import deque
 from collections.abc import Callable
 from functools import wraps
 from pathlib import Path
-from typing import Any, Protocol, TypeVar, cast, overload
+from typing import Any, Protocol, TypeVar, overload
 
 from pydantic import BaseModel
 
@@ -269,7 +269,7 @@ def op(
                         )
 
                     with cache_path.open("rb") as f:
-                        result = cast(T, pickle.load(f))
+                        result: T = pickle.load(f)
                     cache_hit = True
                 except Exception as exc:
                     if _cache_only:

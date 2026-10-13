@@ -16,7 +16,7 @@ import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from pyforger.acquire.model import LocalModel, Model
 from pyforger.alter._dynamic_resources import prepare_input
@@ -91,12 +91,15 @@ def _execute(
         )
     if result.returncode:
         raise ValueError(result.stderr[-4000:])
-    output = json.loads(result.stdout)
-    if not isinstance(output, list) or any(
-        not isinstance(value, str) for value in output
-    ):
+    output: object = json.loads(result.stdout)
+    if not isinstance(output, list):
         raise TypeError("The pipeline must return a list of strings")
-    return cast(list[str], output)
+    strings: list[str] = []
+    for value in output:
+        if not isinstance(value, str):
+            raise TypeError("The pipeline must return a list of strings")
+        strings.append(value)
+    return strings
 
 
 def agent_llm(model: Model) -> LLM:
@@ -136,7 +139,7 @@ def agent_llm(model: Model) -> LLM:
     for option in ("api_mode", "capability_overrides"):
         if option in model._kwargs:
             config[option] = model._kwargs[option]
-    return cast("LLM", LLM(**config))
+    return LLM(**config)
 
 
 def _generate(
@@ -154,6 +157,8 @@ def _generate(
     except ImportError as exc:
         raise ImportError("OpenHands SDK is required; reinstall pyforger") from exc
 
+    from openhands.sdk.conversation import BaseConversation
+    from openhands.sdk.event import ActionEvent, MessageEvent
     from openhands.sdk.tool import Tool
 
     from pyforger.alter._dynamic_tool import (
@@ -189,8 +194,9 @@ def _generate(
                 visualizer=None,
                 max_iteration_per_run=max_iterations,
             )
+            api: BaseConversation = conversation
             try:
-                conversation.send_message(
+                api.send_message(
                     "Build a reusable Python sub-pipeline for this goal and input. "
                     "Use the resource tool to inspect the input or the Git tool to "
                     "inspect a cloned repository. The Python test tool passes a "
@@ -213,7 +219,7 @@ def _generate(
                 while remaining:
                     conversation.max_iteration_per_run = remaining
                     try:
-                        conversation.run()
+                        api.run()
                     except Exception:
                         if not executor.accepted:
                             raise
@@ -222,13 +228,14 @@ def _generate(
                     responses = {
                         event.llm_response_id
                         for event in conversation.state.events
-                        if getattr(event, "source", None) == "agent"
-                        and getattr(event, "llm_response_id", None)
+                        if isinstance(event, (ActionEvent, MessageEvent))
+                        and event.source == "agent"
+                        and event.llm_response_id
                     }
                     remaining -= max(1, len(responses - seen_responses))
                     seen_responses = responses
                     if remaining > 0:
-                        conversation.send_message(
+                        api.send_message(
                             "You have not submitted a working pipeline yet. "
                             "Use the python tool with submit=true after testing."
                         )

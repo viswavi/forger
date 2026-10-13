@@ -14,7 +14,7 @@ import tempfile
 import time
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 from urllib.parse import urljoin, urlsplit
 
 from pyforger.alter._dynamic_git_proxy import git_proxy
@@ -75,11 +75,15 @@ def _public_https_address(url: str) -> tuple[str, str]:
     addresses = socket.getaddrinfo(
         parts.hostname, parts.port or 443, type=socket.SOCK_STREAM
     )
-    if not addresses or any(
-        not public_address(cast(str, entry[4][0])) for entry in addresses
-    ):
+    public_addresses: list[str] = []
+    for entry in addresses:
+        address = entry[4][0]
+        if not isinstance(address, str) or not public_address(address):
+            raise ValueError("Resource URL resolves to a non-public address")
+        public_addresses.append(address)
+    if not public_addresses:
         raise ValueError("Resource URL resolves to a non-public address")
-    return parts.hostname.lower(), cast(str, addresses[0][4][0])
+    return parts.hostname.lower(), public_addresses[0]
 
 
 def _public_https(url: str) -> str:
