@@ -136,6 +136,14 @@ def _generate(goal, item, model, max_iterations, execution_timeout_s):
         config["api_key"] = SecretStr(key)
     if model._max_tokens is not None:
         config["max_output_tokens"] = model._max_tokens
+    # Model counts additional retries; the SDK counts total attempts.
+    if hasattr(model, "_num_retries"):
+        config["num_retries"] = max(1, model._num_retries + 1)
+    for option in ("timeout", "reasoning_effort"):
+        if option in model._kwargs:
+            config[option] = model._kwargs[option]
+    if "extra_body" in model._kwargs:
+        config["litellm_extra_body"] = model._kwargs["extra_body"]
     try:
         llm = LLM(**config)
         with tempfile.TemporaryDirectory(prefix="forger-agent-") as workspace:

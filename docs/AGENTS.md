@@ -225,6 +225,9 @@ model = Model(
 )
 ```
 
+Use `Model(..., reasoning_effort="low")` where supported by the model/provider.
+`dynamic_step` forwards `reasoning_effort` and `extra_body` to OpenHands.
+
 #### Prompt types
 
 Two type aliases are exported from `pyforger.acquire.model`:
