@@ -257,7 +257,7 @@ def dynamic_step(
     goal: str,
     model: Model,
     *,
-    max_parallel: int = 4,
+    max_parallel: int = 10,
     max_iterations: int = 20,
     execution_timeout_s: float = 10.0,
     source_version: str = _SOURCE_VERSION,
