@@ -1,4 +1,5 @@
 """Artifact primitives tested against real synthetic temporary files."""
+
 from __future__ import annotations
 
 import json
@@ -7,7 +8,6 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import FrozenInstanceError
 
 import pytest
-
 from pyforger.artifacts import ArtifactRef, ArtifactStore
 from pyforger.op import clear_trace, op, trace
 
@@ -273,3 +273,20 @@ def test_store_missing_digest(tmp_path):
     store = ArtifactStore(tmp_path / "store")
     with pytest.raises(ValueError, match="Cannot read stored artifact"):
         store.get("0" * 64)
+
+
+def test_bounded_text_reads_regular_files_only(tmp_path):
+    from pyforger.artifacts import read_text
+
+    path = tmp_path / "text"
+    path.write_text("example")
+    assert read_text(path, 7) == "example"
+    with pytest.raises(ValueError, match="limit"):
+        read_text(path, 6)
+    link = tmp_path / "link"
+    link.symlink_to(path)
+    with pytest.raises(ValueError):
+        read_text(link)
+    for limit in (0, -1, True):
+        with pytest.raises(ValueError):
+            read_text(path, limit)

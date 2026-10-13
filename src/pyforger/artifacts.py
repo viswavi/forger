@@ -1,4 +1,5 @@
 """Verified, content-addressed directory artifacts for pipeline inputs."""
+
 from __future__ import annotations
 
 import hashlib
@@ -276,9 +277,10 @@ class ArtifactStore:
             for entry in ref.files:
                 target = staged / entry.path
                 target.parent.mkdir(parents=True, exist_ok=True)
-                with _open_file(ref.root / entry.path) as stream, target.open(
-                    "wb"
-                ) as output:
+                with (
+                    _open_file(ref.root / entry.path) as stream,
+                    target.open("wb") as output,
+                ):
                     shutil.copyfileobj(stream, output, _CHUNK_SIZE)
             ref.verify()
             ArtifactRef(staged, ref.digest, ref.files).verify()
@@ -288,3 +290,18 @@ class ArtifactStore:
                 if not os.path.lexists(destination):
                     raise
             return self.get(ref.digest)
+
+
+def read_text(path: Path, max_bytes: int = 2 * 1024 * 1024) -> str:
+    """Read a bounded regular UTF-8 file without following symlinks."""
+    if type(max_bytes) is not int or max_bytes < 1:
+        raise ValueError("max_bytes must be positive")
+    path = Path(path)
+    try:
+        with _open_file(path) as stream:
+            data = stream.read(max_bytes + 1)
+    except OSError as exc:
+        raise ValueError(f"Expected readable regular artifact: {path}") from exc
+    if len(data) > max_bytes:
+        raise ValueError("Artifact exceeds read limit")
+    return data.decode("utf-8")
