@@ -141,6 +141,7 @@ def _generate(goal, item, model, max_iterations, execution_timeout_s):
         raise ImportError("OpenHands SDK is required; reinstall pyforger") from exc
 
     from openhands.sdk.tool import Tool
+
     from pyforger.alter._dynamic_tool import (
         PythonExecutor,
         register_executor,

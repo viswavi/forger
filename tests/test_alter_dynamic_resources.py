@@ -6,6 +6,7 @@ import socket
 from contextlib import contextmanager
 
 import pytest
+
 from pyforger.alter import _dynamic_resources as resources
 
 
@@ -317,6 +318,7 @@ def test_sdk_resolves_all_restricted_tools():
     pytest.importorskip("openhands.sdk")
     from openhands.sdk.tool import Tool
     from openhands.sdk.tool.registry import resolve_tool
+
     from pyforger.alter import _dynamic_tool as tool
 
     session = tool.PythonExecutor({"text": "plain input"}, 5)
