@@ -7,11 +7,13 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import FrozenInstanceError
 
 import pytest
+
 from pyforger.artifacts import ArtifactRef, ArtifactStore
 from pyforger.op import clear_trace, op, trace
 
 
 def tree(root):
+    """Create a synthetic tree with nested, binary, and empty files."""
     root.mkdir()
     (root / "nested").mkdir()
     (root / "nested/data.bin").write_bytes(b"synthetic\x00data" * 100_000)
@@ -21,6 +23,7 @@ def tree(root):
 
 
 def test_deterministic_immutable_manifest(tmp_path):
+    """Equivalent contents yield immutable manifests independent of timestamps."""
     ref = ArtifactRef.capture(tree(tmp_path / "one"))
     other = ArtifactRef.capture(tree(tmp_path / "two"))
     os.utime(other.root / "a.txt", (100, 100))
@@ -34,6 +37,7 @@ def test_deterministic_immutable_manifest(tmp_path):
 
 
 def test_empty_artifact(tmp_path):
+    """Empty directories do not change an empty artifact manifest."""
     ref = ArtifactRef.capture(tmp_path)
     assert ref.files == ()
     (tmp_path / "directory").mkdir()
@@ -41,6 +45,7 @@ def test_empty_artifact(tmp_path):
 
 
 def test_json_roundtrip(tmp_path):
+    """Restored references retain identity and detect subsequent missing files."""
     ref = ArtifactRef.capture(tree(tmp_path / "source"))
     restored = ArtifactRef.from_dict(json.loads(json.dumps(ref.to_dict())))
     assert restored == ref
@@ -52,6 +57,7 @@ def test_json_roundtrip(tmp_path):
 
 @pytest.mark.parametrize("change", ["missing", "tampered", "additional"])
 def test_mutation(tmp_path, change):
+    """All artifact access paths reject missing, changed, or additional files."""
     ref = ArtifactRef.capture(tree(tmp_path / "source"))
     if change == "missing":
         (ref.root / "a.txt").unlink()
@@ -65,6 +71,7 @@ def test_mutation(tmp_path, change):
 
 
 def test_missing_and_non_directory_root(tmp_path):
+    """Capture and verification reject missing and regular-file roots."""
     ref = ArtifactRef.capture(tree(tmp_path / "source"))
     ref.root.rename(tmp_path / "moved")
     with pytest.raises(ValueError, match="Cannot read artifact"):
@@ -90,12 +97,14 @@ def test_missing_and_non_directory_root(tmp_path):
     ],
 )
 def test_unsafe_paths(tmp_path, relative):
+    """Artifact lookup rejects traversal and malformed relative paths."""
     ref = ArtifactRef.capture(tree(tmp_path / "source"))
     with pytest.raises(ValueError, match="relative path"):
         ref.path(relative)
 
 
 def test_path_requires_manifest_file(tmp_path):
+    """Lookup exposes only regular files present in the verified manifest."""
     ref = ArtifactRef.capture(tree(tmp_path / "source"))
     assert ref.path("nested/data.bin").read_bytes().startswith(b"synthetic")
     for path in ("nested", "unknown"):
@@ -105,6 +114,7 @@ def test_path_requires_manifest_file(tmp_path):
 
 @pytest.mark.parametrize("location", ["root", "file", "directory", "broken"])
 def test_symlinks(tmp_path, location):
+    """Capture rejects root and descendant symlinks, including broken links."""
     root = tree(tmp_path / "source")
     if location == "root":
         link = tmp_path / "link"
@@ -122,6 +132,7 @@ def test_symlinks(tmp_path, location):
 
 
 def test_fifo_and_symlink_mutation(tmp_path):
+    """Verification rejects new special files and replacement symlinks."""
     ref = ArtifactRef.capture(tree(tmp_path / "source"))
     os.mkfifo(ref.root / "fifo")
     with pytest.raises(ValueError, match="special file"):
@@ -134,6 +145,7 @@ def test_fifo_and_symlink_mutation(tmp_path):
 
 
 def test_invalid_ledger(tmp_path):
+    """Deserialization rejects malformed and inconsistent manifests."""
     ref = ArtifactRef.capture(tree(tmp_path / "source"))
     for mutate in (
         lambda d: d.update(digest="bad"),
@@ -152,6 +164,7 @@ def test_invalid_ledger(tmp_path):
 
 
 def test_op_cache_invalidation(tmp_path, monkeypatch):
+    """Cached operations verify artifacts and recompute for new content digests."""
     monkeypatch.setenv("FORGER_CACHE", str(tmp_path / "cache"))
 
     @op
@@ -170,6 +183,7 @@ def test_op_cache_invalidation(tmp_path, monkeypatch):
 
 
 def test_store_copy_dedup_corruption(tmp_path):
+    """Stored copies are independent, deduplicated, and checked for corruption."""
     source = tree(tmp_path / "source")
     store = ArtifactStore(tmp_path / "store")
     ref = store.put(source)
@@ -187,6 +201,7 @@ def test_store_copy_dedup_corruption(tmp_path):
 
 
 def test_concurrent_store_publication(tmp_path):
+    """Concurrent publication retains one verified content-addressed directory."""
     source = tree(tmp_path / "source")
     store = ArtifactStore(tmp_path / "store")
     with ThreadPoolExecutor(max_workers=8) as pool:
@@ -197,6 +212,7 @@ def test_concurrent_store_publication(tmp_path):
 
 
 def test_store_symlinks(tmp_path):
+    """Publication rejects symlink destinations and symlink-bearing sources."""
     source = tree(tmp_path / "source")
     store = ArtifactStore(tmp_path / "store")
     ref = ArtifactRef.capture(source)
@@ -209,6 +225,7 @@ def test_store_symlinks(tmp_path):
 
 
 def test_trusted_ancestor_alias(tmp_path):
+    """Ancestor aliases normalize once without allowing root symlinks."""
     physical = tmp_path / "physical"
     physical.mkdir()
     source = tree(physical / "source")
@@ -236,6 +253,7 @@ def test_trusted_ancestor_alias(tmp_path):
 
 @pytest.mark.parametrize("replacement", ["root", "ancestor"])
 def test_store_rejects_replaced_physical_path(tmp_path, replacement):
+    """Replacing a normalized store root or ancestor with a symlink fails."""
     physical = tmp_path / "physical"
     physical.mkdir()
     source = tree(tmp_path / "source")
@@ -251,6 +269,7 @@ def test_store_rejects_replaced_physical_path(tmp_path, replacement):
 
 
 def test_store_missing_digest(tmp_path):
+    """An absent stored digest raises a descriptive validation error."""
     store = ArtifactStore(tmp_path / "store")
     with pytest.raises(ValueError, match="Cannot read stored artifact"):
         store.get("0" * 64)

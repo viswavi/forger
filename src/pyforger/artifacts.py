@@ -10,7 +10,7 @@ import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
-from typing import Any, Tuple
+from typing import Any
 
 _MAX_ENTRIES = 100_000
 _MAX_DEPTH = 100
@@ -66,13 +66,14 @@ class ArtifactFile:
     sha256: str
 
     def __post_init__(self) -> None:
+        """Validate the relative path, byte count, and content digest."""
         _relative(self.path)
         if type(self.size) is not int or self.size < 0:
             raise ValueError("Artifact file size must be a nonnegative integer")
         _sha256(self.sha256)
 
 
-def _digest(files: Tuple[ArtifactFile, ...]) -> str:
+def _digest(files: tuple[ArtifactFile, ...]) -> str:
     payload = [[f.path, f.size, f.sha256] for f in files]
     return hashlib.sha256(
         json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
@@ -88,7 +89,7 @@ def _open_file(path: Path):
     return stream
 
 
-def _manifest(root: Path) -> Tuple[ArtifactFile, ...]:
+def _manifest(root: Path) -> tuple[ArtifactFile, ...]:
     try:
         root = _directory(root)
         files = []
@@ -157,9 +158,10 @@ class ArtifactRef:
 
     root: Path
     digest: str
-    files: Tuple[ArtifactFile, ...]
+    files: tuple[ArtifactFile, ...]
 
     def __post_init__(self) -> None:
+        """Normalize the root and validate the immutable manifest and digest."""
         object.__setattr__(self, "root", _normalize_root(self.root))
         object.__setattr__(self, "files", tuple(self.files))
         _sha256(self.digest)
@@ -175,11 +177,13 @@ class ArtifactRef:
 
     @classmethod
     def capture(cls, root: Path) -> ArtifactRef:
+        """Hash regular files under a validated root into an immutable reference."""
         root = _normalize_root(root)
         files = _manifest(root)
         return cls(root, _digest(files), files)
 
     def verify(self) -> None:
+        """Reject missing, additional, or changed files against the manifest."""
         current = {f.path: f for f in _manifest(self.root)}
         expected = {f.path: f for f in self.files}
         missing = sorted(expected.keys() - current.keys())
@@ -194,10 +198,12 @@ class ArtifactRef:
             )
 
     def cache_key(self) -> str:
+        """Verify current contents before returning the location-independent digest."""
         self.verify()
         return self.digest
 
     def path(self, relative: str) -> Path:
+        """Return a manifested file path after validating the entire artifact."""
         relative = _relative(relative)
         self.verify()
         if relative not in {f.path for f in self.files}:
@@ -205,6 +211,7 @@ class ArtifactRef:
         return self.root / relative
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize the root, digest, and manifest as JSON-compatible values."""
         return {
             "root": str(self.root),
             "digest": self.digest,
@@ -215,6 +222,7 @@ class ArtifactRef:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ArtifactRef:
+        """Restore manifest metadata without reading artifact files."""
         try:
             if not isinstance(data["root"], str) or not isinstance(data["files"], list):
                 raise ValueError("Invalid artifact ledger root or files")
@@ -231,6 +239,7 @@ class ArtifactStore:
     """Atomic directory publication in a trusted, content-addressed local store."""
 
     def __init__(self, root: Path):
+        """Create or validate the trusted artifact publication directory."""
         self.root = _normalize_root(root)
         try:
             self.root.mkdir(parents=True, exist_ok=True)
@@ -239,6 +248,7 @@ class ArtifactStore:
             raise ValueError(f"Cannot create artifact store: {exc}") from exc
 
     def get(self, digest: str) -> ArtifactRef:
+        """Verify stored contents against the requested digest."""
         _sha256(digest)
         _directory(self.root)
         destination = self.root / digest
@@ -252,6 +262,7 @@ class ArtifactStore:
         return ref
 
     def put(self, source: Path) -> ArtifactRef:
+        """Publish a verified copy atomically, reusing matching stored contents."""
         ref = ArtifactRef.capture(source)
         _directory(self.root)
         destination = self.root / ref.digest
