@@ -7,8 +7,9 @@ import os
 import threading
 
 import pytest
+from pydantic import BaseModel, ValidationError
 
-from pyforger.op import op
+from pyforger.op import CallRecord, clear_trace, op, trace
 
 _SOME_CONFIG = "v1"
 
@@ -163,3 +164,50 @@ def test_op_accepts_unpicklable_arg_with_cache_key() -> None:
     assert takes_unpicklable(UnpicklableObject()) == 1  # cache hit on second call
     # Confirm that the op function only executes once, proving there was a cache hit.
     assert calls == 1
+
+
+def test_trace_records_are_serializable_models(tmp_path, monkeypatch):
+    """Real operation traces validate and roundtrip through Pydantic JSON."""
+    monkeypatch.setenv("FORGER_CACHE", str(tmp_path))
+    clear_trace()
+    try:
+
+        @op
+        def double(value):
+            return value * 2
+
+        assert double(3) == double(3) == 6
+        records = trace()
+        assert [record.cache_hit for record in records] == [False, True]
+        assert records[0].output_hash is not None
+        assert records[1].output_hash is None
+        for record in records:
+            assert isinstance(record, BaseModel)
+            assert CallRecord.model_validate_json(record.model_dump_json()) == record
+            assert set(record.model_dump()) == {
+                "op_name",
+                "input_hash",
+                "output_hash",
+                "cache_hit",
+                "duration_s",
+            }
+    finally:
+        clear_trace()
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("op_name", []), ("cache_hit", "invalid"), ("duration_s", "invalid")],
+)
+def test_call_record_validates_fields(field, value):
+    """Malformed trace metadata fails model validation."""
+    data = dict(
+        op_name="test",
+        input_hash="input",
+        output_hash=None,
+        cache_hit=False,
+        duration_s=0.1,
+    )
+    data[field] = value
+    with pytest.raises(ValidationError):
+        CallRecord(**data)
