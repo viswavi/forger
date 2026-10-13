@@ -13,7 +13,9 @@ from rubric_sandbox import Sandbox  # noqa: E402 - isolated worker/module bootst
 
 def main():
     """Run the command-line utility described in the module documentation."""
-    resource.setrlimit(resource.RLIMIT_AS, (512 * 1024**2, 512 * 1024**2))
+    # Darwin cannot set this address-space limit; Linux training retains it.
+    if sys.platform != "darwin":
+        resource.setrlimit(resource.RLIMIT_AS, (512 * 1024**2, 512 * 1024**2))
     resource.setrlimit(resource.RLIMIT_CPU, (10, 10))
     resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
