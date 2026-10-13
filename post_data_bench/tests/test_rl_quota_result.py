@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from coding.rl import rubric_rm as rm
@@ -34,6 +35,139 @@ def checkpoint(path):
 
 class QuotaCircuitTests(unittest.IsolatedAsyncioTestCase):
     """Regression checks for quota circuit."""
+
+    def setUp(self):
+        """Isolate persistent judge usage and environment settings."""
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.usage_file = Path(temporary.name) / "judge_usage.json"
+        environment = patch.dict(
+            os.environ,
+            {
+                "JUDGE_TOKEN_USAGE_FILE": str(self.usage_file),
+                "JUDGE_TOKEN_UNIT_LIMIT": "75000000",
+                "JUDGE_MODEL": rm.JUDGE_MODEL,
+                "JUDGE_REASONING_EFFORT": "low",
+                "PDB_TASK": "coding",
+            },
+        )
+        environment.start()
+        self.addCleanup(environment.stop)
+        credentials = patch.dict(
+            os.environ,
+            {
+                "LITELLM_JUDGE_API_KEY": "test-only",
+                "LITELLM_BASE_URL": "https://example.test",
+            },
+        )
+        credentials.start()
+        self.addCleanup(credentials.stop)
+
+    async def test_local_quota_stops_on_first_response_and_persists(self):
+        """Stop all workers when shared token usage reaches its limit."""
+        marker = self.usage_file.with_name("stop.json")
+        reply = SimpleNamespace(
+            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=2),
+            choices=[SimpleNamespace(message=SimpleNamespace(content='{"score":1}'))],
+        )
+        with patch.dict(
+            os.environ,
+            {
+                "JUDGE_TOKEN_UNIT_LIMIT": "16",
+                "JUDGE_QUOTA_STOP_FILE": str(marker),
+            },
+        ), patch("litellm.acompletion", new=AsyncMock(return_value=reply)) as call:
+            with self.assertRaises(rm.JudgeQuotaExhausted):
+                await rm.prompt_score("c", [], "r", "g")
+            self.assertEqual(
+                json.loads(marker.read_text()), {"reason": "judge_quota_exhausted"}
+            )
+            self.assertEqual(
+                rm.TokenUnitBudget(self.usage_file, 16).snapshot()["token_units"], 16
+            )
+            # A fresh worker consults the shared file before making another call.
+            rm._JUDGE_STATE.clear()
+            with self.assertRaises(rm.JudgeQuotaExhausted):
+                await rm.prompt_score("c", [], "r", "g")
+            self.assertEqual(call.await_count, 1)
+
+    async def test_invalid_reply_still_charged_and_alias_effort_forwarded(self):
+        """Count malformed replies and preserve the configured judge alias."""
+        replies = [
+            SimpleNamespace(
+                usage={"prompt_tokens": 10, "completion_tokens": 2},
+                _hidden_params={"response_cost": 0.25},
+                choices=[SimpleNamespace(message=SimpleNamespace(content=content))],
+            )
+            for content in ("bad JSON", '{"score":0.5}')
+        ]
+        alias = "custom/DeepSeek-V4-Flash-company"
+        with patch.dict(
+            os.environ,
+            {
+                "JUDGE_MODEL": alias,
+                "JUDGE_REASONING_EFFORT": "high",
+            },
+        ), patch(
+            "litellm.acompletion", new=AsyncMock(side_effect=replies)
+        ) as call, patch.object(
+            rm.asyncio, "sleep", new=AsyncMock()
+        ):
+            self.assertEqual(await rm.prompt_score("c", [], "r", "g"), 0.5)
+            self.assertEqual(call.call_args.kwargs["model"], alias)
+            self.assertEqual(call.call_args.kwargs["reasoning"], {"effort": "high"})
+            self.assertEqual(call.call_args.kwargs["max_tokens"], 4096)
+            snapshot = rm.TokenUnitBudget(self.usage_file, 75_000_000).snapshot()
+            self.assertEqual(snapshot["token_units"], 32)
+            self.assertEqual(snapshot["calls"], 2)
+            self.assertEqual(snapshot["cost_usd"], 0.5)
+            self.assertEqual(snapshot["unpriced_calls"], 0)
+
+    async def test_unavailable_cost_still_charges_judge_tokens(self):
+        """Keep judge token accounting independent of optional pricing."""
+        reply = SimpleNamespace(
+            usage={"prompt_tokens": 10, "completion_tokens": 2},
+            _hidden_params={"response_cost": float("nan")},
+            choices=[SimpleNamespace(message=SimpleNamespace(content='{"score":1}'))],
+        )
+        with patch("litellm.acompletion", new=AsyncMock(return_value=reply)), patch(
+            "litellm.completion_cost", side_effect=RuntimeError("unpriced")
+        ):
+            self.assertEqual(await rm.prompt_score("c", [], "r", "g"), 1)
+        snapshot = rm.TokenUnitBudget(self.usage_file, 75_000_000).snapshot()
+        self.assertEqual(snapshot["token_units"], 16)
+        self.assertEqual(snapshot["calls"], 1)
+        self.assertEqual(snapshot["cost_usd"], 0)
+        self.assertEqual(snapshot["unpriced_calls"], 1)
+
+    async def test_missing_usage_stops_without_retry_and_blocks_later_workers(self):
+        """Fail closed across workers when response usage is unavailable."""
+        reply = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content='{"score":1}'))],
+        )
+        with patch("litellm.acompletion", new=AsyncMock(return_value=reply)) as call:
+            with self.assertRaisesRegex(
+                rm.JudgeUnavailable, "missing or invalid token usage"
+            ):
+                await rm.prompt_score("c", [], "r", "g")
+            self.assertEqual(call.await_count, 1)
+        with self.assertRaisesRegex(ValueError, "incomplete"):
+            rm.TokenUnitBudget(self.usage_file, 75_000_000).check()
+
+    async def test_invalid_configuration_never_calls_judge(self):
+        """Reject invalid judge settings before spending tokens."""
+        for override in (
+            {"JUDGE_MODEL": "litellm_proxy/azure_ai/FW-GLM-5.3"},
+            {"JUDGE_MODEL": "litellm_proxy/azure_ai/Deepeek-V4-Flash"},
+            {"JUDGE_REASONING_EFFORT": "medium"},
+            {"JUDGE_TOKEN_UNIT_LIMIT": "nan"},
+        ):
+            with self.subTest(override=override), patch.dict(
+                os.environ, override
+            ), patch("litellm.acompletion", new=AsyncMock()) as call:
+                with self.assertRaises(ValueError):
+                    await rm.prompt_score("c", [], "r", "g")
+                call.assert_not_awaited()
 
     async def test_quota_marker_contains_no_provider_body_and_circuit_stays_open(self):
         """Verify quota marker contains no provider body and circuit stays open."""
@@ -148,6 +282,11 @@ class ResultTests(unittest.TestCase):
             "JUDGE_QUOTA_STOP_FILE": str(self.marker),
             "LITELLM_API_KEY": "test-generation",
             "LITELLM_JUDGE_API_KEY": "test-judge",
+            "JUDGE_MODEL": rm.JUDGE_MODEL,
+            "JUDGE_REASONING_EFFORT": "none",
+            "JUDGE_TOKEN_UNIT_LIMIT": "75000000",
+            "JUDGE_TOKEN_USAGE_FILE": str(self.root / "usage.json"),
+            "PDB_TASK": "culture",
         }
         subprocess.run(
             [
@@ -162,6 +301,14 @@ class ResultTests(unittest.TestCase):
         values = json.loads(runtime.read_text())["env_vars"]
         self.assertEqual(values["JUDGE_QUOTA_STOP_FILE"], str(self.marker))
         self.assertEqual(values["LITELLM_JUDGE_API_KEY"], "test-judge")
+        for key in (
+            "JUDGE_MODEL",
+            "JUDGE_REASONING_EFFORT",
+            "JUDGE_TOKEN_UNIT_LIMIT",
+            "JUDGE_TOKEN_USAGE_FILE",
+            "PDB_TASK",
+        ):
+            self.assertEqual(values[key], env[key])
         self.assertNotIn("LITELLM_API_KEY", values)
         self.assertEqual(runtime.stat().st_mode & 0o777, 0o600)
 

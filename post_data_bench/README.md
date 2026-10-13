@@ -34,6 +34,129 @@ allocation, and `AGENT_MODEL_OUTPUT_DIR` controls persistent outputs. Each run's
 checkpoints and generated data live below the large model-output volume rather
 than the repository on `/home`.
 
+## Token-equivalent units and quotas
+
+PostDataBench measures API usage in **token-equivalent units** (called `token_units`
+in code). One DeepSeek-V4-Flash input token is one unit. Other input and output
+tokens receive the fixed weights below, so usage across models adds to one quota.
+These weights are benchmark policy and stay fixed when provider prices change.
+
+| Model family | Units per input token | Units per output token |
+|---|---:|---:|
+| DeepSeek-V4-Flash | 1 | 3 |
+| GLM-5.3 | 4 | 12.5 |
+
+For each LiteLLM response, calculate:
+
+```text
+token_units = usage.prompt_tokens * input_weight + usage.completion_tokens * output_weight
+```
+
+For example, 1,000 input tokens and 200 output tokens consume 1,600 units on
+DeepSeek-V4-Flash or 6,500 units on GLM-5.3. Count cached inputs at full weight.
+LiteLLM's aggregate completion count already includes reasoning tokens; do not
+add `reasoning_tokens` again. Model aliases must contain `DeepSeek-V4-Flash` or
+`GLM-5.3` (case-insensitive). There are no defined weights for other models:
+Forger reports `NaN` units for them, and budgeted helpers reject them before a call.
+
+Generation/SFT has 230M units. RL has 75M for Impossible-LiveCodeBench and NormAD,
+and 230M for PRBench and HealthBench. These are separate quotas. The launcher
+currently supports coding and culture; unified RL currently supports coding only.
+
+### LiteLLM helpers without Forger
+
+The supplied helpers calculate units, check the quota before each request, and
+persist token units and available dollar costs after each response. They support
+synchronous `completion` and asynchronous `acompletion`, with LiteLLM keyword
+arguments and response objects. They do not require installing or importing Forger.
+Both wrappers require non-streaming responses with input and output token counts.
+
+Inside a launched agent workspace, including `--hide-forger` runs, import them
+by running from the task directory or adding that directory to `PYTHONPATH`:
+
+```python
+from rl.token_budget import completion, TokenUnitBudget
+```
+
+To use the same helpers in another project, [export a portable package](export_token_helpers.py)
+from this checkout (run from `post_data_bench/`):
+
+```bash
+python export_token_helpers.py --output-dir /path/to/my-agent
+```
+
+This creates `pdb_token_budget/` containing the helper and its accounting module.
+Copy that directory into the agent's project, or put its parent on `PYTHONPATH`.
+The exported package runs independently of this checkout. Only API calls and
+optional dollar-price lookups need LiteLLM; unit calculation uses the standard library.
+
+The launcher supplies credentials and quota environment variables. Outside the
+launcher, provide `LITELLM_API_KEY` and `LITELLM_BASE_URL` securely and set a persistent
+ledger path and quota:
+
+```bash
+export FORGER_TOKEN_USAGE_FILE=/path/to/persistent/run/generation_token_usage.json
+export FORGER_TOKEN_UNIT_LIMIT=230000000
+```
+
+The `FORGER_` prefix is retained for configuration compatibility and does not
+require Forger. With LiteLLM installed in the destination environment:
+
+```python
+import os
+from pdb_token_budget import completion, TokenUnitBudget
+
+response = completion(
+    model="litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731",
+    messages=[{"role": "user", "content": "What is 273 * 149?"}],
+    temperature=1.0,
+    reasoning={"effort": "none"},
+    max_tokens=512,
+)
+print(response.choices[0].message.content)
+budget = TokenUnitBudget(
+    os.environ["FORGER_TOKEN_USAGE_FILE"], os.environ["FORGER_TOKEN_UNIT_LIMIT"]
+)
+print(budget.snapshot())  # Cumulative units, dollars, and remaining quota.
+```
+
+Use the `rl.token_budget` import instead in a launched workspace. For an existing
+response, `token_units(model_id, *response_token_counts(response))` computes its
+units; both functions are exported by either helper. Calculation alone does not
+record usage or enforce a quota. Forger `Model` calls account automatically and
+expose `total_token_units` and `total_cost`.
+
+For judge experiments, pass `budget="judge"`. The helper uses the separate
+`LITELLM_JUDGE_API_KEY`, `JUDGE_TOKEN_USAGE_FILE`, and `JUDGE_TOKEN_UNIT_LIMIT`;
+outside the launcher, configure these too. The judge defaults to
+`litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731`. `JUDGE_MODEL` may select an alias
+containing `DeepSeek-V4-Flash`. `JUDGE_REASONING_EFFORT` accepts `none`, `low`
+(default), or `high`, passed as `reasoning={"effort": ...}`. An optional
+`LITELLM_JUDGE_BASE_URL` overrides `LITELLM_BASE_URL`.
+
+### Persistent usage and dollar costs
+
+Each launched run stores `generation_token_usage.json` and `judge_token_usage.json`
+in its persistent agent directory. Ledgers track `token_units`,
+`remaining_token_units`, `cost_usd`, and `unpriced_calls`, plus per-model usage and cost.
+Dollar costs come from the provider response or LiteLLM pricing. An **unpriced
+call** has no available dollar price; it still consumes its calculated token units.
+Missing dollar pricing is independent of whether token-unit weights are known.
+Existing ledgers keep their token usage and mark earlier calls as unpriced.
+
+Judge probes and final RL share a ledger across recovery runs.
+`token_budget_config.json` preserves the task, limits, judge alias, and reasoning
+effort without credentials. Ledger storage must support POSIX file locks and
+atomic rename: use persistent local storage or NFS, including for
+`AGENT_MODEL_OUTPUT_DIR`; GCS FUSE is unsuitable.
+
+Route API calls through these helpers to participate in accounting. Direct provider
+calls bypass this cooperative accounting; the ledger is not a proxy-enforced cap.
+Calls already in flight may exceed a quota, so batches need headroom. The OpenHands
+model driving agent turns is separate from data generation and reports
+`AGENT_TURN_COST_USD` for reference. See the
+[unified contract](coding/rl/UNIFIED_TRAINING.md) for judge quota recovery.
+
 ## Benchmark data
 
 Keep frozen inputs and previous benchmark versions. Neither datasets nor private

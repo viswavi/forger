@@ -6,11 +6,25 @@ completions from any supported LLM provider.
 
 from __future__ import annotations
 
+import logging
+import math
+import os
+import threading
 import warnings
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Union
 
 import litellm
+
+from pyforger.token_units import (
+    TokenUnitBudget,
+    response_cost_usd,
+    response_token_counts,
+    token_units,
+)
+
+logger = logging.getLogger(__name__)
 
 # Type aliases
 Message = dict[str, str]
@@ -18,7 +32,11 @@ Prompt = Union[str, list[Message]]
 
 
 def _batch_completion_with_progress(
-    all_messages: list[list[dict[str, str]]], call_kwargs: dict[str, Any]
+    all_messages: list[list[dict[str, str]]],
+    call_kwargs: dict[str, Any],
+    *,
+    completion: Callable[..., Any] | None = None,
+    show_progress: bool = True,
 ) -> list[Any]:
     """Concurrent, progress-tracked replacement for litellm.batch_completion.
 
@@ -34,7 +52,9 @@ def _batch_completion_with_progress(
     max_workers = min(100, len(all_messages))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_idx = {
-            executor.submit(litellm.completion, messages=msgs, **call_kwargs): i
+            executor.submit(
+                completion or litellm.completion, messages=msgs, **call_kwargs
+            ): i
             for i, msgs in enumerate(all_messages)
         }
         for future in tqdm(
@@ -42,6 +62,7 @@ def _batch_completion_with_progress(
             total=len(all_messages),
             desc=f"LLM calls ({model_id})",
             leave=False,
+            disable=not show_progress,
         ):
             idx = future_to_idx[future]
             try:
@@ -186,15 +207,11 @@ def _extract_reasoning(response: Any, model_id: str) -> list[str | None]:
 _COST_WARNING_SEEN: set[str] = set()
 
 
-def _extract_cost(response: Any, model_id: str) -> float:
-    """Cost in USD; `0.0` when unavailable. Warns once per `model_id` on miss."""
-    hidden = getattr(response, "_hidden_params", None) or {}
-    cost = hidden.get("response_cost")
-    if cost is None:
-        try:
-            cost = litellm.completion_cost(completion_response=response)
-        except Exception:
-            cost = None
+def _extract_cost(
+    response: Any, model_id: str, *, allow_missing: bool = False
+) -> float | None:
+    """Return available USD cost, warning once per model when pricing is missing."""
+    cost = response_cost_usd(response, model_id)
     if cost is None:
         if model_id not in _COST_WARNING_SEEN:
             _COST_WARNING_SEEN.add(model_id)
@@ -204,8 +221,8 @@ def _extract_cost(response: Any, model_id: str) -> float:
                 UserWarning,
                 stacklevel=2,
             )
-        return 0.0
-    return float(cost)
+        return None if allow_missing else 0.0
+    return cost
 
 
 def _extract_usage(response: Any) -> dict[str, int]:
@@ -288,6 +305,11 @@ class Model:
         self._show_progress = show_progress
         self._kwargs = kwargs
         self.history: list[GenerateResult] = []
+        self._usage_lock = threading.RLock()
+        self._total_token_units = self._calculate_token_units(0, 0)
+        self._usage_log_progress = 0.0
+        self._next_usage_log = 0
+        self._token_budget = self._make_token_budget()
         self._check_params(
             temperature=temperature,
             max_tokens=max_tokens,
@@ -297,6 +319,44 @@ class Model:
     def __repr__(self) -> str:
         """Show model id for debugging."""
         return f"Model({self._model_id!r})"
+
+    def __getstate__(self) -> dict[str, Any]:
+        """Omit the instance lock from serialized state."""
+        with self._usage_lock:
+            state = self.__dict__.copy()
+            state.pop("_usage_lock")
+            return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        """Restore state with an independent accounting lock."""
+        self.__dict__.update(state)
+        self._usage_lock = threading.RLock()
+
+    def _make_token_budget(self) -> TokenUnitBudget | None:
+        path = os.environ.get("FORGER_TOKEN_USAGE_FILE")
+        limit = os.environ.get("FORGER_TOKEN_UNIT_LIMIT")
+        if path is None and limit is None:
+            return None
+        if not path or not limit:
+            raise ValueError(
+                "Set both FORGER_TOKEN_USAGE_FILE and FORGER_TOKEN_UNIT_LIMIT "
+                "to enable the shared token-unit budget."
+            )
+        return TokenUnitBudget(path, float(limit))
+
+    def _calculate_token_units(
+        self, prompt_tokens: int, completion_tokens: int
+    ) -> float:
+        try:
+            return token_units(self._model_id, prompt_tokens, completion_tokens)
+        except ValueError:
+            return math.nan
+
+    @property
+    def total_token_units(self) -> float:
+        """Cumulative units since reset; NaN if any usage cannot be weighted."""
+        with self._usage_lock:
+            return self._total_token_units
 
     def _check_params(self, **params: Any) -> None:
         """Validate params against LiteLLM's registry for this model id."""
@@ -317,20 +377,103 @@ class Model:
     @property
     def total_cost(self) -> float:
         """Sum of cost_usd across every call in this Model's history."""
-        return sum(r.usage.get("cost_usd", 0.0) for r in self.history)
+        with self._usage_lock:
+            return sum(r.usage.get("cost_usd", 0.0) for r in self.history)
 
     @property
     def total_usage(self) -> dict[str, int]:
         """Sum of token counts across every call in this Model's history."""
         totals = {"prompt_tokens": 0, "completion_tokens": 0, "reasoning_tokens": 0}
-        for r in self.history:
-            for key in totals:
-                totals[key] += r.usage.get(key, 0)
+        with self._usage_lock:
+            for r in self.history:
+                for key in totals:
+                    totals[key] += r.usage.get(key, 0)
         return totals
 
     def reset_history(self) -> None:
-        """Drop all recorded calls; total_cost and total_usage reset to zero."""
-        self.history = []
+        """Reset instance totals; the shared token-unit ledger is unchanged."""
+        with self._usage_lock:
+            self.history = []
+            self._total_token_units = self._calculate_token_units(0, 0)
+            self._usage_log_progress = 0.0
+            self._next_usage_log = 0
+
+    def _record_result(self, result: GenerateResult) -> None:
+        with self._usage_lock:
+            self.history.append(result)
+            units = result.usage["token_units"]
+            self._total_token_units += units
+            # Unknown weights use raw tokens only to set the logging interval.
+            self._usage_log_progress += (
+                units
+                if math.isfinite(units)
+                else sum(
+                    value
+                    for key in ("prompt_tokens", "completion_tokens")
+                    if isinstance(value := result.usage.get(key), int) and value > 0
+                )
+            )
+            if self._usage_log_progress >= self._next_usage_log:
+                logger.info(
+                    "%s cumulative usage: %s token units, $%.6f USD recorded cost",
+                    self._model_id,
+                    (
+                        "NaN"
+                        if math.isnan(self._total_token_units)
+                        else f"{self._total_token_units:.1f}"
+                    ),
+                    self.total_cost,
+                )
+                self._next_usage_log = (
+                    int(self._usage_log_progress // 1_000_000) + 1
+                ) * 1_000_000
+
+    def _consume_response(self, response: Any) -> GenerateResult:
+        usage: dict[str, Any] = dict(_extract_usage(response))
+        try:
+            prompt_tokens, completion_tokens = response_token_counts(response)
+        except ValueError:
+            complete_usage = False
+            usage["token_units"] = math.nan
+        else:
+            complete_usage = True
+            usage["prompt_tokens"] = prompt_tokens
+            usage["completion_tokens"] = completion_tokens
+            usage["token_units"] = self._calculate_token_units(
+                prompt_tokens, completion_tokens
+            )
+        result = GenerateResult(
+            [], usage=usage, reasoning=[], model_id=self._model_id, raw=response
+        )
+        cost = None
+        try:
+            cost = _extract_cost(response, self._model_id, allow_missing=True)
+        finally:
+            usage["cost_usd"] = cost if cost is not None else 0.0
+            # Preserve charges even if optional pricing or response parsing fails.
+            self._record_result(result)
+            if self._token_budget is not None:
+                if not complete_usage:
+                    self._token_budget.mark_unmetered()
+                    raise ValueError(
+                        f"Missing or invalid token usage for {self._model_id}; "
+                        "cannot account for the shared budget."
+                    )
+                self._token_budget.record(
+                    self._model_id,
+                    prompt_tokens,
+                    completion_tokens,
+                    cost_usd=cost,
+                )
+        result.extend(choice.message.content or "" for choice in response.choices)
+        result.reasoning = _extract_reasoning(response, self._model_id)
+        return result
+
+    def _completion(self, **call_kwargs: Any) -> GenerateResult:
+        if self._token_budget is not None:
+            token_units(self._model_id, 0, 0)
+            self._token_budget.check()
+        return self._consume_response(litellm.completion(**call_kwargs))
 
     def generate(
         self,
@@ -422,38 +565,38 @@ class Model:
             **self._kwargs,
         )
         if len(all_messages) == 1:
-            responses = [litellm.completion(messages=all_messages[0], **call_kwargs)]
+            return [self._completion(messages=all_messages[0], **call_kwargs)]
         else:
             use_progress = (
                 self._show_progress if show_progress is None else show_progress
             )
-            if use_progress:
-                responses = _batch_completion_with_progress(all_messages, call_kwargs)
+            if use_progress or self._token_budget is not None:
+                responses = _batch_completion_with_progress(
+                    all_messages,
+                    call_kwargs,
+                    completion=self._completion,
+                    show_progress=use_progress,
+                )
             else:
                 responses = litellm.batch_completion(
                     messages=all_messages, **call_kwargs
                 )
-        for response in responses:
-            # batch_completion returns (rather than raises) per-request exceptions.
-            if isinstance(response, Exception):
-                raise response
-
         results: list[GenerateResult] = []
+        errors: list[Exception] = []
         for response in responses:
-            completions = [choice.message.content or "" for choice in response.choices]
-            usage: dict[str, Any] = dict(_extract_usage(response))
-            usage["cost_usd"] = _extract_cost(response, self._model_id)
-            reasoning = _extract_reasoning(response, self._model_id)
-            result = GenerateResult(
-                completions,
-                usage=usage,
-                reasoning=reasoning,
-                model_id=self._model_id,
-                raw=response,
-            )
-            results.append(result)
-            self.history.append(result)
-
+            if isinstance(response, Exception):
+                errors.append(response)
+                continue
+            try:
+                results.append(
+                    response
+                    if isinstance(response, GenerateResult)
+                    else self._consume_response(response)
+                )
+            except Exception as exc:
+                errors.append(exc)
+        if errors:
+            raise errors[0]
         return results
 
 
@@ -594,6 +737,9 @@ class LocalModel(Model):
     def _check_params(self, **params: Any) -> None:
         """No-op: vLLM model ids are not in LiteLLM's parameter registry."""
 
+    def _make_token_budget(self) -> None:
+        return None
+
     def _engine(self) -> Any:
         """Lazily construct and cache the vLLM engine."""
         if self._llm is None:
@@ -684,6 +830,9 @@ class LocalModel(Model):
                 "reasoning_tokens": 0,
                 "cost_usd": 0.0,
             }
+            usage["token_units"] = self._calculate_token_units(
+                usage["prompt_tokens"], usage["completion_tokens"]
+            )
             # raw is dropped: vLLM's RequestOutput holds per-token id lists that
             # would pin gigabytes in self.history over a long sampling run.
             result = GenerateResult(
@@ -694,7 +843,7 @@ class LocalModel(Model):
                 raw=None,
             )
             results.append(result)
-            self.history.append(result)
+            self._record_result(result)
 
         return results
 

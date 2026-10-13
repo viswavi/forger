@@ -390,7 +390,7 @@ class TestErrorHandling:
         with pytest.raises(ValueError) as excinfo:
             model.generate_batch(["Q1", "Q2"])
         assert excinfo.value is error
-        assert model.history == []
+        assert model.history == [["r1"]]
 
 
 class TestShowProgress:
@@ -859,43 +859,43 @@ class TestExtractCost:
         """Clear the once-per-process warning set so each test starts fresh."""
         _COST_WARNING_SEEN.clear()
 
-    @patch("pyforger.acquire.model.litellm")
+    @patch("litellm.completion_cost")
     def test_reads_hidden_params(self, mock_litellm):
         """Reads hidden params."""
         response = MagicMock()
         response._hidden_params = {"response_cost": 0.0042}
         assert _extract_cost(response, "gpt-4o") == 0.0042
 
-    @patch("pyforger.acquire.model.litellm")
+    @patch("litellm.completion_cost")
     def test_falls_back_to_completion_cost(self, mock_litellm):
         """Falls back to completion cost."""
         response = MagicMock()
         response._hidden_params = {}
-        mock_litellm.completion_cost.return_value = 0.005
+        mock_litellm.return_value = 0.005
         assert _extract_cost(response, "gpt-4o") == 0.005
 
-    @patch("pyforger.acquire.model.litellm")
+    @patch("litellm.completion_cost")
     def test_completion_cost_raises_returns_zero(self, mock_litellm):
         """Completion cost raises returns zero."""
         response = MagicMock()
         response._hidden_params = {}
-        mock_litellm.completion_cost.side_effect = RuntimeError("nope")
+        mock_litellm.side_effect = RuntimeError("nope")
         with pytest.warns(UserWarning, match="pricing registry"):
             assert _extract_cost(response, "unknown/model") == 0.0
 
-    @patch("pyforger.acquire.model.litellm")
+    @patch("litellm.completion_cost")
     def test_warning_emitted_once_per_model_id(self, mock_litellm):
         """Warning emitted once per model id."""
         response = MagicMock()
         response._hidden_params = {}
-        mock_litellm.completion_cost.return_value = None
+        mock_litellm.return_value = None
         with pytest.warns(UserWarning) as caught:
             _extract_cost(response, "litellm_proxy/x/y")
             _extract_cost(response, "litellm_proxy/x/y")
             _extract_cost(response, "litellm_proxy/x/y")
         assert len([w for w in caught if "pricing registry" in str(w.message)]) == 1
 
-    @patch("pyforger.acquire.model.litellm")
+    @patch("litellm.completion_cost")
     def test_zero_cost_not_treated_as_missing(self, mock_litellm):
         """Free models (cost_usd == 0.0) must not trigger the registry-miss warning."""
         response = MagicMock()
@@ -906,7 +906,7 @@ class TestExtractCost:
             warnings_mod.simplefilter("error")
             assert _extract_cost(response, "free/model") == 0.0
 
-    @patch("pyforger.acquire.model.litellm")
+    @patch("litellm.completion_cost")
     def test_no_warning_when_cost_present(self, mock_litellm):
         """No warning when cost present."""
         response = MagicMock()

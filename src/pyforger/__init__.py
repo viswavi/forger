@@ -12,6 +12,7 @@ import pyforger.acquire as acquire
 import pyforger.alter as alter
 import pyforger.filter as filter  # noqa: A001
 import pyforger.inspect as inspect
+import pyforger.token_units as token_units
 from pyforger.op import op
 from pyforger.pipeline import optimize, run
 
@@ -20,6 +21,7 @@ __all__ = [
     "alter",
     "filter",
     "inspect",
+    "token_units",
     "op",
     "optimize",
     "run",

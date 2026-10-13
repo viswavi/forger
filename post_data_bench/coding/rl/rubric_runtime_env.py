@@ -13,6 +13,11 @@ if __name__ == "__main__":
             "LITELLM_BASE_URL",
             "JUDGE_MAX_CONSECUTIVE_FAILURES",
             "JUDGE_QUOTA_STOP_FILE",
+            "JUDGE_MODEL",
+            "JUDGE_REASONING_EFFORT",
+            "JUDGE_TOKEN_UNIT_LIMIT",
+            "JUDGE_TOKEN_USAGE_FILE",
+            "PDB_TASK",
         ):
             if key in os.environ:
                 runtime["env_vars"][key] = os.environ[key]

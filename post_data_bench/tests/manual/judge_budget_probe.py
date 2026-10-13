@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -17,9 +18,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from coding.rl import rubric_rm as rm  # noqa: E402 - isolated worker/module bootstrap
 
 
-async def main(model):
+async def main(model, effort, limit, usage_file):
     """Run the command-line utility described in the module documentation."""
-    rm.JUDGE_MODEL = model  # Exact caller-supplied SDK model; no prefix rewriting.
+    os.environ.update(
+        {
+            "JUDGE_MODEL": model,
+            "JUDGE_REASONING_EFFORT": effort,
+            "JUDGE_TOKEN_UNIT_LIMIT": str(limit),
+            "JUDGE_TOKEN_USAGE_FILE": str(usage_file),
+        }
+    )
+    rm.judge_configuration()
+    ledger = rm.TokenUnitBudget(usage_file, limit)
     if not os.environ.get("LITELLM_JUDGE_API_KEY"):
         raise RuntimeError(
             "Set LITELLM_JUDGE_API_KEY; generation-key fallback is forbidden"
@@ -34,6 +44,11 @@ async def main(model):
         "connection_failures": 0,
         "input_tokens": 0,
         "output_tokens": 0,
+        "token_units": 0,
+        "cost_usd": 0.0,
+        "unpriced_calls": 0,
+        "api_calls": 0,
+        "local_quota_exhausted": False,
         "circuit_open": False,
         "blocked_without_api_call": False,
     }
@@ -56,17 +71,7 @@ async def main(model):
         original = litellm.acompletion
 
         async def observed(**kwargs):
-            if model in {
-                "openai/wine-gemini-3.6-flash",
-                "litellm_proxy/openai/wine-gemini-3.6-flash",
-            }:
-                kwargs.pop(
-                    "reasoning", None
-                )  # Use this OpenAI-compatible endpoint's default reasoning.
-            if model == "litellm_proxy/azure_ai/gpt-5.6-luna":
-                kwargs.pop("reasoning", None)
-                kwargs.pop("temperature", None)
-                kwargs["reasoning_effort"] = "high"
+            report["api_calls"] += 1
             try:
                 result = await original(**kwargs)
             except Exception as exc:
@@ -113,13 +118,11 @@ async def main(model):
 
         litellm.acompletion = observed
         started = time.monotonic()
-        for i in range(500):
-            if time.monotonic() - started > 1800:
+        for i in range(10):
+            if time.monotonic() - started > 120:
                 emit(event="time_limit", **report)
                 break
-            # A real, self-contained grading task. Larger follow-up requests
-            # exercise the same judge path while spending the disposable budget.
-            count = 1 if i == 0 else 300
+            count = 1
             pairs = [(j + 173 + i, j + 249) for j in range(count)]
             prompt = [
                 {
@@ -141,23 +144,30 @@ async def main(model):
                 )
             except rm.JudgeUnavailable:
                 report["circuit_open"] = True
-                before = report["exhausted_calls"]
+                snapshot = ledger.snapshot()
+                report["token_units"] = snapshot["token_units"]
+                report["cost_usd"] = snapshot["cost_usd"]
+                report["unpriced_calls"] = snapshot["unpriced_calls"]
+                report["local_quota_exhausted"] = snapshot["remaining_token_units"] <= 0
+                before = report["api_calls"]
                 try:
                     await rm.prompt_score("Correctness", prompt, answer, answer)
                 except rm.JudgeUnavailable:
-                    report["blocked_without_api_call"] = (
-                        before == report["exhausted_calls"]
-                    )
+                    report["blocked_without_api_call"] = before == report["api_calls"]
                 emit(event="stopped", **report)
                 break
             report["successes"] += 1
+            snapshot = ledger.snapshot()
+            report["token_units"] = snapshot["token_units"]
+            report["cost_usd"] = snapshot["cost_usd"]
+            report["unpriced_calls"] = snapshot["unpriced_calls"]
             emit(event="scored", reward=reward, **report)
         else:
             emit(event="call_limit", **report)
     return (
         0
-        if report["successes"]
-        and report["budget_failures"]
+        if report["token_units"] > 0
+        and report["local_quota_exhausted"]
         and report["circuit_open"]
         and report["blocked_without_api_call"]
         else 2
@@ -167,9 +177,22 @@ async def main(model):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default=rm.JUDGE_MODEL)
+    parser.add_argument(
+        "--reasoning-effort", choices=("none", "low", "high"), default="low"
+    )
+    parser.add_argument("--token-unit-limit", type=float, default=250)
+    parser.add_argument("--usage-file", type=Path)
     args = parser.parse_args()
     try:
-        code = asyncio.run(main(args.model))
+        with tempfile.TemporaryDirectory(prefix="judge-token-probe-") as temporary:
+            code = asyncio.run(
+                main(
+                    args.model,
+                    args.reasoning_effort,
+                    args.token_unit_limit,
+                    args.usage_file or Path(temporary) / "usage.json",
+                )
+            )
     except BaseException:
         # Avoid any accidental traceback containing SDK/provider context.
         print('{"event":"probe_failed_without_exception_details"}', flush=True)

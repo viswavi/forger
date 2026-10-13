@@ -16,7 +16,7 @@ import uuid
 from datetime import datetime
 from typing import TextIO, cast
 
-from agent_boundary import atomic_text, model_cache_bind
+from agent_boundary import model_cache_bind
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument(
@@ -33,28 +33,17 @@ parser.add_argument(
 parser.add_argument(
     "--litellm-parent-key",
     required=False,
-    help="Parent API Key to use for LiteLLM if an internal key is given",
+    help="Deprecated; accepted for compatibility but unused by token accounting",
 )
 parser.add_argument(
     "--litellm-user-id",
     required=False,
-    help=(
-        "LiteLLM user ID that owns the run's token, used only for "
-        "the host-side spend check below -- never forwarded into "
-        "the agent's sandbox."
-    ),
+    help="Deprecated; accepted for compatibility but unused by token accounting",
 )
 parser.add_argument(
     "--litellm-token-id",
     required=False,
-    help=(
-        "LiteLLM token ID for the run's API key, used for the "
-        "host-side spend check below. Optional: if omitted, "
-        "litellm_check_usage.sh instead matches the last 4 "
-        "characters of --litellm-api-key against each key's masked "
-        "key_name. Unlike --litellm-parent-key/--litellm-user-id, "
-        "this is not sensitive and is shown to the agent."
-    ),
+    help="Deprecated; accepted for compatibility but unused by token accounting",
 )
 parser.add_argument(
     "--brave-api-key", required=False, help="API Key to use for the Brave Search API "
@@ -181,10 +170,75 @@ def finalization_command(directory, output, termination_reason="manual_recovery"
     return command
 
 
+def configure_run_token_budgets(directory, task):
+    """Keep generation and judge usage across processes, probes, and recovery."""
+    import json
+
+    from agent_boundary import atomic_text
+    from coding.rl.token_budget import (
+        DEFAULT_GENERATION_LIMIT,
+        DEFAULT_JUDGE_MODEL,
+        DEFAULT_REASONING_EFFORT,
+        TokenUnitBudget,
+        default_rl_limit,
+        validate_judge_model,
+        validate_reasoning_effort,
+    )
+
+    judge_limit = default_rl_limit(task)
+    directory = os.path.abspath(directory)
+    config_path = os.path.join(directory, "token_budget_config.json")
+    policy = {
+        "version": 1,
+        "task": task,
+        "generation_token_unit_limit": DEFAULT_GENERATION_LIMIT,
+        "judge_token_unit_limit": judge_limit,
+    }
+    try:
+        descriptor = os.open(config_path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        config = {
+            **policy,
+            "judge_model": os.environ.get("JUDGE_MODEL", DEFAULT_JUDGE_MODEL),
+            "judge_reasoning_effort": os.environ.get(
+                "JUDGE_REASONING_EFFORT", DEFAULT_REASONING_EFFORT
+            ),
+        }
+        new_config = True
+    else:
+        with os.fdopen(descriptor) as stream:
+            config = json.load(stream)
+        if (
+            not isinstance(config, dict)
+            or set(config) != set(policy) | {"judge_model", "judge_reasoning_effort"}
+            or any(config[name] != value for name, value in policy.items())
+        ):
+            raise ValueError("Saved token budget task or policy differs from this run")
+        new_config = False
+    judge_model = validate_judge_model(config["judge_model"])
+    reasoning_effort = validate_reasoning_effort(config["judge_reasoning_effort"])
+    os.makedirs(directory, exist_ok=True)
+    budget_env = {"PDB_TASK": task}
+    for prefix, filename, limit in (
+        ("FORGER", "generation_token_usage.json", DEFAULT_GENERATION_LIMIT),
+        ("JUDGE", "judge_token_usage.json", judge_limit),
+    ):
+        path = os.path.join(directory, filename)
+        budget_env[f"{prefix}_TOKEN_USAGE_FILE"] = path
+        budget_env[f"{prefix}_TOKEN_UNIT_LIMIT"] = str(limit)
+        TokenUnitBudget(path, limit).snapshot()
+    if new_config:
+        atomic_text(config_path, json.dumps(config, sort_keys=True) + "\n")
+    os.environ.update(budget_env)
+    os.environ["JUDGE_MODEL"] = judge_model
+    os.environ["JUDGE_REASONING_EFFORT"] = reasoning_effort
+
+
 # Finalization always uses Slime's Python, even when OpenHands lives in trl.
 if args.benchmark_dir:
     os.environ["PDB_BENCHMARK_DIR"] = os.path.abspath(args.benchmark_dir)
 if args.finalize_submission:
+    configure_run_token_budgets(args.finalize_submission, args.task)
     subprocess.run(
         finalization_command(
             os.path.abspath(args.finalize_submission),
@@ -233,12 +287,6 @@ if litellm_key:
     os.environ["LITELLM_API_KEY"] = litellm_key
 if litellm_base_url:
     os.environ["LITELLM_BASE_URL"] = litellm_base_url
-litellm_user_id = args.litellm_user_id
-if litellm_user_id is None:
-    litellm_user_id = os.environ.get("LITELLM_USER_ID")
-litellm_token_id = args.litellm_token_id
-if litellm_token_id is None:
-    litellm_token_id = os.environ.get("LITELLM_TOKEN_ID")
 brave_api_key = args.brave_api_key or os.environ.get("BRAVE_API_KEY")
 s2_api_key = args.s2_api_key or os.environ.get("S2_API_KEY")
 if brave_api_key:
@@ -272,10 +320,9 @@ RUN_TAG = f"{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}"
 AGENT_DATA_DIR = f"{MODEL_OUTPUT_TASK_DIR}/agent_runs/agent_run_{RUN_TAG}"
 RAW_DATA_PATH = f"{AGENT_DATA_DIR}/generated_raw.jsonl"
 SUBMISSION_PATH = f"{AGENT_DATA_DIR}/submission.json"
-# Spend-check file: see the spend-polling thread below, started right before
-# the ApptainerWorkspace block. It lives under AGENT_DATA_DIR so it's visible
-# through that dir's existing bind mount -- no separate mount needed.
-SPEND_FILE = f"{AGENT_DATA_DIR}/llm_spend.txt"
+GENERATION_USAGE_PATH = f"{AGENT_DATA_DIR}/generation_token_usage.json"
+JUDGE_USAGE_PATH = f"{AGENT_DATA_DIR}/judge_token_usage.json"
+configure_run_token_budgets(AGENT_DATA_DIR, args.task)
 TRL_DATA_PATH = f"{AGENT_DATA_DIR}/generated_raw_trl_format.jsonl"
 MODEL_TAG = args.model.replace("/", "__").replace(":", "__")
 OUTPUT_DIR = f"{MODEL_OUTPUT_TASK_DIR}/{MODEL_TAG}_{RUN_TAG}"
@@ -339,7 +386,6 @@ prompt_content = raw_prompt_content.format(
     ),  # Never interpolate a credential into an LLM prompt.
     # Exclude parent credentials/user ID from prompt formatting; references
     # to those placeholders must raise rather than expose host-only values.
-    LITELLM_TOKEN_ID=litellm_token_id or "unknown",
     LITELLM_BASE_URL=litellm_base_url,
     BRAVE_API_KEY="${BRAVE_API_KEY}",
     S2_API_KEY="${S2_API_KEY}",
@@ -350,7 +396,8 @@ prompt_content = raw_prompt_content.format(
     TIMEOUT_HOURS=f"{TIMEOUT:g}",
     GPU_DESCRIPTION=AGENT_GPU_DESC,
     STUDENT_MODEL=args.model,
-    GENERATION_BUDGET=os.environ.get("AGENT_GENERATION_BUDGET", "100.00"),
+    GENERATION_TOKEN_UNIT_LIMIT=os.environ["FORGER_TOKEN_UNIT_LIMIT"],
+    GENERATION_USAGE_PATH=GENERATION_USAGE_PATH,
     MAX_SFT_LENGTH="18800" if args.task == "coding" else "8192",
 )
 
@@ -447,94 +494,6 @@ os.makedirs(AGENT_SCRATCH_DIR, exist_ok=True)
 os.makedirs(os.environ["FORGER_CACHE"], exist_ok=True)
 os.makedirs(MODEL_OUTPUT_TASK_DIR, exist_ok=True)
 os.makedirs(AGENT_DATA_DIR, exist_ok=True)
-
-import threading  # noqa: E402
-
-LITELLM_CHECK_USAGE_SCRIPT = os.path.join(
-    os.path.dirname(__file__), "litellm_check_usage.sh"
-)
-# The agent creates this file (e.g. `touch`) inside its own AGENT_DATA_DIR
-# whenever it wants a fresh spend number -- e.g. right after launching a batch
-# of generation -- instead of waiting on a fixed timer.
-SPEND_CHECK_REQUEST_FILE = f"{AGENT_DATA_DIR}/check_llm_spend"
-WATCH_POLL_SECONDS = 2  # cheap local os.path.exists() check, no API call
-MIN_SECONDS_BETWEEN_CHECKS = 30  # rate-limits the actual LiteLLM API call
-FALLBACK_INTERVAL_SECONDS = 600  # refresh even if the agent never asks
-
-# Check spend only on the host; pass the agent just the result. Token ID
-# is optional, with masked-key suffix matching as fallback.
-_CAN_CHECK_SPEND = bool(
-    litellm_base_url and litellm_parent_key and litellm_user_id and litellm_key
-)
-
-
-def _poll_llm_spend(stop_event: "threading.Event") -> None:
-    """Poll spend on the host, with rate-limited API refreshes and local requests.
-
-    Write only the dollar amount and timestamp to the agent’s mounted SPEND_FILE.
-    Parent credentials and user ID stay out of agent files, environment, and prompts.
-    """
-    last_check = 0.0
-    while not stop_event.is_set():
-        now = time.time()
-        requested = os.path.exists(SPEND_CHECK_REQUEST_FILE)
-        due_for_fallback = (now - last_check) >= FALLBACK_INTERVAL_SECONDS
-        if (requested or due_for_fallback) and (
-            now - last_check
-        ) >= MIN_SECONDS_BETWEEN_CHECKS:
-            if requested:
-                try:
-                    os.remove(SPEND_CHECK_REQUEST_FILE)
-                except FileNotFoundError:
-                    pass
-            try:
-                usage_cmd = [
-                    LITELLM_CHECK_USAGE_SCRIPT,
-                    litellm_base_url,
-                    litellm_user_id,
-                    litellm_key[-4:],
-                ]
-                if litellm_token_id:
-                    usage_cmd.append(litellm_token_id)
-                # Pass the parent credential over stdin to keep it out of process
-                # listings.
-                result = subprocess.run(
-                    usage_cmd,
-                    input=litellm_parent_key,
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
-                spend = (
-                    result.stdout.strip()
-                    if result.returncode == 0
-                    else "spend check failed"
-                )
-            except Exception:  # keep polling even if one check fails transiently
-                spend = "spend check failed"
-            atomic_text(
-                SPEND_FILE,
-                f"{spend}\n(last checked {datetime.now():%Y-%m-%d %H:%M:%S})\n",
-            )
-            last_check = now
-        stop_event.wait(WATCH_POLL_SECONDS)
-
-
-spend_stop_event = threading.Event()
-spend_thread = None
-if _CAN_CHECK_SPEND:
-    spend_thread = threading.Thread(
-        target=_poll_llm_spend, args=(spend_stop_event,), daemon=True
-    )
-    spend_thread.start()
-else:
-    atomic_text(
-        SPEND_FILE,
-        (
-            "Spend cannot currently be checked; required host-side "
-            "spend credentials or tooling are unavailable.\n"
-        ),
-    )
 
 # Export only public allowlisted files and the validation evaluator.
 # New task files remain hidden until explicitly added.
@@ -696,6 +655,17 @@ def build_agent_mounts(
     dest_task_dir = os.path.join(forger_copy, task_rel)
     os.makedirs(dest_task_dir, exist_ok=True)
     _task_public_copies(task_dir, dest_task_dir)
+    # Accounting helpers remain available in every task and hide-forger run.
+    _copy_into(
+        dest_task_dir,
+        "rl/token_budget.py",
+        os.path.join(forger_repo, "post_data_bench/coding/rl/token_budget.py"),
+    )
+    _copy_into(
+        dest_task_dir,
+        "rl/token_units.py",
+        os.path.join(forger_repo, "src/pyforger/token_units.py"),
+    )
 
     binds.append(f"{forger_copy}:{forger_repo}")
 
@@ -842,7 +812,7 @@ if args.training_mode == "sft-rl":
         f"{AGENT_TURN_BUDGET}"
         " turns,\nwith "
         f"{AGENT_GPU_DESC}"
-        " and your allocated LiteLLM generation credits.\nGenerate "
+        " and your allocated generation token units.\nGenerate "
         "training data for the coding benchmark. You may run SFT "
         "as many times\nas time permits and may run short RL "
         "experiments if the slime stack is available.\nSelect an "
@@ -871,12 +841,19 @@ if args.training_mode == "sft-rl":
         "environment variables in code.\nNEVER print/read them into "
         "your conversation, logs, prompts, or command arguments.\n"
         "LITELLM_API_KEY is for generation. LITELLM_JUDGE_API_KEY "
-        "has a SEPARATE budget:\nyou may use it for as many judge "
-        "calls as you like, but every call reduces the\nremaining "
-        "budget for final RL. Judge calls must load that variable "
-        "directly.\nLITELLM_JUDGE_BASE_URL defaults to "
-        "LITELLM_BASE_URL. Repeated judge failures\n(including "
-        "exhausted credits) terminate final RL; they do not become "
+        "has a SEPARATE budget of "
+        f"{os.environ['JUDGE_TOKEN_UNIT_LIMIT']}"
+        " token units shared by judge experiments, RL probes, and final RL.\n"
+        "Use rl.token_budget.completion or acompletion with budget='judge' "
+        "for your own judge calls. The helpers load judge credentials and "
+        "update JUDGE_TOKEN_USAGE_FILE. Do not bypass accounting.\n"
+        "JUDGE_MODEL must contain DeepSeek-V4-Flash; the default is "
+        "litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731. JUDGE_REASONING_EFFORT "
+        "defaults to low; none and high are also supported. LiteLLM receives "
+        'reasoning={"effort": JUDGE_REASONING_EFFORT}.\n'
+        "LITELLM_JUDGE_BASE_URL defaults to LITELLM_BASE_URL. "
+        "Quota exhaustion stops RL and preserves its latest usable checkpoint; "
+        "other repeated judge failures fail the run. Failures do not become "
         "zero rewards.\nThe harness makes a fixed 90/10 split. SFT "
         "and RL use identical training prompts;\nthe 10% split "
         "monitors RL rewards. You must not generate a separate "
@@ -951,6 +928,25 @@ conversation text, logs, source files, or command arguments. Any literal
 ${LITELLM_API_KEY} in the task text means the environment variable, not a key.
 """
 
+INSTRUCTIONS += (
+    "\nAll API data-generation calls share "
+    f"{os.environ['FORGER_TOKEN_UNIT_LIMIT']} token units. "
+    f"Read {GENERATION_USAGE_PATH} for cumulative token_units, "
+    "remaining_token_units, and cost_usd. unpriced_calls counts responses "
+    "without dollar pricing; only token units enforce the quota. "
+    "DeepSeek-V4-Flash uses 1 unit per input token "
+    "and 3 per output token; GLM-5.3 uses 4 and 12.5. Count cached inputs "
+    "at full weight and reasoning within output tokens. Use only those model "
+    "families. pyforger.Model accounts automatically. For your own API calls, "
+    f"add {TASK_DIR!r} to sys.path and import completion or acompletion from "
+    "rl.token_budget; these helpers are available even when Forger is hidden. "
+    "Do not wrap pyforger.Model again or call LiteLLM directly. Helpers check "
+    "the shared ledger before each request and record reported usage; already "
+    "running requests may cross the limit. Plan batches with headroom. "
+    "Never delete/reset usage ledgers or change their environment settings. "
+    "The OpenHands model driving your turns has separate accounting.\n"
+)
+
 if AGENT_ENABLE_SLIME:
     # Advertise Slime’s interpreter because the default agent PATH selects TRL.
     INSTRUCTIONS += (
@@ -994,7 +990,7 @@ if args.hide_forger or args.hide_curator:
         "instructions above that reference "
         f"{('it' if len(hidden_libs) == 1 else 'them')}"
         "; write your data-generation pipeline using plain Python "
-        "(e.g. your own LLM API calls) instead.\n"
+        "and the provided rl.token_budget API helpers instead.\n"
     )
 
 # Launch the Apptainer workspace with allowlisted library snapshots and
@@ -1031,6 +1027,13 @@ try:
             "LITELLM_JUDGE_API_KEY",
             "LITELLM_JUDGE_BASE_URL",
             "JUDGE_MAX_CONSECUTIVE_FAILURES",
+            "JUDGE_MODEL",
+            "JUDGE_REASONING_EFFORT",
+            "JUDGE_TOKEN_USAGE_FILE",
+            "JUDGE_TOKEN_UNIT_LIMIT",
+            "FORGER_TOKEN_USAGE_FILE",
+            "FORGER_TOKEN_UNIT_LIMIT",
+            "PDB_TASK",
             "SFT_CONDA_ENV",
             "FORGER_CACHE",
             # slime/sglang runtime: without these the agent's RL probes rebuild
@@ -1118,11 +1121,11 @@ try:
             try:
                 metrics = conversation.conversation_stats.get_combined_metrics()
                 cost = metrics.accumulated_cost
-                print(f"DATA_GENERATION_COST: {cost}")
+                print(f"AGENT_TURN_COST_USD: {cost}")
             except Exception as exc:
                 if args.training_mode != "sft-rl":
                     raise
-                logger.warning("Agent cost unavailable (%s)", type(exc).__name__)
+                logger.warning("Agent-turn cost unavailable (%s)", type(exc).__name__)
         finally:
             signal.alarm(0)
             print("Cleaning up conversation...")
@@ -1142,9 +1145,17 @@ finally:
             os.environ.pop(name, None)
         else:
             os.environ[name] = value
-    if spend_thread is not None:
-        spend_stop_event.set()
-        spend_thread.join(timeout=5)
+
+from coding.rl.token_budget import TokenUnitBudget  # noqa: E402
+
+for prefix in ("FORGER", "JUDGE"):
+    usage = TokenUnitBudget(
+        os.environ[f"{prefix}_TOKEN_USAGE_FILE"],
+        os.environ[f"{prefix}_TOKEN_UNIT_LIMIT"],
+    ).snapshot()
+    print(f"{prefix}_TOKEN_UNITS: {usage['token_units']:g} / {usage['limit']:g}")
+    print(f"{prefix}_COST_USD: {usage['cost_usd']:.6f}")
+    print(f"{prefix}_UNPRICED_CALLS: {usage['unpriced_calls']}")
 
 # 5) The agent's part is done; everything from here is a deterministic,
 # non-agentic subprocess pipeline on this host. Fail loudly (not silently) if
