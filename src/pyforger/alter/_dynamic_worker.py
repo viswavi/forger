@@ -29,8 +29,10 @@ def main():
         result = sandbox.execute(
             request["code"], request["item"], timeout_s=request["timeout_s"]
         )
-    if not isinstance(result, str):
-        raise TypeError("The pipeline must return a string")
+    if not isinstance(result, list) or any(
+        not isinstance(value, str) for value in result
+    ):
+        raise TypeError("The pipeline must return a list of strings")
     sys.stdout.write(json.dumps(result))
 
 
