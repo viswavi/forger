@@ -16,17 +16,21 @@ import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, cast
 
 from pyforger.acquire.model import LocalModel, Model
 from pyforger.alter._dynamic_resources import prepare_input
 from pyforger.op import op
+
+if TYPE_CHECKING:
+    from openhands.sdk import LLM
 
 _SOURCE_VERSION = (
     "resource-v4-record"  # Bump when the agent or output contract changes.
 )
 
 
-def _record_key(item: dict) -> str:
+def _record_key(item: dict[str, Any]) -> str:
     """Validate a JSON record and give equal records the same batch key."""
     if not isinstance(item, dict):
         raise TypeError("each input must be a dict")
@@ -56,7 +60,11 @@ def _require_dynamic_platform() -> None:
 
 
 def _execute(
-    code: str, item: dict, timeout: float, *, prepared_input: dict | None = None
+    code: str,
+    item: dict[str, Any],
+    timeout: float,
+    *,
+    prepared_input: dict[str, Any] | None = None,
 ) -> list[str]:
     _require_dynamic_platform()
     # Do not inherit credentials into the generated-code process.
@@ -88,10 +96,10 @@ def _execute(
         not isinstance(value, str) for value in output
     ):
         raise TypeError("The pipeline must return a list of strings")
-    return output
+    return cast(list[str], output)
 
 
-def agent_llm(model):
+def agent_llm(model: Model) -> LLM:
     """Construct the SDK model shared by dynamic and artifact-aware agents."""
     # Read the caller's .env without mutating process-wide environment in threads.
     from dotenv import dotenv_values
@@ -104,7 +112,7 @@ def agent_llm(model):
         or os.environ.get("LITELLM_API_KEY")
         or dotenv.get("LITELLM_API_KEY")
     )
-    config = dict(
+    config: dict[str, Any] = dict(
         model=model._model_id,
         temperature=model._temperature,
         base_url=model._kwargs.get("api_base")
@@ -128,10 +136,16 @@ def agent_llm(model):
     for option in ("api_mode", "capability_overrides"):
         if option in model._kwargs:
             config[option] = model._kwargs[option]
-    return LLM(**config)
+    return cast("LLM", LLM(**config))
 
 
-def _generate(goal, item, model, max_iterations, execution_timeout_s):
+def _generate(
+    goal: str,
+    item: dict[str, Any],
+    model: Model,
+    max_iterations: int,
+    execution_timeout_s: float,
+) -> str:
     _require_dynamic_platform()
     if isinstance(model, LocalModel):
         raise TypeError("dynamic_step requires a LiteLLM-backed Model")
@@ -195,7 +209,7 @@ def _generate(goal, item, model, max_iterations, execution_timeout_s):
                     )
                 )
                 remaining = max_iterations
-                seen_responses = set()
+                seen_responses: set[str] = set()
                 while remaining:
                     conversation.max_iteration_per_run = remaining
                     try:
@@ -231,7 +245,7 @@ def _generate(goal, item, model, max_iterations, execution_timeout_s):
 
 @op(name="alter.dynamic_step_source")
 def dynamic_step_source(
-    item: dict,
+    item: dict[str, Any],
     goal: str,
     model: Model,
     *,
@@ -262,7 +276,7 @@ def dynamic_step_source(
 
 @op(cache=False)
 def dynamic_step(
-    inputs: list[dict],
+    inputs: list[dict[str, Any]],
     goal: str,
     model: Model,
     *,
@@ -284,7 +298,7 @@ def dynamic_step(
     if not inputs:
         return []
 
-    def run(item):
+    def run(item: dict[str, Any]) -> list[str]:
         code = dynamic_step_source(
             item,
             goal,

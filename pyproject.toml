@@ -90,3 +90,9 @@ testpaths = ["tests"]
 [tool.isort]
 profile = "black"
 known_first_party = ["pyforger"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src/pyforger"]
+ignore_missing_imports = true

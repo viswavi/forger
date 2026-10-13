@@ -15,12 +15,12 @@ from pyforger.utils import canonical, get_field
 
 @op(name="filter.by_exact_agreement")
 def by_exact_agreement(
-    items: list[dict],
+    items: list[dict[str, Any]],
     *,
     field_a: str,
     field_b: str,
     disagree: bool = False,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Keep items where two fields agree or disagree, by exact match.
 
     Useful for comparing outputs from different models or annotators
@@ -51,13 +51,13 @@ def by_exact_agreement(
 
 @op(name="filter.by_rouge_l_agreement")
 def by_rouge_l_agreement(
-    items: list[dict],
+    items: list[dict[str, Any]],
     *,
     field_a: str,
     field_b: str,
     threshold: float = 0.7,
     disagree: bool = False,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Keep items where ROUGE-L F1 between two fields meets or misses threshold.
 
     Useful for comparing natural-language outputs from different models
@@ -93,12 +93,12 @@ def by_rouge_l_agreement(
 
 @op(name="filter.by_group_agreement")
 def by_group_agreement(
-    items: list[dict],
+    items: list[dict[str, Any]],
     *,
     group_by_input_field: str,
     match_output_field: str,
     max_count: int | None = None,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Keep only groups of items whose outputs all agree.
 
     Values are compared by type and structure (``1 != "1"``); strings are
@@ -125,7 +125,7 @@ def by_group_agreement(
             conflicting.add(key)
 
     counts: dict[Any, int] = {}
-    result: list[dict] = []
+    result: list[dict[str, Any]] = []
     for key, item in zip(keys, items):
         if key in conflicting:
             continue

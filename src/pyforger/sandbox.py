@@ -37,7 +37,7 @@ import sys
 import threading
 import types
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 from RestrictedPython import compile_restricted, safe_globals
 from RestrictedPython.Guards import (
@@ -173,7 +173,8 @@ def _slice_to_expr(node: ast.expr) -> ast.expr:
     return node
 
 
-class _SandboxPolicy(RestrictingNodeTransformer):
+# RestrictedPython does not provide type information.
+class _SandboxPolicy(RestrictingNodeTransformer):  # type: ignore[misc]
     """Expanded policy to allow augmented assignment to subscripts/attributes.
 
     RestrictedPython's default policy rejects ALL augmented assignment to
@@ -380,7 +381,7 @@ def _build_globals(
     def _input(prompt: Any = "") -> str:
         if prompt:
             sys_.stdout.write(str(prompt))
-        line = sys_.stdin.readline()
+        line = cast(str, sys_.stdin.readline())
         if not line:
             raise EOFError("EOF when reading a line")
         return line.rstrip("\n")
@@ -530,9 +531,11 @@ class Sandbox:
         self._bytecode_cache: dict[str, Any] = {}
         self._compile_cache: dict[str, Callable[..., Any]] = {}
         self._namespace_cache: dict[str, dict[str, Any]] = {}
-        self._result_cache: dict[tuple, Any] | None = {} if cache_results else None
+        self._result_cache: dict[tuple[Any, ...], Any] | None = (
+            {} if cache_results else None
+        )
 
-    def cache_key(self) -> tuple:
+    def cache_key(self) -> tuple[str, tuple[str, ...], float, bool]:
         """Stable hash key for @op caching (excludes the mutable compile cache)."""
         return (
             type(self).__name__,
@@ -595,8 +598,9 @@ class Sandbox:
                 continue
             obj = ns[name]
             if callable(obj) and hasattr(obj, "__code__"):
-                self._compile_cache[code] = obj
-                return obj
+                fn = cast(Callable[..., Any], obj)
+                self._compile_cache[code] = fn
+                return fn
         raise ValueError("sandbox: code did not define any function to call")
 
     def call_method(
@@ -709,7 +713,7 @@ class Sandbox:
         if cache is None:
             return self.call(run, timeout_s=timeout_s)
 
-        cache_key: tuple | None = None
+        cache_key: tuple[Any, ...] | None = None
         if not kwargs:
             try:
                 candidate = (code, args)

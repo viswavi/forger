@@ -7,8 +7,9 @@ completions from any supported LLM provider.
 from __future__ import annotations
 
 import warnings
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Union
+from typing import Any, Union, cast
 
 import litellm
 
@@ -51,7 +52,7 @@ def _batch_completion_with_progress(
     return results
 
 
-class GenerateResult(list):
+class GenerateResult(list[str]):
     """list[str] with `usage` / `reasoning` / `model_id` / `raw` attributes."""
 
     usage: dict[str, Any]
@@ -75,7 +76,14 @@ class GenerateResult(list):
         self.model_id = model_id
         self.raw = raw
 
-    def __reduce__(self):
+    def __reduce__(
+        self,
+    ) -> tuple[
+        Callable[
+            [list[str], dict[str, Any], list[str | None], str, Any], GenerateResult
+        ],
+        tuple[list[str], dict[str, Any], list[str | None], str, Any],
+    ]:
         """Pickle support."""
         return (
             _rebuild_generate_result,
@@ -302,7 +310,7 @@ class Model:
         """Validate params against LiteLLM's registry for this model id."""
         _validate_params(self._model_id, **params)
 
-    def cache_key(self) -> tuple:
+    def cache_key(self) -> tuple[object, ...]:
         """Stable hash key for @op caching using all functional attributes."""
         kwargs_items = tuple(sorted(self._kwargs.items(), key=lambda kv: str(kv[0])))
         return (
@@ -317,7 +325,7 @@ class Model:
     @property
     def total_cost(self) -> float:
         """Sum of cost_usd across every call in this Model's history."""
-        return sum(r.usage.get("cost_usd", 0.0) for r in self.history)
+        return sum(cast(float, r.usage.get("cost_usd", 0.0)) for r in self.history)
 
     @property
     def total_usage(self) -> dict[str, int]:
@@ -560,7 +568,7 @@ class LocalModel(Model):
         self._show_progress = show_progress
         self._llm: Any | None = None
 
-    def cache_key(self) -> tuple:
+    def cache_key(self) -> tuple[object, ...]:
         """Stable hash key for @op caching from the functional configuration.
 
         Includes the sampling settings, the chat-template kwargs actually sent,

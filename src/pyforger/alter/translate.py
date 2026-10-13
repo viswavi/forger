@@ -8,6 +8,7 @@ language. Both use a Model for generation.
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any
 
 from pyforger.acquire.model import Message, Model, Prompt
 from pyforger.op import op
@@ -29,13 +30,13 @@ SYSTEM_PROMPT_CODE = (
 
 @op(name="alter.translate.to_language")
 def to_language(
-    items: list[dict],
+    items: list[dict[str, Any]],
     *,
     target_language: str,
     fields: list[str],
     model: Model,
     target_fields: list[str] | None = None,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Translate text fields on each item into ``target_language`` using a Model.
 
     Each (item, field) pair is one LLM call, all dispatched through a
@@ -78,14 +79,14 @@ def to_language(
 
 @op(name="alter.translate.to_code")
 def to_code(
-    items: list[dict],
+    items: list[dict[str, Any]],
     *,
     target_language: str,
     fields: list[str],
     model: Model,
     source_language: str | None = None,
     target_fields: list[str] | None = None,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Translate text fields on each item into code in ``target_language``.
 
     Each source field can be a natural-language description of what the
@@ -169,7 +170,7 @@ def _strip_code_fences(text: str) -> str:
 
 
 def _translate(
-    items: list[dict],
+    items: list[dict[str, Any]],
     *,
     fields: list[str],
     model: Model,
@@ -177,7 +178,7 @@ def _translate(
     system_message: Message,
     caller_name: str,
     transform: Callable[[str], str],
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Per-(item, field) generate_batch shared by to_language and to_code."""
     if not items:
         return []
@@ -198,7 +199,7 @@ def _translate(
             f"completions for {len(prompts)} prompts"
         )
 
-    results: list[dict] = []
+    results: list[dict[str, Any]] = []
     idx = 0
     for item_idx, item in enumerate(items):
         new_item = dict(item)

@@ -27,7 +27,7 @@ from collections import deque
 from collections.abc import Callable
 from functools import wraps
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, Protocol, TypeVar, cast, overload
 
 from pydantic import BaseModel
 
@@ -36,6 +36,11 @@ from pyforger.utils import canonical, get_formatted_logger
 logger = get_formatted_logger("forger.op")
 
 T = TypeVar("T")
+
+
+class _OpDecorator(Protocol):
+    def __call__(self, fn: Callable[..., T]) -> Callable[..., T]:
+        ...
 
 
 def _cache_dir() -> Path:
@@ -152,12 +157,26 @@ def _warn_unstable_refs(fn: Callable[..., Any], op_name: str) -> None:
     )
 
 
+@overload
 def op(
-    _fn: Callable[..., T] | None = None,
+    _fn: Callable[..., T], *, name: str | None = None, cache: bool = True
+) -> Callable[..., T]:
+    ...
+
+
+@overload
+def op(
+    _fn: None = None, *, name: str | None = None, cache: bool = True
+) -> _OpDecorator:
+    ...
+
+
+def op(
+    _fn: Callable[..., Any] | None = None,
     *,
     name: str | None = None,
     cache: bool = True,
-) -> Any:
+) -> Callable[..., Any] | _OpDecorator:
     """Decorator: cache output on disk, content-addressed by inputs.
 
     Usage::
@@ -250,7 +269,7 @@ def op(
                         )
 
                     with cache_path.open("rb") as f:
-                        result = pickle.load(f)
+                        result = cast(T, pickle.load(f))
                     cache_hit = True
                 except Exception as exc:
                     if _cache_only:
