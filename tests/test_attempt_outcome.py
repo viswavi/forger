@@ -9,9 +9,9 @@ from pyforger.attempt_outcome import AttemptOutcome
 def test_success_failure_and_roundtrip():
     """Model grades retain attribution across serialization."""
     for passed in (True, False):
-        outcome = AttemptOutcome(passed, "model", "graded")
+        outcome = AttemptOutcome(passed=passed, attribution="model", reason="graded")
         assert outcome.counted and outcome.passed is passed
-        assert AttemptOutcome.from_dict(outcome.to_dict()) == outcome
+        assert AttemptOutcome.model_validate(outcome.model_dump(mode="json")) == outcome
 
 
 @pytest.mark.parametrize(
@@ -21,4 +21,4 @@ def test_success_failure_and_roundtrip():
 def test_invalid_contract_rejected(passed, attribution):
     """Ambiguous grades cannot enter success-rate measurements."""
     with pytest.raises(ValueError):
-        AttemptOutcome(passed, attribution, "fixture")
+        AttemptOutcome(passed=passed, attribution=attribution, reason="fixture")

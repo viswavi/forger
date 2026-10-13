@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import FrozenInstanceError
 
 import pytest
+from pydantic import ValidationError
 
 from pyforger.artifacts import ArtifactRef, ArtifactStore
 from pyforger.op import clear_trace, op, trace
@@ -31,9 +31,9 @@ def test_deterministic_immutable_manifest(tmp_path):
     assert ref.digest == other.cache_key()
     assert [f.path for f in ref.files] == ["a.txt", "empty", "nested/data.bin"]
     assert ref.files[0].size == len(b"synthetic fixture")
-    with pytest.raises(FrozenInstanceError):
+    with pytest.raises(ValidationError):
         ref.digest = "changed"
-    with pytest.raises(FrozenInstanceError):
+    with pytest.raises(ValidationError):
         ref.files[0].size = 2
 
 
@@ -48,7 +48,9 @@ def test_empty_artifact(tmp_path):
 def test_json_roundtrip(tmp_path):
     """Restored references retain identity and detect subsequent missing files."""
     ref = ArtifactRef.capture(tree(tmp_path / "source"))
-    restored = ArtifactRef.from_dict(json.loads(json.dumps(ref.to_dict())))
+    restored = ArtifactRef.model_validate(
+        json.loads(json.dumps(ref.model_dump(mode="json")))
+    )
     assert restored == ref
     restored.verify()
     (ref.root / "a.txt").unlink()
@@ -158,10 +160,10 @@ def test_invalid_ledger(tmp_path):
         lambda d: d["files"][0].update(sha256="0" * 64),
         lambda d: d.pop("root"),
     ):
-        data = ref.to_dict()
+        data = ref.model_dump(mode="json")
         mutate(data)
         with pytest.raises(ValueError):
-            ArtifactRef.from_dict(data)
+            ArtifactRef.model_validate(data)
 
 
 def test_op_cache_invalidation(tmp_path, monkeypatch):
@@ -236,9 +238,9 @@ def test_trusted_ancestor_alias(tmp_path):
     assert ref.root == source.resolve()
     assert ref.path("a.txt") == source.resolve() / "a.txt"
     ref.verify()
-    ledger = ref.to_dict()
+    ledger = ref.model_dump(mode="json")
     ledger["root"] = str(alias / "source")
-    assert ArtifactRef.from_dict(ledger) == ref
+    assert ArtifactRef.model_validate(ledger) == ref
     store = ArtifactStore(alias / "store")
     assert store.root == physical.resolve() / "store"
     stored = store.put(alias / "source")

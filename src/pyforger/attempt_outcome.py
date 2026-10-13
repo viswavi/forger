@@ -1,18 +1,22 @@
 """Explicit attempt outcomes shared by runtime adapters and filters."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from typing import Self
+
+from pydantic import BaseModel, ConfigDict, StrictBool, model_validator
 
 
-@dataclass(frozen=True)
-class AttemptOutcome:
+class AttemptOutcome(BaseModel):
     """An explicit grade and attribution, independent of execution status."""
 
-    passed: bool | None
+    model_config = ConfigDict(frozen=True)
+
+    passed: StrictBool | None
     attribution: str
     reason: str
 
-    def __post_init__(self):
+    @model_validator(mode="after")
+    def validate_outcome(self) -> Self:
         """Reject ambiguous grades and unsupported attribution values."""
         if self.attribution not in {"model", "infrastructure", "task", "unknown"}:
             raise ValueError("Unsupported attempt attribution")
@@ -22,21 +26,9 @@ class AttemptOutcome:
             raise ValueError("Ungradable outcomes cannot carry a model grade")
         if not isinstance(self.reason, str) or not self.reason:
             raise ValueError("An attribution reason is required")
+        return self
 
     @property
     def counted(self):
         """Only attributable model outcomes enter empirical accuracy."""
         return self.attribution == "model"
-
-    def to_dict(self):
-        """Serialize the explicit outcome contract."""
-        return {
-            "passed": self.passed,
-            "attribution": self.attribution,
-            "reason": self.reason,
-        }
-
-    @classmethod
-    def from_dict(cls, value):
-        """Validate a retained outcome without guessing attribution."""
-        return cls(value["passed"], value["attribution"], value["reason"])
