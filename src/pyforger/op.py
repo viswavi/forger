@@ -25,10 +25,11 @@ import time
 import types
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
 from functools import wraps
 from pathlib import Path
 from typing import Any, TypeVar
+
+from pydantic import BaseModel
 
 from pyforger.utils import canonical, get_formatted_logger
 
@@ -46,8 +47,7 @@ def _cache_dir() -> Path:
     return Path(os.environ.get("FORGER_CACHE", Path.home() / ".cache" / "forger"))
 
 
-@dataclass
-class CallRecord:
+class CallRecord(BaseModel):
     """CallRecord contains metadata about each @op call, for tracing and debugging."""
 
     op_name: str
