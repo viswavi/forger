@@ -1,7 +1,9 @@
 """Explicit attempt outcomes shared by runtime adapters and filters."""
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, StrictBool, model_validator
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
 
 class AttemptOutcome(BaseModel):
@@ -10,20 +12,13 @@ class AttemptOutcome(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     passed: StrictBool | None
-    attribution: str
-    reason: str
+    attribution: Literal["model", "infrastructure", "task", "unknown"]
+    reason: str = Field(min_length=1)
 
     @model_validator(mode="after")
-    def validate_outcome(self) -> AttemptOutcome:
-        """Reject ambiguous grades and unsupported attribution values."""
-        if self.attribution not in {"model", "infrastructure", "task", "unknown"}:
-            raise ValueError("Unsupported attempt attribution")
-        if self.attribution == "model" and type(self.passed) is not bool:
-            raise ValueError("Model outcomes require a boolean grade")
-        if self.attribution != "model" and self.passed is not None:
-            raise ValueError("Ungradable outcomes cannot carry a model grade")
-        if not isinstance(self.reason, str) or not self.reason:
-            raise ValueError("An attribution reason is required")
+    def coherent_grade(self) -> AttemptOutcome:
+        if (self.attribution == "model") != (self.passed is not None):
+            raise ValueError("Only model outcomes carry a boolean grade")
         return self
 
     @property
