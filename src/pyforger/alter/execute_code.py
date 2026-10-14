@@ -1,6 +1,8 @@
 """Run each item's code snippet through a Sandbox; record the result."""
 from __future__ import annotations
 
+from typing import Any
+
 from pyforger.op import op
 from pyforger.sandbox import Sandbox
 from pyforger.utils import get_field
@@ -8,7 +10,7 @@ from pyforger.utils import get_field
 
 @op(name="alter.execute_code")
 def execute_code(
-    items: list[dict],
+    items: list[dict[str, Any]],
     *,
     code_field: str,
     arg_field: str,
@@ -16,7 +18,7 @@ def execute_code(
     error_field: str | None = "error",
     sandbox: Sandbox | None = None,
     timeout_s: float | None = None,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Compile each item's code and call it with ``arg_field``'s value.
 
     The Sandbox caches by source string, so a snippet reused across items
@@ -31,7 +33,7 @@ def execute_code(
     and main thread only.
     """
     sb = sandbox if sandbox is not None else Sandbox()
-    out: list[dict] = []
+    out: list[dict[str, Any]] = []
     for item in items:
         code = get_field(item, code_field, "alter.execute_code")
         arg = get_field(item, arg_field, "alter.execute_code")

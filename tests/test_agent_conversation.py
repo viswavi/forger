@@ -121,7 +121,7 @@ class RuntimeTests(unittest.TestCase):
             self.assertTrue(requests)
             self.assertFalse(requests[0].get("tools"))
             self.assertNotIn("prompt_cache_key", requests[0])
-            self.assertNotIn("reasoning_effort", requests[0])
+            self.assertEqual(requests[0]["reasoning_effort"], "high")
             payloads = [json.loads(line) for line in events.read_text().splitlines()]
             self.assertTrue(
                 any(

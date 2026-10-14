@@ -3,15 +3,23 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from typing import Any
 
-from pyforger.trials import RolloutResult, TrialRequest
+from pyforger.trials import (
+    AgentRunner,
+    EnvironmentFactory,
+    ReplayRunner,
+    RolloutResult,
+    TrialEvaluator,
+    TrialRequest,
+)
 from pyforger.trials import evaluate_agent as evaluate_one
 from pyforger.trials import execute_agent as execute_one
 from pyforger.trials import replay_agent as replay_one
 from pyforger.utils import get_field
 
 
-def _requests(items, request_field):
+def _requests(items: list[dict[str, Any]], request_field: str) -> list[TrialRequest]:
     requests = []
     for item in items:
         value = get_field(item, request_field, "alter.agent")
@@ -26,19 +34,19 @@ def _requests(items, request_field):
     return requests
 
 
-def _output(root, request):
+def _output(root: Path, request: TrialRequest) -> Path:
     return Path(root) / hashlib.sha256(request.trial_id.encode()).hexdigest()
 
 
 def execute_agent(
-    items: list[dict],
+    items: list[dict[str, Any]],
     *,
-    runner,
+    runner: AgentRunner,
     output: Path,
     request_field: str = "request",
     output_field: str = "rollout",
-    environment_factory=None,
-) -> list[dict]:
+    environment_factory: EnvironmentFactory | None = None,
+) -> list[dict[str, Any]]:
     """Execute explicit row requests once; never implicitly cache samples."""
     return [
         {
@@ -55,14 +63,14 @@ def execute_agent(
 
 
 def evaluate_agent(
-    items: list[dict],
+    items: list[dict[str, Any]],
     *,
-    evaluator,
+    evaluator: TrialEvaluator,
     output: Path,
     request_field: str = "request",
     rollout_field: str = "rollout",
     output_field: str = "evaluation",
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Grade retained row rollouts independently of agent execution."""
     return [
         {
@@ -81,15 +89,15 @@ def evaluate_agent(
 
 
 def replay_agent(
-    items: list[dict],
+    items: list[dict[str, Any]],
     *,
-    runner,
+    runner: ReplayRunner,
     output: Path,
-    environment_factory=None,
+    environment_factory: EnvironmentFactory | None = None,
     request_field: str = "request",
     rollout_field: str = "rollout",
     output_field: str = "replay",
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Replay retained row programs in newly opened environments."""
     return [
         {

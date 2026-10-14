@@ -6,7 +6,7 @@ from pyforger.alter._dynamic_resources import (
 )
 
 
-def validate_url(url):
+def validate_url(url: str) -> tuple[str, str]:
     """Validate and resolve a public HTTPS resource without downloading it."""
     return _public_https_address(url)
 

@@ -59,6 +59,7 @@ clustering = [
 ]
 test = [
     "pytest>=6.0.0",
+    "mypy==2.4.0",
     "pyyaml",
     "jsonschema",
     "numpy",
@@ -90,3 +91,11 @@ testpaths = ["tests"]
 [tool.isort]
 profile = "black"
 known_first_party = ["pyforger"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+disallow_untyped_defs = true
+check_untyped_defs = true
+files = ["src/pyforger"]
+ignore_missing_imports = true

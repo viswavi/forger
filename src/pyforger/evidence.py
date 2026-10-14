@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
+from typing import TYPE_CHECKING
 
 from openhands.sdk import Action, Observation, ToolDefinition
 from openhands.sdk.tool import ToolExecutor, register_tool
 from pydantic import Field
+
+if TYPE_CHECKING:
+    from openhands.sdk.conversation import ConversationState, LocalConversation
 
 PAGE_SIZE = 12000
 SEARCH_MATCHES = 8
@@ -33,14 +38,16 @@ class EvidenceObservation(Observation):
     pass
 
 
-class EvidenceReader(ToolExecutor):
+class EvidenceReader(ToolExecutor[EvidenceAction, EvidenceObservation]):
     """Read only the registered evidence snapshot."""
 
-    def __init__(self, artifacts):
+    def __init__(self, artifacts: Mapping[str, str]) -> None:
         """Snapshot trusted inputs and execution configuration."""
         self.artifacts = dict(artifacts)
 
-    def __call__(self, action, conversation=None):
+    def __call__(
+        self, action: EvidenceAction, conversation: LocalConversation | None = None
+    ) -> EvidenceObservation:
         """Return a bounded evidence page or literal search matches."""
         if not action.artifact:
             if action.query is not None:
@@ -53,7 +60,7 @@ class EvidenceReader(ToolExecutor):
         else:
             return EvidenceObservation.from_text(text="Unknown artifact ID")
         if action.query is not None:
-            matches = []
+            matches: list[dict[str, int | str]] = []
             total_matches = 0
             pattern = re.compile(re.escape(action.query), re.IGNORECASE)
             for match in pattern.finditer(text):
@@ -89,7 +96,9 @@ class EvidenceTool(ToolDefinition[EvidenceAction, EvidenceObservation]):
     """Expose bounded evidence reads without filesystem capabilities."""
 
     @classmethod
-    def create(cls, conv_state, session_id):
+    def create(
+        cls, conv_state: ConversationState, session_id: str
+    ) -> list[EvidenceTool]:
         """Bind the evidence tool to its registered session."""
         return [
             cls(

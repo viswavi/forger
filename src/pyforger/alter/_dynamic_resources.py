@@ -14,6 +14,7 @@ import tempfile
 import time
 from html.parser import HTMLParser
 from pathlib import Path
+from typing import Any
 from urllib.parse import urljoin, urlsplit
 
 from pyforger.alter._dynamic_git_proxy import git_proxy
@@ -26,20 +27,20 @@ _MAX_GIT_DISK = 64 * 1024 * 1024
 
 
 class _TextExtractor(HTMLParser):
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
-        self.parts = []
+        self.parts: list[str] = []
         self.hidden = 0
 
-    def handle_starttag(self, tag, attrs):
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag in {"script", "style"}:
             self.hidden += 1
 
-    def handle_endtag(self, tag):
+    def handle_endtag(self, tag: str) -> None:
         if tag in {"script", "style"} and self.hidden:
             self.hidden -= 1
 
-    def handle_data(self, data):
+    def handle_data(self, data: str) -> None:
         if not self.hidden:
             self.parts.append(data)
 
@@ -74,9 +75,15 @@ def _public_https_address(url: str) -> tuple[str, str]:
     addresses = socket.getaddrinfo(
         parts.hostname, parts.port or 443, type=socket.SOCK_STREAM
     )
-    if not addresses or any(not public_address(entry[4][0]) for entry in addresses):
+    public_addresses: list[str] = []
+    for entry in addresses:
+        address = entry[4][0]
+        if not isinstance(address, str) or not public_address(address):
+            raise ValueError("Resource URL resolves to a non-public address")
+        public_addresses.append(address)
+    if not public_addresses:
         raise ValueError("Resource URL resolves to a non-public address")
-    return parts.hostname.lower(), addresses[0][4][0]
+    return parts.hostname.lower(), public_addresses[0]
 
 
 def _public_https(url: str) -> str:
@@ -267,7 +274,7 @@ def _clone_files(url: str) -> dict[str, str]:
         return files
 
 
-def prepare_input(item: dict) -> dict:
+def prepare_input(item: dict[str, Any]) -> dict[str, Any]:
     """Preserve a record, or expand a URL-only record into resource fields."""
     if set(item) != {"url"} or not isinstance(item["url"], str):
         return item

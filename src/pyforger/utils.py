@@ -33,7 +33,7 @@ def get_formatted_logger(logger_name: str, level: int = logging.INFO) -> logging
     return logger
 
 
-def get_field(item: dict, field: str, caller: str) -> Any:
+def get_field(item: dict[str, Any], field: str, caller: str) -> Any:
     """Retrieve a field from a dict item, raising a clear error if missing.
 
     Args:

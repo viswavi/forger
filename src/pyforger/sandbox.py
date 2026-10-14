@@ -39,12 +39,13 @@ import types
 from collections.abc import Callable
 from typing import Any
 
-from RestrictedPython import compile_restricted, safe_globals
+from RestrictedPython.compile import compile_restricted
 from RestrictedPython.Guards import (
     guarded_iter_unpack_sequence,
     guarded_unpack_sequence,
-    safer_getattr,
+    safe_globals,
 )
+from RestrictedPython.Guards import safer_getattr as _safer_getattr
 from RestrictedPython.transformer import (
     IOPERATOR_TO_STR,
     RestrictingNodeTransformer,
@@ -380,7 +381,7 @@ def _build_globals(
     def _input(prompt: Any = "") -> str:
         if prompt:
             sys_.stdout.write(str(prompt))
-        line = sys_.stdin.readline()
+        line: str = sys_.stdin.readline()
         if not line:
             raise EOFError("EOF when reading a line")
         return line.rstrip("\n")
@@ -423,7 +424,8 @@ def _build_globals(
     def _getattr_(obj: Any, name: str, default: Any = None) -> Any:
         # Allowed modules expose others as attributes (e.g. `typing.sys` is
         # the real sys), so check any module reached this way too.
-        value = safer_getattr(obj, name, default)
+        get_attribute: Callable[[Any, str, Any], Any] = _safer_getattr
+        value = get_attribute(obj, name, default)
         if isinstance(value, types.ModuleType):
             return _check_module(value)
         return value
@@ -436,7 +438,7 @@ def _build_globals(
     safe_builtins["__import__"] = _restricted_import
     safe_builtins["input"] = _input
 
-    g = dict(safe_globals)
+    g: dict[str, Any] = dict(safe_globals)
     g["__builtins__"] = safe_builtins
     g["__name__"] = "sandbox"
     # Required by RestrictedPython's compiled class statements.
@@ -530,9 +532,11 @@ class Sandbox:
         self._bytecode_cache: dict[str, Any] = {}
         self._compile_cache: dict[str, Callable[..., Any]] = {}
         self._namespace_cache: dict[str, dict[str, Any]] = {}
-        self._result_cache: dict[tuple, Any] | None = {} if cache_results else None
+        self._result_cache: dict[tuple[Any, ...], Any] | None = (
+            {} if cache_results else None
+        )
 
-    def cache_key(self) -> tuple:
+    def cache_key(self) -> tuple[str, tuple[str, ...], float, bool]:
         """Stable hash key for @op caching (excludes the mutable compile cache)."""
         return (
             type(self).__name__,
@@ -593,7 +597,7 @@ class Sandbox:
         for name in reversed(list(ns)):
             if name in baseline:
                 continue
-            obj = ns[name]
+            obj: object = ns[name]
             if callable(obj) and hasattr(obj, "__code__"):
                 self._compile_cache[code] = obj
                 return obj
@@ -709,7 +713,7 @@ class Sandbox:
         if cache is None:
             return self.call(run, timeout_s=timeout_s)
 
-        cache_key: tuple | None = None
+        cache_key: tuple[Any, ...] | None = None
         if not kwargs:
             try:
                 candidate = (code, args)

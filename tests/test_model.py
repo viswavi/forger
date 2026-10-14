@@ -8,12 +8,15 @@ import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 from pyforger.acquire.model import (
     _COST_WARNING_SEEN,
     _VALUE_CONSTRAINTS,
     GenerateResult,
     Model,
+    ModelSettings,
+    Usage,
     _extract_cost,
     _extract_reasoning,
     _extract_usage,
@@ -69,52 +72,53 @@ class TestConstructor:
     def test_stores_model_id(self):
         """model_id is accessible after construction."""
         model = Model("gpt-4o")
-        assert model._model_id == "gpt-4o"
+        assert model.config.model_id == "gpt-4o"
 
     def test_default_temperature(self):
         """Default temperature is 0.7."""
         model = Model("gpt-4o")
-        assert model._temperature == 0.7
+        assert model.config.temperature == 0.7
 
     def test_custom_temperature(self):
         """Custom temperature is stored."""
         model = Model("gpt-4o", temperature=0.2)
-        assert model._temperature == 0.2
+        assert model.config.temperature == 0.2
 
     def test_default_max_tokens_is_none(self):
         """Default max_tokens is None."""
         model = Model("gpt-4o")
-        assert model._max_tokens is None
+        assert model.config.max_tokens is None
 
     def test_custom_max_tokens(self):
         """Custom max_tokens is stored."""
         model = Model("gpt-4o", max_tokens=500)
-        assert model._max_tokens == 500
+        assert model.config.max_tokens == 500
 
     def test_default_num_retries(self):
         """Default num_retries is 2."""
         model = Model("gpt-4o")
-        assert model._num_retries == 2
+        assert model.config.num_retries == 2
 
     def test_custom_num_retries(self):
         """Custom num_retries is stored."""
         model = Model("gpt-4o", num_retries=5)
-        assert model._num_retries == 5
+        assert model.config.num_retries == 5
 
     def test_api_key_stored(self):
         """API key is stored when provided."""
         model = Model("gpt-4o", api_key="sk-test")
-        assert model._api_key == "sk-test"
+        assert model.config.api_key == "sk-test"
 
     def test_api_key_defaults_to_none(self):
         """API key defaults to None (falls back to env vars)."""
         model = Model("gpt-4o")
-        assert model._api_key is None
+        assert model.config.api_key is None
 
     def test_kwargs_stored(self):
         """Extra kwargs are stored for passthrough to litellm."""
         model = Model("gpt-4o", api_base="http://localhost:8080")
-        assert model._kwargs == {"api_base": "http://localhost:8080"}
+        assert model.config.api_base == "http://localhost:8080"
+        assert model._kwargs == {}
 
     def test_history_initially_empty(self):
         """History is empty before any calls."""
@@ -522,28 +526,44 @@ class TestGenerateResult:
     def test_is_list_instance(self):
         """Passes isinstance(..., list) check for downstream callers."""
         result = GenerateResult(
-            ["a", "b"], usage={}, reasoning=[None, None], model_id="gpt-4o", raw=None
+            ["a", "b"],
+            usage=Usage(),
+            reasoning=[None, None],
+            model_id="gpt-4o",
+            raw=None,
         )
         assert isinstance(result, list)
 
     def test_iteration(self):
         """Iterates as a list of strings."""
         result = GenerateResult(
-            ["a", "b"], usage={}, reasoning=[None, None], model_id="gpt-4o", raw=None
+            ["a", "b"],
+            usage=Usage(),
+            reasoning=[None, None],
+            model_id="gpt-4o",
+            raw=None,
         )
         assert list(result) == ["a", "b"]
 
     def test_indexing(self):
         """Indexes like a list."""
         result = GenerateResult(
-            ["a", "b"], usage={}, reasoning=[None, None], model_id="gpt-4o", raw=None
+            ["a", "b"],
+            usage=Usage(),
+            reasoning=[None, None],
+            model_id="gpt-4o",
+            raw=None,
         )
         assert result[0] == "a"
 
     def test_equality_with_plain_list(self):
         """Compares equal to a plain list with same contents."""
         result = GenerateResult(
-            ["a", "b"], usage={}, reasoning=[None, None], model_id="gpt-4o", raw=None
+            ["a", "b"],
+            usage=Usage(),
+            reasoning=[None, None],
+            model_id="gpt-4o",
+            raw=None,
         )
         assert result == ["a", "b"]
 
@@ -551,12 +571,12 @@ class TestGenerateResult:
         """usage, reasoning, model_id, raw are accessible."""
         result = GenerateResult(
             ["a"],
-            usage={"cost_usd": 0.01, "prompt_tokens": 5},
+            usage=Usage(cost_usd=0.01, prompt_tokens=5),
             reasoning=["thinking..."],
             model_id="gpt-5",
             raw={"id": "chatcmpl-123"},
         )
-        assert result.usage["cost_usd"] == 0.01
+        assert result.usage.cost_usd == 0.01
         assert result.reasoning == ["thinking..."]
         assert result.model_id == "gpt-5"
         assert result.raw == {"id": "chatcmpl-123"}
@@ -565,28 +585,28 @@ class TestGenerateResult:
         """Pickles cleanly for @op caching."""
         result = GenerateResult(
             ["a"],
-            usage={"cost_usd": 0.01},
+            usage=Usage(cost_usd=0.01),
             reasoning=[None],
             model_id="gpt-4o",
             raw=None,
         )
         restored = pickle.loads(pickle.dumps(result))
         assert restored == ["a"]
-        assert restored.usage["cost_usd"] == 0.01
+        assert restored.usage.cost_usd == 0.01
         assert restored.model_id == "gpt-4o"
 
     def test_deepcopy_preserves_attributes(self):
         """Deepcopy preserves both list contents and metadata."""
         result = GenerateResult(
             ["a"],
-            usage={"cost_usd": 0.01},
+            usage=Usage(cost_usd=0.01),
             reasoning=[None],
             model_id="gpt-4o",
             raw=None,
         )
         copied = copy.deepcopy(result)
         assert copied == ["a"]
-        assert copied.usage == {"cost_usd": 0.01}
+        assert copied.usage == Usage(cost_usd=0.01)
         assert copied.model_id == "gpt-4o"
 
 
@@ -945,9 +965,9 @@ class TestExtractUsage:
         """Basic tokens."""
         response = make_response_with_usage(prompt_tokens=15, completion_tokens=25)
         usage = _extract_usage(response)
-        assert usage["prompt_tokens"] == 15
-        assert usage["completion_tokens"] == 25
-        assert usage["reasoning_tokens"] == 0
+        assert usage.prompt_tokens == 15
+        assert usage.completion_tokens == 25
+        assert usage.reasoning_tokens == 0
 
     def test_reasoning_tokens_when_present(self):
         """Reasoning tokens when present."""
@@ -955,16 +975,16 @@ class TestExtractUsage:
             prompt_tokens=10, completion_tokens=50, reasoning_tokens=30
         )
         usage = _extract_usage(response)
-        assert usage["reasoning_tokens"] == 30
+        assert usage.reasoning_tokens == 30
 
     def test_no_usage_yields_zeros(self):
         """No usage yields zeros."""
         response = make_response_with_usage(include_usage=False)
-        assert _extract_usage(response) == {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "reasoning_tokens": 0,
-        }
+        assert _extract_usage(response) == Usage(
+            prompt_tokens=0,
+            completion_tokens=0,
+            reasoning_tokens=0,
+        )
 
 
 class TestConstructorValidation:
@@ -1084,9 +1104,9 @@ class TestGenerateBatchReturnType:
         )
         model = Model("gpt-4o", api_key="sk-test")
         results = model.generate_batch(["q"])
-        assert results[0].usage["prompt_tokens"] == 15
-        assert results[0].usage["completion_tokens"] == 25
-        assert results[0].usage["cost_usd"] == 0.001
+        assert results[0].usage.prompt_tokens == 15
+        assert results[0].usage.completion_tokens == 25
+        assert results[0].usage.cost_usd == 0.001
         assert results[0].model_id == "gpt-4o"
 
     @patch("pyforger.acquire.model.litellm")
@@ -1186,9 +1206,9 @@ class TestCumulativeTracking:
         model = Model("gpt-4o", api_key="sk-test")
         model.generate("q1")
         model.generate("q2")
-        assert model.total_usage["prompt_tokens"] == 25
-        assert model.total_usage["completion_tokens"] == 45
-        assert model.total_usage["reasoning_tokens"] == 0
+        assert model.total_usage.prompt_tokens == 25
+        assert model.total_usage.completion_tokens == 45
+        assert model.total_usage.reasoning_tokens == 0
 
     @patch("pyforger.acquire.model.litellm")
     def test_reset_history_clears(self, mock_litellm):
@@ -1208,11 +1228,11 @@ class TestCumulativeTracking:
         model.reset_history()
         assert model.history == []
         assert model.total_cost == 0.0
-        assert model.total_usage == {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "reasoning_tokens": 0,
-        }
+        assert model.total_usage == Usage(
+            prompt_tokens=0,
+            completion_tokens=0,
+            reasoning_tokens=0,
+        )
 
     def test_total_cost_empty_history(self):
         """Total cost empty history."""
@@ -1222,11 +1242,11 @@ class TestCumulativeTracking:
     def test_total_usage_empty_history(self):
         """Total usage empty history."""
         model = Model("gpt-4o")
-        assert model.total_usage == {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "reasoning_tokens": 0,
-        }
+        assert model.total_usage == Usage(
+            prompt_tokens=0,
+            completion_tokens=0,
+            reasoning_tokens=0,
+        )
 
 
 class TestPerCallValidation:
@@ -1289,9 +1309,9 @@ class TestUsageOnResult:
         )
         model = Model("gpt-4o", api_key="sk-test")
         result = model.generate("Hi")
-        assert result.usage["prompt_tokens"] == 15
-        assert result.usage["completion_tokens"] == 25
-        assert result.usage["cost_usd"] == 0.001
+        assert result.usage.prompt_tokens == 15
+        assert result.usage.completion_tokens == 25
+        assert result.usage.cost_usd == 0.001
 
     @patch("pyforger.acquire.model.litellm")
     def test_total_usage_sums_across_batch(self, mock_litellm):
@@ -1308,8 +1328,8 @@ class TestUsageOnResult:
         ]
         model = Model("gpt-4o", api_key="sk-test")
         model.generate_batch(["Q1", "Q2"])
-        assert model.total_usage["prompt_tokens"] == 40
-        assert model.total_usage["completion_tokens"] == 60
+        assert model.total_usage.prompt_tokens == 40
+        assert model.total_usage.completion_tokens == 60
         assert model.total_cost == pytest.approx(0.002)
 
 
@@ -1321,3 +1341,123 @@ class TestPublicExports:
         from pyforger.acquire import GenerateResult as Exported
 
         assert Exported is GenerateResult
+
+
+class TestTypedMetadataAndSettings:
+    """Exercise real Pydantic validation without provider calls."""
+
+    def test_usage_defaults_and_serialization(self):
+        """Usage exposes typed fields and explicit dictionary serialization."""
+        result = GenerateResult(
+            ["answer"],
+            usage=Usage(prompt_tokens=3),
+            reasoning=[None],
+            model_id="test",
+            raw=None,
+        )
+        assert result.usage == Usage(prompt_tokens=3)
+        assert result.usage.model_dump() == {
+            "prompt_tokens": 3,
+            "completion_tokens": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.0,
+        }
+
+    @pytest.mark.parametrize(
+        "usage",
+        [
+            {"prompt_tokens": "invalid"},
+            {"completion_tokens": 1.5},
+            {"cost_usd": "invalid"},
+            {"unexpected": 1},
+        ],
+    )
+    def test_invalid_usage_is_rejected(self, usage):
+        """Invalid usage is rejected."""
+        with pytest.raises(ValidationError):
+            Usage.model_validate(usage)
+
+    @pytest.mark.parametrize(
+        "settings",
+        [
+            {"timeout": "invalid"},
+            {"timeout": 1.5},
+            {"api_mode": "invalid"},
+            {"reasoning_effort": 7},
+            {"capability_overrides": {"vision": []}},
+            {"unexpected": 1},
+        ],
+    )
+    def test_invalid_settings_are_rejected(self, settings):
+        """Invalid settings are rejected."""
+        with pytest.raises(ValidationError):
+            ModelSettings.model_validate({"model_id": "test", **settings})
+
+    def test_assignment_is_validated(self):
+        """Assignment is validated."""
+        usage = Usage()
+        with pytest.raises(ValidationError):
+            setattr(usage, "prompt_tokens", "invalid")
+        settings = ModelSettings(model_id="test")
+        with pytest.raises(ValidationError):
+            setattr(settings, "api_mode", "invalid")
+
+    def test_mutable_defaults_are_independent(self):
+        """Mutable defaults are independent."""
+        first = ModelSettings(model_id="test")
+        second = ModelSettings(model_id="test")
+        first.extra_body["custom"] = 1
+        first.capability_overrides["vision"] = False
+        assert second.extra_body == {}
+        assert second.capability_overrides == {}
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_explicit_settings_and_provider_kwargs_forwarded(self, mock_litellm):
+        """Explicit settings and provider kwargs forwarded."""
+        mock_litellm.completion.return_value = make_litellm_response(["answer"])
+        model = Model(
+            "gpt-4o",
+            api_base="http://localhost:1234",
+            timeout=None,
+            reasoning_effort=None,
+            extra_body={"custom": 1},
+            api_mode="chat",
+            capability_overrides={"vision": False},
+            organization="test-org",
+        )
+        model.generate("prompt")
+        kwargs = mock_litellm.completion.call_args.kwargs
+        assert kwargs["api_base"] == model.config.api_base
+        assert "timeout" not in kwargs
+        assert "reasoning_effort" not in kwargs
+        assert kwargs["extra_body"] == {"custom": 1}
+        assert kwargs["api_mode"] == "chat"
+        assert kwargs["capability_overrides"] == {"vision": False}
+        assert kwargs["organization"] == "test-org"
+
+    @patch("pyforger.acquire.model.litellm")
+    def test_omitted_settings_are_not_forwarded(self, mock_litellm):
+        """Omitted settings are not forwarded."""
+        mock_litellm.completion.return_value = make_litellm_response(["answer"])
+        model = Model("gpt-4o")
+        model.generate("prompt")
+        kwargs = mock_litellm.completion.call_args.kwargs
+        for field in (
+            "api_base",
+            "timeout",
+            "reasoning_effort",
+            "extra_body",
+            "api_mode",
+            "capability_overrides",
+        ):
+            assert field not in kwargs
+        assert model.config.timeout is None
+        assert model.config.reasoning_effort is None
+
+    def test_settings_affect_cache_key_but_credentials_do_not(self):
+        """Settings affect cache key but credentials do not."""
+        assert Model("gpt-4o", timeout=42).cache_key() != Model("gpt-4o").cache_key()
+        assert (
+            Model("gpt-4o", api_key="first").cache_key()
+            == Model("gpt-4o", api_key="second").cache_key()
+        )

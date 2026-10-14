@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import json
 import math
-from contextlib import nullcontext
+from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Protocol
@@ -79,7 +80,7 @@ class TrialRequest(BaseModel):
         )
         return self
 
-    def cache_key(self) -> tuple:
+    def cache_key(self) -> tuple[str, str, str, str]:
         """Include sample identity and all public execution configuration."""
         return (
             self.trial_id,
@@ -198,6 +199,14 @@ class AgentRunner(Protocol):
         ...
 
 
+class EnvironmentFactory(Protocol):
+    """Open an adapter-owned environment from public execution settings."""
+
+    def open(self, spec: dict[str, Any]) -> AbstractContextManager[Any]:
+        """Create a fresh environment with a managed lifecycle."""
+        ...
+
+
 class TrialEvaluator(Protocol):
     """Domain-specific grading independent of agent execution."""
 
@@ -234,7 +243,13 @@ def _persist(result: TrialResult, output: Path) -> None:
     )
 
 
-def _execute(request, runner, output, environment_factory, source=None):
+def _execute(
+    request: TrialRequest,
+    runner: Callable[[TrialRequest, Path, Any], RolloutResult],
+    output: Path,
+    environment_factory: EnvironmentFactory | None,
+    source: RolloutResult | None = None,
+) -> RolloutResult:
     identity = request.cache_key()
     source_snapshot = source.model_dump(mode="json") if source is not None else None
     request.task.verify()
@@ -242,7 +257,7 @@ def _execute(request, runner, output, environment_factory, source=None):
         TrialResult(request=request, rollout=source).verify()
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)
-    context = nullcontext(None)
+    context: AbstractContextManager[Any] = nullcontext(None)
     if environment_factory is not None:
         environment = request.configuration.get("environment")
         if not isinstance(environment, dict):
@@ -253,12 +268,7 @@ def _execute(request, runner, output, environment_factory, source=None):
             )
         context = environment_factory.open(dict(environment))
     with context as environment:
-        if source is None:
-            rollout = runner.run(request, output / "rollout", environment=environment)
-        else:
-            rollout = runner.replay(
-                request, source, output / "rollout", environment=environment
-            )
+        rollout = runner(request, output / "rollout", environment)
     if not isinstance(rollout, RolloutResult):
         raise TypeError("Runner must return RolloutResult")
     if request.cache_key() != identity:
@@ -276,7 +286,7 @@ def execute_agent(
     runner: AgentRunner,
     output: Path,
     *,
-    environment_factory=None,
+    environment_factory: EnvironmentFactory | None = None,
 ) -> RolloutResult:
     """Execute and retain one fresh sample, without requiring an evaluator.
 
@@ -284,7 +294,14 @@ def execute_agent(
     Omitting the factory lets an external runtime own its environment. Adapter
     exceptions propagate and partial evidence is not overwritten on retry.
     """
-    return _execute(request, runner, output, environment_factory)
+    return _execute(
+        request,
+        lambda request, output, environment: runner.run(
+            request, output, environment=environment
+        ),
+        output,
+        environment_factory,
+    )
 
 
 def evaluate_agent(
@@ -316,14 +333,22 @@ def replay_agent(
     runner: ReplayRunner,
     output: Path,
     *,
-    environment_factory=None,
+    environment_factory: EnvironmentFactory | None = None,
 ) -> RolloutResult:
     """Replay retained work without universal grading.
 
     The factory opens a fresh environment when supplied; otherwise the adapter
     must own a fresh provider lifecycle, just as for standalone execution.
     """
-    return _execute(request, runner, output, environment_factory, source=rollout)
+    return _execute(
+        request,
+        lambda request, output, environment: runner.replay(
+            request, rollout, output, environment=environment
+        ),
+        output,
+        environment_factory,
+        source=rollout,
+    )
 
 
 def run_trial(
@@ -332,7 +357,7 @@ def run_trial(
     evaluator: TrialEvaluator,
     output: Path,
     *,
-    environment_factory=None,
+    environment_factory: EnvironmentFactory | None = None,
 ) -> TrialResult:
     """Convenience composition of execution and completed-rollout evaluation."""
     output = Path(output)

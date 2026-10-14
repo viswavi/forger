@@ -11,7 +11,7 @@ from pyforger.acquire.model import Model, Prompt, split_reasoning
 from pyforger.op import op
 from pyforger.utils import get_field
 
-PromptTemplate = Union[str, Callable[[dict], Prompt]]
+PromptTemplate = Union[str, Callable[[dict[str, Any]], Prompt]]
 
 _NUMBER = r"-?[0-9][0-9,]*(?:\.[0-9]+)?"
 # A number written with thousands separators, e.g. "-1,234,567.5".
@@ -36,7 +36,7 @@ def _get_logger() -> logging.Logger:
     return _gf(__name__)
 
 
-def _resolve_prompt(template: PromptTemplate, item: dict) -> Prompt:
+def _resolve_prompt(template: PromptTemplate, item: dict[str, Any]) -> Prompt:
     """Resolve a prompt template against one input item.
 
     A string template is formatted with the item's keys (e.g. ``"{text}"``
@@ -49,7 +49,7 @@ def _resolve_prompt(template: PromptTemplate, item: dict) -> Prompt:
 
 @op(name="alter.generate_from_context")
 def generate_from_context(
-    items: list[dict],
+    items: list[dict[str, Any]],
     prompt_fn: PromptTemplate,
     model: Model,
     *,
@@ -58,7 +58,7 @@ def generate_from_context(
     temperature: float = 0.7,
     max_retries: int = 3,
     batch_size: int = 10,
-) -> list[dict | None]:
+) -> list[dict[str, Any] | None]:
     r"""Generate LLM outputs conditioned on upstream input items.
 
     ``prompt_fn`` wraps each input item in a prompt which is passed to ``model`` for
@@ -103,7 +103,7 @@ def generate_from_context(
         _build_prompt(_resolve_prompt(prompt_fn, item), output_schema) for item in items
     ]
 
-    results: list[dict | None] = [None] * (len(prompts) * samples_per_item)
+    results: list[dict[str, Any] | None] = [None] * (len(prompts) * samples_per_item)
 
     # In order to handle retries while generating multiple samples per item via the n=
     # parameter of generate_batch, we keep a list of pending prompts with the number of
@@ -208,7 +208,7 @@ def _normalized_equal(a: Any, b: Any) -> bool:
 
 @op(name="alter.self_taught_reasoner")
 def self_taught_reasoner(
-    items: list[dict],
+    items: list[dict[str, Any]],
     prompt_fn: PromptTemplate,
     model: Model,
     *,
@@ -216,7 +216,7 @@ def self_taught_reasoner(
     reference_field: str = "final_answer",
     extract_answer: Callable[[str], Any] | None = None,
     match_fn: Callable[[Any, Any], bool] | None = None,
-    filter_fn: Callable[[list[dict]], list[dict]] | None = None,
+    filter_fn: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None = None,
     response_field: str = "response",
     thinking_field: str = "thinking",
     answer_field: str = "answer",
@@ -225,7 +225,7 @@ def self_taught_reasoner(
     temperature: float = 0.7,
     max_tokens: int | None = None,
     batch_size: int = 10,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     r"""Self-Taught Reasoner (STaR): keep a student model's own correct solutions.
 
     This implements the Self-Taught Reasoner (STaR) approach of Zelikman et al.,
@@ -304,7 +304,7 @@ def self_taught_reasoner(
     prompts: list[Prompt] = [_resolve_prompt(prompt_fn, item) for item in items]
 
     # Sample n responses per item, batching items together for throughput.
-    item_responses: list[tuple[dict, list[str]]] = []
+    item_responses: list[tuple[dict[str, Any], list[str]]] = []
     for start in range(0, len(prompts), batch_size):
         batch = prompts[start : start + batch_size]
         batch_results = model.generate_batch(
@@ -320,7 +320,7 @@ def self_taught_reasoner(
         item_responses.extend(zip(items[start : start + batch_size], batch_results))
 
     # Build one candidate row per generated response.
-    candidates: list[dict] = []
+    candidates: list[dict[str, Any]] = []
     for item, responses in item_responses:
         # Providers that return reasoning separately (GenerateResult.reasoning)
         # leave it out of the content; otherwise it is inline as <think>...</think>.

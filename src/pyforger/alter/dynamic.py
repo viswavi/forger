@@ -14,19 +14,24 @@ import signal
 import subprocess
 import sys
 import tempfile
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from pyforger.acquire.model import LocalModel, Model
 from pyforger.alter._dynamic_resources import prepare_input
 from pyforger.op import op
+
+if TYPE_CHECKING:
+    from openhands.sdk import LLM
 
 _SOURCE_VERSION = (
     "resource-v4-record"  # Bump when the agent or output contract changes.
 )
 
 
-def _record_key(item: dict) -> str:
+def _record_key(item: dict[str, Any]) -> str:
     """Validate a JSON record and give equal records the same batch key."""
     if not isinstance(item, dict):
         raise TypeError("each input must be a dict")
@@ -56,7 +61,11 @@ def _require_dynamic_platform() -> None:
 
 
 def _execute(
-    code: str, item: dict, timeout: float, *, prepared_input: dict | None = None
+    code: str,
+    item: dict[str, Any],
+    timeout: float,
+    *,
+    prepared_input: dict[str, Any] | None = None,
 ) -> list[str]:
     _require_dynamic_platform()
     # Do not inherit credentials into the generated-code process.
@@ -83,70 +92,94 @@ def _execute(
         )
     if result.returncode:
         raise ValueError(result.stderr[-4000:])
-    output = json.loads(result.stdout)
-    if not isinstance(output, list) or any(
-        not isinstance(value, str) for value in output
-    ):
+    output: object = json.loads(result.stdout)
+    if not isinstance(output, list):
         raise TypeError("The pipeline must return a list of strings")
-    return output
+    strings: list[str] = []
+    for value in output:
+        if not isinstance(value, str):
+            raise TypeError("The pipeline must return a list of strings")
+        strings.append(value)
+    return strings
 
 
-def agent_llm(model):
+def agent_llm(model: Model) -> LLM:
     """Construct the SDK model shared by dynamic and artifact-aware agents."""
     # Read the caller's .env without mutating process-wide environment in threads.
     from dataclasses import replace
 
     from dotenv import dotenv_values
-    from openhands.sdk import LLM
-    from openhands.sdk.llm import LLMCallContext
+    from openhands.sdk import LLM, ToolDefinition
+    from openhands.sdk.llm import (
+        LLMCallContext,
+        LLMResponse,
+        Message,
+        TokenCallbackType,
+    )
     from pydantic import SecretStr
 
     dotenv = dotenv_values(Path.cwd() / ".env")
+    config = model.config
     key = (
-        model._api_key
+        config.api_key
         or os.environ.get("LITELLM_API_KEY")
         or dotenv.get("LITELLM_API_KEY")
     )
-    config = dict(
-        model=model._model_id,
-        temperature=model._temperature,
-        base_url=model._kwargs.get("api_base")
+
+    class ConfiguredLLM(LLM):
+        def generate(
+            self,
+            messages: list[Message],
+            tools: Sequence[ToolDefinition[Any, Any]] | None = None,
+            include: list[str] | None = None,
+            store: bool | None = None,
+            add_security_risk_prediction: bool = False,
+            on_token: TokenCallbackType | None = None,
+            call_context: LLMCallContext | None = None,
+            **kwargs: Any,
+        ) -> LLMResponse:
+            call_context = replace(
+                call_context or LLMCallContext(), prompt_cache_key=None
+            )
+            return super().generate(
+                messages=messages,
+                tools=tools,
+                include=include,
+                store=store,
+                add_security_risk_prediction=add_security_risk_prediction,
+                on_token=on_token,
+                call_context=call_context,
+                **kwargs,
+            )
+
+    llm_type = ConfiguredLLM if model._kwargs.get("disable_prompt_cache_key") else LLM
+    return llm_type(
+        model=config.model_id,
+        temperature=config.temperature,
+        base_url=config.api_base
         or os.environ.get("LITELLM_BASE_URL")
         or os.environ.get("LLM_BASE_URL")
         or dotenv.get("LITELLM_BASE_URL")
         or dotenv.get("LLM_BASE_URL"),
+        api_key=SecretStr(key) if key else None,
+        max_output_tokens=config.max_tokens,
+        # Model counts additional retries; the SDK counts total attempts.
+        num_retries=max(1, config.num_retries + 1),
+        timeout=config.timeout if config.timeout is not None else 300,
+        reasoning_effort=config.reasoning_effort or "high",
+        litellm_extra_body=config.extra_body,
+        api_mode=config.api_mode,
+        capability_overrides=config.capability_overrides,
     )
-    if key:
-        config["api_key"] = SecretStr(key)
-    if model._max_tokens is not None:
-        config["max_output_tokens"] = model._max_tokens
-    # Model counts additional retries; the SDK counts total attempts.
-    if hasattr(model, "_num_retries"):
-        config["num_retries"] = max(1, model._num_retries + 1)
-    for option in ("timeout", "reasoning_effort"):
-        if option in model._kwargs:
-            config[option] = model._kwargs[option]
-    if "extra_body" in model._kwargs:
-        config["litellm_extra_body"] = model._kwargs["extra_body"]
-    for option in ("api_mode", "capability_overrides"):
-        if option in model._kwargs:
-            config[option] = model._kwargs[option]
-
-    if not model._kwargs.get("disable_prompt_cache_key"):
-        return LLM(**config)
-
-    class ConfiguredLLM(LLM):
-        def generate(self, *args, call_context=None, **kwargs):
-            if model._kwargs.get("disable_prompt_cache_key"):
-                call_context = replace(
-                    call_context or LLMCallContext(), prompt_cache_key=None
-                )
-            return super().generate(*args, call_context=call_context, **kwargs)
-
-    return ConfiguredLLM(**config)
 
 
-def _generate(goal, item, model, max_iterations, execution_timeout_s):
+def _generate(
+    goal: str,
+    item: dict[str, Any],
+    model: Model,
+    max_iterations: int,
+    execution_timeout_s: float,
+) -> str:
     _require_dynamic_platform()
     if isinstance(model, LocalModel):
         raise TypeError("dynamic_step requires a LiteLLM-backed Model")
@@ -155,6 +188,8 @@ def _generate(goal, item, model, max_iterations, execution_timeout_s):
     except ImportError as exc:
         raise ImportError("OpenHands SDK is required; reinstall pyforger") from exc
 
+    from openhands.sdk.conversation import BaseConversation
+    from openhands.sdk.event import ActionEvent, MessageEvent
     from openhands.sdk.tool import Tool
 
     from pyforger.alter._dynamic_tool import (
@@ -190,8 +225,9 @@ def _generate(goal, item, model, max_iterations, execution_timeout_s):
                 visualizer=None,
                 max_iteration_per_run=max_iterations,
             )
+            api: BaseConversation = conversation
             try:
-                conversation.send_message(
+                api.send_message(
                     "Build a reusable Python sub-pipeline for this goal and input. "
                     "Use the resource tool to inspect the input or the Git tool to "
                     "inspect a cloned repository. The Python test tool passes a "
@@ -210,11 +246,11 @@ def _generate(goal, item, model, max_iterations, execution_timeout_s):
                     )
                 )
                 remaining = max_iterations
-                seen_responses = set()
+                seen_responses: set[str] = set()
                 while remaining:
                     conversation.max_iteration_per_run = remaining
                     try:
-                        conversation.run()
+                        api.run()
                     except Exception:
                         if not executor.accepted:
                             raise
@@ -223,13 +259,14 @@ def _generate(goal, item, model, max_iterations, execution_timeout_s):
                     responses = {
                         event.llm_response_id
                         for event in conversation.state.events
-                        if getattr(event, "source", None) == "agent"
-                        and getattr(event, "llm_response_id", None)
+                        if isinstance(event, (ActionEvent, MessageEvent))
+                        and event.source == "agent"
+                        and event.llm_response_id
                     }
                     remaining -= max(1, len(responses - seen_responses))
                     seen_responses = responses
                     if remaining > 0:
-                        conversation.send_message(
+                        api.send_message(
                             "You have not submitted a working pipeline yet. "
                             "Use the python tool with submit=true after testing."
                         )
@@ -246,7 +283,7 @@ def _generate(goal, item, model, max_iterations, execution_timeout_s):
 
 @op(name="alter.dynamic_step_source")
 def dynamic_step_source(
-    item: dict,
+    item: dict[str, Any],
     goal: str,
     model: Model,
     *,
@@ -277,7 +314,7 @@ def dynamic_step_source(
 
 @op(cache=False)
 def dynamic_step(
-    inputs: list[dict],
+    inputs: list[dict[str, Any]],
     goal: str,
     model: Model,
     *,
@@ -299,7 +336,7 @@ def dynamic_step(
     if not inputs:
         return []
 
-    def run(item):
+    def run(item: dict[str, Any]) -> list[str]:
         code = dynamic_step_source(
             item,
             goal,
