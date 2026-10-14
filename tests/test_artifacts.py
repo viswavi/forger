@@ -60,7 +60,11 @@ def test_json_roundtrip(tmp_path):
 
 @pytest.mark.parametrize("change", ["missing", "tampered", "additional"])
 def test_mutation(tmp_path, change):
-    """All artifact access paths reject missing, changed, or additional files."""
+    """Integrity checks reject missing, changed, or additional files.
+
+    ``path()`` is only a manifest lookup and does not rehash the tree;
+    callers verify explicitly at trust boundaries.
+    """
     ref = ArtifactRef.capture(tree(tmp_path / "source"))
     if change == "missing":
         (ref.root / "a.txt").unlink()
@@ -68,9 +72,11 @@ def test_mutation(tmp_path, change):
         (ref.root / "a.txt").write_text("SYNTHETIC FIXTURE")
     else:
         (ref.root / "extra").write_text("extra")
-    for check in (ref.verify, ref.cache_key, lambda: ref.path("empty")):
+    for check in (ref.verify, ref.cache_key):
         with pytest.raises(ValueError, match=change):
             check()
+    if change != "missing":
+        assert ref.path("empty") == ref.root / "empty"
 
 
 def test_missing_and_non_directory_root(tmp_path):
