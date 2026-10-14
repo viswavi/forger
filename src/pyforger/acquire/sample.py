@@ -81,7 +81,7 @@ def sample_from_LLM(
     max_retries: int = 3,
     batch_size: int = 10,
     name: str = "sample_from_LLM",
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Generate from `model` until `n` samples are generated.
 
     Args:

@@ -22,13 +22,13 @@ _SUPPORTED_LANGS = frozenset({"json", "yaml", "python", "xml"})
 
 @op(name="filter.by_syntax")
 def by_syntax(
-    items: list[dict],
+    items: list[dict[str, Any]],
     *,
     lang: str = "json",
     field: str,
     required_keys: list[str] | None = None,
     json_schema: dict[str, Any] | None = None,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Keep items whose ``field`` parses as valid ``lang``."""
     assert (
         lang in _SUPPORTED_LANGS
@@ -42,7 +42,7 @@ def by_syntax(
 
     if lang == "yaml":
         try:
-            import yaml  # type: ignore[import]  # noqa: F401
+            import yaml  # noqa: F401
         except ImportError:
             raise ImportError(
                 "PyYAML is required for lang='yaml'. Install: pip install pyyaml"
@@ -103,7 +103,7 @@ def _validate_json(
 
 
 def _validate_yaml(text: str) -> bool:
-    import yaml  # type: ignore[import]
+    import yaml
 
     try:
         yaml.safe_load(text)

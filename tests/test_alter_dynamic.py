@@ -11,6 +11,7 @@ import pytest
 from completion import completion_server
 
 from pyforger.acquire import Model
+from pyforger.acquire.model import ModelSettings
 from pyforger.alter import dynamic_step, dynamic_step_source
 from pyforger.op import clear_trace, trace
 
@@ -265,9 +266,7 @@ def test_agent_retries_text_and_keeps_successful_submission(monkeypatch):
     monkeypatch.setattr(sdk, "Agent", lambda **kwargs: SimpleNamespace(**kwargs))
     monkeypatch.setattr(dynamic, "prepare_input", lambda item: item)
     monkeypatch.setattr(tool, "prepare_input", lambda item: item)
-    model = SimpleNamespace(
-        _model_id="test", _temperature=0, _kwargs={}, _api_key=None, _max_tokens=None
-    )
+    model = SimpleNamespace(config=ModelSettings(model_id="test", temperature=0))
     assert dynamic._generate("goal", {"text": "input"}, model, 3, 5).startswith(
         "def run"
     )
@@ -404,3 +403,59 @@ def test_real_sdk_corrects_code_and_reexecutes_cached_source(tmp_path, monkeypat
         for entry in trace()
         if entry.op_name == "alter.dynamic_step_source"
     ] == [False, True, True]
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {},
+        {
+            "timeout": None,
+            "reasoning_effort": None,
+            "extra_body": {"custom": 1},
+            "api_mode": "chat",
+            "capability_overrides": {"vision": False},
+        },
+    ],
+)
+def test_agent_llm_real_settings_translation(options, monkeypatch, tmp_path):
+    """Validate the adapter against the actual SDK, without making API calls."""
+    from openhands.sdk import LLM
+
+    monkeypatch.chdir(tmp_path)
+    model = Model(
+        "gpt-4o",
+        api_key="test-key",
+        api_base="http://localhost:1234",
+        temperature=0,
+        max_tokens=123,
+        num_retries=0,
+        **options,
+    )
+    llm = dynamic.agent_llm(model)
+    assert llm.model == model.config.model_id
+    assert llm.temperature == 0
+    assert llm.max_output_tokens == 123
+    assert llm.num_retries == 1
+    assert llm.base_url == model.config.api_base
+    assert llm.api_key.get_secret_value() == "test-key"
+    assert llm.timeout == (
+        model.config.timeout if model.config.timeout is not None else 300
+    )
+    assert llm.reasoning_effort == (model.config.reasoning_effort or "high")
+    assert llm.litellm_extra_body == model.config.extra_body
+    assert llm.api_mode == model.config.api_mode
+    assert llm.capability_overrides == model.config.capability_overrides
+    if not options:
+        assert llm.timeout == LLM.model_fields["timeout"].default
+        assert llm.reasoning_effort == LLM.model_fields["reasoning_effort"].default
+
+
+def test_agent_llm_env_fallback(monkeypatch, tmp_path):
+    """Agent llm env fallback."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LITELLM_API_KEY", "env-key")
+    monkeypatch.setenv("LITELLM_BASE_URL", "http://localhost:9876")
+    llm = dynamic.agent_llm(Model("gpt-4o"))
+    assert llm.api_key.get_secret_value() == "env-key"
+    assert llm.base_url == "http://localhost:9876"
