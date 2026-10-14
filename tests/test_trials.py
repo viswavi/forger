@@ -211,6 +211,7 @@ def test_execution_record_rejects_evaluation(tmp_path):
 
 def test_runner_exception_preserves_partial_evidence_and_reserves_output(tmp_path):
     """Runner exception preserves partial evidence and reserves output."""
+
     class BrokenRunner:
         def run(self, request, output, *, environment=None):
             assert not output.exists()
@@ -230,6 +231,7 @@ def test_runner_exception_preserves_partial_evidence_and_reserves_output(tmp_pat
 
 def test_runner_must_return_current_evidence(tmp_path):
     """Runner must return current evidence."""
+
     class StaleRunner(ArithmeticRunner):
         def run(self, request, output, *, environment=None):
             result = super().run(request, output)
