@@ -70,12 +70,15 @@ tokens and the model used. For example, gpt-5.4-nano is generally much cheaper t
 
 A pipeline is a Python function. It calls operations from `pyforger.acquire`, `pyforger.alter`, `pyforger.filter`,
 and `pyforger.inspect`. Each operation takes a `list[dict]` (or generation parameters). Acquire, alter, and filter
-operations return a `list[dict]`; inspect operations instead return a report about the rows without modifying rows.
+operations generally return a `list[dict]`; rubric generation returns one rubric per input.
+`acquire.generate_custom_rubric_criteria` maps
+`list[str]` to `list[list[tuple[str, float]]]`. Inspect operations return a report about the rows without modifying rows.
 Control flow (`for`, `if`, comprehensions, helper functions) in plain Python can be used
 
 ### Operation reference
 
-All operations are plain functions. Operations that perform LLM calls or expensive in-process work (`sample_from_LLM`
+All operations are plain functions. Operations that perform LLM calls or expensive in-process work (`sample_from_LLM`,
+`generate_custom_rubric_criteria`,
 every `alter.*` op, every `filter.*` op, every `inspect.*` op) are decorated internally with `@op`, so their results
 are cached on disk and traced. The retrieval functions (`retrieve`, `retrieve_from_*`) are not internally cached; wrap
 them with `@op` to memoize their results.
@@ -98,6 +101,9 @@ Generate or retrieve new rows.
 | Export | Cached | Description |
 |---|---|---|
 | `sample_from_LLM` | yes | Sample data from an LLM with a prompt. Supports schema-based validation and retries. |
+| `generate_custom_rubric` | per stage | Recommended: generate mixed code/prompt rubrics ready for the RL executor. |
+| `convert_rubric_criteria` | yes | Convert existing textual rubrics, preserving order and weights. |
+| `generate_custom_rubric_criteria` | yes | Generate weighted textual rubrics with optional context and candidates. |
 | `retrieve` | no | Generic retrieval against a `RetrievalSource`. |
 | `retrieve_from_web` | no | Brave Search backend (QUERY only). |
 | `retrieve_from_wiki` | no | Wikipedia backend (QUERY or RANDOM). |
@@ -116,6 +122,86 @@ validation, making this a superior choice to calling `Model` directly. Any reaso
 contained in the output dict under a `thinking_trace` key. Inline traces are not extracted: `LocalModel` leaves `<think>`
 blocks in the completion text and supplies `None` for that metadata; use `split_reasoning` to separate them out.
 
+`generate_custom_rubric` is the recommended entry point for humans and agents.
+It first generates textual criteria, then converts deterministic requirements
+(such as exact counts or JSON structure) to code while retaining semantic and
+subjective requirements as prompted judges. For example, Arabic-language
+identification stays prompted, while an explicit Unicode range requirement uses
+code; sharing a script does not establish language. No mode flag is needed:
+
+```python
+from pyforger.acquire import generate_custom_rubric
+
+rubrics = generate_custom_rubric(
+    ["Write a 400–600-word story about a shy dragon for children aged 6–8."],
+    model=model,
+)
+# rubrics[i] is [[{"code": "def grade(prompt, response, ground_truth): ..."}, 100.0],
+#                [{"prompt": "Is the story suitable for ages 6–8?"}, 75.0], ...]
+```
+
+The result uses JSON lists and single-key `code`/`prompt` objects accepted by
+`rl.rubric_data.validate_rubric`. Each code criterion defines a synchronous
+`grade(prompt, response, ground_truth)` returning a numeric score in `[0, 1]`.
+Weights and criterion order are preserved; prompted criteria keep their exact
+text. Ambiguous requirements and combined objective/subjective criteria stay
+prompted rather than being approximated by heuristics. The main entry point
+rejects empty or zero-total-weight rubrics; an empty input list returns `[]`.
+
+Pass `code_criteria_only=True` when every criterion should be checked in code, e.g.
+tasks with exact answers, where an LLM judge only adds cost and reward noise. Both
+stages then ask only for code-checkable criteria, and criteria that still cannot be
+checked faithfully in code are dropped rather than approximated. An input left
+without a positive-weight code criterion raises `ValueError`. The same flag exists
+on `generate_custom_rubric_criteria` and `convert_rubric_criteria`.
+
+To inspect or reuse stages independently, keep using the textual generator below
+and then call `convert_rubric_criteria(text_rubrics, model, inputs=task_strings)`.
+The optional aligned `inputs` and shared `meta_description` provide context.
+Conversion preserves empty rubrics, retries malformed output or invalid code,
+and raises with `(rubric, criterion)` indices on exhaustion. Provider errors
+propagate. Conversion statically checks the signature, allowlisted imports (at top level
+or inside the grader), and
+RestrictedPython compilation; it does **not** execute generated code or establish
+semantic correctness. Test generated graders with known passing/failing cases
+before using them for training. Default word counts use `len(response.split())`.
+
+Both stages are cached independently. `_no_cache=True` on the main entry point
+refreshes both; `_cache_only=True` requires both cached stages. The result is a
+rubric, not a full training row: callers still supply `prompt` and `ground_truth`.
+The RL validator requires the latter to contain reasoning and a final answer.
+
+`generate_custom_rubric_criteria` supports open-ended evaluation (e.g. personal advice, creative writing,
+or deep research). Pass a caller-configured `model` and a list of strings containing task descriptions,
+prompts, serialized conversations, or documents. `meta_description` provides optional shared evaluation
+context. `candidate_responses`, when provided, must contain one list of strings per input; use `[]` for
+inputs without candidates. Candidates help identify failure modes and are not treated as ground truth.
+
+```python
+from pyforger.acquire import generate_custom_rubric_criteria
+
+rubrics = generate_custom_rubric_criteria(
+    ["Write a story about starting a new job.", "Explain how rainbows form."],
+    model=model,
+    meta_description="Evaluate writing for a non-native English speaking audience",
+    candidate_responses=[["On my first day ...", "I began work ..."], []],
+)
+# rubrics[i] is [(criterion_text, weight), ...] for input i.
+```
+
+Weights are independent finite floats in `[0, 100]`, not percentages summing to 100. An empty input list
+returns `[]`; a model may return an empty rubric when no meaningful criteria can be grounded in the context.
+`batch_size` (default 10) limits prompts per batch, `temperature` defaults to 0.7, and `max_retries`
+(default 3) gives additional attempts for malformed outputs, including invalid nested pairs or weights.
+Exhaustion raises `ValueError` identifying zero-based input indices; failed inputs are never silently dropped.
+Results are cached with `@op`; `_no_cache=True` forces fresh generation.
+
+The output is an intermediate textual rubric. For `rl.agent_training validate`, a later dataset adapter
+must wrap each criterion as `{"prompt": criterion_text}` (or convert it to `{"code": source}`),
+ensure a nonempty rubric with positive total weight, and supply the required `prompt` and `ground_truth`
+fields. The current RL validator requires `ground_truth` to include nonempty `<think>...</think>` reasoning
+and a final answer. This building block does not generate those fields or execute criteria.
+
 #### `pyforger.alter`
 
 Transform rows without removing items.
@@ -126,6 +212,8 @@ Transform rows without removing items.
 | `translate.to_language` | LLM translation of selected fields into a target natural language. |
 | `translate.to_code` | LLM conversion of fields into code in a target programming language. Strips markdown fences. |
 | `execute_code` | Execute Python code in a sandboxed environment and return the result. |
+| `dynamic_step` | Run dynamic input-specific sub-pipelines that return a string list per input. |
+| `dynamic_step_source` | Generate or inspect sub-pipeline generated for a single input. |
 
 `generate_from_context` performs `samples_per_item` LLM calls per input and returns parsed dicts, with retry against an
 optional JSON schema. If the validated LLM call fails after `num_retries`, we return `None` for the failing slots.
@@ -223,6 +311,9 @@ model = Model(
 )
 ```
 
+Use `Model(..., reasoning_effort="low")` where supported by the model/provider.
+`dynamic_step` forwards `reasoning_effort` and `extra_body` to OpenHands.
+
 #### Prompt types
 
 Two type aliases are exported from `pyforger.acquire.model`:
@@ -266,6 +357,8 @@ unrelated helper does not.
 can redirect it.
 
 **Per-call bypass.** Pass `_no_cache=True` at the call site to skip the cache for a single invocation.
+Pass `_cache_only=True` to retrieve an existing result without executing the function;
+a miss raises `FileNotFoundError`.
 
 **Custom hash keys for objects.** If an argument defines `cache_key() -> Any`, this is used in place of the argument's
 canonical form. This is useful for objects that are expensive to serialize or contain ever-changing state. Here is
@@ -357,8 +450,8 @@ then apply `pyforger.filter` operations to assure quality and diversity. For exa
 filter with `by_llm_score` to keep the best according to a consensus of 5 judge calls, and then filter with
 `by_rouge_l` to keep a subset with sufficient lexical diversity.
 - **Rubric-based filtering:** For complex tasks where quality is hard to assure with simple heuristics, generate a
-rubric (using `pyforger.alter.generate_from_context`) and then use multiple `by_llm_score` calls with each rubric item
-as a separate judge to filter for high-quality outputs that meet multiple criteria.
+rubric (using `pyforger.acquire.generate_custom_rubric_criteria`) and then use multiple `by_llm_score` calls
+with each rubric item as a separate judge to filter for high-quality outputs that meet multiple criteria.
 - **Strong-vs-weak gap:** For a given input, generate one output with a "weak" model (e.g. "gemini-3.1") and one with
 multiple "expert" models (e.g. multiple calls of "gemini-3.5" with slightly different
 prompts or another strong model). Then choose only the rows where the expert models agree with each other (answer is
@@ -384,3 +477,75 @@ answer* far better than off-policy teacher traces, and answer-verification keeps
 the final answer alone admits the occasional "right answer, wrong reasoning" trace; add a `by_llm_score` judge over the
 reasoning (passed as `filter_fn`, or as a downstream filter) only if inspection shows this is actually frequent --
 prefer the cheap answer check first.
+
+### Dynamic input-specific pipelines
+
+`alter.dynamic_step(inputs, goal, model, max_parallel=4, max_iterations=20)`
+returns a `list[list[str]]` in input order. Each inner list contains the strings
+produced for one input and may be empty. The default `pyforger` install includes
+OpenHands SDK and its dynamic-step dependencies; Python 3.12+ and Unix signal
+timers are required for execution.
+Inputs are JSON-compatible records (`list[dict]`). Each uncached unique input
+gets its own bare-metal OpenHands conversation with
+restricted Python, resource inspection, Git inspection, and finish tools. Agents revise code
+against execution feedback and submit a function accepting one dict and
+returning a list of strings. The last defined function is the entry point.
+
+```python
+outputs = alter.dynamic_step(
+    [{"text": "Alice <alice@example.org>"}, {"text": "Bob <bob@example.net>"}],
+    "Return a list containing the email address's domain", model, max_parallel=2,
+)
+# Example output: [["example.org"], ["example.net"]]
+```
+
+`dynamic_step_source(item, goal, model)` stores generated source through standard
+`@op` caching under `$FORGER_CACHE` (otherwise `~/.cache/forger`). Use `trace()`
+to inspect hits and `_cache_only=True` to inspect source without launching an
+agent on a miss. Reordered or overlapping batches reuse source, and cached code
+executes again on every call. Duplicate inputs share generation and execution
+within a batch. `@op` writes atomically, but simultaneous calls for the same
+uncached input in separate batches may each start an agent. Failures raise;
+successful source from other inputs is retained.
+
+`examples/show_dynamic_step_source.py` accepts a goal and JSON object inputs, then prints
+previously generated programs and their `@op` cache-hit status without opening
+cache files directly. As with any
+`@op`, changing the decorated function body invalidates its earlier cache entries.
+The default source version was advanced for the record input contract, so
+previously cached string-input programs are regenerated on first use.
+Pass a new `source_version` to either operation to generate and cache a fresh
+program for an input when its earlier source is stale.
+
+`max_parallel` bounds active sessions, `max_iterations` bounds agent steps,
+and `execution_timeout_s` bounds each generated-code execution in a subprocess. `dynamic_step` works best with fast models
+suited to agent workflows (e.g. DeepSeek-v4-flash or gpt-5.6-luna) to avoid timeouts.
+All model information (LiteLLM model ID, base URL, and API key, as well as hyperparameters) can come from the Model class.
+Credentials and base URL fall back to the LiteLLM environment, which reads `.env` from the current working directory without
+changing the process environment. Credentials are passed to the SDK as secrets and excluded from worker environments.
+Only `json`, `re`, `math`, and `html` imports are available to generated
+code. A URL-only record such as `{"url": "https://example.org/page"}` is
+expanded before calling that code. For HTTPS HTML and PDF URLs, Forger retrieves
+and extracts text. For HTTPS `.git` URLs on GitHub or GitLab, it shallow-clones
+the repository into a temporary directory and passes a bounded snapshot of text
+files. The generated function receives a dict with `kind`, `url`, and either
+`content` (HTML/PDF/plain text) or `files` (Git). Records with other fields,
+including a retrieved row with `text` and `url`, pass through unchanged and
+do not trigger another fetch.
+OpenHands has read-only resource and Git list/read tools to inspect the same
+snapshot during construction. The Git snapshot includes at most 200 files,
+64 KiB per file, and 1 MiB total text. HTTP downloads have a 10 MiB body cap;
+Git clones have a 60-second timeout, a 32 MiB tunnel transfer cap, and a
+64 MiB monitored temporary disk cap. Source remains
+cached by `@op`, while the URL is fetched or cloned again whenever the generated
+step executes. The generated Python worker runs without credentials or direct
+network, shell, and filesystem tools. OpenHands runs on the host; SDK-discovered
+plugins and their hooks may still be loaded, so use an isolated account for
+untrusted inputs.
+HTTP and Git connections use validated public IP addresses while preserving
+TLS hostname checks; Git tunnels only GitHub and GitLab. PDF parsing runs
+before the generated Python timeout starts.
+PDF extraction uses `pypdf.PdfReader` on up to 100 pages; image-only scans need
+OCR, which this operation does not provide.
+RestrictedPython provides accidental-damage guardrails, not isolation against
+adversarial code. Cache directories must be trusted.

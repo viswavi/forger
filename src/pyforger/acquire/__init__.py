@@ -9,6 +9,11 @@ from pyforger.acquire.retrieve import (
     retrieve_from_web,
     retrieve_from_wiki,
 )
+from pyforger.acquire.rubric import (
+    convert_rubric_criteria,
+    generate_custom_rubric,
+    generate_custom_rubric_criteria,
+)
 from pyforger.acquire.sample import sample_from_LLM
 from pyforger.acquire.sources import (
     ArxivRetrievalSource,
@@ -32,6 +37,9 @@ __all__ = [
     "retrieve_from_arxiv",
     "retrieve_from_s2",
     "sample_from_LLM",
+    "generate_custom_rubric",
+    "convert_rubric_criteria",
+    "generate_custom_rubric_criteria",
     "RetrievalSource",
     "RetrieveMode",
     "WebRetrievalSource",

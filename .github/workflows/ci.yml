@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: [ '3.9', '3.10', '3.11' ]
+        python-version: [ '3.12', '3.13' ]
     steps:
       - uses: actions/checkout@v3
       - name: Install Python ${{ matrix.python-version }}
@@ -33,7 +33,7 @@ jobs:
       - name: Install Python 3
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
       - name: format
         uses: pre-commit/action@v3.0.0
         with:
@@ -45,7 +45,7 @@ jobs:
       - name: Install Python 3
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
       - name: isort
         uses: pre-commit/action@v3.0.0
         with:
@@ -57,7 +57,7 @@ jobs:
       - name: Install Python 3
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
       - name: lint
         uses: pre-commit/action@v3.0.0
         with:
@@ -73,7 +73,7 @@ jobs:
       - name: Install Python 3
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
       - name: mypy
         uses: pre-commit/action@v3.0.0
         with:
