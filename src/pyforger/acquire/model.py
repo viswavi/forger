@@ -100,14 +100,16 @@ class GenerateResult(list[str]):
         self,
         completions: list[str],
         *,
-        usage: Usage | dict[str, Any],
+        usage: Usage,
         reasoning: list[str | None],
         model_id: str,
         raw: Any,
     ) -> None:
         """Wrap completions with per-call metadata."""
         super().__init__(completions)
-        self.usage = Usage.model_validate(usage)
+        if not isinstance(usage, Usage):
+            raise TypeError("usage must be a Usage model")
+        self.usage = usage
         self.reasoning = reasoning
         self.model_id = model_id
         self.raw = raw
@@ -116,10 +118,10 @@ class GenerateResult(list[str]):
         self,
     ) -> tuple[
         Callable[
-            [list[str], Usage | dict[str, Any], list[str | None], str, Any],
+            [list[str], Usage, list[str | None], str, Any],
             GenerateResult,
         ],
-        tuple[list[str], Usage | dict[str, Any], list[str | None], str, Any],
+        tuple[list[str], Usage, list[str | None], str, Any],
     ]:
         """Pickle support."""
         return (
@@ -130,7 +132,7 @@ class GenerateResult(list[str]):
 
 def _rebuild_generate_result(
     completions: list[str],
-    usage: Usage | dict[str, Any],
+    usage: Usage,
     reasoning: list[str | None],
     model_id: str,
     raw: Any,

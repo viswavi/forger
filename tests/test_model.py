@@ -526,28 +526,44 @@ class TestGenerateResult:
     def test_is_list_instance(self):
         """Passes isinstance(..., list) check for downstream callers."""
         result = GenerateResult(
-            ["a", "b"], usage={}, reasoning=[None, None], model_id="gpt-4o", raw=None
+            ["a", "b"],
+            usage=Usage(),
+            reasoning=[None, None],
+            model_id="gpt-4o",
+            raw=None,
         )
         assert isinstance(result, list)
 
     def test_iteration(self):
         """Iterates as a list of strings."""
         result = GenerateResult(
-            ["a", "b"], usage={}, reasoning=[None, None], model_id="gpt-4o", raw=None
+            ["a", "b"],
+            usage=Usage(),
+            reasoning=[None, None],
+            model_id="gpt-4o",
+            raw=None,
         )
         assert list(result) == ["a", "b"]
 
     def test_indexing(self):
         """Indexes like a list."""
         result = GenerateResult(
-            ["a", "b"], usage={}, reasoning=[None, None], model_id="gpt-4o", raw=None
+            ["a", "b"],
+            usage=Usage(),
+            reasoning=[None, None],
+            model_id="gpt-4o",
+            raw=None,
         )
         assert result[0] == "a"
 
     def test_equality_with_plain_list(self):
         """Compares equal to a plain list with same contents."""
         result = GenerateResult(
-            ["a", "b"], usage={}, reasoning=[None, None], model_id="gpt-4o", raw=None
+            ["a", "b"],
+            usage=Usage(),
+            reasoning=[None, None],
+            model_id="gpt-4o",
+            raw=None,
         )
         assert result == ["a", "b"]
 
@@ -555,7 +571,7 @@ class TestGenerateResult:
         """usage, reasoning, model_id, raw are accessible."""
         result = GenerateResult(
             ["a"],
-            usage={"cost_usd": 0.01, "prompt_tokens": 5},
+            usage=Usage(cost_usd=0.01, prompt_tokens=5),
             reasoning=["thinking..."],
             model_id="gpt-5",
             raw={"id": "chatcmpl-123"},
@@ -569,7 +585,7 @@ class TestGenerateResult:
         """Pickles cleanly for @op caching."""
         result = GenerateResult(
             ["a"],
-            usage={"cost_usd": 0.01},
+            usage=Usage(cost_usd=0.01),
             reasoning=[None],
             model_id="gpt-4o",
             raw=None,
@@ -583,7 +599,7 @@ class TestGenerateResult:
         """Deepcopy preserves both list contents and metadata."""
         result = GenerateResult(
             ["a"],
-            usage={"cost_usd": 0.01},
+            usage=Usage(cost_usd=0.01),
             reasoning=[None],
             model_id="gpt-4o",
             raw=None,
@@ -1330,11 +1346,11 @@ class TestPublicExports:
 class TestTypedMetadataAndSettings:
     """Exercise real Pydantic validation without provider calls."""
 
-    def test_usage_defaults_and_dict_validation(self):
-        """Usage defaults and dict validation."""
+    def test_usage_defaults_and_serialization(self):
+        """Usage exposes typed fields and explicit dictionary serialization."""
         result = GenerateResult(
             ["answer"],
-            usage={"prompt_tokens": "3"},
+            usage=Usage(prompt_tokens=3),
             reasoning=[None],
             model_id="test",
             raw=None,
@@ -1359,8 +1375,13 @@ class TestTypedMetadataAndSettings:
     def test_invalid_usage_is_rejected(self, usage):
         """Invalid usage is rejected."""
         with pytest.raises(ValidationError):
+            Usage.model_validate(usage)
+
+    def test_generate_result_rejects_dictionary_usage(self):
+        """Generation results require an explicitly constructed Usage model."""
+        with pytest.raises(TypeError, match="Usage model"):
             GenerateResult(
-                ["answer"], usage=usage, reasoning=[None], model_id="test", raw=None
+                ["answer"], usage={}, reasoning=[None], model_id="test", raw=None
             )
 
     @pytest.mark.parametrize(
