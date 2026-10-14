@@ -96,6 +96,8 @@ When you run your large-scale run, save your final dataset to {RAW_DATA_PATH}.
 
 You are allowed to use any publicly available tools and libraries, including LLM libraries, Brave Search API, Semantic Scholar API, or any other library/API that does not require a paid subscription.
 
+Go beyond simply prompting an LLM for rows; techniques like these tend to help, and you can build them yourself: generate a rubric for each task with an LLM and write every requirement that can be checked exactly (final answers, abstention, behavior on test inputs) as a code criterion; overgenerate candidates, then filter them, e.g. drop near-duplicates by text overlap (ROUGE-L or n-gram overlap) and have an LLM judge discard low-quality rows; group the baseline model's validation failures by topic or skill to see where it is weak, and check which topics your own data covers; retrieve material from the web for inspiration instead of relying only on the model's own knowledge; and cache LLM calls on disk so you can rerun and adjust later pipeline stages cheaply.
+
 There are two open-source libraries which you are NOT allowed to use. You are not allowed to use the Forger data generation framework (pyforger in pypi) or the Bespoke Curator library (bespokelabs.curator in pypi). If you try to download or use either of these libraries, you will instantly be terminated and fail the task. Otherwise, you are free to use any other libraries or tools that you wish.
 
 You have {TIMEOUT_HOURS} hours to do your work. After this, we will automatically move to the training phase. While you get no points for finishing early, if your data generation is complete, then you are free to move on to the next problem. Now let's get started!
