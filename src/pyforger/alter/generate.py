@@ -55,7 +55,7 @@ def generate_from_context(
     *,
     samples_per_item: int = 1,
     output_schema: dict[str, Any] | None = None,
-    temperature: float = 0.7,
+    temperature: float = 1.0,
     max_retries: int = 3,
     batch_size: int = 10,
 ) -> list[dict | None]:
@@ -222,7 +222,7 @@ def self_taught_reasoner(
     answer_field: str = "answer",
     student_answer_field: str = "student_final_answer",
     split_thinking: bool = True,
-    temperature: float = 0.7,
+    temperature: float = 1.0,
     max_tokens: int | None = None,
     batch_size: int = 10,
 ) -> list[dict]:

@@ -318,7 +318,7 @@ class Model:
         model_id: str,
         *,
         api_key: str | None = None,
-        temperature: float = 0.7,
+        temperature: float = 1.0,
         max_tokens: int | None = None,
         num_retries: int = 2,
         show_progress: bool = False,

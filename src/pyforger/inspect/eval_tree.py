@@ -93,7 +93,7 @@ def eval_tree(
                 {"role": "user", "content": content},
             ]
         )
-    responses = model.generate_batch(prompts, temperature=0.0)
+    responses = model.generate_batch(prompts)
     capabilities = [
         _phrase(response[0], "capability annotation") for response in responses
     ]
@@ -227,7 +227,7 @@ def eval_tree(
                 ]
                 for node in internal
             ]
-            responses = model.generate_batch(prompts, temperature=0.0)
+            responses = model.generate_batch(prompts)
             for node, response in zip(internal, responses):
                 node["description"] = _phrase(response[0], "capability description")
 

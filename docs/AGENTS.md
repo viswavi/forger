@@ -228,7 +228,7 @@ rubrics = generate_custom_rubric_criteria(
 
 Weights are independent finite floats in `[0, 100]`, not percentages summing to 100. An empty input list
 returns `[]`; a model may return an empty rubric when no meaningful criteria can be grounded in the context.
-`batch_size` (default 10) limits prompts per batch, `temperature` defaults to 0.7, and `max_retries`
+`batch_size` (default 10) limits prompts per batch, `temperature` defaults to 1.0, and `max_retries`
 (default 3) gives additional attempts for malformed outputs, including invalid nested pairs or weights.
 Exhaustion raises `ValueError` identifying zero-based input indices; failed inputs are never silently dropped.
 Results are cached with `@op`; `_no_cache=True` forces fresh generation.
@@ -365,7 +365,7 @@ from pyforger.acquire import Model
 model = Model(
     os.environ.get("MODEL_ID"),
     api_key=os.environ.get("LITELLM_API_KEY"),
-    temperature=0.7,
+    temperature=1.0,
     max_tokens=None,
     num_retries=2,
 )

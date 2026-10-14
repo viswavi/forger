@@ -77,7 +77,7 @@ def sample_from_LLM(
     model: Model,
     n: int = 100,
     output_schema: dict[str, Any] | None = None,
-    temperature: float = 0.7,
+    temperature: float = 1.0,
     max_retries: int = 3,
     batch_size: int = 10,
     name: str = "sample_from_LLM",

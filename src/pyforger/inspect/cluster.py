@@ -251,7 +251,7 @@ def _summarize_shards(
         )
         for shard in shards
     ]
-    responses = model.generate_batch(prompts, temperature=0.2)
+    responses = model.generate_batch(prompts)
     shard_topics = [_parse_topics(shard_responses[0]) for shard_responses in responses]
     kept = [topics for topics in shard_topics if topics]
     if not kept:
@@ -290,7 +290,7 @@ def _build_codebook(
     )
     codebook: dict[str, str] = {}  # latest nonempty attempt
     for _ in range(3):  # retry on unparseable JSON or the wrong topic count
-        response = model.generate(messages, temperature=0.0)[0]
+        response = model.generate(messages)[0]
         try:
             parsed = _parse_json(response)
         except ValueError:
@@ -349,7 +349,7 @@ def _assign_topics(
     pending = list(docs)
     for _ in range(1 + max_retries):  # rerun documents whose label was invalid
         prompts: list[Prompt] = [prompt_of[doc] for doc in pending]
-        responses = model.generate_batch(prompts, temperature=0.0)
+        responses = model.generate_batch(prompts)
         still_pending = []
         for doc, doc_responses in zip(pending, responses):
             try:

@@ -72,9 +72,9 @@ class TestConstructor:
         assert model._model_id == "gpt-4o"
 
     def test_default_temperature(self):
-        """Default temperature is 0.7."""
+        """Default temperature is 1.0."""
         model = Model("gpt-4o")
-        assert model._temperature == 0.7
+        assert model._temperature == 1.0
 
     def test_custom_temperature(self):
         """Custom temperature is stored."""

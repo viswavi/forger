@@ -26,7 +26,7 @@ def by_llm_score(
     num_judges: int = 1,
     agreement_threshold: float = 1.0,
     criteria: str = "overall quality, relevance, and correctness",
-    temperature: float = 0.0,
+    temperature: float = 1.0,
 ) -> list[dict]:
     """Keep items where ``num_judges`` LLM judges sufficiently agree on quality."""
     if num_judges < 1:
