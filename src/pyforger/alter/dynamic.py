@@ -128,8 +128,8 @@ def agent_llm(model: Model) -> LLM:
         max_output_tokens=config.max_tokens,
         # Model counts additional retries; the SDK counts total attempts.
         num_retries=max(1, config.num_retries + 1),
-        timeout=config.timeout,
-        reasoning_effort=config.reasoning_effort,
+        timeout=config.timeout if config.timeout is not None else 300,
+        reasoning_effort=config.reasoning_effort or "high",
         litellm_extra_body=config.extra_body,
         api_mode=config.api_mode,
         capability_overrides=config.capability_overrides,

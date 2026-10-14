@@ -1377,13 +1377,6 @@ class TestTypedMetadataAndSettings:
         with pytest.raises(ValidationError):
             Usage.model_validate(usage)
 
-    def test_generate_result_rejects_dictionary_usage(self):
-        """Generation results require an explicitly constructed Usage model."""
-        with pytest.raises(TypeError, match="Usage model"):
-            GenerateResult(
-                ["answer"], usage={}, reasoning=[None], model_id="test", raw=None
-            )
-
     @pytest.mark.parametrize(
         "settings",
         [
@@ -1435,8 +1428,8 @@ class TestTypedMetadataAndSettings:
         model.generate("prompt")
         kwargs = mock_litellm.completion.call_args.kwargs
         assert kwargs["api_base"] == model.config.api_base
-        assert kwargs["timeout"] is None
-        assert kwargs["reasoning_effort"] is None
+        assert "timeout" not in kwargs
+        assert "reasoning_effort" not in kwargs
         assert kwargs["extra_body"] == {"custom": 1}
         assert kwargs["api_mode"] == "chat"
         assert kwargs["capability_overrides"] == {"vision": False}
@@ -1458,8 +1451,8 @@ class TestTypedMetadataAndSettings:
             "capability_overrides",
         ):
             assert field not in kwargs
-        assert model.config.timeout == 300
-        assert model.config.reasoning_effort == "high"
+        assert model.config.timeout is None
+        assert model.config.reasoning_effort is None
 
     def test_settings_affect_cache_key_but_credentials_do_not(self):
         """Settings affect cache key but credentials do not."""

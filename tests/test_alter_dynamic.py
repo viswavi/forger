@@ -439,8 +439,10 @@ def test_agent_llm_real_settings_translation(options, monkeypatch, tmp_path):
     assert llm.num_retries == 1
     assert llm.base_url == model.config.api_base
     assert llm.api_key.get_secret_value() == "test-key"
-    assert llm.timeout == model.config.timeout
-    assert llm.reasoning_effort == model.config.reasoning_effort
+    assert llm.timeout == (
+        model.config.timeout if model.config.timeout is not None else 300
+    )
+    assert llm.reasoning_effort == (model.config.reasoning_effort or "high")
     assert llm.litellm_extra_body == model.config.extra_body
     assert llm.api_mode == model.config.api_mode
     assert llm.capability_overrides == model.config.capability_overrides

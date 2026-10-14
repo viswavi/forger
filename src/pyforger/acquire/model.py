@@ -9,7 +9,6 @@ from __future__ import annotations
 import warnings
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from enum import Enum
 from typing import Any, Literal, Union
 
 import litellm
@@ -77,15 +76,11 @@ class ModelSettings(BaseModel):
     num_retries: int = 2
     show_progress: bool = False
     api_base: str | None = None
-    timeout: int | None = 300
-    reasoning_effort: str | None = "high"
+    timeout: int | None = None
+    reasoning_effort: str | None = None
     extra_body: dict[str, Any] = Field(default_factory=dict)
     api_mode: Literal["auto", "chat", "responses"] = "auto"
     capability_overrides: dict[str, bool | str] = Field(default_factory=dict)
-
-
-class _Unset(Enum):
-    VALUE = "unset"
 
 
 class GenerateResult(list[str]):
@@ -107,8 +102,6 @@ class GenerateResult(list[str]):
     ) -> None:
         """Wrap completions with per-call metadata."""
         super().__init__(completions)
-        if not isinstance(usage, Usage):
-            raise TypeError("usage must be a Usage model")
         self.usage = usage
         self.reasoning = reasoning
         self.model_id = model_id
@@ -310,8 +303,8 @@ class Model:
         num_retries: int = 2,
         show_progress: bool = False,
         api_base: str | None = None,
-        timeout: int | None | _Unset = _Unset.VALUE,
-        reasoning_effort: str | None | _Unset = _Unset.VALUE,
+        timeout: int | None = None,
+        reasoning_effort: str | None = None,
         extra_body: dict[str, Any] | None = None,
         api_mode: Literal["auto", "chat", "responses"] | None = None,
         capability_overrides: dict[str, bool | str] | None = None,
@@ -347,27 +340,14 @@ class Model:
             num_retries=num_retries,
             show_progress=show_progress,
             api_base=api_base,
-            timeout=300 if isinstance(timeout, _Unset) else timeout,
-            reasoning_effort=(
-                "high" if isinstance(reasoning_effort, _Unset) else reasoning_effort
-            ),
+            timeout=timeout,
+            reasoning_effort=reasoning_effort,
             extra_body={} if extra_body is None else extra_body,
             api_mode="auto" if api_mode is None else api_mode,
             capability_overrides=(
                 {} if capability_overrides is None else capability_overrides
             ),
         )
-        # SDK defaults must not turn omitted options into LiteLLM overrides.
-        for name, omitted in (
-            ("api_base", api_base is None),
-            ("timeout", isinstance(timeout, _Unset)),
-            ("reasoning_effort", isinstance(reasoning_effort, _Unset)),
-            ("extra_body", extra_body is None),
-            ("api_mode", api_mode is None),
-            ("capability_overrides", capability_overrides is None),
-        ):
-            if omitted:
-                self.config.model_fields_set.discard(name)
         self._kwargs = kwargs
         self.history: list[GenerateResult] = []
         self._check_params(
@@ -408,7 +388,8 @@ class Model:
                 "api_mode",
                 "capability_overrides",
             },
-            exclude_unset=True,
+            exclude_defaults=True,
+            exclude_none=True,
         )
         return {**options, **self._kwargs}
 
