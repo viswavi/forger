@@ -1,30 +1,21 @@
-"""Runtime-neutral agent execution, evaluation, and fresh replay APIs."""
+"""Runtime-neutral fresh agent execution APIs."""
+
 from pyforger.trials import (
-    AgentRequest,
     AgentRunner,
-    EvaluationResult,
-    ReplayRunner,
+    EnvironmentFactory,
+    RolloutRecord,
     RolloutResult,
-    TrialEvaluator,
-    TrialResult,
-    evaluate_agent,
+    TrialRequest,
     execute_agent,
-    load_trial,
-    replay_agent,
-    run_trial,
+    load_rollout,
 )
 
 __all__ = [
-    "AgentRequest",
     "AgentRunner",
-    "EvaluationResult",
-    "ReplayRunner",
+    "EnvironmentFactory",
+    "RolloutRecord",
     "RolloutResult",
-    "TrialEvaluator",
-    "TrialResult",
-    "evaluate_agent",
+    "TrialRequest",
     "execute_agent",
-    "load_trial",
-    "replay_agent",
-    "run_trial",
+    "load_rollout",
 ]

@@ -1,4 +1,5 @@
 """Runner-neutral trials keep outcomes separate from infrastructure failures."""
+
 from __future__ import annotations
 
 import json
@@ -9,11 +10,11 @@ from pydantic import ValidationError
 
 from pyforger.artifacts import ArtifactRef
 from pyforger.trials import (
-    EvaluationResult,
+    RolloutRecord,
     RolloutResult,
     TrialRequest,
-    TrialResult,
-    run_trial,
+    execute_agent,
+    load_rollout,
 )
 
 
@@ -37,24 +38,6 @@ class ArithmeticRunner:
         )
 
 
-class ArithmeticEvaluator:
-    """Grade actual runner artifacts rather than substituting function results."""
-
-    def evaluate(self, request, rollout, output):
-        """Grade the retained answer against task data and persist evidence."""
-        output.mkdir()
-        answer = json.loads(rollout.artifacts.path("answer.json").read_text())
-        expected = sum(json.loads(request.task.path("input.json").read_text()))
-        passed = answer == expected
-        (output / "grade.json").write_text(json.dumps({"passed": passed}))
-        return EvaluationResult(
-            passed=passed,
-            score=float(passed),
-            metadata={"domain_flag": not passed},
-            evidence=ArtifactRef.capture(output),
-        )
-
-
 def request(tmp_path, **configuration):
     """Create a frozen arithmetic task with public runner configuration."""
     task = tmp_path / "task"
@@ -68,21 +51,18 @@ def request(tmp_path, **configuration):
     )
 
 
-@pytest.mark.parametrize("offset,passed", [(0, True), (1, False)])
-def test_real_rollout_evaluation_and_serialization(tmp_path, offset, passed):
-    """Arithmetic outcomes and evidence survive trial serialization."""
+@pytest.mark.parametrize("offset", [0, 1])
+def test_real_rollout_and_serialization(tmp_path, offset):
     req = request(tmp_path, offset=offset)
-    result = run_trial(req, ArithmeticRunner(), ArithmeticEvaluator(), tmp_path / "run")
-    assert result.evaluation.passed is passed
-    assert result.evaluation.score == float(passed)
-    restored = TrialResult.model_validate(
-        json.loads(json.dumps(result.model_dump(mode="json")))
-    )
+    rollout = execute_agent(req, ArithmeticRunner(), tmp_path / "run")
+    result = RolloutRecord(request=req, rollout=rollout)
+    restored = RolloutRecord.model_validate(result.model_dump(mode="json"))
     assert restored.model_dump(mode="json") == result.model_dump(mode="json")
     assert restored.request.cache_key() == req.cache_key()
     assert json.loads(
-        (tmp_path / "run" / "trial.json").read_text()
+        (tmp_path / "run" / "rollout.json").read_text()
     ) == result.model_dump(mode="json")
+    assert load_rollout(ArtifactRef.capture(tmp_path / "run")) == restored
 
 
 def test_infrastructure_failure_preserves_evidence(tmp_path):
@@ -96,12 +76,9 @@ def test_infrastructure_failure_preserves_evidence(tmp_path):
                 status="infrastructure_error", artifacts=ArtifactRef.capture(output)
             )
 
-    result = run_trial(
-        request(tmp_path), FailedRunner(), ArithmeticEvaluator(), tmp_path / "run"
-    )
-    assert result.evaluation is None
+    result = execute_agent(request(tmp_path), FailedRunner(), tmp_path / "run")
     assert not (tmp_path / "run" / "evaluation").exists()
-    assert result.rollout.artifacts.path("log.txt").read_text() == "Transport failed"
+    assert result.artifacts.path("log.txt").read_text() == "Transport failed"
 
 
 def test_changed_task_fails_closed(tmp_path):
@@ -114,9 +91,7 @@ def test_changed_task_fails_closed(tmp_path):
             return result
 
     with pytest.raises(ValueError):
-        run_trial(
-            request(tmp_path), MutatingRunner(), ArithmeticEvaluator(), tmp_path / "run"
-        )
+        execute_agent(request(tmp_path), MutatingRunner(), tmp_path / "run")
 
 
 def test_trial_identity_distinguishes_fresh_samples(tmp_path):
@@ -135,9 +110,9 @@ def test_existing_output_is_not_overwritten(tmp_path):
     """Repeated execution cannot overwrite an existing trial directory."""
     req = request(tmp_path)
     output = tmp_path / "run"
-    run_trial(req, ArithmeticRunner(), ArithmeticEvaluator(), output)
+    execute_agent(req, ArithmeticRunner(), output)
     with pytest.raises(FileExistsError):
-        run_trial(req, ArithmeticRunner(), ArithmeticEvaluator(), output)
+        execute_agent(req, ArithmeticRunner(), output)
 
 
 def test_malformed_adapter_types_fail_closed(tmp_path):
@@ -148,9 +123,7 @@ def test_malformed_adapter_types_fail_closed(tmp_path):
             return {"status": "completed"}
 
     with pytest.raises(TypeError, match="RolloutResult"):
-        run_trial(
-            request(tmp_path), InvalidRunner(), ArithmeticEvaluator(), tmp_path / "run"
-        )
+        execute_agent(request(tmp_path), InvalidRunner(), tmp_path / "run")
 
 
 @pytest.mark.parametrize("value", [True, -1, float("inf"), float("nan"), "1"])
@@ -160,37 +133,16 @@ def test_invalid_usage_is_rejected(value):
         RolloutResult(status="completed", usage={"cost_usd": value})
 
 
-@pytest.mark.parametrize("value", [1, "true", [], {}])
-def test_outcomes_require_actual_booleans(value):
-    """Evaluation outcomes reject values that merely resemble booleans."""
-    with pytest.raises(ValidationError):
-        EvaluationResult(passed=value)
-
-
 def test_restored_evidence_must_still_match(tmp_path):
     """Restoring a trial verifies that retained evidence is unchanged."""
-    result = run_trial(
-        request(tmp_path), ArithmeticRunner(), ArithmeticEvaluator(), tmp_path / "run"
+    request_record = request(tmp_path)
+    result = execute_agent(request_record, ArithmeticRunner(), tmp_path / "run")
+    encoded = RolloutRecord(request=request_record, rollout=result).model_dump(
+        mode="json"
     )
-    encoded = result.model_dump(mode="json")
-    (result.rollout.artifacts.root / "answer.json").write_text("99")
+    (result.artifacts.root / "answer.json").write_text("99")
     with pytest.raises(ValueError):
-        TrialResult.model_validate(encoded)
-
-
-def test_evaluator_cannot_mutate_rollout_evidence(tmp_path):
-    """Evaluator mutations of retained rollout files invalidate the trial."""
-
-    class MutatingEvaluator(ArithmeticEvaluator):
-        def evaluate(self, request, rollout, output):
-            result = super().evaluate(request, rollout, output)
-            (rollout.artifacts.root / "answer.json").write_text("99")
-            return result
-
-    with pytest.raises(ValueError):
-        run_trial(
-            request(tmp_path), ArithmeticRunner(), MutatingEvaluator(), tmp_path / "run"
-        )
+        RolloutRecord.model_validate(encoded)
 
 
 @pytest.mark.parametrize(
@@ -230,32 +182,55 @@ def test_runner_may_not_change_request_identity(tmp_path):
             return super().run(request, output)
 
     with pytest.raises(ValueError, match="identity"):
-        run_trial(
-            request(tmp_path), MutatingRunner(), ArithmeticEvaluator(), tmp_path / "run"
-        )
+        execute_agent(request(tmp_path), MutatingRunner(), tmp_path / "run")
 
 
-def test_verified_record_binds_grading_metadata(tmp_path):
-    """Verified enclosing artifacts detect edits to grading metadata."""
-    from pyforger.trials import load_trial
-
-    result = run_trial(
-        request(tmp_path, offset=1),
-        ArithmeticRunner(),
-        ArithmeticEvaluator(),
-        tmp_path / "run",
-    )
+def test_verified_record_binds_execution_metadata(tmp_path):
+    req = request(tmp_path, offset=1)
+    rollout = execute_agent(req, ArithmeticRunner(), tmp_path / "run")
     record = ArtifactRef.capture(tmp_path / "run")
-    assert load_trial(record).evaluation.passed is False
-    data = result.model_dump(mode="json")
-    data["evaluation"].update(passed=True, score=1.0)
-    (record.root / "trial.json").write_text(json.dumps(data))
+    assert load_rollout(record).rollout.metadata["answer"] == 7
+    data = RolloutRecord(request=req, rollout=rollout).model_dump(mode="json")
+    data["rollout"]["metadata"]["answer"] = 6
+    (record.root / "rollout.json").write_text(json.dumps(data))
     with pytest.raises(ValueError, match="tampered"):
-        load_trial(record)
+        load_rollout(record)
 
 
-@pytest.mark.parametrize("passed", [True, False])
-def test_attributed_evaluation_roundtrip(passed):
-    """Trial evaluation preserves generic outcome attribution."""
-    result = EvaluationResult(passed=passed, attribution="model", reason="graded")
-    assert EvaluationResult.model_validate(result.model_dump(mode="json")) == result
+def test_execution_record_rejects_evaluation(tmp_path):
+    req = request(tmp_path)
+    rollout = execute_agent(req, ArithmeticRunner(), tmp_path / "run")
+    data = RolloutRecord(request=req, rollout=rollout).model_dump(mode="json")
+    data["evaluation"] = {"passed": True}
+    with pytest.raises(ValidationError):
+        RolloutRecord.model_validate(data)
+
+
+def test_runner_exception_preserves_partial_evidence_and_reserves_output(tmp_path):
+    class BrokenRunner:
+        def run(self, request, output, *, environment=None):
+            assert not output.exists()
+            output.mkdir()
+            (output / "error.txt").write_text("execution interrupted")
+            raise RuntimeError("failed")
+
+    req = request(tmp_path)
+    output = tmp_path / "run"
+    with pytest.raises(RuntimeError, match="failed"):
+        execute_agent(req, BrokenRunner(), output)
+    assert (output / "rollout" / "error.txt").read_text() == "execution interrupted"
+    assert not (output / "rollout.json").exists()
+    with pytest.raises(FileExistsError):
+        execute_agent(req, ArithmeticRunner(), output)
+
+
+def test_runner_must_return_current_evidence(tmp_path):
+    class StaleRunner(ArithmeticRunner):
+        def run(self, request, output, *, environment=None):
+            result = super().run(request, output)
+            (output / "answer.json").write_text("99")
+            return result
+
+    with pytest.raises(ValueError, match="tampered"):
+        execute_agent(request(tmp_path), StaleRunner(), tmp_path / "run")
+    assert not (tmp_path / "run" / "rollout.json").exists()

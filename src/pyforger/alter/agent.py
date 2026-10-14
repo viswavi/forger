@@ -1,21 +1,13 @@
-"""Uncached row operations for separately executing and grading agents."""
+"""Uncached row operations for executing fresh agent samples."""
+
 from __future__ import annotations
 
 import hashlib
 from pathlib import Path
 from typing import Any
 
-from pyforger.trials import (
-    AgentRunner,
-    EnvironmentFactory,
-    ReplayRunner,
-    RolloutResult,
-    TrialEvaluator,
-    TrialRequest,
-)
-from pyforger.trials import evaluate_agent as evaluate_one
+from pyforger.trials import AgentRunner, EnvironmentFactory, TrialRequest
 from pyforger.trials import execute_agent as execute_one
-from pyforger.trials import replay_agent as replay_one
 from pyforger.utils import get_field
 
 
@@ -53,60 +45,6 @@ def execute_agent(
             **item,
             output_field: execute_one(
                 request,
-                runner,
-                _output(output, request),
-                environment_factory=environment_factory,
-            ).model_dump(mode="json"),
-        }
-        for item, request in zip(items, _requests(items, request_field))
-    ]
-
-
-def evaluate_agent(
-    items: list[dict[str, Any]],
-    *,
-    evaluator: TrialEvaluator,
-    output: Path,
-    request_field: str = "request",
-    rollout_field: str = "rollout",
-    output_field: str = "evaluation",
-) -> list[dict[str, Any]]:
-    """Grade retained row rollouts independently of agent execution."""
-    return [
-        {
-            **item,
-            output_field: evaluate_one(
-                request,
-                RolloutResult.model_validate(
-                    get_field(item, rollout_field, "alter.agent")
-                ),
-                evaluator,
-                _output(output, request),
-            ).model_dump(mode="json"),
-        }
-        for item, request in zip(items, _requests(items, request_field))
-    ]
-
-
-def replay_agent(
-    items: list[dict[str, Any]],
-    *,
-    runner: ReplayRunner,
-    output: Path,
-    environment_factory: EnvironmentFactory | None = None,
-    request_field: str = "request",
-    rollout_field: str = "rollout",
-    output_field: str = "replay",
-) -> list[dict[str, Any]]:
-    """Replay retained row programs in newly opened environments."""
-    return [
-        {
-            **item,
-            output_field: replay_one(
-                request,
-                RolloutResult.model_validate(
-                    get_field(item, rollout_field, "alter.agent")
-                ),
                 runner,
                 _output(output, request),
                 environment_factory=environment_factory,
