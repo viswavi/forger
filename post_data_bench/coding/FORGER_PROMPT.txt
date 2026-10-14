@@ -36,7 +36,7 @@ Credentials are provided as `LITELLM_API_KEY` and `LITELLM_BASE_URL`; load them 
 
 DeepSeek-V4-Flash returns its reasoning separately from its answer, and Forger keeps it: `sample_from_LLM` and `generate_from_context` put it under each output's `thinking_trace` key. Use it for <think>...</think> targets instead of making another call to write reasoning; the reasoning effort setting controls how long it is.
 
-Iterate with small batches before your final generation run. Web search uses `BRAVE_API_KEY`; Semantic Scholar uses `S2_API_KEY`.
+Iterate with small batches before your final generation run. Web search uses `BRAVE_API_KEY`; Semantic Scholar uses `S2_API_KEY`. Web search has no fixed usage limit, but be reasonable: do not send hundreds of thousands of queries.
 
 # Training and Validation
 
