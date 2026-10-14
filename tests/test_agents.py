@@ -22,19 +22,19 @@ from pyforger.trials import (
 
 
 def _environment(environment):
-    """ environment."""
+    """environment."""
     if environment is None:
         raise ValueError("This runner requires an explicit execution environment")
     return environment
 
 
 def _limits(request):
-    """ limits."""
+    """limits."""
     return request.configuration.get("command_timeout_s", 60.0)
 
 
 def _collect(environment, request, output):
-    """ collect."""
+    """collect."""
     outputs = tuple(request.configuration.get("outputs", []))
     if outputs:
         environment.collect(outputs, output / "files")

@@ -13,7 +13,10 @@ from pyforger.evaluation import EvaluationResult, evaluate, load_evaluation
 
 
 class ArithmeticEvaluator:
+    """Grade retained numerical artifacts without an agent request."""
+
     def evaluate(self, artifact: ArtifactRef, output: Path) -> EvaluationResult:
+        """Read saved output and retain independent grading evidence."""
         assert not output.exists()
         answer = json.loads(artifact.path("answer.json").read_text())
         expected = sum(json.loads(artifact.path("input.json").read_text()))
@@ -58,6 +61,7 @@ def test_evaluate_arbitrary_artifact_and_restore(tmp_path, answer, passed):
 
 def test_evaluation_can_omit_outcomes_and_evidence(tmp_path):
     """Evaluation can omit outcomes and evidence."""
+
     class DescriptiveEvaluator:
         def evaluate(self, artifact, output):
             return EvaluationResult(
@@ -103,6 +107,7 @@ def test_changed_input_fails_before_evaluator(tmp_path):
 
 def test_evaluator_cannot_mutate_input(tmp_path):
     """Evaluator cannot mutate input."""
+
     class MutatingEvaluator(ArithmeticEvaluator):
         def evaluate(self, artifact, output):
             result = super().evaluate(artifact, output)
@@ -116,6 +121,7 @@ def test_evaluator_cannot_mutate_input(tmp_path):
 
 def test_evidence_is_verified_after_adapter_returns(tmp_path):
     """Evidence is verified after adapter returns."""
+
     class MutatingEvaluator(ArithmeticEvaluator):
         def evaluate(self, artifact, output):
             result = super().evaluate(artifact, output)
@@ -128,6 +134,7 @@ def test_evidence_is_verified_after_adapter_returns(tmp_path):
 
 def test_invalid_adapter_result(tmp_path):
     """Invalid adapter result."""
+
     class InvalidEvaluator:
         def evaluate(self, artifact, output):
             return {"passed": True}
@@ -138,6 +145,7 @@ def test_invalid_adapter_result(tmp_path):
 
 def test_exception_reserves_output_against_retries(tmp_path):
     """Exception reserves output against retries."""
+
     class BrokenEvaluator:
         def evaluate(self, artifact, output):
             output.mkdir()
