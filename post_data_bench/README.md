@@ -12,19 +12,26 @@ paths and Slurm resource directives; adapt those before using another machine.
 
 1. Run `bash setup_dependencies.sh` to initialize the pinned LiveCodeBench
    submodule and apply its timeout/metadata patches.
-2. Use the `slime` environment for unified SFT/RL, including RestrictedPython,
-   LiteLLM, TRL, PEFT and Accelerate. The setup scripts live in `coding/rl/`.
-   OpenHands lives in `trl`; the launcher can re-execute with `--agent-python`.
+2. Unified SFT/RL and evaluation run on Tinker (LoRA on Qwen/Qwen3-8B). The
+   agent sandbox gets one GPU, for embeddings and clustering only. The host interpreter (`--host-python`) and the agent
+   image need Python 3.12 with `tinker`, `transformers`, RestrictedPython and
+   LiteLLM. OpenHands lives in `trl`; the launcher can re-execute with
+   `--agent-python`. The legacy Slime setup scripts remain in `coding/rl/`.
 3. Build an allowlisted image with `bash apptainer/rebuild_flame.sh` and set
    `AGENT_SIF` to its output. There is no default image. The legacy recipe that
    copied the whole repository and the native launcher have been removed.
    Slime image downloads require an immutable `--image ...@sha256:...` reference
    and refuse to replace an existing image without `--force`.
-4. Provide credentials through environment variables: `LITELLM_API_KEY` and
-   `LITELLM_BASE_URL` for generation; a separate `LITELLM_JUDGE_API_KEY` for
-   judging, optionally with `LITELLM_JUDGE_BASE_URL`. Never put values in files,
-   prompts, command arguments or logs. Retrieval can use `BRAVE_API_KEY` and
-   `S2_API_KEY`. Driver and unrelated provider keys are not forwarded.
+4. Provide credentials through environment variables, with three distinct keys:
+   `LITELLM_DATAGEN_API_KEY` for generation and `LITELLM_JUDGE_API_KEY` for
+   judging, both through the gateway at `LITELLM_WORKER_BASE_URL`;
+   `LLM_AGENT_API_KEY` and `LLM_AGENT_MODEL` for the OpenHands runner (set
+   `LLM_AGENT_BASE_URL` only to route it through a proxy); `TINKER_API_KEY` for
+   training and sampling. The launcher maps these to the `LITELLM_API_KEY`,
+   `LITELLM_BASE_URL`, and `LLM_*` names the sandbox and reward code read. Never
+   put values in prompts, command arguments or logs. Retrieval can use
+   `BRAVE_API_KEY` and `S2_API_KEY`. The runner key and unrelated provider keys
+   are not forwarded into the sandbox.
 
 For agent RL probes, set `AGENT_ENABLE_SLIME=1`. `AGENT_HF_HOME` names the host
 cache containing the selected model; only that model's cache directory is bound
@@ -33,6 +40,14 @@ read-only. Tokens, other model caches and dataset caches are not mounted.
 allocation, and `AGENT_MODEL_OUTPUT_DIR` controls persistent outputs. Each run's
 checkpoints and generated data live below the large model-output volume rather
 than the repository on `/home`.
+
+## Tinker dollar budgets
+
+Each launched run gets a $150 Tinker budget for the agent's SFT trials and
+validation evaluations, and a $400 budget shared by its RL probes and final RL.
+The host's secret-test evaluation is recorded but not limited. Charges use
+Tinker's own per-call token counts (including prompt cache hits) at its Qwen3-8B
+rates; see [the unified contract](coding/rl/UNIFIED_TRAINING.md#tinker-dollar-budgets).
 
 ## Token-equivalent units and quotas
 

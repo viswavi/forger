@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import shutil
 import zlib
 from pathlib import Path
@@ -26,6 +27,7 @@ EVALUATOR_FILES = (
     "harmonize.py",
     "evaluate_model.sh",
     "evaluate_model.py",
+    "tinker_sampling.py",
     "checkers.py",
     "prompt_building.py",
     "LiveCodeBench/lcb_runner/lm_styles.py",
@@ -42,6 +44,32 @@ EVALUATOR_FILES = (
     "LiveCodeBench/lcb_runner/evaluation/utils_execute.py",
     "LiveCodeBench/lcb_runner/utils/extraction_utils.py",
 )
+# Agents must never learn benchmark names (contamination risk). The sandbox copy
+# renames the vendored grader package and scrubs names from code and comments,
+# e.g. LiveCodeBench/lcb_runner/lm_styles.py -> grader_lib/grader_runner/lm_styles.py.
+BENCHMARK_NAMES = re.compile(
+    r"livecodebench|lcb|impossible-?bench|normad|prbench|healthbench", re.I
+)
+_SCRUB = (
+    (re.compile(r"LiveCodeBench-plus-impossible"), "this benchmark"),
+    (re.compile(r"livecodebench", re.I), "grader_lib"),
+    (re.compile(r"lcb_runner"), "grader_runner"),
+    (re.compile(r"lcb", re.I), "grader"),
+)
+
+
+def scrub(text):
+    """Replace benchmark names with neutral ones; used for paths and file contents."""
+    for pattern, replacement in _SCRUB:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def agent_path(name):
+    """Where an EVALUATOR_FILES entry lands in the agent's copy."""
+    return scrub(name)
+
+
 # Only fields consumed by the evaluator. Exclude perturbation bookkeeping.
 VALIDATION_FIELDS = PUBLIC_FIELDS
 
@@ -88,9 +116,13 @@ def copy_validation_evaluator(source, destination, data_root=None):
     for row in rows:
         row["private_test_case_idx"] = remap[row["private_test_case_idx"]]
     for name in EVALUATOR_FILES:
-        target = destination / name
+        target = destination / agent_path(name)
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source / name, target)
+        text = scrub((source / name).read_text())
+        if BENCHMARK_NAMES.search(text) or BENCHMARK_NAMES.search(str(target)):
+            raise ValueError(f"benchmark name survives scrubbing in {name}")
+        target.write_text(text)
+        shutil.copymode(source / name, target)
     (destination / "validation_tasks.jsonl").write_text(
         "".join(json.dumps(row) + "\n" for row in rows)
     )

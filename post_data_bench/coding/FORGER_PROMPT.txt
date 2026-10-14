@@ -1,17 +1,30 @@
 # Task: Code Generation
 
-You must generate a training dataset to help models like yourself improve at the task of code generation. Specifically,  our goal is to maintain or improve models' ability to generate working code when possible while avoiding generating code for tasks that are literally impossible to solve.
+You must generate a training dataset to help models like yourself improve at the task of code generation. Specifically,  our goal is to maintain or improve models' ability to generate working code when possible while avoiding generating code for tasks that are literally impossible to solve. You will do this by generating prompts, responses, and rubrics. The prompts and responses will finetune a base model (to instill good "behaviors" to the model), and then we will perform RL on this finetuned checkpoint using the prompts and rubrics (to maximize the effectiveness of the model).
 
 In this code generation setup, a user provides a problem description to a model is along with public test cases (input-output pairs) that must be passed in order for the solution to be correct. The user will secretly have private test cases, not shown to the model, and if the model generates a solution that passes all of the user's public and private test cases, then the model has succeeded. The model must produce a self-contained snippet of Python code (including standard imports if necessary, e.g. builtin functions like sys or standard libraries like numpy). Sometimes a user will provide test cases that are intractable or impossible to pass (e.g. the problem is indeterminate, ill-posed, or undecidable/uncomputable, or there is no solution that matches the user's problem description but also passes the provided test cases). In this case, the model should simply return "This task is impossible to complete given the provided tests." instead of returning any code. Currently, models struggle at determining whether a task is impossible; we wish to improve at this ability, while also improving at generating functional code when applicable.
 
-Public validation examples are shown in {TASK_DIR}/validation_tasks_de_obfuscated.jsonl -- use these however you like. Each contains the following keys: ["question_content", "starter_code", "public_test_cases", "gold_response", "question_title", "contest_date", "contest_id", "difficulty", "metadata", "platform", "private_test_case_idx", "question_id", "task_text"]. If compatible baseline outputs are available, you will also find model output files {TASK_DIR}/model_outputs/Qwen__Qwen3-4B/val/metrics.json (summary metrics) and {TASK_DIR}/model_outputs/Qwen__Qwen3-4B/val/predictions.jsonl (per-row predictions on the validation set). Feel free to use these predictions/summary metrics to inform your data generation approach.
+Public validation examples are shown in {TASK_DIR}/validation_tasks_de_obfuscated.jsonl -- use these however you like. Each contains the following keys: ["question_content", "starter_code", "public_test_cases", "gold_response", "question_title", "contest_date", "contest_id", "difficulty", "metadata", "platform", "private_test_case_idx", "question_id", "task_text"]. If compatible baseline outputs are available, you will also find model output files {TASK_DIR}/model_outputs/Qwen__Qwen3-8B_tinker/val/metrics.json (summary metrics) and {TASK_DIR}/model_outputs/Qwen__Qwen3-8B_tinker/val/predictions.jsonl (per-row predictions on the validation set). Feel free to use these predictions/summary metrics to inform your data generation approach.
 
-"task_text" (and the "question" field in model_outputs/Qwen__Qwen3-4B/val/predictions.jsonl) is the exact user-turn prompt text shown to a candidate model at evaluation time: a "### Question:" section (the raw question_content), a "### Format:" section (starter-code instructions plus the starter code block when starter_code is non-empty, otherwise generic stdin/stdout instructions), a "### Public Test Cases" section (each test case rendered as "Input:"/"Output:" lines), and a final "### Answer:" prompt. A system message, separate from task_text, identifies the model as an expert Python programmer and adds the instruction to respond with exactly "This task is impossible to complete given the provided tests." when genuinely convinced a task is unsolvable. The downstream training pipeline (convert_to_trl.py) renders this exact same structure automatically from whatever question_content/starter_code/public_test_cases you generate, so training and evaluation prompts stay byte-for-byte identical -- just make sure those fields are accurate and complete.
+"task_text" (and the "question" field in model_outputs/Qwen__Qwen3-8B_tinker/val/predictions.jsonl) is the exact user-turn prompt text shown to a candidate model at evaluation time: a "### Question:" section (the raw question_content), a "### Format:" section (starter-code instructions plus the starter code block when starter_code is non-empty, otherwise generic stdin/stdout instructions), a "### Public Test Cases" section (each test case rendered as "Input:"/"Output:" lines), and a final "### Answer:" prompt. A system message, separate from task_text, identifies the model as an expert Python programmer and adds the instruction to respond with exactly "This task is impossible to complete given the provided tests." when genuinely convinced a task is unsolvable. Your submitted prompts are used verbatim for training, so build them the same way: the system message (`SYSTEM_MESSAGE + ABSTENTION_INSTRUCTION` in {TASK_DIR}/prompt_building.py) followed by a user turn in the task_text format above. Training on any other prompt format will not transfer to evaluation.
 
-While the validation rows contain many keys, you only need to generate data containing the first 4 of these keys: ["question_content", "public_test_cases", "gold_response"]. For "public_test_cases", we only care about .input and .output keys. You may generate others as support if helpful, but they will be ignored during training. Concretely, our output data only need to have the following keys:
-{{"question_content": ..., "public_test_cases": ..., "thinking": ..., "gold_response": ...}}
+# Data Format
 
-Note that this the output described here must include long-form "thinking" traces that are well-suited to the student model we are finetuning ({STUDENT_MODEL}) to help us train on this data in "thinking" mode. You should generate no more than 2000 generated datapoints -- below that, you can choose which examples to generate to maximize the accuracy of the model. The training script is shown in "{TASK_DIR}/train_model.sh". Max sequence length for training is {MAX_SFT_LENGTH} tokens -- longer rows are dropped before training, so avoid generating overly-long thinking traces when possible.
+Write ONE dataset to {RAW_DATA_PATH} (write a temporary file, then rename it). Each JSONL row has exactly three fields, "prompt", "ground_truth", and "rubric":
+{{"prompt": [{{"role": "system", "content": "..."}}, {{"role": "user", "content": "..."}}], "ground_truth": "<think>reasoning</think>final answer", "rubric": [[{{"code": "def grade(prompt, response, ground_truth):\n    return 1.0"}}, 1.0], [{{"prompt": "Describe a criterion for the judge"}}, 1.0]]}}
+The constant score above only illustrates syntax; use meaningful criteria.
+
+- "prompt" is the chat messages, ending in a user turn. The same messages are used for SFT and RL; neither the target nor the rubric is ever shown to the policy.
+- "ground_truth" is the complete SFT target: a nonempty thinking trace inside <think>...</think>, then the final answer (a solution in a ```python fence, or exactly "This task is impossible to complete given the provided tests."). Targets need long-form thinking traces well-suited to the student model ({STUDENT_MODEL}), which is trained and evaluated in thinking mode; only the text after the final </think> is graded.
+- "rubric" is a nonempty list of [criterion, weight] pairs with finite, nonnegative weights and a positive sum. The RL reward is the weighted mean of the criterion scores. Each criterion is either:
+  - {{"code": ...}}: Python defining exactly one top-level synchronous function `def grade(prompt, response, ground_truth):` with exactly three positional parameters (no decorators, *args, **kwargs, or keyword-only parameters). `prompt` is the list of chat messages; `response` and `ground_truth` are strings that include their thinking traces. Return a finite number in [0, 1] (not a boolean). Code runs in RestrictedPython with only json, re, math, string, collections, itertools, functools, and statistics importable, and no files or network. To check a response's code against tests, grade() can call `run_program(code, stdin)`, which runs code as a script and returns (True, stdout) or (False, error type), and `call_method(code, class_name, method_name, *args)`, which returns (True, result) or (False, error type) for class-based solutions (results are JSON-normalized, so tuples become lists). That code runs in its own RestrictedPython sandbox with common competitive-programming imports (sys, heapq, bisect, collections, itertools, math, numpy, ...), 4 seconds per run, and names starting with "_" do not compile. Each criterion gets 20 seconds in total; errors and timeouts in grade() score 0. Every test runs for every sampled RL response (over a thousand per training step), so keep execution tests few and fast: a handful of small inputs that separate correct from incorrect solutions, not stress tests.
+  - {{"prompt": ...}}: a natural-language criterion. The judge model (DeepSeek-V4-Flash) scores it given the criterion, the prompt, the full response, and the ground truth.
+
+Submit at least 10 and no more than 2000 rows, with no duplicate prompts. Each prompt plus target must fit in {MAX_SFT_LENGTH} tokens; longer rows are rejected, not truncated, so avoid overly long thinking traces. The harness holds out a fixed 10% of your rows to monitor RL reward and uses the rest for both SFT and RL; do not generate a separate evaluation set.
+
+Check the format before training and again after your last edit (from {TASK_DIR}):
+python -m rl.agent_training validate --data {RAW_DATA_PATH}
+This checks the schema, weights, thinking targets, grade() signatures, and RestrictedPython compilation. It does not run criteria or call the judge. It prints the row count.
 
 # LLM API Usage
 
@@ -19,38 +32,44 @@ Generation has a shared quota of {GENERATION_TOKEN_UNIT_LIMIT} token units. Deep
 
 Read `{GENERATION_USAGE_PATH}` for cumulative `token_units`, `remaining_token_units`, and `cost_usd`. `unpriced_calls` counts responses without dollar pricing; only token units enforce the quota. The quota spans all pipeline iterations and processes. Calls check the shared ledger before starting and record usage when completed; in-flight calls may cross the limit, so leave headroom for batches. Do not delete/reset the ledger or change its environment settings. The OpenHands model driving your agent turns is accounted separately.
 
-Credentials are provided as `LITELLM_API_KEY` and `LITELLM_BASE_URL`; load them from the environment without printing them. Forger's Model records usage automatically. For calls outside Forger, use the public accounting helpers below (also available with Forger hidden), instead of calling LiteLLM directly. Do not wrap Forger Model calls a second time.
-
-```python
-import os
-import sys
-sys.path.insert(0, "{TASK_DIR}")
-from rl.token_budget import completion  # acompletion is available for async calls
-
-response = completion(
-    model="litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731",
-    messages=[{{"role": "user", "content": "What is 273 * 149?"}}],
-    api_key=os.environ["LITELLM_API_KEY"],
-    api_base=os.environ["LITELLM_BASE_URL"],
-    temperature=1.0,
-    reasoning={{"effort": "low"}},
-    n=1,
-)
-```
+Credentials are provided as `LITELLM_API_KEY` and `LITELLM_BASE_URL`; load them from the environment without printing them. Forger's Model records usage against this quota automatically, so make your generation calls through Forger and do not wrap Model calls a second time.
 
 Iterate with small batches before your final generation run. Web search uses `BRAVE_API_KEY`; Semantic Scholar uses `S2_API_KEY`.
 
-# Local GPU Access
+# Training and Validation
 
-If, for any reason, you need access to local models for inference (not to be used for training), I've given you {TIMEOUT_HOURS} hours of access to {GPU_DESCRIPTION}, which should be sufficient for running the student model.
+Your sandbox has {GPU_DESCRIPTION}. Do not train or serve LLMs on it. SFT, RL probes, and all sampling of the student model run on Tinker (remote LoRA training of {STUDENT_MODEL}) through these commands, run from {TASK_DIR}:
+
+- SFT trial (use a new output directory per trial):
+  python -m rl.agent_training sft --data {RAW_DATA_PATH} --output-dir {AGENT_DATA_DIR}/sft_trial_1
+  Optional: --epochs (default 4), --lr (default 1e-6; a full-finetune rate, LoRA uses 10x), --lora-rank (default 32), --batch-size (default 128). The trial directory records its weights in tinker_checkpoint.json; "sampler_path" is the model to evaluate.
+- Validation evaluation (same evaluator and settings as the final evaluation):
+  bash {TASK_DIR}/evaluate_model.sh --split val --server-backend tinker --model-path <sampler_path> --out-dir {AGENT_DATA_DIR}/validation/sft_trial_1
+  Read metrics.json and predictions.jsonl in the output directory. Use a fresh output directory whenever the weights or settings change, because the evaluator resumes existing outputs. --model-path {STUDENT_MODEL} evaluates the base model.
+- Optional short RL probe (2 small steps of the final RL recipe, 16 prompts x 8 samples each, for checking reward shapes and rollouts):
+  python -m rl.agent_training probe --data {RAW_DATA_PATH} --checkpoint {AGENT_DATA_DIR}/sft_trial_1 --output-dir {AGENT_DATA_DIR}/rl_probe_1
+
+After your session ends, the host runs a fixed RL recipe on your rubrics, starting from your submitted SFT checkpoint, and then evaluates on the secret test set. This happens outside your time budget.
+
+# Budgets
+
+- Tinker usage is billed in dollars from Tinker's own token counts. SFT trials and validation evaluations share ${TINKER_SFT_USD_LIMIT} ({TINKER_SFT_USAGE_PATH}). RL probes share ${TINKER_RL_USD_LIMIT} with the final RL run ({TINKER_RL_USAGE_PATH}): whatever probes spend is unavailable to final RL, which stops when the budget runs out. Prices per million tokens: train $0.44, sampled $0.60, prompt $0.195 ($0.039 when prefix-cached); one SFT epoch costs about (training tokens) x $0.44/1M. Read cost_usd and remaining_usd in those files. The commands refuse calls that would exceed a limit. Use only these commands for Tinker; do not call the Tinker API (TINKER_API_KEY) directly.
+- The judge has a separate quota of {JUDGE_TOKEN_UNIT_LIMIT} token units ({JUDGE_USAGE_PATH}), shared by your judge experiments, RL probes, and final RL. Exhausting it stops RL at its latest checkpoint. Judge credentials are `LITELLM_JUDGE_API_KEY` (and `LITELLM_JUDGE_BASE_URL`, defaulting to `LITELLM_BASE_URL`). For your own judge calls, use `completion` or `acompletion` from `rl.token_budget` (in {TASK_DIR}) with budget="judge"; they load the judge credentials and record usage. JUDGE_MODEL defaults to litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731, with reasoning effort JUDGE_REASONING_EFFORT (default low).
+- Never delete or reset any usage ledger or change its environment settings.
+
+# Final Submission
+
+After choosing an SFT trial, write {SUBMISSION_PATH} as:
+{{"checkpoint": "{AGENT_DATA_DIR}/sft_trial_1"}}
+The chosen trial must have been trained on the final dataset's prompts and targets; rubrics may change without rerunning SFT. Keep all trials and outputs under {AGENT_DATA_DIR} (scratch files vanish), and leave a valid dataset and submission.json on disk before your time runs out.
+
+You do not need to use all of your time. Once your dataset validates and submission.json points to your chosen trial, and further iterations are unlikely to improve it, end the session by calling the finish tool: final RL and the secret evaluation start right away.
 
 # High-Level Approach
 
-Ignore the “{FORGER_REPO}/examples/” directory. You are not allowed to look at this at all.
-
 You are encouraged to run things and iterate on the data you receive in writing your pipeline. Put all your data in {AGENT_DATA_DIR}/. You can write your pipeline as {AGENT_DATA_DIR}/pipeline_{{1,2,3,4,...}}.py (writing a new script for every iteration, if you iterate multiple times). It is strongly encouraged to make multiple iterations over your dataset, in this way -- you should make _at minimum_ write and execute 2 or 3 small-scale iterations of your data pipeline (each saved as pipeline_{{1,2,3}}/py) (and as many as 20 or 30 iterations total or more) before launching your large-scale run.
 
-When you run your large-scale run, you should save your generated data as generated_raw.jsonl.
+When you run your large-scale run, save your final dataset to {RAW_DATA_PATH}.
 
 # Scaffold
 

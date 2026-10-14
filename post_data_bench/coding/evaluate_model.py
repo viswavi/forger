@@ -16,6 +16,7 @@ import argparse
 import asyncio
 import json
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -74,6 +75,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--top-k", type=int, default=20)
     p.add_argument("--min-p", type=float, default=0.0)
     p.add_argument("--max-connections", type=int, default=128)
+    # tinker: sample remotely; --model-path is a base model or tinker://... path.
+    p.add_argument("--backend", choices=["openai", "tinker"], default="openai")
     p.add_argument("--grade-workers", type=int, default=8)
     p.add_argument("--grade-timeout", type=int, default=6)
     p.add_argument(
@@ -228,15 +231,45 @@ async def generate_and_grade_all(
     args: argparse.Namespace, rows: list[dict], messages_list: list[list[dict]]
 ) -> list[dict]:
     """Generate and grade concurrently with resumable prediction checkpoints."""
-    base_url = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
-    api_key = os.environ.get("VLLM_API_KEY", "tok")
-    # Concurrent long completions may exceed the SDK’s 600-second timeout.
-    request_timeout = float(os.environ.get("VLLM_REQUEST_TIMEOUT", "1800"))
-    client = AsyncOpenAI(base_url=base_url, api_key=api_key, timeout=request_timeout)
+    if getattr(args, "backend", "openai") == "tinker":
+        from rl.tinker_budget import max_concurrent_samples
+        from tinker_sampling import TinkerChat
 
-    extra_body: dict = {"min_p": args.min_p, "top_k": args.top_k}
-    if args.enable_thinking is not None:
-        extra_body["chat_template_kwargs"] = {"enable_thinking": args.enable_thinking}
+        # Parallel agents share Tinker's per-account limit on in-flight samples.
+        args.max_connections = min(args.max_connections, max_concurrent_samples())
+
+        # The constructor makes blocking SDK calls; keep them off the event loop.
+        request = await asyncio.to_thread(
+            TinkerChat,
+            args,
+            user_metadata={"purpose": "pdb-coding-eval", "split": args.split},
+        )
+    else:
+        base_url = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
+        api_key = os.environ.get("VLLM_API_KEY", "tok")
+        # Concurrent long completions may exceed the SDK’s 600-second timeout.
+        request_timeout = float(os.environ.get("VLLM_REQUEST_TIMEOUT", "1800"))
+        client = AsyncOpenAI(
+            base_url=base_url, api_key=api_key, timeout=request_timeout
+        )
+
+        extra_body: dict = {"min_p": args.min_p, "top_k": args.top_k}
+        if args.enable_thinking is not None:
+            extra_body["chat_template_kwargs"] = {
+                "enable_thinking": args.enable_thinking
+            }
+
+        async def request(messages: list[dict]) -> tuple[str, str | None, None]:
+            resp = await client.chat.completions.create(
+                model=args.model_path,
+                messages=messages,
+                max_tokens=args.max_tokens,
+                temperature=args.temperature,
+                top_p=args.top_p,
+                extra_body=extra_body,
+            )
+            choice = resp.choices[0]
+            return choice.message.content or "", choice.finish_reason, None
 
     sem = asyncio.Semaphore(args.max_connections)
     grade_executor = ThreadPoolExecutor(max_workers=args.grade_workers)
@@ -262,19 +295,11 @@ async def generate_and_grade_all(
 
     async def one(row: dict, messages: list[dict]):
         async with sem:
-            completion = ""
+            completion, finish_reason, usage = "", None, None
             try:
                 for attempt in range(4):
                     try:
-                        resp = await client.chat.completions.create(
-                            model=args.model_path,
-                            messages=messages,
-                            max_tokens=args.max_tokens,
-                            temperature=args.temperature,
-                            top_p=args.top_p,
-                            extra_body=extra_body,
-                        )
-                        completion = resp.choices[0].message.content or ""
+                        completion, finish_reason, usage = await request(messages)
                         break
                     except Exception as e:  # noqa: BLE001
                         if attempt == 3 or getattr(e, "status_code", None) in (
@@ -311,8 +336,10 @@ async def generate_and_grade_all(
                 except Exception as e:  # noqa: BLE001
                     raise RuntimeError("Evaluation grader failed") from e
                 out = build_output_row(row, messages, completion, g)
-                out["finish_reason"] = resp.choices[0].finish_reason
-                out["truncated"] = resp.choices[0].finish_reason == "length"
+                out["finish_reason"] = finish_reason
+                out["truncated"] = finish_reason == "length"
+                if usage is not None:
+                    out["usage"] = usage
                 output_rows.append(out)
                 pending.append(out)
                 flush()
@@ -395,6 +422,15 @@ _HEADLINE_KEYS = (
 )
 
 
+def _add_usage(metrics: dict, rows: list[dict]) -> None:
+    """Attach token totals and estimated USD when rows recorded usage (Tinker)."""
+    from tinker_sampling import usage_summary
+
+    summary = usage_summary(rows)
+    if summary:
+        metrics["usage"] = summary
+
+
 def _print_summary(metrics: dict) -> None:
     print(json.dumps({k: metrics[k] for k in _HEADLINE_KEYS}, indent=2))
 
@@ -427,6 +463,7 @@ def run_merge(args: argparse.Namespace) -> None:
     metrics["model"] = args.model_path
     metrics["split"] = args.split
     metrics["n_shards"] = len(args.merge_shards)
+    _add_usage(metrics, all_rows)
 
     out_dir = args.out_dir or (args.log_dir or ".")
     os.makedirs(out_dir, exist_ok=True)
@@ -487,6 +524,7 @@ def main() -> None:
         f"{args.model_path}"
     )
 
+    start = time.monotonic()
     if rows:
         messages_list = [
             pb.build_candidate_prompt(
@@ -503,6 +541,10 @@ def main() -> None:
     metrics = compute_metrics(output_rows)
     metrics["model"] = args.model_path
     metrics["split"] = args.split
+    _add_usage(metrics, output_rows)
+    if rows:
+        # This invocation only; resumed rows were generated earlier.
+        metrics["generation_wall_clock_s"] = round(time.monotonic() - start, 1)
 
     _write_outputs(output_rows, metrics, args)
 

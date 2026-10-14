@@ -129,19 +129,15 @@ def validate_reasoning_effort(effort):
 
 
 def default_rl_limit(task):
-    """Return the fixed RL quota for a benchmark name or its launcher alias."""
-    normalized = str(task).lower().replace("-", "").replace("_", "").replace(" ", "")
-    if normalized in (
-        "coding",
-        "impossiblelivecodebench",
-        "impossiblelcb",
-        "culture",
-        "normad",
-    ):
+    """Return the fixed RL quota for a launcher task name.
+
+    Only task names appear here: this module is copied into agent sandboxes,
+    which must never see benchmark names.
+    """
+    normalized = str(task).strip().lower()
+    if normalized in ("coding", "culture"):
         return 75_000_000
-    if normalized in ("prbench", "healthbench"):
-        return 230_000_000
-    raise ValueError("Unknown benchmark for RL token-unit quota")
+    raise ValueError("Unknown task for RL token-unit quota")
 
 
 class TokenUnitBudget:

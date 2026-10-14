@@ -105,11 +105,19 @@ class AgentTokenBudgetTests(unittest.TestCase):
                     "judge_token_unit_limit": 75_000_000,
                     "judge_model": DEFAULT_JUDGE_MODEL,
                     "judge_reasoning_effort": "low",
+                    "tinker_usd_limits": {"sft": 150.0, "rl": 400.0},
                 },
             )
             self.assertEqual(
                 Path(os.environ["JUDGE_TOKEN_USAGE_FILE"]).parent, Path(directory)
             )
+            for name, limit in (("SFT", "150.0"), ("RL", "400.0")):
+                self.assertEqual(
+                    Path(os.environ[f"TINKER_{name}_USAGE_FILE"]).parent,
+                    Path(directory),
+                )
+                self.assertEqual(os.environ[f"TINKER_{name}_USD_LIMIT"], limit)
+            self.assertNotIn("TINKER_EVAL_USD_LIMIT", os.environ)
 
     def test_recovery_refuses_symlinked_configuration(self):
         """Reject a configuration symlink without reading or modifying its target."""
@@ -200,6 +208,7 @@ class AgentTokenBudgetTests(unittest.TestCase):
                 run = root / "run"
                 run.mkdir()
                 scope["build_agent_mounts"](
+                    host_forger_repo=str(repo),
                     forger_repo=str(repo),
                     curator_repo=str(root / "curator"),
                     task_dir=str(task_dir),
@@ -233,29 +242,88 @@ completion(model='litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731')
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(json.loads(ledger.read_text())["token_units"], 22)
 
+    def test_host_env_aliases_fill_internal_names(self):
+        """Map the host .env names without overriding explicit settings."""
+        tree = ast.parse((ROOT / "launch_agent.py").read_text())
+        aliases = next(
+            node.value
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            and getattr(node.targets[0], "id", None) == "ENV_ALIASES"
+        )
+        scope = launcher_functions(
+            "apply_env_aliases", ENV_ALIASES=ast.literal_eval(aliases)
+        )
+        environ = {
+            "LITELLM_DATAGEN_API_KEY": "datagen",
+            "LITELLM_WORKER_BASE_URL": "https://worker",
+            "LLM_AGENT_API_KEY": "agent",
+            "LLM_AGENT_MODEL": "zai/glm-5.3",
+            "LITELLM_JUDGE_API_KEY": "judge",
+        }
+        scope["apply_env_aliases"](environ)
+        self.assertEqual(environ["LITELLM_API_KEY"], "datagen")
+        self.assertEqual(environ["LITELLM_BASE_URL"], "https://worker")
+        self.assertEqual(environ["LLM_API_KEY"], "agent")
+        self.assertEqual(environ["LLM_MODEL"], "zai/glm-5.3")
+        self.assertNotIn("LLM_BASE_URL", environ)  # the runner calls its provider directly
+        explicit = {"LITELLM_API_KEY": "explicit", "LITELLM_DATAGEN_API_KEY": "datagen"}
+        scope["apply_env_aliases"](explicit)
+        self.assertEqual(explicit["LITELLM_API_KEY"], "explicit")
+
     def test_prompts_format_with_token_units(self):
-        """Render each supplied prompt with token quotas and accounting helpers."""
+        """Render each supplied prompt with quotas, budgets, and accounting helpers."""
+        from coding.rl.agent_validation import BENCHMARK_NAMES
+
         values = dict(
             TASK_DIR="/task",
-            STUDENT_MODEL="Qwen/Qwen3-4B",
+            STUDENT_MODEL="Qwen/Qwen3-8B",
             MAX_SFT_LENGTH="18800",
             GENERATION_TOKEN_UNIT_LIMIT="230000000",
             GENERATION_USAGE_PATH="/run/generation_token_usage.json",
             TIMEOUT_HOURS="6",
-            GPU_DESCRIPTION="assigned GPUs",
+            GPU_DESCRIPTION="one local GPU, for embeddings and clustering only",
             AGENT_DATA_DIR="/run",
             FORGER_REPO="/forger",
+            RAW_DATA_PATH="/run/generated_raw.jsonl",
+            SUBMISSION_PATH="/run/submission.json",
+            JUDGE_TOKEN_UNIT_LIMIT="75,000,000",
+            JUDGE_USAGE_PATH="/run/judge_token_usage.json",
+            TINKER_SFT_USD_LIMIT="200",
+            TINKER_SFT_USAGE_PATH="/run/tinker_sft_usage.json",
+            TINKER_RL_USD_LIMIT="400",
+            TINKER_RL_USAGE_PATH="/run/tinker_rl_usage.json",
         )
+        prompts = {}
         for relative in (
             "coding/FORGER_PROMPT.txt",
             "culture/FORGER_PROMPT.txt",
             "coding/minimal_scaffold_prompt.txt",
         ):
             with self.subTest(prompt=relative):
-                prompt = (ROOT / relative).read_text().format(**values)
+                prompt = prompts[relative] = (ROOT / relative).read_text().format(**values)
                 self.assertIn("230000000 token units", prompt)
-                self.assertIn("from rl.token_budget import completion", prompt)
                 self.assertNotIn("llm_spend", prompt)
+                # Agents must never learn benchmark names.
+                self.assertIsNone(BENCHMARK_NAMES.search(prompt))
+        # Forger agents generate through Forger; only the native baseline (and
+        # the legacy culture prompt) gets the direct LiteLLM generation helper.
+        helper = "from rl.token_budget import completion"
+        self.assertNotIn(helper, prompts["coding/FORGER_PROMPT.txt"])
+        self.assertIn(helper, prompts["coding/minimal_scaffold_prompt.txt"])
+        self.assertIn(helper, prompts["culture/FORGER_PROMPT.txt"])
+        # Both coding scaffolds share the operational contract verbatim.
+        for start, stop in (
+            ("# Data Format", "# LLM API Usage"),
+            ("# Training and Validation", "# High-Level Approach"),
+        ):
+            sections = {
+                text[text.index(start) : text.index(stop)]
+                for name, text in prompts.items()
+                if name.startswith("coding/")
+            }
+            self.assertEqual(len(sections), 1, start)
+            self.assertIn("$400", prompts["coding/FORGER_PROMPT.txt"])
 
 
 if __name__ == "__main__":

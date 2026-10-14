@@ -30,10 +30,28 @@ while (($#)); do
   esac
 done
 [[ "$SPLIT" == val || "$SPLIT" == test ]] || { echo 'Specify --split val|test' >&2; exit 2; }
-[[ "$SERVER_BACKEND" == vllm || "$SERVER_BACKEND" == sglang ]] || { echo 'Unknown server backend' >&2; exit 2; }
+[[ "$SERVER_BACKEND" == vllm || "$SERVER_BACKEND" == sglang || "$SERVER_BACKEND" == tinker ]] || { echo 'Unknown server backend' >&2; exit 2; }
+# Tinker samples remotely, so default to its per-process cap rather than a GPU server's.
+[[ "$SERVER_BACKEND" != tinker ]] || MAX_CONN="${MAX_CONN:-${TINKER_MAX_CONCURRENT_SAMPLES:-600}}"
 DEFAULT_ARGS=(--model-path "$MODEL_PATH" --split "$SPLIT" --max-tokens "${MAX_TOKENS:-28672}" --max-connections "${MAX_CONN:-128}" --temperature 0.6 --top-p 0.95 --top-k 20 --min-p 0)
 # Reject bad evaluator arguments before loading models or claiming GPUs.
 python evaluate_model.py "${DEFAULT_ARGS[@]}" "${EXTRA[@]}" --validate-only
+# Secret test predictions live under .hidden/, which agents never see.
+OUT_ROOT=model_outputs
+[[ "$SPLIT" != test ]] || OUT_ROOT=.hidden/model_outputs
+if [[ "$SERVER_BACKEND" == tinker ]]; then
+  # Tinker samples remotely (TINKER_API_KEY from the environment): no local server, GPUs or shards.
+  ESC_MODEL="${MODEL_PATH//\//__}_tinker"
+  ((NO_THINKING == 0)) || ESC_MODEL+="_no_thinking"
+  OUT_DIR="${OUT_DIR:-$OUT_ROOT/$ESC_MODEL/$SPLIT}"
+  mkdir -p "$OUT_DIR"
+  if [[ "${FORCE:-0}" == 1 ]]; then
+    for f in predictions.jsonl metrics.json evaluation_state.json; do
+      [[ ! -f "$OUT_DIR/$f" ]] || mv "$OUT_DIR/$f" "$OUT_DIR/$f.bak.$$.${RANDOM}"
+    done
+  fi
+  exec python evaluate_model.py "${DEFAULT_ARGS[@]}" "${EXTRA[@]}" --backend tinker --log-dir "$OUT_DIR" --json-output-file "$OUT_DIR/metrics.json"
+fi
 python -c 'import importlib.util,sys; sys.exit(0 if importlib.util.find_spec(sys.argv[1]) else "Missing server backend: "+sys.argv[1])' "$SERVER_BACKEND"
 if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
   IFS=, read -ra GPUS <<< "$CUDA_VISIBLE_DEVICES"
@@ -61,7 +79,7 @@ for k in "${SHARDS[@]}"; do
 done
 ESC_MODEL="${MODEL_PATH//\//__}"
 ((NO_THINKING == 0)) || ESC_MODEL+="_no_thinking"
-OUT_DIR="${OUT_DIR:-model_outputs/$ESC_MODEL/$SPLIT}"
+OUT_DIR="${OUT_DIR:-$OUT_ROOT/$ESC_MODEL/$SPLIT}"
 mkdir -p "$OUT_DIR"
 # Use per-invocation local credentials, never a host provider credential.
 API_KEY="$(python -c 'import secrets; print(secrets.token_hex(24))')"

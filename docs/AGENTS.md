@@ -41,9 +41,7 @@ pause and ask the user to provide one. This identifier should include account/us
 a model name (e.g. "gpt-5.6-sol"). Within this structure, you can potentially try other models within the same account
 if the user-provided model is undesirable or unavailable. Within Azure specifically, the following models are available
 by default:
-"gemini/gemini-3.1-flash-lite" (fast, cheap), "gemini/gemini-3.5-flash" (accurate, expensive),
-"azure_ai/DeepSeek-R1-0528", "azure_ai/DeepSeek-V4-Flash", "azure_ai/gpt-5.6-terra" (fast),
-"azure_ai/gpt-5.6-luna" (medium speed/cost), "azure_ai/gpt-5.6-sol" (expensive/most accurate).
+"litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731" (fast, cheap, surprisingly good for most things), "litellm_proxy/azure_ai/FW-GLM-5.3" (accurate, strong reasoning, expensive).
 
 Typically, the user should set LITELLM_API_KEY environment variable. If none is given, then LiteLLM will fall back to
 provider-specific environment variables (e.g. `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`). When instantiating a `Model` with
@@ -84,8 +82,8 @@ Set `FORGER_TOKEN_USAGE_FILE` to a persistent JSON ledger and
 Ledgers retain `cost_usd` and count missing prices in `unpriced_calls`.
 New calls stop once the recorded total reaches the quota; in-flight calls can overshoot it.
 Unknown model weights or missing token counts stop budgeted calls instead of counting as free.
-The benchmark launcher sets a 230M-unit generation quota and a separate judge quota:
-75M for Impossible-LiveCodeBench/NormAD, 230M for PRBench/HealthBench.
+The benchmark launcher sets a 230M-unit generation quota and a separate judge quota,
+given in the task instructions.
 Direct API calls must use the launcher's `rl.token_budget` helpers to participate in accounting.
 
 ### Execution model
@@ -243,11 +241,7 @@ keeps only those whose final answer matches the row's reference answer (`referen
 Each kept response becomes one
 output row carrying the student's raw response plus, when `split_thinking=True`, its reasoning and answer in
 `thinking`/`answer` fields (reasoning comes from the provider's separate reasoning field when returned, otherwise from
-the inline `<think>` block); the matched student answer becomes the new ground truth. A row with zero correct
-samples contributes nothing (so 8 samples with 4 correct yield 4 rows). Acceptance defaults to extracting an answer
-with `default_extract_answer` (reads `ANSWER:`/`\boxed{}`/`####` markers) and comparing by normalized string equality;
-pass a custom `extract_answer`, `match_fn`, or a `filter_fn` (any `list[dict] -> list[dict]`, e.g. a `pyforger.filter`
-op bound with `functools.partial`) to override. Pair it with `LocalModel` to generate student traces on-GPU for SFT.
+the inline `<think>` block); the matched student answer becomes the new ground truth.
 
 ```python
 # LocalModel needs vLLM: pip install "pyforger[vllm]"
@@ -475,34 +469,24 @@ Module import time should not execute work. LLM calls, file I/O, and any `@op`-d
 
 We often see some common patterns in data generation pipelines. Here is an incomplete list of examples:
 
-- **Topic-based generation**: First sample from a list of topics (e.g. "biology", "chemistry", "mathematics") and then
-condition generation on the chosen topic. This can improve diversity across topics and allow for topic-specific
-prompting or filtering.
-- **Retrieval-augmented generation:** First retrieve relevant information (e.g. from Wikipedia or a custom document
-collection) and then condition generation on that retrieved information.
-- **Self-refinement:** For a complicated step (e.g. generating a program to pair with a given natural language query),
-first generate a "draft" output. Then use `pyforger.alter.generate_from_context` with a prompt that includes the query
-and draft and asks for a critique of this draft. Then, use another `generate_from_context` call with a prompt that
-includes the query, draft, and critique and asks for a refined output.
-- **Back-translation:** First retrieve or generate outputs (e.g. math proofs) and then "back-translate" a suitable
-input that could have produced that output (e.g. an English description of a math problem). This can be done with two
-separate `@op`-decorated functions, one for the forward direction and one for the backward direction.
-- **Overgenerate and filter:** Generate more candidates than needed (especially at the early stages of a pipeline) and
-then apply `pyforger.filter` operations to assure quality and diversity. For example, generate 1000 candidate queries,
-filter with `by_llm_score` to keep the best according to a consensus of 5 judge calls, and then filter with
-`by_rouge_l` to keep a subset with sufficient lexical diversity.
+
+- **Agent-as-a-step:** Treat an agent as a single step in a larger pipeline. The agent can perform complex reasoning or multi-turn interactions internally, customized to an individual input in the pipeline. This can be slower but allows for more sophisticated processing within a single pipeline step.
+- **Retrieval-augmented generation:** First retrieve relevant information (e.g. from the web) and then condition
+data generation on this (either directly, for simple/consistently-structured content, or using the "dynamic step"
+building block to perform case-by-case extraction of usable details from the retrieved links). It is almost always
+better to retrieve knowledge before generating content, rather than relying solely on the model's parametric knowledge.
 - **Rubric-based filtering:** For complex tasks where quality is hard to assure with simple heuristics, generate a
 rubric (using `pyforger.acquire.generate_custom_rubric_criteria`) and then use multiple `by_llm_score` calls
 with each rubric item as a separate judge to filter for high-quality outputs that meet multiple criteria.
+- **Overgenerate and filter:** Generate more candidates than needed (especially early in a pipeline) and then apply
+`pyforger.filter` operations to assure quality and diversity. Forger offers tons of filters to make this worthwhile.
 - **Strong-vs-weak gap:** For a given input, generate one output with a "weak" model (e.g. "gemini-3.1") and one with
 multiple "expert" models (e.g. multiple calls of "gemini-3.5" with slightly different
 prompts or another strong model). Then choose only the rows where the expert models agree with each other (answer is
 likely correct) but disagree with the non-expert model (input is not too easy).
-- **Iterative in-context learning:** Start with a simple pipeline that generates some initial outputs. Then, keep an
-outer loop in Python and at each round sample in-context examples from the outputs of the previous round to construct
-a prompt for the next round. Decorate the inner loop function with `@op` so that improvements to the prompt or
-sampling parameters are cached and reused across rounds. This pattern can improve diversity and quality over multiple
-rounds, as the pool of in-context examples evolves.
+- **Back-translation:** First retrieve or generate outputs (e.g. math proofs) and then "back-translate" a suitable
+input that could have produced that output (e.g. an English description of a math problem). This can be done with two
+separate `@op`-decorated functions, one for the forward direction and one for the backward direction.
 - **Self-Taught Reasoner / STaR (extending thinking for reasoning problems):** This is the Self-Taught Reasoner (STaR)
 approach ([Zelikman et al., 2022](https://arxiv.org/abs/2203.14465)), closely related to On-Policy Distillation
 (Agarwal et al., 2023). When you have prompts paired with *verified*
@@ -513,12 +497,7 @@ math, programming, or embodied reasoning. Sample `n` solutions per prompt from t
 run an open-weights reasoning model on-GPU via vLLM with a generous `max_tokens`/`max_model_len` so traces are not
 truncated), keep only the solutions whose final answer matches the verified answer, and use each kept trace as a
 training target. `alter.self_taught_reasoner` implements exactly this: it returns one row per correct sample (a prompt
-with 0 correct samples drops out), with the student's reasoning trace and answer split into separate fields. Because the
-traces are in the student's own distribution, this distills the skill of *extending its own thinking to reach the right
-answer* far better than off-policy teacher traces, and answer-verification keeps only correct reasoning. Filtering on
-the final answer alone admits the occasional "right answer, wrong reasoning" trace; add a `by_llm_score` judge over the
-reasoning (passed as `filter_fn`, or as a downstream filter) only if inspection shows this is actually frequent --
-prefer the cheap answer check first.
+with 0 correct samples drops out), with the student's reasoning trace and answer split into separate fields. 
 
 ### Dynamic input-specific pipelines
 

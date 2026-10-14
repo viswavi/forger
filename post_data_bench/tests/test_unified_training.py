@@ -144,6 +144,76 @@ class CodeTests(unittest.TestCase):
         )
 
 
+class SolutionExecutionTests(unittest.TestCase):
+    """Code criteria can run the response's code against tests, safely."""
+
+    STDIN_GRADER = (
+        "import re\n"
+        "TESTS = [('1 2\\n', '3'), ('5 7\\n', '12')]\n"
+        "def grade(prompt, response, ground_truth):\n"
+        "    blocks = re.findall(r'```python\\n(.*?)```', response.split('</think>')[-1], re.S)\n"
+        "    if not blocks:\n"
+        "        return 0.0\n"
+        "    passed = 0\n"
+        "    for stdin, expected in TESTS:\n"
+        "        ok, out = run_program(blocks[-1], stdin)\n"
+        "        passed += ok and out.strip() == expected\n"
+        "    return passed / len(TESTS)\n"
+    )
+
+    def response(self, code):
+        return "<think>add</think>```python\n" + code + "\n```"
+
+    def test_runs_stdin_programs_and_scores_tests(self):
+        """Correct, partially correct, and failing programs get graded by tests."""
+        for code, expected in (
+            ("a, b = map(int, input().split())\nprint(a + b)", 1.0),
+            ("a, b = map(int, input().split())\nprint(3)", 0.5),
+            ("print(int(input()) + )", 0.0),
+            ("while True:\n    pass", 0.0),
+            ("import os\nprint(os.getcwd())", 0.0),
+        ):
+            with self.subTest(code=code):
+                self.assertEqual(
+                    rm.code_score(self.STDIN_GRADER, [], self.response(code), ""),
+                    expected,
+                )
+
+    def test_timeout_is_per_run(self):
+        """One looping test fails alone; later runs still get their own budget."""
+        grader = (
+            "def grade(prompt, response, ground_truth):\n"
+            "    slow = run_program('while True:\\n    pass')\n"
+            "    fast = run_program('print(2 + 2)')\n"
+            "    return float(slow == (False, 'SandboxTimeout') and fast == (True, '4\\n'))\n"
+        )
+        self.assertEqual(rm.code_score(grader, [], "", ""), 1.0)
+
+    def test_response_cannot_forge_scores(self):
+        """Printing a score, or returning an always-equal object, earns nothing."""
+        forged_output = 'import sys\nprint(\'{"score": 1.0}\')\nsys.exit(0)'
+        self.assertEqual(
+            rm.code_score(self.STDIN_GRADER, [], self.response(forged_output), ""), 0.0
+        )
+        cheat = (
+            "class Anything:\n"
+            "    def __eq__(self, other):\n"
+            "        return True\n"
+            "class Solution:\n"
+            "    def add(self, a, b):\n"
+            "        return Anything()\n"
+        )
+        honest = "class Solution:\n    def add(self, a, b):\n        return [a + b, (a, b)]\n"
+        grader = (
+            "CODE = %r\n"
+            "def grade(prompt, response, ground_truth):\n"
+            "    ok, result = call_method(CODE, 'Solution', 'add', 2, 3)\n"
+            "    return float(ok and result == [5, [2, 3]])\n"
+        )
+        self.assertEqual(rm.code_score(grader % cheat, [], "", ""), 0.0)
+        self.assertEqual(rm.code_score(grader % honest, [], "", ""), 1.0)
+
+
 class RewardTests(unittest.IsolatedAsyncioTestCase):
     """Regression checks for reward."""
 
@@ -271,36 +341,38 @@ class RewardTests(unittest.IsolatedAsyncioTestCase):
                 await rm.prompt_score("c", [], "r", "g")
 
 
+def tinker_checkpoint(directory, sft_sha256):
+    """Write a recorded Tinker trial: remote paths plus the SFT receipt."""
+    directory.mkdir(parents=True)
+    (directory / "tinker_checkpoint.json").write_text(
+        json.dumps(
+            {
+                "base_model": "Qwen/Qwen3-8B",
+                "lora_rank": 32,
+                "state_path": "tinker://run:train:0/weights/sft",
+                "sampler_path": "tinker://run:train:0/sampler_weights/sft",
+            }
+        )
+    )
+    (directory / "sft_submission.json").write_text(
+        json.dumps({"sft_sha256": sft_sha256})
+    )
+
+
 class FinalizationTests(unittest.TestCase):
     """Regression checks for finalization."""
 
     def test_freeze_selected_checkpoint_and_detect_tampering(self):
         """Verify freeze selected checkpoint and detect tampering."""
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             agent = root / "agent"
-            checkpoint = agent / "selected"
-            checkpoint.mkdir(parents=True)
-            (checkpoint / "config.json").write_text(
-                json.dumps(
-                    dict(
-                        model_type="qwen3",
-                        hidden_size=2560,
-                        num_hidden_layers=36,
-                        num_attention_heads=32,
-                        num_key_value_heads=8,
-                        intermediate_size=9728,
-                    )
-                )
-            )
-            (checkpoint / "tokenizer_config.json").write_text("{}")
-            (checkpoint / "model.safetensors").write_bytes(b"test fixture weights")
-            (checkpoint / "untrusted.py").write_text("raise Exception()")
+            agent.mkdir()
             write_rows(agent / "generated_raw.jsonl", rows())
             data.compile_data(agent / "generated_raw.jsonl", root / "prepared")
-            (checkpoint / "sft_submission.json").write_text(
-                json.dumps({"sft_sha256": training.digest(root / "prepared/sft.jsonl")})
-            )
+            checkpoint = agent / "selected"
+            tinker_checkpoint(checkpoint, training.digest(root / "prepared/sft.jsonl"))
+            (checkpoint / "untrusted.py").write_text("raise Exception()")
             (agent / "submission.json").write_text(
                 json.dumps({"checkpoint": str(checkpoint)})
             )
@@ -309,48 +381,42 @@ class FinalizationTests(unittest.TestCase):
                 submission=agent / "submission.json",
                 agent_dir=agent,
                 output_dir=root / "final",
-                slime_env="/slime",
-                slime_deps="/deps",
                 prepare_only=True,
             )
-            host_model = root / "host_model"
-            host_model.mkdir()
-            (host_model / "tokenizer_config.json").write_text('{"host": true}')
-            with patch(
-                "huggingface_hub.snapshot_download", return_value=str(host_model)
-            ), patch.object(
+            compile_without_tokenizer = patch.object(
                 training,
                 "prepare",
-                side_effect=lambda src, dst, model: data.compile_data(src, dst),
+                side_effect=lambda src, dst, model=None: data.compile_data(src, dst),
+            )
+            with compile_without_tokenizer, patch.dict(
+                os.environ, {"TINKER_RL_USAGE_FILE": str(agent / "rl.json")}
             ):
                 training.finalize(args)
-            self.assertFalse((root / "final/initial_checkpoint/untrusted.py").exists())
+            frozen = root / "final/initial_checkpoint"
             self.assertEqual(
-                json.loads(
-                    (
-                        root / "final/initial_checkpoint/tokenizer_config.json"
-                    ).read_text()
-                ),
-                {"host": True},
+                sorted(p.name for p in frozen.iterdir()),
+                ["sft_submission.json", "tinker_checkpoint.json"],
             )
+            command = json.loads((root / "final/final_command.json").read_text())
+            self.assertEqual(command[2:4], ["rl.agent_training", "rl-run"])
             self.assertEqual(
-                (root / "final/initial_checkpoint/model.safetensors").read_bytes(),
-                b"test fixture weights",
+                command[command.index("--tinker-usage-file") + 1],
+                str(agent / "rl.json"),
             )
+            self.assertEqual(command[command.index("--tinker-usd-limit") + 1], "400.0")
             with patch.dict(
                 os.environ,
                 {
-                    "PDB_TASK": "HealthBench",
+                    "PDB_TASK": "culture",
                     "JUDGE_MODEL": "custom/DeepSeek-V4-Flash-changed",
                     "JUDGE_REASONING_EFFORT": "high",
                     "JUDGE_TOKEN_UNIT_LIMIT": "230000000",
                     "JUDGE_TOKEN_USAGE_FILE": str(root / "different.json"),
+                    "TINKER_RL_USAGE_FILE": str(root / "different-rl.json"),
                 },
             ), patch.object(training, "run") as run:
                 training.run_final(argparse.Namespace(bundle=root / "final"))
                 command = run.call_args.args[0]
-                self.assertIn("--rubric-rewards", command)
-                self.assertNotIn("--no-thinking", command)
                 self.assertEqual(command[command.index("--task") + 1], "coding")
                 self.assertEqual(
                     command[command.index("--judge-token-unit-limit") + 1], "75000000.0"
@@ -362,17 +428,182 @@ class FinalizationTests(unittest.TestCase):
                 self.assertEqual(
                     command[command.index("--judge-reasoning-effort") + 1], "low"
                 )
+                self.assertEqual(
+                    command[command.index("--tinker-usage-file") + 1],
+                    str(agent / "rl.json"),
+                )
+                self.assertNotIn("--skip-final-eval", command)
             (root / "final/data/train.jsonl").write_text("tampered")
             with self.assertRaisesRegex(ValueError, "changed"):
                 training.run_final(argparse.Namespace(bundle=root / "final"))
 
+    def test_freeze_rejects_stale_sft_and_foreign_model(self):
+        """Reject a receipt for other data and a checkpoint of another base model."""
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = Path(tmp) / "agent"
+            agent.mkdir()
+            write_rows(agent / "generated_raw.jsonl", rows())
+            tinker_checkpoint(agent / "stale", "0" * 64)
+            (agent / "submission.json").write_text(
+                json.dumps({"checkpoint": str(agent / "stale")})
+            )
+            with patch.object(
+                training,
+                "prepare",
+                side_effect=lambda src, dst, model=None: data.compile_data(src, dst),
+            ), self.assertRaisesRegex(ValueError, "different"):
+                training.freeze(
+                    agent / "generated_raw.jsonl",
+                    agent / "submission.json",
+                    agent,
+                    Path(tmp) / "final",
+                )
+            record = json.loads((agent / "stale/tinker_checkpoint.json").read_text())
+            record["base_model"] = "Qwen/Qwen3-4B"
+            (agent / "stale/tinker_checkpoint.json").write_text(json.dumps(record))
+            with self.assertRaisesRegex(ValueError, "Qwen3-8B"):
+                training.checkpoint_files(agent / "stale")
+
     def test_probe_skips_secret_eval(self):
-        """Verify probe skips secret eval."""
-        command = training.rl_command(
-            "data", "checkpoint", "out", "env", "deps", probe=True
-        )
+        """Verify probe skips secret eval and shares the RL ledger."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = training.TinkerBudget(Path(tmp) / "rl.json", 400, name="rl")
+            command = training.rl_command(
+                "data", "checkpoint", "out", ledger, probe=True
+            )
         self.assertIn("--skip-final-eval", command)
-        self.assertIn("--rubric-rewards", command)
+        self.assertEqual(command[command.index("--num-rollout") + 1], "2")
+        self.assertEqual(command[command.index("--rollout-batch-size") + 1], "16")
+
+
+class TinkerBudgetTests(unittest.TestCase):
+    """Dollar ledgers shared by agent SFT/RL probes and host RL."""
+
+    def test_prices_cache_hits_and_shared_prompt(self):
+        """Bill the shared prompt once, minus cache hits; extra samples are cached."""
+        from coding.rl import tinker_budget as budget
+
+        tokens = budget.sample_tokens(1000, 4, 200, [10, 20, 30, 40])
+        self.assertEqual(
+            tokens, {"prefill": 800, "cached_prefill": 3200, "sample": 100}
+        )
+        self.assertAlmostEqual(
+            budget.cost_usd("Qwen/Qwen3-8B", tokens),
+            (800 * 0.195 + 3200 * 0.039 + 100 * 0.60) / 1e6,
+        )
+
+    def test_limit_refuses_calls_and_persists_across_instances(self):
+        """Refuse a call whose estimate would cross the limit; keep usage on disk."""
+        from coding.rl import tinker_budget as budget
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "sft.json"
+            ledger = budget.TinkerBudget(path, 1.0, name="sft")
+            ledger.record({"train": 2_000_000}, session_id="s1")  # $0.88
+            again = budget.TinkerBudget(path, 1.0, name="sft")
+            self.assertAlmostEqual(again.snapshot()["cost_usd"], 0.88)
+            again.check(0.1)
+            with self.assertRaises(budget.TinkerBudgetExceeded):
+                again.check(0.2)
+            self.assertEqual(again.snapshot()["sessions"], ["s1"])
+            with self.assertRaisesRegex(ValueError, "limit"):
+                budget.TinkerBudget(path, 2.0, name="sft").snapshot()
+            unlimited = budget.TinkerBudget(Path(tmp) / "eval.json", None, "eval")
+            unlimited.record({"sample": 10**9})
+            unlimited.check(10**6)
+
+    def test_env_ledgers_default_limits(self):
+        """The launcher's environment selects per-run ledgers and default limits."""
+        from coding.rl import tinker_budget as budget
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {
+                "TINKER_SFT_USAGE_FILE": str(Path(tmp) / "sft.json"),
+                "TINKER_EVAL_USAGE_FILE": str(Path(tmp) / "eval.json"),
+            },
+        ):
+            self.assertEqual(budget.budget_from_env("sft").limit, 150.0)
+            self.assertIsNone(budget.budget_from_env("eval").limit)
+            with self.assertRaisesRegex(ValueError, "TINKER_RL_USAGE_FILE"):
+                budget.budget_from_env("rl")
+
+    def test_sample_requests_respect_concurrency_cap(self):
+        """Parallel agents share Tinker's account limit: cap in-flight samples."""
+        import asyncio
+
+        from coding.rl import tinker_training as training_module
+        from coding.rl.tinker_budget import TinkerBudget
+
+        state = {"active": 0, "peak": 0}
+
+        class Sampler:
+            async def sample_async(self, **kwargs):
+                state["active"] += 1
+                state["peak"] = max(state["peak"], state["active"])
+                await asyncio.sleep(0.01)
+                state["active"] -= 1
+                sequence = SimpleNamespace(tokens=[1, 2], stop_reason="stop")
+                return SimpleNamespace(sequences=[sequence], prompt_cache_hit_tokens=0)
+
+        tokenizer = SimpleNamespace(
+            apply_chat_template=lambda *args, **kwargs: [5, 6, 7],
+            convert_tokens_to_ids=lambda token: 0,
+        )
+
+        async def run(budget):
+            await asyncio.gather(
+                *[
+                    training_module.sample_group(
+                        Sampler(), tokenizer, [], budget,
+                        num_samples=1, max_tokens=4, temperature=1.0,
+                    )
+                    for _ in range(20)
+                ]
+            )
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ, {"TINKER_MAX_CONCURRENT_SAMPLES": "2"}
+        ):
+            budget = TinkerBudget(Path(tmp) / "eval.json", None, "eval")
+            asyncio.run(run(budget))
+            self.assertEqual(budget.snapshot()["calls"], 20)
+        self.assertEqual(state["peak"], 2)
+
+    def test_sft_refuses_a_trial_the_budget_cannot_finish(self):
+        """Check the whole trial's cost up front; a cut-off trial saves nothing."""
+        from coding.rl import tinker_training as training_module
+        from coding.rl.tinker_budget import TinkerBudget, TinkerBudgetExceeded
+
+        tokenizer = SimpleNamespace(
+            apply_chat_template=lambda messages, **kwargs: list(
+                range(10 if kwargs.get("add_generation_prompt") else 1010)
+            )
+            + ([] if kwargs.get("add_generation_prompt") else [7, 8]),
+            convert_tokens_to_ids=lambda token: 7,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp) / "sft.jsonl"
+            row = {"messages": [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}]}
+            data.write_text(json.dumps(row) + "\n")
+            budget = TinkerBudget(Path(tmp) / "sft_usage.json", 200, name="sft")
+            budget.record({"train": 454_000_000})  # $199.76 spent
+            with patch.object(
+                training_module, "load_tokenizer", return_value=tokenizer
+            ), patch.object(training_module, "service_client") as client:
+                with self.assertRaises(TinkerBudgetExceeded):
+                    training_module.run_sft(
+                        data, Path(tmp) / "trial", budget, epochs=1000
+                    )
+                client.assert_not_called()
+
+    def test_cosine_schedule(self):
+        """Warm up linearly, then decay to zero, as in the HF trainer."""
+        from coding.rl.tinker_training import cosine_lr
+
+        self.assertAlmostEqual(cosine_lr(1.0, 0, 100), 1 / 3)
+        self.assertAlmostEqual(cosine_lr(1.0, 2, 100), 1.0)
+        self.assertLess(cosine_lr(1.0, 99, 100), 0.01)
 
 
 class RecipeTests(unittest.TestCase):
@@ -429,13 +660,23 @@ class RecipeTests(unittest.TestCase):
                 "LITELLM_JUDGE_API_KEY": "test-only-secret",
                 "SLURM_SUBMIT_DIR": "",
             }
-            command = training.rl_command(
-                root / "data",
-                root / "checkpoint",
-                root / "out",
+            # The legacy Slime recipe remains runnable directly.
+            command = [
+                "bash",
+                str(ROOT / "coding/rl/run_rl_training_and_evaluation.sh"),
+                "--rl-data-dir",
+                str(root / "data"),
+                "--init-checkpoint",
+                str(root / "checkpoint"),
+                "--output-dir",
+                str(root / "out"),
+                "--rubric-rewards",
+                "--slime-env",
                 str(environment),
+                "--slime-deps",
                 str(root / "deps"),
-            ) + ["--dry-run"]
+                "--dry-run",
+            ]
             result = subprocess.run(
                 command, env=env, capture_output=True, text=True, check=True
             )

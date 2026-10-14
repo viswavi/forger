@@ -1,5 +1,6 @@
 """Agent-side SFT/probe helpers and host-side finalization for unified submissions.
 
+SFT and RL run on Tinker (LoRA on Qwen3-8B), charged to per-run dollar ledgers.
 Run from coding/: python -m rl.agent_training --help
 """
 from __future__ import annotations
@@ -17,6 +18,12 @@ from pathlib import Path
 # Supports both `rl` CLI imports and `coding.rl` library imports.
 from .rubric_data import compile_data, validate_dataset, validate_rubric  # noqa: ABS101
 from .rubric_rm import judge_configuration  # noqa: ABS101
+from .tinker_budget import (  # noqa: ABS101
+    BASE_MODEL,
+    DEFAULT_LIMITS_USD,
+    TinkerBudget,
+    budget_from_env,
+)
 
 CODING = Path(__file__).resolve().parents[1]
 JUDGE_FLAGS = {
@@ -28,15 +35,15 @@ JUDGE_FLAGS = {
 }
 
 
-def run(command, cwd=CODING):
+def run(command, cwd=CODING, env=None):
     """Print and execute the trusted training command."""
     import shlex
 
     print("$ " + shlex.join(map(str, command)), flush=True)
-    subprocess.run(list(map(str, command)), cwd=cwd, check=True)
+    subprocess.run(list(map(str, command)), cwd=cwd, check=True, env=env)
 
 
-def prepare(data, directory, model):
+def prepare(data, directory, model=BASE_MODEL):
     """Validate shared triples and compile the identical SFT and RL prompts."""
     from transformers import AutoTokenizer
 
@@ -44,55 +51,15 @@ def prepare(data, directory, model):
 
 
 def checkpoint_files(checkpoint):
-    """Check a full HF checkpoint, including every shard referenced by its index."""
+    """Check a recorded Tinker checkpoint directory; return its resolved path."""
+    from .tinker_training import read_checkpoint  # noqa: ABS101
+
     checkpoint = Path(checkpoint).resolve(strict=True)
-    for name in (
-        "config.json",
-        "tokenizer_config.json",
-        "model.safetensors.index.json",
-        "pytorch_model.bin.index.json",
-    ):
+    for name in ("tinker_checkpoint.json", "sft_submission.json"):
         path = checkpoint / name
-        if path.is_symlink() and not path.resolve(strict=True).is_relative_to(
-            checkpoint
-        ):
+        if not path.resolve(strict=True).is_relative_to(checkpoint):
             raise ValueError("Checkpoint metadata escaped its directory")
-    for name in ("config.json", "tokenizer_config.json"):
-        if not (checkpoint / name).is_file():
-            raise ValueError(f"checkpoint missing {name}: {checkpoint}")
-    config = json.loads((checkpoint / "config.json").read_text())
-    # The supplied Megatron recipe sources scripts/models/qwen3-4B.sh.
-    expected = {
-        "model_type": "qwen3",
-        "hidden_size": 2560,
-        "num_hidden_layers": 36,
-        "num_attention_heads": 32,
-        "num_key_value_heads": 8,
-        "intermediate_size": 9728,
-    }
-    if any(config.get(key) != value for key, value in expected.items()):
-        raise ValueError("the fixed RL recipe requires a Qwen3-4B checkpoint")
-    weights = []
-    for index_name in ("model.safetensors.index.json", "pytorch_model.bin.index.json"):
-        index = checkpoint / index_name
-        if index.exists():
-            weights += list(set(json.loads(index.read_text())["weight_map"].values()))
-    if not weights:
-        weights = [
-            n
-            for n in ("model.safetensors", "pytorch_model.bin")
-            if (checkpoint / n).is_file()
-        ]
-    if not weights:
-        raise ValueError("submit a full/merged HF checkpoint, not a LoRA adapter")
-    for name in weights:
-        path = (checkpoint / name).resolve(strict=True)
-        if (
-            not path.is_relative_to(checkpoint)
-            or not path.is_file()
-            or path.stat().st_size == 0
-        ):
-            raise ValueError(f"invalid checkpoint weight file: {name}")
+    read_checkpoint(checkpoint)
     return checkpoint
 
 
@@ -107,39 +74,35 @@ def digest(path):
 
 def sft(args):
     """Train and record an SFT trial on the fixed training partition."""
+    from .tinker_training import run_sft  # noqa: ABS101
+
     output = Path(args.output_dir).resolve()
     if output.exists():
         raise ValueError(f"use a new output directory for each SFT trial: {output}")
-    prepared = prepare(args.data, str(output) + ".data", args.model)
-    run(
-        [
-            "bash",
-            CODING / "train_model.sh",
-            "--model",
-            args.model,
-            "--data-file",
-            prepared / "sft.jsonl",
-            "--output-dir",
-            output,
-            "--epochs",
-            args.epochs,
-            "--lr",
-            args.lr,
-            "--conda-env",
-            args.conda_env,
-        ]
+    prepared = prepare(args.data, str(output) + ".data")
+    record = run_sft(
+        prepared / "sft.jsonl",
+        output,
+        budget_from_env("sft"),
+        epochs=args.epochs,
+        lr=args.lr,
+        lora_rank=args.lora_rank,
+        batch_size=args.batch_size,
+        run_tag=os.environ.get("PDB_RUN_TAG"),
     )
-    checkpoint_files(output)
     # Record the actual prompts/targets used, separate from mutable rubrics.
     (output / "sft_submission.json").write_text(
         json.dumps(
             {
                 "sft_sha256": digest(prepared / "sft.jsonl"),
-                "base_model": args.model,
+                "base_model": BASE_MODEL,
                 "data_directory": str(prepared),
                 "thinking": True,
                 "epochs": args.epochs,
                 "learning_rate": args.lr,
+                "lora_rank": args.lora_rank,
+                "batch_size": args.batch_size,
+                "sampler_path": record["sampler_path"],
             },
             indent=2,
         )
@@ -147,7 +110,8 @@ def sft(args):
     )
     print(
         (
-            'SFT complete. To select this trial: write {"checkpoint": '
+            f"SFT complete; sampler weights: {record['sampler_path']}\n"
+            'To select this trial: write {"checkpoint": '
             f"{json.dumps(str(output))}"
             "} to submission.json"
         )
@@ -176,14 +140,8 @@ def _freeze_into(data, submission, agent_dir, output):
     checkpoint = checkpoint_files(checkpoint)
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=False)
-    from huggingface_hub import snapshot_download
-
-    host_model = Path(snapshot_download("Qwen/Qwen3-4B", local_files_only=True))
-    prepared = prepare(data, output / "data", host_model)
-    receipt_path = (checkpoint / "sft_submission.json").resolve(strict=True)
-    if not receipt_path.is_relative_to(agent_dir):
-        raise ValueError("SFT receipt escaped the agent directory")
-    receipt = json.loads(receipt_path.read_text())
+    prepared = prepare(data, output / "data")
+    receipt = json.loads((checkpoint / "sft_submission.json").read_text())
     if receipt.get("sft_sha256") != digest(prepared / "sft.jsonl"):
         raise ValueError(
             (
@@ -191,30 +149,11 @@ def _freeze_into(data, submission, agent_dir, output):
                 "prompts/targets; rerun SFT on the final dataset"
             )
         )
-    # Dereference symlinks and copy only HF runtime files, never agent .py code.
+    # Weights stay on Tinker; freeze the recorded paths and receipt, never agent code.
     frozen_checkpoint = output / "initial_checkpoint"
     frozen_checkpoint.mkdir()
-    for path in checkpoint.iterdir():
-        if path.name == "config.json" or path.name.startswith(
-            ("model.safetensors", "model-", "pytorch_model")
-        ):
-            if not path.resolve(strict=True).is_relative_to(agent_dir):
-                raise ValueError("Checkpoint file escaped the agent directory")
-            if path.is_file() and path.suffix in {".json", ".safetensors", ".bin"}:
-                shutil.copyfile(path, frozen_checkpoint / path.name)
-    for path in host_model.iterdir():
-        if path.name in {
-            "tokenizer.json",
-            "tokenizer_config.json",
-            "special_tokens_map.json",
-            "vocab.json",
-            "merges.txt",
-            "added_tokens.json",
-            "chat_template.jinja",
-            "generation_config.json",
-            "tokenizer.model",
-        }:
-            shutil.copyfile(path, frozen_checkpoint / path.name)
+    for name in ("tinker_checkpoint.json", "sft_submission.json"):
+        shutil.copyfile(checkpoint / name, frozen_checkpoint / name)
     checkpoint_files(frozen_checkpoint)
     manifest = {p.name: digest(p) for p in sorted(frozen_checkpoint.iterdir())}
     (output / "submission_manifest.json").write_text(
@@ -223,6 +162,7 @@ def _freeze_into(data, submission, agent_dir, output):
                 "selected_checkpoint": str(checkpoint),
                 "checkpoint_sha256": manifest,
                 "custom_rm_path": "rl.rubric_rm.custom_rm",
+                "base_model": BASE_MODEL,
                 "thinking": True,
             },
             indent=2,
@@ -247,39 +187,50 @@ def freeze(data, submission, agent_dir, output):
     return output / "data", output / "initial_checkpoint"
 
 
-def rl_command(
-    data, checkpoint, output, slime_env, slime_deps, probe=False, judge_config=None
-):
-    """Build the fixed Slime command for a probe or final run."""
+def rl_command(data, checkpoint, output, tinker_ledger, probe=False, judge_config=None):
+    """Build the fixed Tinker RL command for a probe or final run."""
     command = [
-        "bash",
-        str(CODING / "rl/run_rl_training_and_evaluation.sh"),
-        "--rl-data-dir",
+        sys.executable,
+        "-m",
+        "rl.agent_training",
+        "rl-run",
+        "--data-dir",
         str(data),
-        "--init-checkpoint",
+        "--checkpoint",
         str(checkpoint),
         "--output-dir",
         str(output),
-        "--rubric-rewards",
-        "--slime-env",
-        slime_env,
-        "--slime-deps",
-        slime_deps,
+        "--tinker-usage-file",
+        str(tinker_ledger.path),
+        "--tinker-usd-limit",
+        str(tinker_ledger.limit),
     ]
     if judge_config:
         for key, flag in JUDGE_FLAGS.items():
             command.extend([flag, judge_config[key]])
     if probe:
+        # Two small steps: enough to check rewards and rollouts, cheap for agents.
         command += [
             "--num-rollout",
             "2",
+            "--rollout-batch-size",
+            "16",
             "--save-interval",
             "1",
             "--eval-interval",
-            "1",
+            "2",
             "--skip-final-eval",
         ]
     return command
+
+
+def rl_ledger(agent_dir):
+    """The run's shared RL ledger: probes and final RL draw on one limit."""
+    path = os.environ.get("TINKER_RL_USAGE_FILE") or (
+        Path(agent_dir).resolve() / "tinker_rl_usage.json"
+    )
+    limit = os.environ.get("TINKER_RL_USD_LIMIT", DEFAULT_LIMITS_USD["rl"])
+    return TinkerBudget(path, limit, name="rl")
 
 
 def reward_preflight(directory, judge_config=None):
@@ -336,8 +287,7 @@ def finalize(args):
         data,
         checkpoint,
         Path(args.output_dir) / "rl",
-        args.slime_env,
-        args.slime_deps,
+        rl_ledger(args.agent_dir),
         judge_config=judge_config,
     )
     # A resumable host-only entry point; contains no credentials.
@@ -376,16 +326,78 @@ def run_final(args):
     judge_config = judge_configuration(overrides=saved_config)
     reward_preflight(bundle / "data", judge_config)
     # Do not execute a command stored by the agent; this file is host-produced.
-    # Rebuild from fixed trusted code, taking only the recorded environment paths.
+    # Rebuild from fixed trusted code, taking only the recorded ledger.
+    ledger = TinkerBudget(
+        command[command.index("--tinker-usage-file") + 1],
+        command[command.index("--tinker-usd-limit") + 1],
+        name="rl",
+    )
     run(
         rl_command(
             bundle / "data",
             bundle / "initial_checkpoint",
             bundle / "rl",
-            command[command.index("--slime-env") + 1],
-            command[command.index("--slime-deps") + 1],
+            ledger,
             judge_config=judge_config,
         )
+    )
+
+
+def rl_run(args):
+    """Run Tinker RL from a recorded checkpoint, then the secret test evaluation."""
+    from .tinker_training import read_checkpoint, run_rl  # noqa: ABS101
+
+    judge_config = judge_configuration(
+        overrides={
+            key: getattr(args, key.lower())
+            for key in JUDGE_FLAGS
+            if getattr(args, key.lower()) is not None
+        }
+        or None
+    )
+    os.environ.update(judge_config)
+    reward_preflight(args.data_dir, judge_config)
+    result = run_rl(
+        args.data_dir,
+        read_checkpoint(checkpoint_files(args.checkpoint)),
+        args.output_dir,
+        TinkerBudget(args.tinker_usage_file, args.tinker_usd_limit, name="rl"),
+        num_rollout=args.num_rollout,
+        rollout_batch_size=args.rollout_batch_size,
+        save_interval=args.save_interval,
+        eval_interval=args.eval_interval,
+        run_tag=os.environ.get("PDB_RUN_TAG"),
+    )
+    print(json.dumps(result, indent=2))
+    if not args.skip_final_eval:
+        final_evaluation(
+            result["final_checkpoint"]["sampler_path"],
+            Path(args.output_dir) / ".hidden" / "final_eval",
+        )
+
+
+def final_evaluation(sampler_path, out_dir):
+    """Secret-test evaluation of the final RL weights; charged to the eval ledger."""
+    env = {**os.environ, "TINKER_EVAL_BUDGET": "eval"}
+    env.setdefault(
+        "TINKER_EVAL_USAGE_FILE",
+        str(Path(out_dir).resolve().parents[2] / "tinker_eval_usage.json"),
+    )
+    env.pop("TINKER_EVAL_USD_LIMIT", None)  # recorded, never limited
+    run(
+        [
+            "bash",
+            CODING / "evaluate_model.sh",
+            "--server-backend",
+            "tinker",
+            "--split",
+            "test",
+            "--model-path",
+            sampler_path,
+            "--out-dir",
+            out_dir,
+        ],
+        env=env,
     )
 
 
@@ -426,26 +438,19 @@ def main():
     )
     train.add_argument("--data", required=True)
     train.add_argument("--output-dir", required=True)
-    train.add_argument("--model", default="Qwen/Qwen3-4B")
+    train.add_argument("--model", default=BASE_MODEL, choices=[BASE_MODEL])
     train.add_argument("--epochs", type=int, default=4)
-    train.add_argument("--lr", type=float, default=1e-6)
     train.add_argument(
-        "--conda-env", default=os.environ.get("SFT_CONDA_ENV", sys.prefix)
+        "--lr", type=float, default=1e-6, help="Full-finetune LR; LoRA uses 10x"
     )
+    train.add_argument("--lora-rank", type=int, default=32)
+    train.add_argument("--batch-size", type=int, default=128)
     train.set_defaults(action=sft)
     for name in ("probe", "finalize"):
         command = commands.add_parser(name)
         command.add_argument("--data", required=True)
         command.add_argument("--output-dir", required=True)
         command.add_argument("--task", default=os.environ.get("PDB_TASK", "coding"))
-        command.add_argument(
-            "--slime-env",
-            default=os.environ.get("SLIME_ENV", "/home/vijayv/miniconda3/envs/slime"),
-        )
-        command.add_argument(
-            "--slime-deps",
-            default=os.environ.get("SLIME_DEPS", "/data/user_data/vijayv/slime_deps"),
-        )
         if name == "finalize":
             command.add_argument("--submission", required=True)
             command.add_argument("--agent-dir", required=True)
@@ -457,6 +462,21 @@ def main():
         else:
             command.add_argument("--checkpoint", required=True)
             command.set_defaults(action=probe)
+    # Internal: built by rl_command from trusted code, never from agent input.
+    rl = commands.add_parser("rl-run", help=argparse.SUPPRESS)
+    rl.add_argument("--data-dir", required=True)
+    rl.add_argument("--checkpoint", required=True)
+    rl.add_argument("--output-dir", required=True)
+    rl.add_argument("--tinker-usage-file", required=True)
+    rl.add_argument("--tinker-usd-limit", type=float, required=True)
+    rl.add_argument("--num-rollout", type=int, default=25)
+    rl.add_argument("--rollout-batch-size", type=int, default=128)
+    rl.add_argument("--save-interval", type=int, default=5)
+    rl.add_argument("--eval-interval", type=int, default=5)
+    rl.add_argument("--skip-final-eval", action="store_true")
+    for key, flag in JUDGE_FLAGS.items():
+        rl.add_argument(flag, dest=key.lower())
+    rl.set_defaults(action=rl_run)
     args = parser.parse_args()
     try:
         args.action(args)
@@ -472,15 +492,14 @@ def probe(args):
         task=getattr(args, "task", None),
     )
     checkpoint = checkpoint_files(args.checkpoint)
-    data = prepare(args.data, str(args.output_dir) + ".data", checkpoint)
+    data = prepare(args.data, str(args.output_dir) + ".data")
     reward_preflight(data, judge_config)
     run(
         rl_command(
             data,
             checkpoint,
             args.output_dir,
-            args.slime_env,
-            args.slime_deps,
+            rl_ledger(Path(args.data).resolve().parent),
             probe=True,
             judge_config=judge_config,
         )

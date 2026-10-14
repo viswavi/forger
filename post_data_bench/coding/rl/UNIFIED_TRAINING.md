@@ -1,11 +1,14 @@
 # Unified SFT and RL evaluation
 
 `launch_agent.py --training-mode sft-rl --task coding --prompt YOUR_PROMPT`
-uses the existing agent sandbox and time limit, then runs the fixed coding RL
-recipe and secret benchmark evaluation after the agent closes. The default
-`--training-mode sft` preserves the old task-specific SFT-only workflow.
-The supplied RL architecture is Qwen3-4B; other models/tasks are rejected in
-unified mode rather than silently using an incompatible Megatron configuration.
+(sft-rl is the default) uses the existing agent sandbox and time limit, then
+runs the fixed coding RL recipe and secret benchmark evaluation after the agent
+closes. `--training-mode sft` preserves the old task-specific SFT-only workflow.
+
+SFT, RL and sampling run on [Tinker](https://thinkingmachines.ai/tinker/):
+LoRA training of Qwen/Qwen3-8B on remote GPUs. The agent sandbox has one local
+GPU, for embeddings and clustering only; the host needs none. Other models/tasks are rejected in unified mode. Weights stay
+on Tinker; trial directories record their `tinker://` paths.
 
 ## Submission
 
@@ -54,28 +57,29 @@ python -m rl.agent_training sft \
   --output-dir "$AGENT_DATA_DIR/sft_trial_1" --epochs 4 --lr 1e-6
 ```
 
-Repeat as often as the agent's time permits, using new output directories.
-This calls the existing SFT recipe, retains thinking, and writes a receipt
-identifying the actual training prompts/targets. The SFT environment defaults
-to the invoking Python environment (`slime` on the host, potentially `trl` in
-the existing agent image); `--conda-env` or `SFT_CONDA_ENV` can override it. The public trainer and FSDP
-config are available even with
-`--hide-forger`.
+Repeat as often as the SFT budget permits, using new output directories. This
+trains a Tinker LoRA adapter (rank 32 by default, `--lora-rank`) on the training
+partition with thinking retained: AdamW, cosine schedule with 3% warmup,
+batches of 128 sequences (`--batch-size`), loss averaged over target tokens.
+`--lr` is a full-finetune rate; LoRA uses 10x it, as in `train_sft.py` and the
+Tinker cookbook. The trial directory receives `tinker_checkpoint.json`
+(`state_path` for resuming training, `sampler_path` for sampling),
+`train_log.jsonl`, and a receipt identifying the actual training prompts/targets.
 
-Evaluate a trained checkpoint with the existing benchmark evaluator:
+Evaluate a trial with the existing benchmark evaluator, sampling on Tinker:
 
 ```bash
 env -u SLURM_SUBMIT_DIR bash ./evaluate_model.sh --split val \
-  --model-path "$AGENT_DATA_DIR/sft_trial_1" \
+  --server-backend tinker \
+  --model-path "$(python -c 'import json;print(json.load(open("'"$AGENT_DATA_DIR"'/sft_trial_1/tinker_checkpoint.json"))["sampler_path"])')" \
   --out-dir "$AGENT_DATA_DIR/validation/sft_trial_1"
 ```
 
 Compare `metrics.json` and inspect `predictions.jsonl` in that output directory
-before selecting a trial. Thinking stays enabled. The evaluator defaults to
-vLLM; use `--server-backend sglang` when using the Slime serving stack. Run it
-from the environment containing the selected serving backend. Use a fresh
-output directory for changed weights or settings: existing predictions are
-resumed, not recomputed. Keeping outputs under `AGENT_DATA_DIR` makes them
+before selecting a trial. Thinking stays enabled. `--model-path Qwen/Qwen3-8B`
+evaluates the base model. The vLLM and sglang backends remain available for
+local checkpoints. Use a fresh output directory for changed weights or
+settings: existing predictions are resumed, not recomputed. Keeping outputs under `AGENT_DATA_DIR` makes them
 persistent. `env -u SLURM_SUBMIT_DIR` prevents a scheduler working directory
 from overriding the evaluator's location.
 
@@ -86,7 +90,7 @@ remapped accordingly. Neither secret test tasks nor unrelated test-case blobs
 are copied. This benchmark validation set is separate from the 10% generated
 holdout used to monitor RL rewards. Available even with `--hide-forger`.
 
-Choose a completed, merged/full Hugging Face SFT checkpoint:
+Choose a completed SFT trial directory:
 
 ```json
 {"checkpoint":"/absolute/path/inside/AGENT_DATA_DIR/sft_trial_1"}
@@ -97,21 +101,41 @@ final dataset's prompts/targets. Rubrics can change without rerunning SFT.
 Agent-selected RL checkpoints are not SFT submissions. Receipts establish
 workflow provenance, not cryptographic proof of training by an untrusted agent.
 
-Short RL probes are available when the agent image contains Slime:
+Short RL probes run the final recipe for two rollouts on Tinker:
 
 ```bash
 python -m rl.agent_training probe \
   --data "$AGENT_DATA_DIR/generated_raw.jsonl" \
   --checkpoint "$AGENT_DATA_DIR/sft_trial_1" \
-  --output-dir "$AGENT_DATA_DIR/probe_1" \
-  --slime-env /path/to/slime/environment --slime-deps /path/to/slime_deps
+  --output-dir "$AGENT_DATA_DIR/probe_1"
 ```
 
-Set `SLIME_SRC` to the Slime checkout (for example `/opt/slime` in a container).
-The dependencies directory must contain `Megatron-LM`. Enable agent RL runtime
-mounts with `AGENT_ENABLE_SLIME=1` and use a compatible image via `AGENT_SIF`.
-Probes run two rollouts and no secret test evaluation. Their outputs are separate
-from the selected SFT checkpoint. Normal agent trajectory logs record commands.
+Probes run no secret test evaluation and draw on the same RL dollar budget as
+final RL. Their outputs are separate from the selected SFT checkpoint. Normal
+agent trajectory logs record commands.
+
+## Tinker dollar budgets
+
+Each run has two dollar limits, charged at Tinker's Qwen3-8B rates per million
+tokens: train $0.44, sampled $0.60, prompt prefill $0.195, cached prefill $0.039.
+
+* `TINKER_SFT_USAGE_FILE` / `TINKER_SFT_USD_LIMIT` ($150): agent SFT trials and
+  validation evaluations.
+* `TINKER_RL_USAGE_FILE` / `TINKER_RL_USD_LIMIT` ($400): agent RL probes and the
+  final RL run, sharing one ledger like the judge quota.
+* `TINKER_EVAL_USAGE_FILE`: the host's secret-test evaluation, recorded without
+  a limit so the agent cannot starve it.
+
+Charges use Tinker's own per-call counts: training tokens per datum, sampled
+tokens, and each sample response's `prompt_cache_hit_tokens` (the shared prompt
+of an n-sample request is billed once, its other copies as cache hits). Each
+call is checked against the remaining budget before it is sent, using its
+maximum cost, so the limit is not crossed except by concurrent in-flight calls.
+Ledgers live in the persistent agent directory and need POSIX locks; never
+reset them. `tinker_budget.py LEDGER --reconcile START END` compares a ledger
+with Tinker's billing records for the sessions it lists (billing lags by a few
+hours and needs billing-view access). Sessions carry `pdb_run` and `pdb_budget`
+metadata. Calls made outside these commands bypass the ledgers.
 
 ## Rubric execution and token-unit quotas
 
@@ -135,6 +159,14 @@ positive sum. Reward is `sum(weight * score) / sum(weight)`.
   The subprocess is not an OS filesystem/network namespace; an RP escape would
   still run as the host user.
   Code errors, invalid scores, and timeouts earn zero for that criterion.
+  To test the policy's code, `grade` can call `run_program(code, stdin)` ->
+  `(ok, stdout)` and `call_method(code, class_name, method_name, *args)` ->
+  `(ok, result)` (see `rubric_worker.py`). The response's code runs in a separate
+  RestrictedPython namespace with captured stdin/stdout and competitive-
+  programming imports, 4 seconds per run within the criterion's 20 seconds.
+  Results are JSON-normalized so returned objects cannot override comparisons,
+  and the response cannot write to the worker's output. Underscore-prefixed
+  names do not compile there, a known false-negative source.
   This is the original sandbox's guardrail model, not a hardened security boundary.
 * **Prompt:** trusted reward code calls LiteLLM outside RestrictedPython with
   `litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731`, temperature 1, low reasoning,
@@ -160,7 +192,7 @@ values, include them in prompts, or pass them on command lines:
   not yet implement those tasks.
 * `JUDGE_MAX_CONSECUTIVE_FAILURES`: defaults to 5. Each logical judge call gets three local attempts with backoff, each
   with up to two LiteLLM retries. After five consecutive exhausted calls in any reward
-  worker, the circuit opens and stops the rollout/Ray job. Success resets the
+  worker, the circuit opens and stops RL. Success resets the
   counter. The same rule covers provider quota errors, outages, and malformed judge
   output; failures are never converted into zero rewards. Up to 16 concurrent
   criteria per worker can be in flight when the circuit opens.
@@ -187,18 +219,14 @@ not a proxy-enforced cap. In-flight calls can cross the limit.
 Local quota exhaustion immediately records a credential-free quota marker and
 stops RL. Provider budget errors use the consecutive-failure circuit above;
 plain HTTP 429 rate limits do not imply budget exhaustion. Other repeated judge
-failures still fail the run. Ray receives judge credentials and token accounting
-configuration through a temporary mode-600 runtime environment file, not shell tracing.
+failures still fail the run. Rewards are computed in the host RL process,
+which reads judge credentials from its environment.
 
-On quota exhaustion, the host prints a warning, returns the newest usable saved
-HF checkpoint as `FINAL_CHECKPOINT=...`, and writes `rl_result.json` with its path,
-termination reason, and original training exit code. It then evaluates that
-checkpoint on the secret test split (unless `--skip-final-eval`). Incomplete
-exports are skipped. If no RL checkpoint was saved, it returns and evaluates the
-submitted SFT checkpoint with an explicit warning that no RL progress was saved.
-Updates since the last completed save are not recovered. Each attempt uses a
-fresh quota marker, so resuming cannot mistake an old quota stop for a new one.
-Unrelated training failures remain fatal and do not trigger this fallback.
+On judge-quota or Tinker RL budget exhaustion, RL stops before the next
+rollout, saves the current weights as its final checkpoint, and writes
+`rl_result.json` with the checkpoint's `tinker://` paths, the stop reason, and
+completed rollouts. It then evaluates that checkpoint on the secret test split
+(unless `--skip-final-eval`). Unrelated training failures remain fatal.
 
 ## Host finalization and recovery
 
@@ -206,11 +234,21 @@ The launcher closes the agent workspace and disarms its timer before copying
 validated data and the selected checkpoint into a new host output directory.
 It records SHA-256 manifests and uses the fixed `rl.rubric_rm.custom_rm` function.
 No agent-written reward module or additional Slime arguments enter the graded
-recipe. The final run defaults to 100 rollouts, with thinking enabled throughout
-training and final test evaluation. Checkpoint conversion caches are per-run,
-so identically named SFT trials cannot reuse another trial's weights.
+recipe. The final run uses the same 25,600 rollouts as the Slime recipe in
+fewer, larger steps: 25 steps of 128 prompts x 8 samples, 16,384 response
+tokens, temperature 1, group-normalized (GRPO) advantages, and one
+importance-sampling optimizer step per step at a full-finetune-equivalent LR
+of 6e-6 (LoRA 6e-5, gradient clip 1). Tinker samples a batch in parallel, so
+wall-clock is about steps x the slowest sample (~9 minutes at 16K tokens),
+roughly 4-5 hours in total. Each group is scored as soon as it is sampled, and
+the next batch is sampled from the pre-update weights while a step trains
+(one step off-policy, corrected by the importance-sampling loss). The 10%
+holdout is scored in the background every 5 steps with 4 samples per prompt,
+and checkpoints are saved every 5 steps. Unlike Slime, there is no KL penalty
+(Slime used 1e-3). Probes run 2 steps of 16 prompts.
+Thinking is enabled throughout training and final test evaluation.
 
-Use `--prepare-final-only` to freeze without starting a long GPU job. To finalize
+Use `--prepare-final-only` to freeze without starting final RL. To finalize
 an existing agent submission (without starting OpenHands):
 
 ```bash
@@ -220,26 +258,25 @@ python launch_agent.py --task coding --training-mode sft-rl \
 ```
 
 The resulting `final_command.json` records the host command. Run the frozen
-bundle on a sufficiently long GPU allocation:
+bundle from any host with network access to Tinker:
 
 ```bash
 cd coding
 python -m rl.agent_training run-final --bundle /path/to/final_run
 ```
 
-The six-hour limit applies only to the agent; a scheduler allocation must still
-cover final RL, or use the preparation/recovery workflow on another allocation.
-`--slime-env` defaults to `/home/vijayv/miniconda3/envs/slime`; Slime source and
-Megatron dependencies must be installed/configured. If the launcher environment
-lacks OpenHands, it uses the SDK in `trl` via `--agent-python`; finalization,
-training, and evaluation still use Slime's environment. No packages are copied
-between environments. Existing SFT-only behavior keeps its original environment.
+The six-hour limit applies only to the agent; the host process must still
+outlive final RL, or use the preparation/recovery workflow later.
+Finalization runs with `--host-python` (default: the launcher's interpreter),
+which needs `tinker`, `transformers`, RestrictedPython and LiteLLM. If the
+launcher environment lacks OpenHands, it re-executes under `--agent-python`.
+The legacy Slime recipe (`run_rl_training_and_evaluation.sh`) is unchanged but
+no longer used by unified mode.
 
-The host freezes tokenizer, chat template, and generation configuration from its
-cached Qwen/Qwen3-4B snapshot, ignoring the agent's versions. The host tokenizer
-also enforces the 18,800-token limit. Failed freezes leave no published bundle.
-Ray's dashboard binds to localhost. A successful RL job must have a usable final
-export; only a quota stop permits selection of an earlier usable checkpoint.
+The host renders prompts and enforces the 18,800-token limit with the
+Qwen/Qwen3-8B tokenizer and chat template, ignoring the agent's versions. The
+frozen bundle holds the selected trial's `tinker_checkpoint.json` and receipt,
+never agent code. Failed freezes leave no published bundle.
 
 The legacy LiveCodeBench execution reward has a separate result protocol,
 credential-free environment, and resource limits. These are robustness controls,

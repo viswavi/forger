@@ -46,6 +46,14 @@ From: /data/user_data/vijayv/containers/slime.sif
     tar -xf /opt/trl_env.tar -C /
     rm /opt/trl_env.tar
 
+    # Forger needs openhands-sdk>=1.51 and litellm>=1.93; the tarred env has
+    # 1.36/1.83. The host launcher's OpenHands must match this version.
+    # tinker: SFT, RL probes and validation sampling run on Tinker.
+    /home/vijayv/miniconda3/envs/trl/bin/pip install --no-cache-dir \
+        openhands-sdk==1.54.0 openhands-agent-server==1.54.0 \
+        openhands-tools==1.54.0 openhands-workspace==1.54.0 litellm==1.105.0 \
+        tinker==0.33.1
+
     # Root-own the tarred env: flame fakeroot cannot map its original owner UID.
     chown -R 0:0 /home/vijayv/miniconda3
     chmod -R go+rX /home/vijayv/miniconda3
@@ -104,7 +112,23 @@ EOF
     "$TRL/bin/pip" install --no-deps -e /home/vijayv/forger
     "$TRL/bin/pip" install --no-deps -e /home/vijayv/curator
 
-    /home/vijayv/miniconda3/envs/trl/bin/python -c "from importlib.metadata import version; assert version('openhands-sdk') == '1.36.0'; assert version('openhands-agent-server') == '1.36.0'"
+    /home/vijayv/miniconda3/envs/trl/bin/python -c "from importlib.metadata import version; assert version('openhands-sdk') == '1.54.0'; assert version('openhands-agent-server') == '1.54.0'; import tinker"
+    # --no-deps above: fail here if Forger's declared requirements drift.
+    "$TRL/bin/python" - <<'PYTHON'
+from importlib.metadata import requires, version, PackageNotFoundError
+from packaging.requirements import Requirement
+bad = []
+for spec in requires('pyforger'):
+    r = Requirement(spec)
+    if r.marker and not r.marker.evaluate({'extra': ''}):
+        continue
+    try:
+        if not r.specifier.contains(version(r.name), prereleases=True):
+            bad.append(f'{spec} (have {version(r.name)})')
+    except PackageNotFoundError:
+        bad.append(f'{spec} (missing)')
+assert not bad, 'unmet pyforger requirements: ' + '; '.join(bad)
+PYTHON
 
     # Build-time smoke tests: fail the BUILD, not the first six-hour agent run.
     "$TRL/bin/agent-server" --help > /dev/null \

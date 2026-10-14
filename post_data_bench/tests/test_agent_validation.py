@@ -11,8 +11,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from coding.rl.agent_validation import (
+    BENCHMARK_NAMES,
     EVALUATOR_FILES,
     VALIDATION_FIELDS,
+    agent_path,
     copy_validation_evaluator,
 )
 from coding.split_contract import write_manifest
@@ -54,7 +56,10 @@ class AgentValidationTests(unittest.TestCase):
         for name in EVALUATOR_FILES:
             path = self.source / name
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("# evaluator source\n")
+            path.write_text(
+                "# evaluator source: LiveCodeBench-plus-impossible via LCB\n"
+                "from lcb_runner.lm_styles import LMStyle\n"
+            )
 
         self.manifest()
 
@@ -95,7 +100,7 @@ class AgentValidationTests(unittest.TestCase):
         }
         self.assertEqual(
             files,
-            set(EVALUATOR_FILES)
+            {agent_path(name) for name in EVALUATOR_FILES}
             | {
                 "validation_tasks.jsonl",
                 "private_test_cases.txt",
@@ -104,6 +109,15 @@ class AgentValidationTests(unittest.TestCase):
             },
         )
         self.assertFalse((self.dest / ".hidden").exists())
+        # No benchmark name reaches the agent through paths or file contents.
+        for path in self.dest.rglob("*"):
+            self.assertIsNone(BENCHMARK_NAMES.search(str(path.relative_to(self.dest))))
+            if path.is_file():
+                self.assertIsNone(BENCHMARK_NAMES.search(path.read_text()), path)
+        self.assertIn(
+            "from grader_runner.lm_styles import LMStyle",
+            (self.dest / "grader_lib/grader_runner/lm_styles.py").read_text(),
+        )
 
     def test_missing_blob_fails_before_export(self):
         """Verify missing blob fails before export."""
@@ -138,15 +152,17 @@ class AgentValidationTests(unittest.TestCase):
             namespace,
         )
         for relative in (
-            "Qwen__Qwen3-4B/val/metrics.json",
-            "Qwen__Qwen3-4B/val/predictions.jsonl",
-            "Qwen__Qwen3-4B/test/metrics.json",
-            "Qwen__Qwen3-4B/val/shard_0/predictions.jsonl",
+            "Qwen__Qwen3-8B_tinker/val/metrics.json",
+            "Qwen__Qwen3-8B_tinker/val/predictions.jsonl",
+            "Qwen__Qwen3-8B_tinker/test/metrics.json",
+            "Qwen__Qwen3-8B_tinker/val/shard_0/predictions.jsonl",
         ):
             path = self.source / "model_outputs" / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("{}")
-        baseline_path = self.source / "model_outputs/Qwen__Qwen3-4B/val/metrics.json"
+        baseline_path = (
+            self.source / "model_outputs/Qwen__Qwen3-8B_tinker/val/metrics.json"
+        )
         from coding.eval_state import CONTRACT_VERSION
         from coding.split_contract import sha256
 
@@ -161,11 +177,15 @@ class AgentValidationTests(unittest.TestCase):
         namespace["_task_public_copies"](str(self.source), str(self.dest))
         self.assertTrue((self.dest / "evaluate_model.sh").exists())
         self.assertTrue(
-            (self.dest / "model_outputs/Qwen__Qwen3-4B/val/metrics.json").exists()
+            (
+                self.dest / "model_outputs/Qwen__Qwen3-8B_tinker/val/metrics.json"
+            ).exists()
         )
-        self.assertFalse((self.dest / "model_outputs/Qwen__Qwen3-4B/test").exists())
         self.assertFalse(
-            (self.dest / "model_outputs/Qwen__Qwen3-4B/val/shard_0").exists()
+            (self.dest / "model_outputs/Qwen__Qwen3-8B_tinker/test").exists()
+        )
+        self.assertFalse(
+            (self.dest / "model_outputs/Qwen__Qwen3-8B_tinker/val/shard_0").exists()
         )
 
 
