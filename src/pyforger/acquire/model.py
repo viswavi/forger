@@ -9,9 +9,11 @@ from __future__ import annotations
 import warnings
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Union
+from enum import Enum
+from typing import Any, Literal, Union
 
 import litellm
+from pydantic import BaseModel, ConfigDict, Field
 
 # Type aliases
 Message = dict[str, str]
@@ -52,10 +54,44 @@ def _batch_completion_with_progress(
     return results
 
 
+class Usage(BaseModel):
+    """Validated generation token counts and monetary cost."""
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    reasoning_tokens: int = 0
+    cost_usd: float = 0.0
+
+
+class ModelSettings(BaseModel):
+    """Common interpreted settings, separate from provider-specific kwargs."""
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    model_id: str
+    api_key: str | None = Field(default=None, repr=False)
+    temperature: float | None = 0.7
+    max_tokens: int | None = None
+    num_retries: int = 2
+    show_progress: bool = False
+    api_base: str | None = None
+    timeout: int | None = 300
+    reasoning_effort: str | None = "high"
+    extra_body: dict[str, Any] = Field(default_factory=dict)
+    api_mode: Literal["auto", "chat", "responses"] = "auto"
+    capability_overrides: dict[str, bool | str] = Field(default_factory=dict)
+
+
+class _Unset(Enum):
+    VALUE = "unset"
+
+
 class GenerateResult(list[str]):
     """list[str] with `usage` / `reasoning` / `model_id` / `raw` attributes."""
 
-    usage: dict[str, Any]
+    usage: Usage
     reasoning: list[str | None]
     model_id: str
     raw: Any
@@ -64,14 +100,14 @@ class GenerateResult(list[str]):
         self,
         completions: list[str],
         *,
-        usage: dict[str, Any],
+        usage: Usage | dict[str, Any],
         reasoning: list[str | None],
         model_id: str,
         raw: Any,
     ) -> None:
         """Wrap completions with per-call metadata."""
         super().__init__(completions)
-        self.usage = usage
+        self.usage = Usage.model_validate(usage)
         self.reasoning = reasoning
         self.model_id = model_id
         self.raw = raw
@@ -80,9 +116,10 @@ class GenerateResult(list[str]):
         self,
     ) -> tuple[
         Callable[
-            [list[str], dict[str, Any], list[str | None], str, Any], GenerateResult
+            [list[str], Usage | dict[str, Any], list[str | None], str, Any],
+            GenerateResult,
         ],
-        tuple[list[str], dict[str, Any], list[str | None], str, Any],
+        tuple[list[str], Usage | dict[str, Any], list[str | None], str, Any],
     ]:
         """Pickle support."""
         return (
@@ -93,7 +130,7 @@ class GenerateResult(list[str]):
 
 def _rebuild_generate_result(
     completions: list[str],
-    usage: dict[str, Any],
+    usage: Usage | dict[str, Any],
     reasoning: list[str | None],
     model_id: str,
     raw: Any,
@@ -216,22 +253,22 @@ def _extract_cost(response: Any, model_id: str) -> float:
     return float(cost)
 
 
-def _extract_usage(response: Any) -> dict[str, int]:
-    """Dict with `prompt_tokens` / `completion_tokens` / `reasoning_tokens`."""
+def _extract_usage(response: Any) -> Usage:
+    """Extract token counts, defaulting missing provider metadata to zero."""
     usage = getattr(response, "usage", None)
     if usage is None:
-        return {"prompt_tokens": 0, "completion_tokens": 0, "reasoning_tokens": 0}
+        return Usage()
 
     details = getattr(usage, "completion_tokens_details", None)
     reasoning_tokens = (
         getattr(details, "reasoning_tokens", 0) if details is not None else 0
     ) or 0
 
-    return {
-        "prompt_tokens": getattr(usage, "prompt_tokens", 0) or 0,
-        "completion_tokens": getattr(usage, "completion_tokens", 0) or 0,
-        "reasoning_tokens": reasoning_tokens,
-    }
+    return Usage(
+        prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+        completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
+        reasoning_tokens=reasoning_tokens,
+    )
 
 
 def _to_messages(prompt: Prompt) -> list[Message]:
@@ -266,10 +303,16 @@ class Model:
         model_id: str,
         *,
         api_key: str | None = None,
-        temperature: float = 0.7,
+        temperature: float | None = 0.7,
         max_tokens: int | None = None,
         num_retries: int = 2,
         show_progress: bool = False,
+        api_base: str | None = None,
+        timeout: int | None | _Unset = _Unset.VALUE,
+        reasoning_effort: str | None | _Unset = _Unset.VALUE,
+        extra_body: dict[str, Any] | None = None,
+        api_mode: Literal["auto", "chat", "responses"] | None = None,
+        capability_overrides: dict[str, bool | str] | None = None,
         **kwargs: Any,
     ) -> None:
         """Create a Model instance.
@@ -286,14 +329,43 @@ class Model:
             show_progress: When True, a multi-prompt generate_batch() call
                 (len(prompts) > 1) shows a live tqdm progress bar to stderr.
             **kwargs: Passed through to litellm.completion()
-                (e.g. api_base, timeout, organization).
+                (e.g. organization).
+            api_base: Provider endpoint override.
+            timeout: Request timeout in seconds; SDK default is 300.
+            reasoning_effort: Reasoning level; SDK default is "high".
+            extra_body: Extra provider request body fields.
+            api_mode: SDK endpoint mode (auto, chat, or responses).
+            capability_overrides: SDK model capability overrides.
         """
-        self._model_id = model_id
-        self._api_key = api_key
-        self._temperature = temperature
-        self._max_tokens = max_tokens
-        self._num_retries = num_retries
-        self._show_progress = show_progress
+        self.config = ModelSettings(
+            model_id=model_id,
+            api_key=api_key,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            num_retries=num_retries,
+            show_progress=show_progress,
+            api_base=api_base,
+            timeout=300 if isinstance(timeout, _Unset) else timeout,
+            reasoning_effort=(
+                "high" if isinstance(reasoning_effort, _Unset) else reasoning_effort
+            ),
+            extra_body={} if extra_body is None else extra_body,
+            api_mode="auto" if api_mode is None else api_mode,
+            capability_overrides=(
+                {} if capability_overrides is None else capability_overrides
+            ),
+        )
+        # SDK defaults must not turn omitted options into LiteLLM overrides.
+        for name, omitted in (
+            ("api_base", api_base is None),
+            ("timeout", isinstance(timeout, _Unset)),
+            ("reasoning_effort", isinstance(reasoning_effort, _Unset)),
+            ("extra_body", extra_body is None),
+            ("api_mode", api_mode is None),
+            ("capability_overrides", capability_overrides is None),
+        ):
+            if omitted:
+                self.config.model_fields_set.discard(name)
         self._kwargs = kwargs
         self.history: list[GenerateResult] = []
         self._check_params(
@@ -304,37 +376,54 @@ class Model:
 
     def __repr__(self) -> str:
         """Show model id for debugging."""
-        return f"Model({self._model_id!r})"
+        return f"Model({self.config.model_id!r})"
 
     def _check_params(self, **params: Any) -> None:
         """Validate params against LiteLLM's registry for this model id."""
-        _validate_params(self._model_id, **params)
+        _validate_params(self.config.model_id, **params)
 
     def cache_key(self) -> tuple[object, ...]:
         """Stable hash key for @op caching using all functional attributes."""
-        kwargs_items = tuple(sorted(self._kwargs.items(), key=lambda kv: str(kv[0])))
+        kwargs_items = tuple(
+            sorted(self._completion_options().items(), key=lambda kv: str(kv[0]))
+        )
         return (
             type(self).__name__,
-            self._model_id,
-            self._temperature,
-            self._max_tokens,
-            self._num_retries,
+            self.config.model_id,
+            self.config.temperature,
+            self.config.max_tokens,
+            self.config.num_retries,
             kwargs_items,
         )
+
+    def _completion_options(self) -> dict[str, Any]:
+        options = self.config.model_dump(
+            include={
+                "api_base",
+                "timeout",
+                "reasoning_effort",
+                "extra_body",
+                "api_mode",
+                "capability_overrides",
+            },
+            exclude_unset=True,
+        )
+        return {**options, **self._kwargs}
 
     @property
     def total_cost(self) -> float:
         """Sum of cost_usd across every call in this Model's history."""
-        return sum(float(r.usage.get("cost_usd", 0.0)) for r in self.history)
+        return self.total_usage.cost_usd
 
     @property
-    def total_usage(self) -> dict[str, int]:
-        """Sum of token counts across every call in this Model's history."""
-        totals = {"prompt_tokens": 0, "completion_tokens": 0, "reasoning_tokens": 0}
-        for r in self.history:
-            for key in totals:
-                totals[key] += r.usage.get(key, 0)
-        return totals
+    def total_usage(self) -> Usage:
+        """Sum token counts and cost across every call in this Model's history."""
+        return Usage(
+            prompt_tokens=sum(r.usage.prompt_tokens for r in self.history),
+            completion_tokens=sum(r.usage.completion_tokens for r in self.history),
+            reasoning_tokens=sum(r.usage.reasoning_tokens for r in self.history),
+            cost_usd=sum(r.usage.cost_usd for r in self.history),
+        )
 
     def reset_history(self) -> None:
         """Drop all recorded calls; total_cost and total_usage reset to zero."""
@@ -405,8 +494,10 @@ class Model:
         if not prompts:
             return []
 
-        temperature = temperature if temperature is not None else self._temperature
-        max_tokens = max_tokens if max_tokens is not None else self._max_tokens
+        temperature = (
+            temperature if temperature is not None else self.config.temperature
+        )
+        max_tokens = max_tokens if max_tokens is not None else self.config.max_tokens
 
         validate_kwargs: dict[str, Any] = {
             "temperature": temperature,
@@ -420,20 +511,20 @@ class Model:
 
         all_messages = [_to_messages(prompt) for prompt in prompts]
         call_kwargs = dict(
-            model=self._model_id,
+            model=self.config.model_id,
             n=n,
             temperature=temperature,
             max_tokens=max_tokens,
             stop=stop,
-            api_key=self._api_key,
-            num_retries=self._num_retries,
-            **self._kwargs,
+            api_key=self.config.api_key,
+            num_retries=self.config.num_retries,
+            **self._completion_options(),
         )
         if len(all_messages) == 1:
             responses = [litellm.completion(messages=all_messages[0], **call_kwargs)]
         else:
             use_progress = (
-                self._show_progress if show_progress is None else show_progress
+                self.config.show_progress if show_progress is None else show_progress
             )
             if use_progress:
                 responses = _batch_completion_with_progress(all_messages, call_kwargs)
@@ -449,14 +540,14 @@ class Model:
         results: list[GenerateResult] = []
         for response in responses:
             completions = [choice.message.content or "" for choice in response.choices]
-            usage: dict[str, Any] = dict(_extract_usage(response))
-            usage["cost_usd"] = _extract_cost(response, self._model_id)
-            reasoning = _extract_reasoning(response, self._model_id)
+            usage = _extract_usage(response)
+            usage.cost_usd = _extract_cost(response, self.config.model_id)
+            reasoning = _extract_reasoning(response, self.config.model_id)
             result = GenerateResult(
                 completions,
                 usage=usage,
                 reasoning=reasoning,
-                model_id=self._model_id,
+                model_id=self.config.model_id,
                 raw=response,
             )
             results.append(result)
@@ -514,7 +605,7 @@ class LocalModel(Model):
         self,
         model_id: str,
         *,
-        temperature: float = 0.7,
+        temperature: float | None = 0.7,
         max_tokens: int | None = None,
         max_model_len: int | None = None,
         gpu_memory_utilization: float = 0.9,
@@ -556,8 +647,9 @@ class LocalModel(Model):
             model_id,
             temperature=temperature,
             max_tokens=max_tokens,
-            **engine_kwargs,
+            show_progress=show_progress,
         )
+        self._kwargs = engine_kwargs
         self._max_model_len = max_model_len
         self._gpu_memory_utilization = gpu_memory_utilization
         self._tensor_parallel_size = tensor_parallel_size
@@ -565,7 +657,6 @@ class LocalModel(Model):
         self._enable_thinking = enable_thinking
         self._chat_template_kwargs = chat_template_kwargs
         self._seed = seed
-        self._show_progress = show_progress
         self._llm: Any | None = None
 
     def cache_key(self) -> tuple[object, ...]:
@@ -588,9 +679,9 @@ class LocalModel(Model):
         )
         return (
             type(self).__name__,
-            self._model_id,
-            self._temperature,
-            self._max_tokens,
+            self.config.model_id,
+            self.config.temperature,
+            self.config.max_tokens,
             self._max_model_len,
             self._dtype,
             self._template_kwargs(),
@@ -606,7 +697,7 @@ class LocalModel(Model):
         """Lazily construct and cache the vLLM engine."""
         if self._llm is None:
             self._llm = _import_vllm().LLM(
-                model=self._model_id,
+                model=self.config.model_id,
                 gpu_memory_utilization=self._gpu_memory_utilization,
                 tensor_parallel_size=self._tensor_parallel_size,
                 dtype=self._dtype,
@@ -656,11 +747,13 @@ class LocalModel(Model):
 
         vllm = _import_vllm()
 
-        temperature = temperature if temperature is not None else self._temperature
+        temperature = (
+            temperature if temperature is not None else self.config.temperature
+        )
         if max_tokens is None:
             max_tokens = (
-                self._max_tokens
-                if self._max_tokens is not None
+                self.config.max_tokens
+                if self.config.max_tokens is not None
                 else _DEFAULT_LOCAL_MAX_TOKENS
             )
 
@@ -676,7 +769,9 @@ class LocalModel(Model):
             conversations,
             sampling_params,
             chat_template_kwargs=self._template_kwargs(),
-            use_tqdm=self._show_progress if show_progress is None else show_progress,
+            use_tqdm=self.config.show_progress
+            if show_progress is None
+            else show_progress,
         )
 
         results: list[GenerateResult] = []
@@ -684,21 +779,19 @@ class LocalModel(Model):
             completions = [completion.text for completion in output.outputs]
             # Local inference has no per-call monetary cost; cost is fixed (GPU
             # time). Thinking tokens are inline in the text, so not counted apart.
-            usage: dict[str, Any] = {
-                "prompt_tokens": len(output.prompt_token_ids or []),
-                "completion_tokens": sum(
+            usage = Usage(
+                prompt_tokens=len(output.prompt_token_ids or []),
+                completion_tokens=sum(
                     len(completion.token_ids) for completion in output.outputs
                 ),
-                "reasoning_tokens": 0,
-                "cost_usd": 0.0,
-            }
+            )
             # raw is dropped: vLLM's RequestOutput holds per-token id lists that
             # would pin gigabytes in self.history over a long sampling run.
             result = GenerateResult(
                 completions,
                 usage=usage,
                 reasoning=[None] * len(completions),
-                model_id=self._model_id,
+                model_id=self.config.model_id,
                 raw=None,
             )
             results.append(result)

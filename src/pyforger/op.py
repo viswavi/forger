@@ -27,7 +27,7 @@ from collections import deque
 from collections.abc import Callable
 from functools import wraps
 from pathlib import Path
-from typing import Any, Protocol, TypeVar, overload
+from typing import Any, Generic, ParamSpec, Protocol, TypeVar, overload
 
 from pydantic import BaseModel
 
@@ -35,11 +35,52 @@ from pyforger.utils import canonical, get_formatted_logger
 
 logger = get_formatted_logger("forger.op")
 
+P = ParamSpec("P")
 T = TypeVar("T")
+T_co = TypeVar("T_co", covariant=True)
+
+
+class Op(Protocol[P, T_co]):
+    """An operation with its original signature and typed cache controls."""
+
+    def __call__(self, *args: P.args, **kwargs: P.kwargs) -> T_co:
+        """Call the operation with its original signature."""
+        ...
+
+    def no_cache(self, *args: P.args, **kwargs: P.kwargs) -> T_co:
+        """Execute without reading or writing cached results."""
+        ...
+
+    def cache_only(self, *args: P.args, **kwargs: P.kwargs) -> T_co:
+        """Read a cached result without executing the operation."""
+        ...
+
+
+class _OpWrapper(Generic[P, T]):
+    def __init__(self, wrapper: Callable[..., T]) -> None:
+        self._wrapper = wrapper
+        self.__code__ = wrapper.__code__
+        self.__globals__ = wrapper.__globals__
+        self.__closure__ = wrapper.__closure__
+
+    def __call__(self, *args: P.args, **kwargs: P.kwargs) -> T:
+        return self._wrapper(*args, **kwargs)
+
+    def no_cache(self, *args: P.args, **kwargs: P.kwargs) -> T:
+        return self._wrapper(*args, **kwargs, _no_cache=True)
+
+    def cache_only(self, *args: P.args, **kwargs: P.kwargs) -> T:
+        return self._wrapper(*args, **kwargs, _cache_only=True)
+
+    def __get__(self, instance: object, owner: type | None = None) -> Any:
+        # Preserve function descriptor binding for operations used as methods.
+        if instance is None:
+            return self
+        return types.MethodType(self, instance)
 
 
 class _OpDecorator(Protocol):
-    def __call__(self, fn: Callable[..., T]) -> Callable[..., T]:
+    def __call__(self, fn: Callable[P, T]) -> Op[P, T]:
         ...
 
 
@@ -158,9 +199,7 @@ def _warn_unstable_refs(fn: Callable[..., Any], op_name: str) -> None:
 
 
 @overload
-def op(
-    _fn: Callable[..., T], *, name: str | None = None, cache: bool = True
-) -> Callable[..., T]:
+def op(_fn: Callable[P, T], *, name: str | None = None, cache: bool = True) -> Op[P, T]:
     ...
 
 
@@ -176,7 +215,7 @@ def op(
     *,
     name: str | None = None,
     cache: bool = True,
-) -> Callable[..., Any] | _OpDecorator:
+) -> Op[..., Any] | _OpDecorator:
     """Decorator: cache output on disk, content-addressed by inputs.
 
     Usage::
@@ -187,12 +226,17 @@ def op(
         @op(name="custom", cache=False)
         def debug_op(x): ...
 
+    Use ``fn.no_cache(...)`` to bypass caching or ``fn.cache_only(...)`` to
+    retrieve an existing result, with the same typed arguments as ``fn``.
+    Legacy ``_no_cache`` and ``_cache_only`` kwargs remain supported at runtime
+    but are not part of the statically typed signature.
+
     Pass ``_no_cache=True`` at call time to bypass the cache for one call.
     Pass ``_cache_only=True`` to return only an existing cached result, raising
     ``FileNotFoundError`` on a miss without executing the function.
     """
 
-    def decorate(fn: Callable[..., T]) -> Callable[..., T]:
+    def decorate(fn: Callable[P, T]) -> Op[P, T]:
         try:
             sig = inspect.signature(fn)
         except (TypeError, ValueError) as exc:
@@ -334,7 +378,9 @@ def op(
 
             return result
 
-        return wrapper
+        wrapped: _OpWrapper[P, T] = _OpWrapper(wrapper)
+        wraps(wrapper)(wrapped)
+        return wrapped
 
     if _fn is not None:
         return decorate(_fn)

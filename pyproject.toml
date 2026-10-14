@@ -59,6 +59,7 @@ clustering = [
 ]
 test = [
     "pytest>=6.0.0",
+    "mypy==2.4.0",
     "pyyaml",
     "jsonschema",
     "numpy",

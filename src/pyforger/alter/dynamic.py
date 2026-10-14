@@ -110,36 +110,30 @@ def agent_llm(model: Model) -> LLM:
     from pydantic import SecretStr
 
     dotenv = dotenv_values(Path.cwd() / ".env")
+    config = model.config
     key = (
-        model._api_key
+        config.api_key
         or os.environ.get("LITELLM_API_KEY")
         or dotenv.get("LITELLM_API_KEY")
     )
-    config: dict[str, Any] = dict(
-        model=model._model_id,
-        temperature=model._temperature,
-        base_url=model._kwargs.get("api_base")
+    return LLM(
+        model=config.model_id,
+        temperature=config.temperature,
+        base_url=config.api_base
         or os.environ.get("LITELLM_BASE_URL")
         or os.environ.get("LLM_BASE_URL")
         or dotenv.get("LITELLM_BASE_URL")
         or dotenv.get("LLM_BASE_URL"),
+        api_key=SecretStr(key) if key else None,
+        max_output_tokens=config.max_tokens,
+        # Model counts additional retries; the SDK counts total attempts.
+        num_retries=max(1, config.num_retries + 1),
+        timeout=config.timeout,
+        reasoning_effort=config.reasoning_effort,
+        litellm_extra_body=config.extra_body,
+        api_mode=config.api_mode,
+        capability_overrides=config.capability_overrides,
     )
-    if key:
-        config["api_key"] = SecretStr(key)
-    if model._max_tokens is not None:
-        config["max_output_tokens"] = model._max_tokens
-    # Model counts additional retries; the SDK counts total attempts.
-    if hasattr(model, "_num_retries"):
-        config["num_retries"] = max(1, model._num_retries + 1)
-    for option in ("timeout", "reasoning_effort"):
-        if option in model._kwargs:
-            config[option] = model._kwargs[option]
-    if "extra_body" in model._kwargs:
-        config["litellm_extra_body"] = model._kwargs["extra_body"]
-    for option in ("api_mode", "capability_overrides"):
-        if option in model._kwargs:
-            config[option] = model._kwargs[option]
-    return LLM(**config)
 
 
 def _generate(
