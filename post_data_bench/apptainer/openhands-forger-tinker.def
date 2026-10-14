@@ -1,0 +1,77 @@
+Bootstrap: docker
+From: python:3.12-slim-bookworm
+# Agent sandbox for Tinker runs: SFT, RL probes and student sampling happen
+# remotely, so there is no Slime or vLLM. The one local GPU (--nv) serves
+# embeddings/clustering via torch + sentence-transformers. One Python 3.12 runs
+# both the agent server and the agent's tools.
+# Build: apptainer build --fakeroot X.sif this.def
+
+%files
+    # Bake only packaging metadata and source stubs; runtime binds supply
+    # allowlisted snapshots. uv_build requires pyproject.toml, README.md, LICENSE.
+    /home/vijayv/forger/pyproject.toml    /home/vijayv/forger/pyproject.toml
+    /home/vijayv/forger/README.md         /home/vijayv/forger/README.md
+    /home/vijayv/forger/LICENSE           /home/vijayv/forger/LICENSE
+    /home/vijayv/curator/pyproject.toml   /home/vijayv/curator/pyproject.toml
+    /home/vijayv/curator/README.md        /home/vijayv/curator/README.md
+
+%post
+    set -e
+    leaked=$(find /home/vijayv -type f \( -name 'private_test_cases*' -o -name 'perturbed_cases*' -o -name 'gold_responses*' -o -name 'test*.jsonl' -o -name '*.sif' -o -path '*/.hidden*/*' \) -print -quit)
+    [ -z "$leaked" ] || { echo "Refusing image containing benchmark artifacts" >&2; exit 1; }
+
+    # tini reaps orphans (--compat disables Apptainer's init); tmux backs TerminalTool.
+    apt-get update
+    apt-get install -y --no-install-recommends tini tmux git curl ca-certificates procps build-essential
+    rm -rf /var/lib/apt/lists/*
+    mkdir -p /tmp /var/tmp
+
+    # Empty package stubs satisfy editable-install backends; runtime binds
+    # supply actual sources via their .pth entries.
+    mkdir -p /home/vijayv/forger/src/pyforger /home/vijayv/curator/src/bespokelabs
+    touch /home/vijayv/forger/src/pyforger/__init__.py
+    touch /home/vijayv/curator/src/bespokelabs/__init__.py
+
+    pip install --no-cache-dir \
+        openhands-sdk==1.54.0 openhands-agent-server==1.54.0 \
+        openhands-tools==1.54.0 openhands-workspace==1.54.0 \
+        litellm==1.105.0 tinker==0.33.1 transformers==5.10.2 \
+        torch==2.9.1 sentence-transformers==5.6.0 \
+        RestrictedPython datasets openai numpy scipy pandas scikit-learn \
+        pyyaml jsonschema python-dotenv
+    pip install --no-cache-dir -e /home/vijayv/forger
+    # Curator pins litellm 1.83.7, which Forger's litellm>=1.93 excludes.
+    pip install --no-cache-dir --no-deps -e /home/vijayv/curator
+    pip install --no-cache-dir instructor xxhash nest-asyncio aiofiles anthropic \
+        posthog mistralai matplotlib
+
+    python - <<'PYTHON'
+from importlib.metadata import requires, version, PackageNotFoundError
+from packaging.requirements import Requirement
+assert version('openhands-sdk') == version('openhands-agent-server') == '1.54.0'
+bad = []
+for spec in requires('pyforger'):
+    r = Requirement(spec)
+    if r.marker and not r.marker.evaluate({'extra': ''}):
+        continue
+    try:
+        if not r.specifier.contains(version(r.name), prereleases=True):
+            bad.append(f'{spec} (have {version(r.name)})')
+    except PackageNotFoundError:
+        bad.append(f'{spec} (missing)')
+assert not bad, 'unmet pyforger requirements: ' + '; '.join(bad)
+import tinker, transformers, RestrictedPython, litellm, datasets, openai  # noqa: F401
+import torch, sentence_transformers  # noqa: F401  (clustering embeddings)
+PYTHON
+    agent-server --help > /dev/null || { echo "FATAL: agent-server is broken"; exit 1; }
+    tmux -V
+
+%environment
+    export PYTHONUNBUFFERED=1
+
+%runscript
+    # Skip a ~2s chromium preload that always fails here, and the VSCode probe.
+    export OH_PRELOAD_TOOLS=false
+    export OH_ENABLE_VSCODE=false
+    # -s: under root-mapped fakeroot tini is not PID 1; as a subreaper it still reaps orphans.
+    exec /usr/bin/tini -s -- agent-server "$@"
