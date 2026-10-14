@@ -225,3 +225,11 @@ class TestS2RetrievalSourceFetch:
             assert "summary" in item
             assert item["title"] in item["text"]
             assert item["summary"] in item["text"]
+
+
+def test_api_key_defaults_to_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without api_key, the client gets S2_API_KEY."""
+    monkeypatch.setenv("S2_API_KEY", "env-key")
+    with patch("pyforger.acquire.sources.SemanticScholar") as mock_client_cls:
+        S2RetrievalSource()._get_client()
+    assert mock_client_cls.call_args.kwargs["api_key"] == "env-key"

@@ -148,6 +148,30 @@ class TestWebRetrievalSourceFetch:
         headers = mock_session.headers.update.call_args[0][0]
         assert headers["X-Subscription-Token"] == "my-secret-key"
 
+    @patch("pyforger.acquire.sources.requests.Session")
+    def test_api_key_defaults_to_env(
+        self, mock_session_cls: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without api_key, the token comes from BRAVE_API_KEY."""
+        monkeypatch.setenv("BRAVE_API_KEY", "env-key")
+        mock_session = MagicMock()
+        mock_session_cls.return_value = mock_session
+
+        WebRetrievalSource()._get_session()
+
+        headers = mock_session.headers.update.call_args[0][0]
+        assert headers["X-Subscription-Token"] == "env-key"
+
+    @patch("pyforger.acquire.sources.requests.Session")
+    def test_missing_api_key_raises(
+        self, mock_session_cls: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With no key anywhere, fetch() raises instead of sending a request."""
+        monkeypatch.delenv("BRAVE_API_KEY", raising=False)
+        with pytest.raises(ValueError, match="BRAVE_API_KEY"):
+            WebRetrievalSource().fetch(RetrieveMode.QUERY, query="test", n=1)
+        mock_session_cls.return_value.get.assert_not_called()
+
     @pytest.mark.parametrize("n,expected", [(25, 25), (100, 50)])
     @patch("pyforger.acquire.sources.requests.Session")
     def test_single_request_capped_at_api_maximum(

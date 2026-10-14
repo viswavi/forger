@@ -5,6 +5,7 @@ Concrete sources: web, Wikipedia, Hugging Face, ArXiv, Semantic Scholar.
 
 from __future__ import annotations
 
+import os
 import random
 from abc import ABC, abstractmethod
 from enum import Enum, auto
@@ -114,13 +115,14 @@ class WebRetrievalSource(RetrievalSource):
         Args:
             base_url: Optional domain to restrict results to.  When set,
                 ``site:{base_url}`` is prepended to every query.
-            api_key: Brave Search API subscription token.  Required for
-                actual API calls; omitting it will cause a 401 error.
+            api_key: Brave Search API subscription token.  Defaults to the
+                ``BRAVE_API_KEY`` environment variable; fetch() raises
+                ``ValueError`` if neither is set.
             **kwargs: Session overrides.  ``timeout`` (float) -- per-request
                 timeout in seconds (default 5).
         """
         self.base_url = base_url
-        self._api_key = api_key
+        self._api_key = api_key or os.environ.get("BRAVE_API_KEY")
         self._kwargs = kwargs
         self._session: requests.Session | None = None
 
@@ -215,6 +217,10 @@ class WebRetrievalSource(RetrievalSource):
             )
         if n <= 0:
             raise ValueError("n must be greater than 0")
+        if not self._api_key:
+            raise ValueError(
+                "Brave Search needs an API key: pass api_key or set BRAVE_API_KEY"
+            )
 
         merged = {**self._kwargs, **kwargs}
         session = self._get_session()
@@ -240,7 +246,7 @@ class WebRetrievalSource(RetrievalSource):
 
             return [self._result_to_item(r) for r in generic_results]
 
-        return []
+        raise ValueError(f"unsupported mode: {mode!r}")
 
 
 class WikiRetrievalSource(RetrievalSource):
@@ -835,12 +841,13 @@ class S2RetrievalSource(RetrievalSource):
 
         Args:
             api_key: Optional API key for Semantic Scholar (forwarded to
-                SemanticScholar(api_key=...)). Without a key the client uses
+                SemanticScholar(api_key=...)). Defaults to the ``S2_API_KEY``
+                environment variable. Without a key the client uses
                 unauthenticated access, which has lower rate limits.
             **kwargs: Passed to SemanticScholar (timeout, api_url, retry)
                 and to fetch() overrides (e.g. fields_of_study for RANDOM).
         """
-        self._api_key = api_key
+        self._api_key = api_key or os.environ.get("S2_API_KEY")
         self._kwargs = kwargs
         self._client: SemanticScholar | None = None
 

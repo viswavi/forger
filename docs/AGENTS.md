@@ -146,6 +146,19 @@ validation, making this a superior choice to calling `Model` directly. Any reaso
 contained in the output dict under a `thinking_trace` key. Inline traces are not extracted: `LocalModel` leaves `<think>`
 blocks in the completion text and supplies `None` for that metadata; use `split_reasoning` to separate them out.
 
+The retrieval functions take one query string or a list of queries as their first argument and return a flat list of
+rows, each stamped with its `query`. `mode` is keyword-only (`mode=RetrieveMode.RANDOM` for random sampling where
+supported). Web search reads `BRAVE_API_KEY` and Semantic Scholar reads `S2_API_KEY` from the environment unless
+`api_key=` is passed; web search raises without a key.
+
+```python
+from pyforger.acquire import retrieve_from_web, retrieve_from_wiki
+
+pages = retrieve_from_web(["interval scheduling greedy proof", "monotonic stack patterns"], n=5)
+# pages[i] has "text" (extracted page content), "title", "url", and "query".
+articles = retrieve_from_wiki("Segment tree", n=2)
+```
+
 `generate_custom_rubric` is the recommended entry point for humans and agents.
 It first generates textual criteria, then converts deterministic requirements
 (such as exact counts or JSON structure) to code while retaining semantic and

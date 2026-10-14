@@ -22,12 +22,27 @@ from pyforger.acquire.sources import (
 from pyforger.op import op
 
 
+def _resolve_queries(queries: str | list[str] | None) -> list[str | None]:
+    """Turn the ``queries`` argument into the list of fetches to make.
+
+    A bare string is one query (``"dp tricks"`` -> ``["dp tricks"]``), not a
+    list of characters. ``None`` means one fetch with no query (RANDOM mode).
+    """
+    if isinstance(queries, RetrieveMode):
+        raise TypeError("mode is keyword-only: pass mode=RetrieveMode...")
+    if queries is None:
+        return [None]
+    if isinstance(queries, str):
+        return [queries]
+    return list(queries)
+
+
 @op(name="acquire.retrieve")
 def retrieve(
     source: RetrievalSource,
-    mode: RetrieveMode = RetrieveMode.QUERY,
+    queries: str | list[str] | None = None,
     *,
-    queries: list[str] | None = None,
+    mode: RetrieveMode = RetrieveMode.QUERY,
     n: int = 10,
     seed: int | None = None,
     **kwargs: Any,
@@ -37,11 +52,13 @@ def retrieve(
     Each row is stamped with a ``"query"`` field. With ``queries=None``,
     a single fetch with no query is performed (e.g. random sampling).
     """
-    resolved_queries: list[str | None] = (
-        list(queries) if queries is not None else [None]
-    )
+    if not isinstance(mode, RetrieveMode):
+        raise TypeError(
+            f"mode must be a RetrieveMode, not {mode!r}; "
+            "pass search strings as queries"
+        )
     all_rows: list[dict[str, Any]] = []
-    for q in resolved_queries:
+    for q in _resolve_queries(queries):
         rows = source.fetch(mode, query=q, n=n, seed=seed, **kwargs)
         for row in rows:
             row["query"] = q
@@ -53,15 +70,18 @@ def retrieve(
 # implementation so bypassing a wrapper cannot hit an inner cache.
 @op(name="acquire.retrieve_from_web")
 def retrieve_from_web(
-    mode: RetrieveMode = RetrieveMode.QUERY,
+    queries: str | list[str] | None = None,
     *,
-    queries: list[str] | None = None,
+    mode: RetrieveMode = RetrieveMode.QUERY,
     n: int = 10,
     seed: int | None = None,
     base_url: str | None = None,
     **kwargs: Any,
 ) -> list[dict]:
-    """Search the web via Brave's LLM Context API. QUERY mode only."""
+    """Search the web via Brave's LLM Context API. QUERY mode only.
+
+    The API key comes from ``api_key=`` or, failing that, ``BRAVE_API_KEY``.
+    """
     source_kwargs = {k: v for k, v in kwargs.items() if k not in ("api_key",)}
     source = WebRetrievalSource(
         base_url=base_url,
@@ -75,9 +95,9 @@ def retrieve_from_web(
 
 @op(name="acquire.retrieve_from_wiki")
 def retrieve_from_wiki(
-    mode: RetrieveMode = RetrieveMode.QUERY,
+    queries: str | list[str] | None = None,
     *,
-    queries: list[str] | None = None,
+    mode: RetrieveMode = RetrieveMode.QUERY,
     n: int = 10,
     seed: int | None = None,
     language: str = "en",
@@ -93,12 +113,12 @@ def retrieve_from_wiki(
 @op(name="acquire.retrieve_from_hf")
 def retrieve_from_hf(
     dataset: str,
+    queries: str | list[str] | None = None,
+    *,
     config: str | None = None,
     split: str = "train",
     text_column: str | None = None,
     mode: RetrieveMode = RetrieveMode.RANDOM,
-    *,
-    queries: list[str] | None = None,
     n: int = 10,
     seed: int | None = None,
     **kwargs: Any,
@@ -118,9 +138,9 @@ def retrieve_from_hf(
 
 @op(name="acquire.retrieve_from_arxiv")
 def retrieve_from_arxiv(
-    mode: RetrieveMode = RetrieveMode.QUERY,
+    queries: str | list[str] | None = None,
     *,
-    queries: list[str] | None = None,
+    mode: RetrieveMode = RetrieveMode.QUERY,
     n: int = 10,
     seed: int | None = None,
     **kwargs: Any,
@@ -134,9 +154,9 @@ def retrieve_from_arxiv(
 
 @op(name="acquire.retrieve_from_s2")
 def retrieve_from_s2(
-    mode: RetrieveMode = RetrieveMode.QUERY,
+    queries: str | list[str] | None = None,
     *,
-    queries: list[str] | None = None,
+    mode: RetrieveMode = RetrieveMode.QUERY,
     n: int = 10,
     seed: int | None = None,
     **kwargs: Any,

@@ -194,6 +194,32 @@ class TestMultiQueryRetrieve:
         result = retrieve(source, queries=["a"])
         assert result == [{"text": "hello", "id": "42", "query": "a"}]
 
+    def test_bare_query_string_is_one_query(self):
+        """A positional string is a single query, not a list of characters."""
+        source = MockRetrievalSource([{"text": "hello"}])
+        assert retrieve(source, "dp tricks") == [
+            {"text": "hello", "query": "dp tricks"}
+        ]
+
+    @patch("pyforger.acquire.sources.WebRetrievalSource.fetch")
+    def test_wrapper_takes_query_first(self, mock_fetch):
+        """retrieve_from_web("...") searches for that string in QUERY mode."""
+        mock_fetch.return_value = [{"text": "t", "url": "u"}]
+        assert retrieve_from_web("segment tree", n=3) == [
+            {"text": "t", "url": "u", "query": "segment tree"}
+        ]
+        mock_fetch.assert_called_once_with(
+            RetrieveMode.QUERY, query="segment tree", n=3, seed=None
+        )
+
+    def test_mode_is_keyword_only(self):
+        """Passing a mode positionally, or a string as mode, raises TypeError."""
+        source = MockRetrievalSource([{"text": "a"}])
+        with pytest.raises(TypeError, match="keyword-only"):
+            retrieve_from_web(RetrieveMode.QUERY)
+        with pytest.raises(TypeError, match="pass search strings as queries"):
+            retrieve(source, mode="segment tree")
+
 
 @pytest.mark.parametrize(
     "entry,source_type,args",
