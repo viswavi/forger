@@ -87,6 +87,8 @@ def evaluate(
     result = evaluator.evaluate(artifact, output / "evidence")
     if not isinstance(result, EvaluationResult):
         raise TypeError("Evaluator.evaluate must return EvaluationResult")
+    # The evaluator had write access to its evidence directory and read access
+    # to the artifact; verify both once before persisting the result.
     artifact.verify()
     result.verify()
     (output / "evaluation.json").write_text(
@@ -96,8 +98,6 @@ def evaluate(
         + "\n",
         encoding="utf-8",
     )
-    artifact.verify()
-    result.verify()
     return result
 
 
