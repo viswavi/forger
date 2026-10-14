@@ -280,9 +280,7 @@ class ArtifactStore:
                 if not os.path.lexists(destination):
                     raise
                 return self.get(ref.digest)
-            return ArtifactRef(
-                root=destination, digest=ref.digest, files=ref.files
-            )
+            return ArtifactRef(root=destination, digest=ref.digest, files=ref.files)
 
 
 def read_text(path: Path, max_bytes: int = 2 * 1024 * 1024) -> str:
