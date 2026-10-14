@@ -109,7 +109,7 @@ def code_score(code, prompt, response, ground_truth):
                 stderr=subprocess.PIPE,
                 cwd=directory,
                 env={"LANG": "C.UTF-8"},
-                timeout=12,
+                timeout=30,  # rubric_worker.GRADE_TIMEOUT_S plus startup
             )
         except subprocess.TimeoutExpired:
             return 0.0

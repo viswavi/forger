@@ -132,6 +132,16 @@ positive sum. Reward is `sum(weight * score) / sum(weight)`.
   wall-clock, CPU, memory, and file-size limits. It receives no credentials.
   Imports are limited to JSON, regex, math, string, collections, itertools,
   functools, and statistics. The RestrictedPython API exposes no LiteLLM, filesystem, or network operations.
+  `exec` is unavailable; to test code in the response, `grade` can call two
+  predefined helpers. `run_program(code, stdin="")` runs `code` as a script and
+  returns `(True, stdout)`. `call_method(code, class_name, method_name, *args)`
+  returns `(True, class_name().method_name(*args))`, JSON-normalized (tuples
+  become lists; custom objects fail). Both return `(False, error_type)` on errors
+  or timeouts. The response's code runs in its own RestrictedPython namespace
+  with captured stdin/stdout and common algorithm imports (`heapq`, `bisect`,
+  `collections`, ...; no `os`). Each run is limited to 4 s and the whole
+  criterion to 20 s, so keep test counts small. Response code that uses
+  `_`-prefixed names (e.g. `self._cache`) does not compile there.
   The subprocess is not an OS filesystem/network namespace; an RP escape would
   still run as the host user.
   Code errors, invalid scores, and timeouts earn zero for that criterion.
