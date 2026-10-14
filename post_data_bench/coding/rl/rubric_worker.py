@@ -27,7 +27,9 @@ def _budgeted(fn, seconds):
     """
     remaining = signal.getitimer(signal.ITIMER_REAL)[0]
     started = time.monotonic()
-    signal.setitimer(signal.ITIMER_REAL, min(seconds, remaining) if remaining else seconds)
+    signal.setitimer(
+        signal.ITIMER_REAL, min(seconds, remaining) if remaining else seconds
+    )
     try:
         return True, fn()
     except Exception as exc:
@@ -47,10 +49,12 @@ def solution_helpers():
     solutions = Sandbox(allowed_imports=DEFAULT_ALLOWED_IMPORTS)
 
     def run_program(code, stdin=""):
-        """Run code as a script on stdin; return (True, stdout) or (False, error type)."""
+        """Run code as a script on stdin; return (True, stdout) or (False, error)."""
         if not isinstance(code, str) or not isinstance(stdin, str):
             return False, "TypeError"
-        return _budgeted(lambda: solutions.run_program(code, stdin=stdin), RUN_TIMEOUT_S)
+        return _budgeted(
+            lambda: solutions.run_program(code, stdin=stdin), RUN_TIMEOUT_S
+        )
 
     def call_method(code, class_name, method_name, *args):
         """Return (True, class_name().method_name(*args)) or (False, error type).
@@ -123,7 +127,9 @@ def main():
             raise ValueError("score must be a finite number in [0,1]")
         print(json.dumps({"score": float(value)}, allow_nan=False))
     except Exception as exc:
-        print(json.dumps({"error": type(exc).__name__}))
+        # The message makes a broken grade() debuggable instead of a silent 0,
+        # e.g. 'Line 4: "_final" is an invalid variable name ...'.
+        print(json.dumps({"error": type(exc).__name__, "message": str(exc)[:2000]}))
 
 
 if __name__ == "__main__":

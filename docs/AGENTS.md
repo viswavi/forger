@@ -63,7 +63,8 @@ if "LITELLM_API_KEY" not in os.environ:
 ### Cost
 
 Benchmark LLM quotas use fixed token units, independent of provider prices:
-DeepSeek-V4-Flash input/output tokens weigh 1/3 units; GLM-5.3 tokens weigh 4/12.5.
+DeepSeek-V4-Flash costs 1 unit per input token and 3 per output token; GLM-5.3 costs
+4 per input token and 12.5 per output token.
 Cached input tokens count at full weight. Completion tokens already include reasoning;
 do not add reasoning tokens again. Other model families have no defined unit weight.
 
