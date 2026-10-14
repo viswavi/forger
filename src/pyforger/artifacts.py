@@ -211,9 +211,12 @@ class ArtifactRef(BaseModel):
         return self.digest
 
     def path(self, relative: str) -> Path:
-        """Return a manifested file path after validating the entire artifact."""
+        """Return the path of a manifested file without rehashing the tree.
+
+        This is a lookup, not an integrity check: call ``verify()`` explicitly
+        at trust boundaries (before reuse, after untrusted code runs).
+        """
         relative = _relative(relative)
-        self.verify()
         if relative not in {f.path for f in self.files}:
             raise ValueError(f"File is not in artifact manifest: {relative!r}")
         return self.root / relative
@@ -246,7 +249,12 @@ class ArtifactStore:
         return ref
 
     def put(self, source: Path) -> ArtifactRef:
-        """Publish a verified copy atomically, reusing matching stored contents."""
+        """Publish a verified copy atomically, reusing matching stored contents.
+
+        The source is hashed once by ``capture``; the staged copy is verified
+        once before the atomic rename. The returned reference is constructed
+        for the destination directly instead of recapturing it.
+        """
         ref = ArtifactRef.capture(source)
         _directory(self.root)
         destination = self.root / ref.digest
@@ -265,14 +273,16 @@ class ArtifactStore:
                     target.open("wb") as output,
                 ):
                     shutil.copyfileobj(stream, output, _CHUNK_SIZE)
-            ref.verify()
             ArtifactRef(root=staged, digest=ref.digest, files=ref.files).verify()
             try:
                 staged.rename(destination)
             except OSError:
                 if not os.path.lexists(destination):
                     raise
-            return self.get(ref.digest)
+                return self.get(ref.digest)
+            return ArtifactRef(
+                root=destination, digest=ref.digest, files=ref.files
+            )
 
 
 def read_text(path: Path, max_bytes: int = 2 * 1024 * 1024) -> str:
