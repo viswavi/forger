@@ -38,6 +38,8 @@ logger = get_formatted_logger("forger.op")
 P = ParamSpec("P")
 T = TypeVar("T")
 T_co = TypeVar("T_co", covariant=True)
+Q = ParamSpec("Q")
+R = TypeVar("R")
 
 
 class Op(Protocol[P, T_co]):
@@ -211,11 +213,11 @@ def op(
 
 
 def op(
-    _fn: Callable[..., Any] | None = None,
+    _fn: Callable[P, T] | None = None,
     *,
     name: str | None = None,
     cache: bool = True,
-) -> Op[..., Any] | _OpDecorator:
+) -> Op[P, T] | _OpDecorator:
     """Decorator: cache output on disk, content-addressed by inputs.
 
     Usage::
@@ -236,7 +238,7 @@ def op(
     ``FileNotFoundError`` on a miss without executing the function.
     """
 
-    def decorate(fn: Callable[P, T]) -> Op[P, T]:
+    def decorate(fn: Callable[Q, R]) -> Op[Q, R]:
         try:
             sig = inspect.signature(fn)
         except (TypeError, ValueError) as exc:
@@ -266,7 +268,7 @@ def op(
             _no_cache: bool = False,
             _cache_only: bool = False,
             **kwargs: Any,
-        ) -> T:
+        ) -> R:
             if _cache_only and (_no_cache or not cache):
                 raise ValueError("_cache_only requires an enabled cache")
             start = time.time()
@@ -313,7 +315,7 @@ def op(
                         )
 
                     with cache_path.open("rb") as f:
-                        result: T = pickle.load(f)
+                        result: R = pickle.load(f)
                     cache_hit = True
                 except Exception as exc:
                     if _cache_only:
@@ -378,7 +380,7 @@ def op(
 
             return result
 
-        wrapped: _OpWrapper[P, T] = _OpWrapper(wrapper)
+        wrapped: _OpWrapper[Q, R] = _OpWrapper(wrapper)
         wraps(wrapper)(wrapped)
         return wrapped
 
