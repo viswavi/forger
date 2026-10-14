@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import functools
 import json
 import math
 from typing import Any
@@ -10,8 +11,25 @@ from typing import Any
 from pyforger.acquire.model import Model, Prompt
 from pyforger.op import op
 
+# Appended to the stage prompts when every criterion must be checked in code.
+_CODE_ONLY_CRITERIA = """
+Code-only mode: no LLM judge is available. Every criterion will be checked by a
+Python function of the prompt, response, and optional ground_truth. Write only
+criteria that code can check faithfully and deterministically, such as an exact
+final answer, a required literal string, an output format, or behavior on inputs
+stated in the task. Omit subjective or judgment-based requirements instead of
+approximating them."""
 
-def _rubric_prompt(item: dict) -> Prompt:
+_CODE_ONLY_CONVERSION = """
+
+Code-only mode: there is no prompted judge, so kind "prompt" is not allowed.
+Return kind "code" when the ENTIRE criterion can be checked faithfully in code.
+Otherwise return kind "omit" with an empty source; omitted criteria are dropped.
+The rules above still apply: never approximate a semantic requirement with code.
+Omitting an uncertain criterion is a successful decision."""
+
+
+def _rubric_prompt(item: dict, code_criteria_only: bool = False) -> Prompt:
     return [
         {
             "role": "system",
@@ -42,7 +60,8 @@ Assign each criterion an independent numeric importance weight from 0 to 100:
 Return only a JSON object with a "rubric" array of [criterion, weight] pairs.
 Example: {"rubric": [["Does the response address the stated audience?", 100],
 ["Does the response explain unfamiliar terminology?", 75]]}.
-Do not include reasoning, scores for candidate responses, or executable code.""",
+Do not include reasoning, scores for candidate responses, or executable code."""
+            + (_CODE_ONLY_CRITERIA if code_criteria_only else ""),
         },
         {"role": "user", "content": json.dumps(item, ensure_ascii=False)},
     ]
@@ -82,6 +101,7 @@ def generate_custom_rubric_criteria(
     temperature: float = 0.7,
     max_retries: int = 3,
     batch_size: int = 10,
+    code_criteria_only: bool = False,
 ) -> list[list[tuple[str, float]]]:
     """Generate one textual rubric per input, preserving input order.
 
@@ -95,6 +115,9 @@ def generate_custom_rubric_criteria(
     Weights represent independent importance, not normalized percentages.
     An empty rubric means the model found no grounded criteria; empty inputs
     return an empty list without calling the model.
+
+    ``code_criteria_only=True`` asks only for criteria that code can check
+    deterministically, e.g. an exact final answer rather than clarity.
 
     ``batch_size`` limits prompts per model batch; ``temperature`` controls
     sampling. Invalid outputs receive up to ``max_retries`` additional attempts.
@@ -138,6 +161,11 @@ def generate_custom_rubric_criteria(
             item["candidate_responses"] = candidate_responses[i]
         items.append(item)
 
+    prompt = (
+        functools.partial(_rubric_prompt, code_criteria_only=True)
+        if code_criteria_only
+        else _rubric_prompt
+    )
     results: list[list[tuple[str, float]]] = [[] for _ in inputs]
     pending = list(range(len(inputs)))
     for _ in range(max_retries + 1):
@@ -145,7 +173,7 @@ def generate_custom_rubric_criteria(
             break
         rows = generate_from_context(
             [items[i] for i in pending],
-            _rubric_prompt,
+            prompt,
             model,
             output_schema={"rubric": list},
             temperature=temperature,
@@ -171,7 +199,7 @@ def generate_custom_rubric_criteria(
     return results
 
 
-def _conversion_prompt(item: dict) -> Prompt:
+def _conversion_prompt(item: dict, code_criteria_only: bool = False) -> Prompt:
     return [
         {
             "role": "system",
@@ -227,7 +255,8 @@ def grade(prompt, response, ground_truth):
     except (ValueError, TypeError):
         return 0.0
     return 1.0 if isinstance(value, dict) else 0.0
-""",
+"""
+            + (_CODE_ONLY_CONVERSION if code_criteria_only else ""),
         },
         {"role": "user", "content": json.dumps(item, ensure_ascii=False)},
     ]
@@ -304,6 +333,7 @@ def convert_rubric_criteria(
     temperature: float = 0.7,
     max_retries: int = 3,
     batch_size: int = 10,
+    code_criteria_only: bool = False,
 ) -> list[list[list[dict[str, str] | float]]]:
     """Convert text rubrics to RL-format ``[{code|prompt: source}, weight]`` pairs.
 
@@ -317,6 +347,10 @@ def convert_rubric_criteria(
     Malformed outputs receive ``max_retries`` additional fresh attempts, then
     raise with (rubric, criterion) indices. Provider errors propagate.
     Use ``_no_cache=True`` for fresh conversion or ``_cache_only=True`` for reads.
+
+    ``code_criteria_only=True`` never keeps a prompted judge: criteria that
+    cannot be checked faithfully in code are dropped, so rubrics may shrink or
+    become empty.
     """
     from pyforger.alter.generate import generate_from_context
 
@@ -360,13 +394,20 @@ def convert_rubric_criteria(
                 item["meta_description"] = meta_description
             items.append(item)
             positions.append((i, j))
+    kinds = {"code", "omit"} if code_criteria_only else {"code", "prompt"}
+    prompt = (
+        functools.partial(_conversion_prompt, code_criteria_only=True)
+        if code_criteria_only
+        else _conversion_prompt
+    )
+    omitted: set[tuple[int, int]] = set()
     pending = list(range(len(items)))
     for _ in range(max_retries + 1):
         if not pending:
             break
         rows = generate_from_context(
             [items[k] for k in pending],
-            _conversion_prompt,
+            prompt,
             model,
             output_schema={"kind": str, "source": str},
             temperature=temperature,
@@ -378,9 +419,12 @@ def convert_rubric_criteria(
         for offset, k in enumerate(pending):
             row = rows[offset] if offset < len(rows) else None
             try:
-                if row is None or row.get("kind") not in {"code", "prompt"}:
+                if row is None or row.get("kind") not in kinds:
                     raise ValueError("invalid conversion variant")
                 kind, source = row["kind"], row.get("source")
+                if kind == "omit":
+                    omitted.add(positions[k])
+                    continue
                 if not isinstance(source, str) or not source.strip():
                     raise ValueError("empty conversion source")
                 if kind == "prompt" and source != items[k]["criterion"]:
@@ -398,7 +442,10 @@ def convert_rubric_criteria(
             f"Rubric conversion failed for (rubric, criterion) indices "
             f"{[positions[k] for k in pending]} after {max_retries + 1} attempts"
         )
-    return results
+    return [
+        [pair for j, pair in enumerate(rubric) if (i, j) not in omitted]
+        for i, rubric in enumerate(results)
+    ]
 
 
 def generate_custom_rubric(
@@ -410,6 +457,7 @@ def generate_custom_rubric(
     temperature: float = 0.7,
     max_retries: int = 3,
     batch_size: int = 10,
+    code_criteria_only: bool = False,
     _no_cache: bool = False,
     _cache_only: bool = False,
 ) -> list[list[list[dict[str, str] | float]]]:
@@ -421,6 +469,10 @@ def generate_custom_rubric(
     positive total weight. The caller still supplies prompt and ground_truth
     for RL training rows. Code receives static validation, not a semantic proof.
     The separate text generator remains available for inspecting either stage.
+
+    ``code_criteria_only=True`` returns only ``{"code": ...}`` criteria, e.g.
+    for tasks with exact answers where a judge only adds cost and noise. An
+    input left without a positive-weight code criterion raises ValueError.
     """
     rubrics = generate_custom_rubric_criteria(
         inputs,
@@ -430,6 +482,7 @@ def generate_custom_rubric(
         temperature=temperature,
         max_retries=max_retries,
         batch_size=batch_size,
+        code_criteria_only=code_criteria_only,
         _no_cache=_no_cache,
         _cache_only=_cache_only,
     )
@@ -438,7 +491,7 @@ def generate_custom_rubric(
             raise ValueError(
                 f"RL rubric at input index {i} must have positive total weight"
             )
-    return convert_rubric_criteria(
+    converted = convert_rubric_criteria(
         rubrics,
         model,
         inputs=inputs,
@@ -446,6 +499,18 @@ def generate_custom_rubric(
         temperature=temperature,
         max_retries=max_retries,
         batch_size=batch_size,
+        code_criteria_only=code_criteria_only,
         _no_cache=_no_cache,
         _cache_only=_cache_only,
     )
+    empty = [
+        i
+        for i, rubric in enumerate(converted)
+        if sum(weight for _, weight in rubric) <= 0  # type: ignore[misc]
+    ]
+    if empty:
+        raise ValueError(
+            f"Rubrics at input indices {empty} have no code-checkable criteria "
+            "with positive weight"
+        )
+    return converted

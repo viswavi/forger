@@ -148,6 +148,13 @@ text. Ambiguous requirements and combined objective/subjective criteria stay
 prompted rather than being approximated by heuristics. The main entry point
 rejects empty or zero-total-weight rubrics; an empty input list returns `[]`.
 
+Pass `code_criteria_only=True` when every criterion should be checked in code, e.g.
+tasks with exact answers, where an LLM judge only adds cost and reward noise. Both
+stages then ask only for code-checkable criteria, and criteria that still cannot be
+checked faithfully in code are dropped rather than approximated. An input left
+without a positive-weight code criterion raises `ValueError`. The same flag exists
+on `generate_custom_rubric_criteria` and `convert_rubric_criteria`.
+
 To inspect or reuse stages independently, keep using the textual generator below
 and then call `convert_rubric_criteria(text_rubrics, model, inputs=task_strings)`.
 The optional aligned `inputs` and shared `meta_description` provide context.

@@ -7,7 +7,7 @@ import json
 import pytest
 from fixtures import RecordingMockModel
 
-from pyforger.acquire import generate_custom_rubric_criteria
+from pyforger.acquire import generate_custom_rubric, generate_custom_rubric_criteria
 from pyforger.op import trace
 
 
@@ -193,3 +193,56 @@ def test_cache_preserves_tuples_and_bypass_reaches_model():
     generate_custom_rubric_criteria(["input"], model, meta_description="new context")
     generate_custom_rubric_criteria(["input"], model, candidate_responses=[["example"]])
     assert model._call_count == 4
+
+
+CODE = "def grade(prompt, response, ground_truth):\n    return 1.0"
+
+
+def converted(kind, source=""):
+    """Encode one criterion conversion in the model's expected JSON format."""
+    return json.dumps({"kind": kind, "source": source})
+
+
+def test_code_criteria_only_drops_uncheckable_criteria():
+    """Keep code criteria, drop omitted ones, and tell both stages."""
+    model = ScriptedModel(
+        [
+            [[encoded(["Is the final answer 42?", 100], ["Is it clear?", 50])]],
+            [[converted("code", CODE)], [converted("omit")]],
+        ]
+    )
+    result = generate_custom_rubric(["What is 6 * 7?"], model, code_criteria_only=True)
+    assert result == [[[{"code": CODE}, 100.0]]]
+    assert all(
+        "Code-only mode" in batch[0][0]["content"] for batch in model.recorded_prompts
+    )
+
+
+def test_code_criteria_only_rejects_prompt_kind_and_empty_rubrics():
+    """A prompted judge is retried; an all-omitted rubric raises."""
+    model = ScriptedModel(
+        [
+            [[encoded(["Is it kind?", 100])]],
+            [[converted("prompt", "Is it kind?")]],
+            [[converted("omit")]],
+        ]
+    )
+    with pytest.raises(ValueError, match=r"input indices \[0\] have no code"):
+        generate_custom_rubric(
+            ["Comfort a friend."], model, code_criteria_only=True, max_retries=1
+        )
+    assert model._call_count == 3
+
+
+def test_default_mode_keeps_prompted_judges():
+    """Without the flag, "omit" is invalid and prompts are kept verbatim."""
+    model = ScriptedModel(
+        [
+            [[encoded(["Is it kind?", 100])]],
+            [[converted("omit")]],
+            [[converted("prompt", "Is it kind?")]],
+        ]
+    )
+    result = generate_custom_rubric(["Comfort a friend."], model, max_retries=1)
+    assert result == [[[{"prompt": "Is it kind?"}, 100.0]]]
+    assert "Code-only mode" not in model.recorded_prompts[0][0][0]["content"]
