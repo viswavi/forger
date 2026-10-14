@@ -22,16 +22,19 @@ from pyforger.trials import (
 
 
 def _environment(environment):
+    """ environment."""
     if environment is None:
         raise ValueError("This runner requires an explicit execution environment")
     return environment
 
 
 def _limits(request):
+    """ limits."""
     return request.configuration.get("command_timeout_s", 60.0)
 
 
 def _collect(environment, request, output):
+    """ collect."""
     outputs = tuple(request.configuration.get("outputs", []))
     if outputs:
         environment.collect(outputs, output / "files")
@@ -165,6 +168,7 @@ def request(tmp_path, **configuration):
 
 
 def test_execute_is_fresh_and_records_are_execution_only(tmp_path):
+    """Execute is fresh and records are execution only."""
     req = request(tmp_path)
     factory = LocalFactory(tmp_path / "envs")
     runner = CommandAgentRunner()

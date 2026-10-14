@@ -53,6 +53,7 @@ def request(tmp_path, **configuration):
 
 @pytest.mark.parametrize("offset", [0, 1])
 def test_real_rollout_and_serialization(tmp_path, offset):
+    """Real rollout and serialization."""
     req = request(tmp_path, offset=offset)
     rollout = execute_agent(req, ArithmeticRunner(), tmp_path / "run")
     result = RolloutRecord(request=req, rollout=rollout)
@@ -186,6 +187,7 @@ def test_runner_may_not_change_request_identity(tmp_path):
 
 
 def test_verified_record_binds_execution_metadata(tmp_path):
+    """Verified record binds execution metadata."""
     req = request(tmp_path, offset=1)
     rollout = execute_agent(req, ArithmeticRunner(), tmp_path / "run")
     record = ArtifactRef.capture(tmp_path / "run")
@@ -198,6 +200,7 @@ def test_verified_record_binds_execution_metadata(tmp_path):
 
 
 def test_execution_record_rejects_evaluation(tmp_path):
+    """Execution record rejects evaluation."""
     req = request(tmp_path)
     rollout = execute_agent(req, ArithmeticRunner(), tmp_path / "run")
     data = RolloutRecord(request=req, rollout=rollout).model_dump(mode="json")
@@ -207,6 +210,7 @@ def test_execution_record_rejects_evaluation(tmp_path):
 
 
 def test_runner_exception_preserves_partial_evidence_and_reserves_output(tmp_path):
+    """Runner exception preserves partial evidence and reserves output."""
     class BrokenRunner:
         def run(self, request, output, *, environment=None):
             assert not output.exists()
@@ -225,6 +229,7 @@ def test_runner_exception_preserves_partial_evidence_and_reserves_output(tmp_pat
 
 
 def test_runner_must_return_current_evidence(tmp_path):
+    """Runner must return current evidence."""
     class StaleRunner(ArithmeticRunner):
         def run(self, request, output, *, environment=None):
             result = super().run(request, output)
