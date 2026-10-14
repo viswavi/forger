@@ -142,6 +142,49 @@ def _family(model_id: str) -> str:
     return s
 
 
+# How each known model family reads a reasoning effort, matched by substring of
+# the model id. The gateway serves DeepSeek through Azure AI, which ignores
+# `reasoning_effort` (thinking stays off, or leaks into the answer text); GLM is
+# served by Fireworks, which reads `reasoning_effort` ("low", "medium", "high").
+_REASONING_FORMS: dict[str, Callable[[str], dict[str, Any]]] = {
+    "deepseek-v4": lambda effort: {"reasoning": {"effort": effort}},
+    "glm-5.3": lambda effort: {"reasoning_effort": effort},
+}
+
+
+def _reasoning_kwargs(
+    model_id: str, effort: str | None, kwargs: dict[str, Any]
+) -> dict[str, Any]:
+    """Return completion kwargs with `effort` in the form the model reads.
+
+    An explicit `effort` overrides any `reasoning`/`reasoning_effort` in
+    `kwargs` or in `kwargs["extra_body"]`. Known families use the form in
+    `_REASONING_FORMS`; other models get LiteLLM's standard `reasoning_effort`.
+    With no `effort`, `kwargs` are returned unchanged.
+    """
+    if effort is None:
+        return dict(kwargs)
+    kwargs = {
+        k: v for k, v in kwargs.items() if k not in ("reasoning", "reasoning_effort")
+    }
+    if isinstance(kwargs.get("extra_body"), dict):
+        extra_body = {
+            k: v
+            for k, v in kwargs["extra_body"].items()
+            if k not in ("reasoning", "reasoning_effort")
+        }
+        if extra_body:
+            kwargs["extra_body"] = extra_body
+        else:
+            del kwargs["extra_body"]
+    lowered = model_id.lower()
+    form = next(
+        (f for key, f in _REASONING_FORMS.items() if key in lowered),
+        lambda effort: {"reasoning_effort": effort},
+    )
+    return {**kwargs, **form(effort)}
+
+
 def _validate_params(model_id: str, **params: Any) -> None:
     """Raise `ValueError` on unsupported params or constraint violations."""
     supported_set = set(litellm.get_supported_openai_params(model=model_id) or [])
@@ -279,6 +322,7 @@ class Model:
         max_tokens: int | None = None,
         num_retries: int = 2,
         show_progress: bool = False,
+        reasoning_effort: str | None = None,
         **kwargs: Any,
     ) -> None:
         """Create a Model instance.
@@ -294,6 +338,12 @@ class Model:
                 failures.
             show_progress: When True, a multi-prompt generate_batch() call
                 (len(prompts) > 1) shows a live tqdm progress bar to stderr.
+            reasoning_effort: Reasoning effort (e.g. "none", "low", "high"),
+                sent in the form the model reads: DeepSeek-V4 gets
+                ``reasoning={"effort": ...}`` and GLM-5.3 ``reasoning_effort``
+                (see `_REASONING_FORMS`). Overrides any reasoning setting in
+                `kwargs` or `extra_body`. DeepSeek-V4 on the gateway does not
+                think at all without it.
             **kwargs: Passed through to litellm.completion()
                 (e.g. api_base, timeout, organization).
         """
@@ -303,7 +353,7 @@ class Model:
         self._max_tokens = max_tokens
         self._num_retries = num_retries
         self._show_progress = show_progress
-        self._kwargs = kwargs
+        self._kwargs = _reasoning_kwargs(model_id, reasoning_effort, kwargs)
         self.history: list[GenerateResult] = []
         self._usage_lock = threading.RLock()
         self._total_token_units = self._calculate_token_units(0, 0)

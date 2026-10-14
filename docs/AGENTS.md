@@ -371,8 +371,11 @@ model = Model(
 )
 ```
 
-Use `Model(..., reasoning_effort="low")` where supported by the model/provider.
-`dynamic_step` forwards `reasoning_effort` and `extra_body` to OpenHands.
+Use `Model(..., reasoning_effort="low")` (or `"none"`, `"high"`) to set reasoning effort. `Model` sends it in the
+form each model reads: DeepSeek-V4 as `reasoning={"effort": "low"}` (the gateway ignores `reasoning_effort` for it),
+GLM-5.3 and other models as `reasoning_effort`. It overrides any reasoning setting passed through `**kwargs` or
+`extra_body`. Without it, DeepSeek-V4-Flash on the gateway does not think at all.
+`dynamic_step` forwards the reasoning effort and `extra_body` to OpenHands.
 
 #### Prompt types
 

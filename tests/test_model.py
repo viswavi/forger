@@ -1321,3 +1321,49 @@ class TestPublicExports:
         from pyforger.acquire import GenerateResult as Exported
 
         assert Exported is GenerateResult
+
+
+class TestReasoningEffort:
+    """reasoning_effort is sent in the form each model family reads."""
+
+    DEEPSEEK = "litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731"
+    GLM = "litellm_proxy/azure_ai/FW-GLM-5.3"
+
+    @pytest.mark.parametrize(
+        "model_id,sent",
+        [
+            # The gateway's DeepSeek ignores reasoning_effort entirely.
+            (DEEPSEEK, {"reasoning": {"effort": "high"}}),
+            # GLM is served by Fireworks, which reads reasoning_effort.
+            (GLM, {"reasoning_effort": "high"}),
+            # Unmapped models get LiteLLM's standard parameter.
+            ("gpt-4o", {"reasoning_effort": "high"}),
+        ],
+    )
+    @patch("pyforger.acquire.model.litellm")
+    def test_sent_in_family_form(self, mock_litellm, model_id, sent):
+        """The effort reaches litellm under the name the provider honors."""
+        mock_litellm.get_supported_openai_params.return_value = []
+        mock_litellm.completion.return_value = make_litellm_response(["ok"])
+        Model(model_id, reasoning_effort="high").generate("Hi")
+        kwargs = mock_litellm.completion.call_args.kwargs
+        for name in ("reasoning", "reasoning_effort"):
+            assert kwargs.get(name) == sent.get(name)
+
+    def test_overrides_kwargs_and_extra_body(self):
+        """An explicit effort replaces reasoning settings passed any other way."""
+        model = Model(
+            self.DEEPSEEK,
+            reasoning_effort="low",
+            reasoning={"effort": "high"},
+            extra_body={"reasoning_effort": "high", "top_k": 5},
+        )
+        assert model._kwargs == {
+            "reasoning": {"effort": "low"},
+            "extra_body": {"top_k": 5},
+        }
+
+    def test_without_effort_kwargs_pass_through(self):
+        """With no explicit effort, caller kwargs are sent unchanged."""
+        model = Model(self.DEEPSEEK, reasoning={"effort": "none"})
+        assert model._kwargs == {"reasoning": {"effort": "none"}}

@@ -123,8 +123,12 @@ def agent_llm(model):
     for option in ("timeout", "reasoning_effort"):
         if option in model._kwargs:
             config[option] = model._kwargs[option]
-    if "extra_body" in model._kwargs:
-        config["litellm_extra_body"] = model._kwargs["extra_body"]
+    extra_body = dict(model._kwargs.get("extra_body") or {})
+    # Model sends DeepSeek's effort as reasoning={"effort": ...}; see model.py.
+    if "reasoning" in model._kwargs:
+        extra_body.setdefault("reasoning", model._kwargs["reasoning"])
+    if extra_body:
+        config["litellm_extra_body"] = extra_body
     for option in ("api_mode", "capability_overrides"):
         if option in model._kwargs:
             config[option] = model._kwargs[option]
