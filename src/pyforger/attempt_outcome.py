@@ -27,6 +27,6 @@ class AttemptOutcome(BaseModel):
         return self
 
     @property
-    def counted(self):
+    def counted(self) -> bool:
         """Only attributable model outcomes enter empirical accuracy."""
         return self.attribution == "model"

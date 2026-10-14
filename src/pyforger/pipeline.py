@@ -39,7 +39,7 @@ def run(pipeline: P, *args: Any, **kwargs: Any) -> Any:
     return pipeline(*args, **kwargs)
 
 
-def optimize(pipeline: P, transforms: list[Transform]) -> P:
+def optimize(pipeline: P, transforms: list[Transform[P]]) -> P:
     """Apply transforms in order. Each is a function → function rewriter.
 
     Returns a new pipeline. The original is not mutated.

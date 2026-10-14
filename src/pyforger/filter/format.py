@@ -5,6 +5,7 @@ Length, invalid-response, and keyword-blocklist filters.
 from __future__ import annotations
 
 from difflib import SequenceMatcher
+from typing import Any
 
 from pyforger.op import op
 from pyforger.utils import get_field
@@ -33,12 +34,12 @@ DEFAULT_BLOCKLIST = [
 
 @op(name="filter.by_length")
 def by_length(
-    items: list[dict],
+    items: list[dict[str, Any]],
     *,
     instruction_field: str,
     min_len: int = 10,
     max_len: int = 10000,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Keep items whose ``instruction_field`` word count is in [min_len, max_len]."""
     return [
         item
@@ -51,12 +52,12 @@ def by_length(
 
 @op(name="filter.by_invalid_response")
 def by_invalid_response(
-    items: list[dict],
+    items: list[dict[str, Any]],
     *,
     instruction_field: str,
     response_field: str,
     similarity_threshold: float = 0.85,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Filter items with invalid responses (copies of instruction or empty).
 
     Removes items where:
@@ -67,7 +68,7 @@ def by_invalid_response(
     - The normalized string similarity exceeds the threshold.
     """
 
-    def _is_invalid(item: dict) -> bool:
+    def _is_invalid(item: dict[str, Any]) -> bool:
         response = get_field(item, response_field, "by_invalid_response")
         if response is None or not response.strip():
             return True
@@ -86,12 +87,12 @@ def by_invalid_response(
 
 @op(name="filter.by_keyword_blocklist")
 def by_keyword_blocklist(
-    items: list[dict],
+    items: list[dict[str, Any]],
     *,
     response_field: str,
     blocklist: list[str] | None = None,
     case_sensitive: bool = False,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Drop items whose ``response_field`` contains any blocklisted phrase."""
     keywords = blocklist if blocklist is not None else DEFAULT_BLOCKLIST
     return [
