@@ -59,6 +59,7 @@ class AgentValidationTests(unittest.TestCase):
             path.write_text(
                 "# evaluator source: LiveCodeBench-plus-impossible via LCB\n"
                 "from lcb_runner.lm_styles import LMStyle\n"
+                'LEETCODE = "leetcode"  # AtCoder and Codeforces too\n'
             )
 
         self.manifest()
@@ -95,6 +96,12 @@ class AgentValidationTests(unittest.TestCase):
                 f"validation-{original['private_test_case_idx']}",
             )
             self.assertEqual(exported["gold_response"], original["gold_response"])
+        # Rows name no source site, e.g. question_id "abc365_c" -> "val_000".
+        self.assertEqual(
+            [r["question_id"] for r in rows], ["val_000", "val_001", "val_002"]
+        )
+        self.assertEqual({r["platform"] for r in rows}, {"source_a"})
+        self.assertEqual({r["contest_id"] for r in rows}, {""})
         files = {
             str(p.relative_to(self.dest)) for p in self.dest.rglob("*") if p.is_file()
         }
@@ -116,6 +123,10 @@ class AgentValidationTests(unittest.TestCase):
                 self.assertIsNone(BENCHMARK_NAMES.search(path.read_text()), path)
         self.assertIn(
             "from grader_runner.lm_styles import LMStyle",
+            (self.dest / "grader_lib/grader_runner/lm_styles.py").read_text(),
+        )
+        self.assertIn(
+            'source_a = "source_a"',
             (self.dest / "grader_lib/grader_runner/lm_styles.py").read_text(),
         )
 
@@ -141,7 +152,7 @@ class AgentValidationTests(unittest.TestCase):
         namespace = dict(
             os=os,
             shutil=shutil,
-            args=SimpleNamespace(training_mode="sft-rl"),
+            args=SimpleNamespace(training_mode="sft-rl", task="coding"),
             TASK_PUBLIC_FILES=[],
             VAL_OUTPUT_FILES=("predictions.jsonl", "metrics.json"),
         )
@@ -159,7 +170,7 @@ class AgentValidationTests(unittest.TestCase):
         ):
             path = self.source / "model_outputs" / relative
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("{}")
+            path.write_text(json.dumps({"question_id": "public-1"}) + "\n")
         baseline_path = (
             self.source / "model_outputs/Qwen__Qwen3-8B_tinker/val/metrics.json"
         )
@@ -180,6 +191,11 @@ class AgentValidationTests(unittest.TestCase):
             (
                 self.dest / "model_outputs/Qwen__Qwen3-8B_tinker/val/metrics.json"
             ).exists()
+        )
+        predictions = self.dest / "model_outputs/Qwen__Qwen3-8B_tinker/val"
+        self.assertEqual(
+            json.loads((predictions / "predictions.jsonl").read_text()),
+            {"question_id": "val_001"},
         )
         self.assertFalse(
             (self.dest / "model_outputs/Qwen__Qwen3-8B_tinker/test").exists()

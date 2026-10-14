@@ -47,14 +47,22 @@ EVALUATOR_FILES = (
 # Agents must never learn benchmark names (contamination risk). The sandbox copy
 # renames the vendored grader package and scrubs names from code and comments,
 # e.g. LiveCodeBench/lcb_runner/lm_styles.py -> grader_lib/grader_runner/lm_styles.py.
+# Nor which sites the problems came from: an agent that knows could fetch
+# near-copies of held-out problems. The Platform enum keeps distinct members,
+# e.g. LEETCODE = "leetcode" -> source_a = "source_a".
 BENCHMARK_NAMES = re.compile(
-    r"livecodebench|lcb|impossible-?bench|normad|prbench|healthbench", re.I
+    r"livecodebench|lcb|impossible-?bench|normad|prbench|healthbench"
+    r"|leetcode|atcoder|codeforces",
+    re.I,
 )
 _SCRUB = (
     (re.compile(r"LiveCodeBench-plus-impossible"), "this benchmark"),
     (re.compile(r"livecodebench", re.I), "grader_lib"),
     (re.compile(r"lcb_runner"), "grader_runner"),
     (re.compile(r"lcb", re.I), "grader"),
+    (re.compile(r"leetcode", re.I), "source_a"),
+    (re.compile(r"codeforces", re.I), "source_b"),
+    (re.compile(r"atcoder", re.I), "source_c"),
 )
 
 
@@ -68,6 +76,30 @@ def scrub(text):
 def agent_path(name):
     """Where an EVALUATOR_FILES entry lands in the agent's copy."""
     return scrub(name)
+
+
+def public_identity(number):
+    """Opaque identity fields for the number-th validation row.
+
+    The originals name the site, e.g. question_id "abc365_c" and contest_id
+    "abc365"; grading reads none of them.
+    """
+    return {
+        "question_id": f"val_{number:03d}",
+        "question_title": f"Problem {number}",
+        "contest_id": "",
+        "platform": "source_a",
+    }
+
+
+def public_question_ids(data_root):
+    """Map host validation ids to the agent's, e.g. {"abc365_c": "val_017"}."""
+    with (Path(data_root) / "validation_tasks.jsonl").open() as stream:
+        rows = [json.loads(line) for line in stream if line.strip()]
+    return {
+        row["question_id"]: public_identity(number)["question_id"]
+        for number, row in enumerate(rows)
+    }
 
 
 # Only fields consumed by the evaluator. Exclude perturbation bookkeeping.
@@ -113,8 +145,9 @@ def copy_validation_evaluator(source, destination, data_root=None):
                 break
     if set(blobs) != set(indices):
         raise ValueError("validation references missing private-test blobs")
-    for row in rows:
+    for number, row in enumerate(rows):
         row["private_test_case_idx"] = remap[row["private_test_case_idx"]]
+        row.update(public_identity(number))
     for name in EVALUATOR_FILES:
         target = destination / agent_path(name)
         target.parent.mkdir(parents=True, exist_ok=True)

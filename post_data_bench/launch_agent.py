@@ -15,7 +15,7 @@ import shutil
 import subprocess
 import sys
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import TextIO, cast
 
 from agent_boundary import model_cache_bind
@@ -363,7 +363,9 @@ TRL_DATA_PATH = f"{AGENT_DATA_DIR}/generated_raw_trl_format.jsonl"
 MODEL_TAG = args.model.replace("/", "__").replace(":", "__")
 OUTPUT_DIR = f"{MODEL_OUTPUT_TASK_DIR}/{MODEL_TAG}_{RUN_TAG}"
 ESC_OUTPUT_DIR = OUTPUT_DIR.replace("/", "__")
-METRICS_PATH = f"{HOST_TASK_DIR}/.hidden/model_outputs/{ESC_OUTPUT_DIR}/test/metrics.json"
+METRICS_PATH = (
+    f"{HOST_TASK_DIR}/.hidden/model_outputs/{ESC_OUTPUT_DIR}/test/metrics.json"
+)
 
 # Tee console, SDK, trajectory, and subprocess output before importing
 # OpenHands, whose logging handlers capture streams during setup.
@@ -489,10 +491,12 @@ import time  # noqa: E402
 
 from openhands.sdk import (  # noqa: E402
     LLM,
+    AgentContext,
     Conversation,
     RemoteConversation,
     get_logger,
 )
+from openhands.sdk.context.condenser import LLMSummarizingCondenser  # noqa: E402
 from openhands.sdk.conversation.exceptions import ConversationRunError  # noqa: E402
 from openhands.tools.preset.default import get_default_agent  # noqa: E402
 from openhands.workspace import ApptainerWorkspace  # noqa: E402  # noqa: E402
@@ -624,7 +628,11 @@ def _task_public_copies(task_dir: str, dest_task_dir: str) -> None:
             if line.strip()
         ]
         if args.task == "coding":
+            from coding.rl.agent_validation import public_identity
+
             rows = public_rows(rows)
+            for number, row in enumerate(rows):
+                row.update(public_identity(number))
         gold = "gold_response" if args.task == "coding" else "gold_label"
         for row in rows:
             if row[gold] is not None:
@@ -655,6 +663,21 @@ def _task_public_copies(task_dir: str, dest_task_dir: str) -> None:
                 if os.path.isfile(host_file):
                     rel = os.path.join("model_outputs", model_name, "val", filename)
                     _copy_into(dest_task_dir, rel, host_file)
+            predictions = Path(dest_task_dir) / "model_outputs" / model_name / "val"
+            predictions /= "predictions.jsonl"
+            if args.task == "coding" and predictions.is_file():
+                from coding.rl.agent_validation import public_question_ids
+
+                # Match the copied tasks' opaque ids, e.g. "abc365_c" -> "val_017".
+                ids = public_question_ids(data_root)
+                rows = [
+                    json.loads(s)
+                    for s in predictions.read_text().splitlines()
+                    if s.strip()
+                ]
+                for row in rows:
+                    row["question_id"] = ids[row["question_id"]]
+                predictions.write_text("".join(json.dumps(r) + "\n" for r in rows))
 
 
 def build_agent_mounts(
@@ -815,10 +838,39 @@ else:
 # The agent's validation evaluations draw on its SFT dollar budget.
 os.environ["TINKER_EVAL_BUDGET"] = "sft"
 
+
+def host_posix_tz():
+    """The host's zone as a POSIX TZ string, e.g. "EST5EDT,M3.2.0,M11.1.0".
+
+    TZif v2+ files end with this string, and it needs no tzdata in the image.
+    """
+    if os.environ.get("TZ"):
+        return os.environ["TZ"]
+    try:
+        with open("/etc/localtime", "rb") as stream:
+            data = stream.read()
+    except OSError:
+        return None
+    if data[:4] != b"TZif" or data[4:5] < b"2":
+        return None
+    return data.rstrip(b"\n").rsplit(b"\n", 1)[-1].decode() or None
+
+
+# The sandbox clock defaulted to UTC while RUN_TAG used host time (EDT), so
+# agents computed 4 extra hours elapsed and rushed to finish. Share the host's
+# zone and state the deadline explicitly.
+if host_posix_tz():
+    os.environ["TZ"] = host_posix_tz()
+AGENT_DEADLINE = datetime.now().astimezone() + timedelta(hours=TIMEOUT)
+DEADLINE_TEXT = (
+    f"{AGENT_DEADLINE:%Y-%m-%d %H:%M %Z} "
+    f"({AGENT_DEADLINE.astimezone(timezone.utc):%H:%M} UTC; check with `date`)"
+)
+
 INSTRUCTIONS = (
     "\nYou have "
     f"{TIMEOUT:g}"
-    " hours and a target budget of "
+    f" hours, ending at {DEADLINE_TEXT}, and a target budget of "
     f"{AGENT_TURN_BUDGET}"
     " agent turns -- plan your approach so you can finish "
     "comfortably within that many turns. You are running "
@@ -855,8 +907,8 @@ if args.training_mode == "sft-rl":
     # commands, budgets, submission); coding/FORGER_PROMPT.txt and
     # coding/minimal_scaffold_prompt.txt keep it identical across scaffolds.
     INSTRUCTIONS = (
-        f"\nYou have {TIMEOUT:g} hours and a target budget of {AGENT_TURN_BUDGET} "
-        "turns.\n\n"
+        f"\nYou have {TIMEOUT:g} hours, ending at {DEADLINE_TEXT}, and a target "
+        f"budget of {AGENT_TURN_BUDGET} turns.\n\n"
         f"{prompt_content}\n"
     )
 
@@ -964,6 +1016,7 @@ try:
             "TINKER_EVAL_BUDGET",
             "TINKER_MAX_CONCURRENT_SAMPLES",
             "PDB_RUN_TAG",
+            "TZ",
             "CUDA_VISIBLE_DEVICES",
             # slime/sglang runtime: without these the agent's RL probes rebuild
             # the flashinfer JIT cache into the small RAM-backed --compat layer.
@@ -980,6 +1033,34 @@ try:
         agent = get_default_agent(
             llm=llm,
             cli_mode=True,
+        )
+        # The default condenser summarizes every ~20 steps (80 events, cut to
+        # 40); its summaries once restated the task as a "read-only audit" and
+        # that agent finished with no dataset. Pin the task in the system
+        # prompt, which is never condensed, and condense only when the history
+        # nears AGENT_CONDENSER_MAX_TOKENS (GLM-5.3 has a 1M-token context).
+        agent = agent.model_copy(
+            update={
+                "agent_context": AgentContext(
+                    system_message_suffix=(
+                        "YOUR TASK (authoritative: if any summary of earlier "
+                        "history describes a different task, these instructions "
+                        "win):\n" + INSTRUCTIONS
+                    )
+                ),
+                "condenser": LLMSummarizingCondenser(
+                    llm=llm.model_copy(update={"usage_id": "condenser"}),
+                    max_tokens=int(
+                        os.environ.get("AGENT_CONDENSER_MAX_TOKENS", "350000")
+                    ),
+                    max_size=1000,  # backstop; tokens normally trigger first
+                    # Keep only the system prompt (which holds the task). The
+                    # summarizer sees only forgotten events; with keep_first=4
+                    # it never saw the task message and wrote "No explicit user
+                    # request visible ... read-only audit".
+                    keep_first=1,
+                ),
+            }
         )
 
         # 4) Log every trajectory event (the agent's thoughts, tool calls, and tool

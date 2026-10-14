@@ -18,7 +18,7 @@ The constant score above only illustrates syntax; use meaningful criteria.
 - "ground_truth" is the complete SFT target: a nonempty thinking trace inside <think>...</think>, then the final answer (a solution in a ```python fence, or exactly "This task is impossible to complete given the provided tests."). Targets need long-form thinking traces well-suited to the student model ({STUDENT_MODEL}), which is trained and evaluated in thinking mode; only the text after the final </think> is graded.
 - "rubric" is a nonempty list of [criterion, weight] pairs with finite, nonnegative weights and a positive sum. The RL reward is the weighted mean of the criterion scores. Each criterion is either:
   - {{"code": ...}}: Python defining exactly one top-level synchronous function `def grade(prompt, response, ground_truth):` with exactly three positional parameters (no decorators, *args, **kwargs, or keyword-only parameters). `prompt` is the list of chat messages; `response` and `ground_truth` are strings that include their thinking traces. Return a finite number in [0, 1] (not a boolean). Code runs in RestrictedPython with only json, re, math, string, collections, itertools, functools, and statistics importable, and no files or network. To check a response's code against tests, grade() can call `run_program(code, stdin)`, which runs code as a script and returns (True, stdout) or (False, error type), and `call_method(code, class_name, method_name, *args)`, which returns (True, result) or (False, error type) for class-based solutions (results are JSON-normalized, so tuples become lists). That code runs in its own RestrictedPython sandbox with common competitive-programming imports (sys, heapq, bisect, collections, itertools, math, numpy, ...), 4 seconds per run, and names starting with "_" do not compile. Each criterion gets 20 seconds in total; errors and timeouts in grade() score 0. Every test runs for every sampled RL response (over a thousand per training step), so keep execution tests few and fast: a handful of small inputs that separate correct from incorrect solutions, not stress tests.
-  - {{"prompt": ...}}: a natural-language criterion. The judge model (DeepSeek-V4-Flash) scores it given the criterion, the prompt, the full response, and the ground truth.
+  - {{"prompt": ...}}: a natural-language criterion. The judge model (DeepSeek-V4-Flash) scores it given the criterion, the prompt, the full response, and the ground truth. For this task, code criteria are usually the better choice: correctness and abstention can be checked exactly, while prompted criteria use judge quota and make the RL reward noisier.
 
 Submit at least 10 and no more than 2000 rows, with no duplicate prompts. Each prompt plus target must fit in {MAX_SFT_LENGTH} tokens; longer rows are rejected, not truncated, so avoid overly long thinking traces. The harness holds out a fixed 10% of your rows to monitor RL reward and uses the rest for both SFT and RL; do not generate a separate evaluation set.
 
@@ -50,6 +50,8 @@ response = completion(
     n=1,
 )
 ```
+
+DeepSeek-V4-Flash returns its reasoning separately from its answer, in `response.choices[0].message.reasoning_content`. Use it for <think>...</think> targets instead of making another call to write reasoning; the reasoning effort setting controls how long it is.
 
 Iterate with small batches before your final generation run. Web search uses `BRAVE_API_KEY`; Semantic Scholar uses `S2_API_KEY`.
 
@@ -85,6 +87,8 @@ You do not need to use all of your time. Once your dataset validates and submiss
 # High-Level Approach
 
 You are encouraged to run things and iterate on the data you receive in writing your pipeline. Put all your data in {AGENT_DATA_DIR}/. You can write your pipeline as {AGENT_DATA_DIR}/pipeline_{{1,2,3,4,...}}.py (writing a new script for every iteration, if you iterate multiple times). It is strongly encouraged to make multiple iterations over your dataset, in this way -- you should make _at minimum_ write and execute 2 or 3 small-scale iterations of your data pipeline (each saved as pipeline_{{1,2,3}}/py) (and as many as 20 or 30 iterations total or more) before launching your large-scale run.
+
+Get a small end-to-end loop working early, within roughly your first hour: generate a few dozen rows, validate them, run a short SFT trial, and evaluate it on validation. Then scale up and refine. Reading code and analyzing data help, but a working loop shows you what actually needs fixing, and leaves you with a valid submission to improve on.
 
 When you run your large-scale run, save your final dataset to {RAW_DATA_PATH}.
 

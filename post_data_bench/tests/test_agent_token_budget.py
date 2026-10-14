@@ -266,7 +266,9 @@ completion(model='litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731')
         self.assertEqual(environ["LITELLM_BASE_URL"], "https://worker")
         self.assertEqual(environ["LLM_API_KEY"], "agent")
         self.assertEqual(environ["LLM_MODEL"], "zai/glm-5.3")
-        self.assertNotIn("LLM_BASE_URL", environ)  # the runner calls its provider directly
+        self.assertNotIn(
+            "LLM_BASE_URL", environ
+        )  # the runner calls its provider directly
         explicit = {"LITELLM_API_KEY": "explicit", "LITELLM_DATAGEN_API_KEY": "datagen"}
         scope["apply_env_aliases"](explicit)
         self.assertEqual(explicit["LITELLM_API_KEY"], "explicit")
@@ -301,7 +303,9 @@ completion(model='litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731')
             "coding/minimal_scaffold_prompt.txt",
         ):
             with self.subTest(prompt=relative):
-                prompt = prompts[relative] = (ROOT / relative).read_text().format(**values)
+                prompt = prompts[relative] = (
+                    (ROOT / relative).read_text().format(**values)
+                )
                 self.assertIn("230000000 token units", prompt)
                 self.assertNotIn("llm_spend", prompt)
                 # Agents must never learn benchmark names.
@@ -316,6 +320,7 @@ completion(model='litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731')
         for start, stop in (
             ("# Data Format", "# LLM API Usage"),
             ("# Training and Validation", "# High-Level Approach"),
+            ("# High-Level Approach", "# Scaffold"),
         ):
             sections = {
                 text[text.index(start) : text.index(stop)]
