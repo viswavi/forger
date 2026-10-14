@@ -31,6 +31,10 @@ class RetrievalSource(ABC):
 
     Segments may be passages, docs, or rows. Subclasses implement fetch()
     to return a list of items (e.g. dicts with "text", "id").
+    For use with cached ``retrieve()``, custom sources with mutable runtime
+    state should define ``cache_key()`` containing their type and configuration
+    while excluding clients, sessions, and counters. Direct ``fetch()`` calls
+    are not cached.
     """
 
     @abstractmethod
@@ -87,6 +91,16 @@ class WebRetrievalSource(RetrievalSource):
     _BRAVE_API_URL = "https://api.search.brave.com/res/v1/llm/context"
     _BRAVE_MAX_RESULTS = 50  # API caps count / maximum_number_of_urls at 50
     _DEFAULT_TIMEOUT = 5  # seconds
+
+    def cache_key(self) -> tuple:
+        """Identify source configuration independently of runtime client state."""
+        return (
+            type(self).__module__,
+            type(self).__qualname__,
+            self.base_url,
+            self._api_key,
+            self._kwargs,
+        )
 
     def __init__(
         self,
@@ -252,6 +266,15 @@ class WikiRetrievalSource(RetrievalSource):
     _API_LIMIT = 500
     _EXTRACT_BATCH_SIZE = 20
     _DEFAULT_TIMEOUT = 5
+
+    def cache_key(self) -> tuple:
+        """Identify source configuration independently of runtime client state."""
+        return (
+            type(self).__module__,
+            type(self).__qualname__,
+            self.language,
+            self._kwargs,
+        )
 
     def __init__(self, language: str = "en", **kwargs: Any) -> None:
         """Store config for Wikipedia retrieval.
@@ -499,6 +522,18 @@ class HFRetrievalSource(RetrievalSource):
     ``row_idx``, ``dataset_id``, and the dataset's column values.
     """
 
+    def cache_key(self) -> tuple:
+        """Identify source configuration independently of runtime client state."""
+        return (
+            type(self).__module__,
+            type(self).__qualname__,
+            self.dataset,
+            self.config,
+            self.split,
+            self._token,
+            self._kwargs,
+        )
+
     def __init__(
         self,
         dataset: str | None = None,
@@ -639,6 +674,10 @@ class ArxivRetrievalSource(RetrievalSource):
             fetch overrides.
         _client: Lazy-initialized arxiv.Client, reused across fetch() calls.
     """
+
+    def cache_key(self) -> tuple:
+        """Identify source configuration independently of runtime client state."""
+        return (type(self).__module__, type(self).__qualname__, self._kwargs)
 
     def __init__(self, **kwargs: Any) -> None:
         """Store options for arXiv retrieval.
@@ -781,6 +820,15 @@ class S2RetrievalSource(RetrievalSource):
     _PAGE_LIMIT = 100
     _RELEVANCE_CAP = 1000
     _RANDOM_POOL_MAX_BULK = 10_000
+
+    def cache_key(self) -> tuple:
+        """Identify source configuration independently of runtime client state."""
+        return (
+            type(self).__module__,
+            type(self).__qualname__,
+            self._api_key,
+            self._kwargs,
+        )
 
     def __init__(self, api_key: str | None = None, **kwargs: Any) -> None:
         """Store options for Semantic Scholar retrieval.
