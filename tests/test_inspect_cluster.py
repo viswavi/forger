@@ -8,7 +8,12 @@ import pytest
 
 from pyforger.acquire.model import Model
 from pyforger.inspect import topic_based_clustering
-from pyforger.inspect.cluster import _build_codebook, _match_topic, _parse_json
+from pyforger.inspect.cluster import (
+    _build_codebook,
+    _match_topic,
+    _parse_json,
+    _warn_if_heavy_reasoning,
+)
 
 CONTEXT = "short hobby notes. Topics should describe the HOBBY the note is about."
 
@@ -298,3 +303,18 @@ def test_parse_json_returns_first_complete_object():
     """Only the first complete object is parsed, skipping stray braces."""
     assert _parse_json('{"topic": "a"} or maybe {"topic": "b"}') == {"topic": "a"}
     assert _parse_json('Using {braces} loosely: {"topic": "a"}') == {"topic": "a"}
+
+
+@pytest.mark.parametrize(
+    "effort,warns",
+    [("high", True), ("medium", True), ("low", False), ("none", False), (None, False)],
+)
+def test_warns_on_heavy_reasoning(monkeypatch, effort, warns):
+    """Inspect ops warn when their many short calls would reason at length."""
+    calls = []
+    monkeypatch.setattr(
+        "pyforger.inspect.cluster.logger.warning", lambda *a: calls.append(a)
+    )
+    kwargs = {} if effort is None else {"reasoning_effort": effort}
+    _warn_if_heavy_reasoning(Model("gpt-4o", **kwargs), "eval_tree")
+    assert bool(calls) == warns

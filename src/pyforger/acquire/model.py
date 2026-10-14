@@ -403,6 +403,15 @@ class Model:
             return math.nan
 
     @property
+    def reasoning_effort(self) -> str | None:
+        """Effort sent to the provider, whichever form it takes; None if unset."""
+        effort = self._kwargs.get("reasoning_effort")
+        reasoning = self._kwargs.get("reasoning")
+        if effort is None and isinstance(reasoning, dict):
+            effort = reasoning.get("effort")
+        return effort
+
+    @property
     def total_token_units(self) -> float:
         """Cumulative units since reset; NaN if any usage cannot be weighted."""
         with self._usage_lock:

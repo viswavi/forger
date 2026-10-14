@@ -18,6 +18,23 @@ from pyforger.utils import get_field, get_formatted_logger
 
 logger = get_formatted_logger("Inspect")
 
+
+def _warn_if_heavy_reasoning(model: Model, op_name: str) -> None:
+    """Warn when an inspect op's many short calls would reason at length.
+
+    Inspect ops send one short request per row; at a higher effort (e.g.
+    "high"), a few calls reason for minutes and can hit gateway timeouts.
+    """
+    effort = getattr(model, "reasoning_effort", None)
+    if effort is not None and effort not in ("none", "low"):
+        logger.warning(
+            "%s makes many short LLM calls; reasoning_effort=%r makes them slow "
+            "and prone to timeouts. Use reasoning_effort='low' or 'none'.",
+            op_name,
+            effort,
+        )
+
+
 _DEFAULT_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 
 _SUMMARIZE_SYSTEM = (
@@ -122,6 +139,7 @@ def topic_based_clustering(
     codebook is used.
     """
     # Validate input parameters.
+    _warn_if_heavy_reasoning(model, "topic_based_clustering")
     if num_clusters < 2:
         raise ValueError("num_clusters must be at least 2")
     for name, value in (

@@ -347,6 +347,9 @@ report = eval_tree(rows, input_field="question", score_field="score", model=mode
 # report["weaknesses"] lists the extracted capability groups.
 ```
 
+Inspect ops make one short LLM call per row (or per cluster), so run them with `reasoning_effort="low"` or
+`"none"`; higher efforts make a few calls reason for minutes and hit gateway timeouts, and both ops warn about it.
+
 The `question` alone is used to infer the skill, avoiding leakage from an incorrect model output. If verified
 solutions are available, pass `reference_field` to include them in the capability annotation prompt. The
 default embedding backend is the same as `topic_based_clustering` (`pyforger[clustering]`); `embed_fn` can

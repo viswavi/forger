@@ -1367,3 +1367,20 @@ class TestReasoningEffort:
         """With no explicit effort, caller kwargs are sent unchanged."""
         model = Model(self.DEEPSEEK, reasoning={"effort": "none"})
         assert model._kwargs == {"reasoning": {"effort": "none"}}
+
+
+class TestReasoningEffortProperty:
+    """Model.reasoning_effort reports the effort however it was passed."""
+
+    @pytest.mark.parametrize(
+        "kwargs,expected",
+        [
+            ({"reasoning_effort": "high"}, "high"),
+            ({"reasoning": {"effort": "low"}}, "low"),
+            ({}, None),
+        ],
+    )
+    def test_reports_effort(self, kwargs, expected):
+        """DeepSeek-V4 stores a dict, but the property reads it back."""
+        model = Model("litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731", **kwargs)
+        assert model.reasoning_effort == expected

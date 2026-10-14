@@ -11,7 +11,7 @@ from collections.abc import Callable
 from typing import Any
 
 from pyforger.acquire.model import Model, Prompt
-from pyforger.inspect.cluster import _default_embed
+from pyforger.inspect.cluster import _default_embed, _warn_if_heavy_reasoning
 from pyforger.op import op
 from pyforger.utils import get_field
 
@@ -60,6 +60,7 @@ def eval_tree(
     confidence interval lies entirely below ``threshold``, unless a child of
     at least ``min_child_size`` does not satisfy that test (following EvalTree).
     """
+    _warn_if_heavy_reasoning(model, "eval_tree")
     if max_children < 2:
         raise ValueError("max_children must be at least 2")
     if not 0 <= threshold <= 1:
