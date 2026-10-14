@@ -1384,3 +1384,31 @@ class TestReasoningEffortProperty:
         """DeepSeek-V4 stores a dict, but the property reads it back."""
         model = Model("litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731", **kwargs)
         assert model.reasoning_effort == expected
+
+
+class TestGatewayEnvironment:
+    """litellm_proxy/ models read the LiteLLM gateway environment."""
+
+    def test_reads_base_url_and_key(self, monkeypatch):
+        """Without explicit values, the gateway URL and key come from env."""
+        monkeypatch.setenv("LITELLM_BASE_URL", "https://gateway.example")
+        monkeypatch.setenv("LITELLM_API_KEY", "env-key")
+        model = Model("litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731")
+        assert model._kwargs["api_base"] == "https://gateway.example"
+        assert model._api_key == "env-key"
+
+    def test_explicit_values_win(self, monkeypatch):
+        """Explicit api_base and api_key override the environment."""
+        monkeypatch.setenv("LITELLM_BASE_URL", "https://gateway.example")
+        monkeypatch.setenv("LITELLM_API_KEY", "env-key")
+        model = Model(
+            "litellm_proxy/x", api_key="mine", api_base="https://other.example"
+        )
+        assert model._kwargs["api_base"] == "https://other.example"
+        assert model._api_key == "mine"
+
+    def test_other_providers_unchanged(self, monkeypatch):
+        """Direct provider models keep litellm's own environment handling."""
+        monkeypatch.setenv("LITELLM_BASE_URL", "https://gateway.example")
+        model = Model("gpt-4o")
+        assert "api_base" not in model._kwargs

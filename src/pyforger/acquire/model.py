@@ -331,7 +331,9 @@ class Model:
             model_id: LiteLLM model string (e.g. "gpt-4o",
                 "anthropic/claude-sonnet-4-20250514").
             api_key: API key. Falls back to provider-specific env vars
-                (OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.) when None.
+                (OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.) when None; for
+                ``litellm_proxy/`` models, to LITELLM_API_KEY, and `api_base`
+                to LITELLM_BASE_URL.
             temperature: Default sampling temperature.
             max_tokens: Default max tokens. None lets the provider decide.
             num_retries: Retries with exponential backoff on transient
@@ -347,6 +349,12 @@ class Model:
             **kwargs: Passed through to litellm.completion()
                 (e.g. api_base, timeout, organization).
         """
+        # Gateway models read the LiteLLM environment, e.g. LITELLM_BASE_URL;
+        # without a base URL, litellm would send the request to OpenAI.
+        if model_id.startswith("litellm_proxy/"):
+            api_key = api_key or os.environ.get("LITELLM_API_KEY")
+            if kwargs.get("api_base") is None and os.environ.get("LITELLM_BASE_URL"):
+                kwargs = {**kwargs, "api_base": os.environ["LITELLM_BASE_URL"]}
         self._model_id = model_id
         self._api_key = api_key
         self._temperature = temperature
