@@ -10,6 +10,7 @@ import shutil
 import stat
 import tempfile
 from pathlib import Path, PureWindowsPath
+from typing import BinaryIO
 
 from pydantic import BaseModel, ConfigDict, StrictInt, model_validator
 
@@ -84,7 +85,7 @@ def _digest(files: tuple[ArtifactFile, ...]) -> str:
     ).hexdigest()
 
 
-def _open_file(path: Path):
+def _open_file(path: Path) -> BinaryIO:
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     stream = os.fdopen(os.open(path, flags), "rb")
     if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
