@@ -29,6 +29,7 @@ class ArithmeticEvaluator:
 
 
 def artifact(tmp_path, answer=6):
+    """Artifact."""
     root = tmp_path / "data"
     root.mkdir()
     (root / "input.json").write_text("[1, 2, 3]")
@@ -38,6 +39,7 @@ def artifact(tmp_path, answer=6):
 
 @pytest.mark.parametrize("answer,passed", [(6, True), (7, False)])
 def test_evaluate_arbitrary_artifact_and_restore(tmp_path, answer, passed):
+    """Evaluate arbitrary artifact and restore."""
     source = artifact(tmp_path, answer)
     result = evaluate(source, ArithmeticEvaluator(), tmp_path / "grade")
     assert result.passed is passed
@@ -55,6 +57,7 @@ def test_evaluate_arbitrary_artifact_and_restore(tmp_path, answer, passed):
 
 
 def test_evaluation_can_omit_outcomes_and_evidence(tmp_path):
+    """Evaluation can omit outcomes and evidence."""
     class DescriptiveEvaluator:
         def evaluate(self, artifact, output):
             return EvaluationResult(
@@ -68,6 +71,7 @@ def test_evaluation_can_omit_outcomes_and_evidence(tmp_path):
 
 
 def test_existing_output_is_not_overwritten(tmp_path):
+    """Existing output is not overwritten."""
     source = artifact(tmp_path)
     output = tmp_path / "grade"
     evaluate(source, ArithmeticEvaluator(), output)
@@ -78,6 +82,7 @@ def test_existing_output_is_not_overwritten(tmp_path):
 
 
 def test_evaluations_are_fresh_and_independent(tmp_path):
+    """Evaluations are fresh and independent."""
     source = artifact(tmp_path)
     first = evaluate(source, ArithmeticEvaluator(), tmp_path / "first")
     record = ArtifactRef.capture(tmp_path / "first")
@@ -88,6 +93,7 @@ def test_evaluations_are_fresh_and_independent(tmp_path):
 
 
 def test_changed_input_fails_before_evaluator(tmp_path):
+    """Changed input fails before evaluator."""
     source = artifact(tmp_path)
     (source.root / "answer.json").write_text("99")
     with pytest.raises(ValueError, match="tampered"):
@@ -96,6 +102,7 @@ def test_changed_input_fails_before_evaluator(tmp_path):
 
 
 def test_evaluator_cannot_mutate_input(tmp_path):
+    """Evaluator cannot mutate input."""
     class MutatingEvaluator(ArithmeticEvaluator):
         def evaluate(self, artifact, output):
             result = super().evaluate(artifact, output)
@@ -108,6 +115,7 @@ def test_evaluator_cannot_mutate_input(tmp_path):
 
 
 def test_evidence_is_verified_after_adapter_returns(tmp_path):
+    """Evidence is verified after adapter returns."""
     class MutatingEvaluator(ArithmeticEvaluator):
         def evaluate(self, artifact, output):
             result = super().evaluate(artifact, output)
@@ -119,6 +127,7 @@ def test_evidence_is_verified_after_adapter_returns(tmp_path):
 
 
 def test_invalid_adapter_result(tmp_path):
+    """Invalid adapter result."""
     class InvalidEvaluator:
         def evaluate(self, artifact, output):
             return {"passed": True}
@@ -128,6 +137,7 @@ def test_invalid_adapter_result(tmp_path):
 
 
 def test_exception_reserves_output_against_retries(tmp_path):
+    """Exception reserves output against retries."""
     class BrokenEvaluator:
         def evaluate(self, artifact, output):
             output.mkdir()
@@ -145,6 +155,7 @@ def test_exception_reserves_output_against_retries(tmp_path):
 
 
 def test_verified_record_binds_evaluation_metadata(tmp_path):
+    """Verified record binds evaluation metadata."""
     result = evaluate(artifact(tmp_path, 7), ArithmeticEvaluator(), tmp_path / "grade")
     record = ArtifactRef.capture(tmp_path / "grade")
     data = result.model_dump(mode="json")
@@ -155,6 +166,7 @@ def test_verified_record_binds_evaluation_metadata(tmp_path):
 
 
 def test_restored_evidence_must_still_match(tmp_path):
+    """Restored evidence must still match."""
     result = evaluate(artifact(tmp_path), ArithmeticEvaluator(), tmp_path / "grade")
     data = result.model_dump(mode="json")
     (result.evidence.root / "grade.json").write_text("{}")
@@ -164,12 +176,14 @@ def test_restored_evidence_must_still_match(tmp_path):
 
 @pytest.mark.parametrize("score", [True, float("inf"), float("nan"), "1"])
 def test_invalid_scores(score):
+    """Invalid scores."""
     with pytest.raises(ValueError):
         EvaluationResult(score=score)
 
 
 @pytest.mark.parametrize("passed", [1, "true", [], {}])
 def test_outcomes_require_booleans(passed):
+    """Outcomes require booleans."""
     with pytest.raises(ValidationError):
         EvaluationResult(passed=passed)
 
@@ -178,11 +192,13 @@ def test_outcomes_require_booleans(passed):
     "metadata", [{"nested": (1, 2)}, {"nested": {2: "v"}}, {"value": float("nan")}]
 )
 def test_metadata_requires_lossless_json(metadata):
+    """Metadata requires lossless json."""
     with pytest.raises(ValueError):
         EvaluationResult(metadata=metadata)
 
 
 def test_metadata_snapshot_and_unrestricted_attribution():
+    """Metadata snapshot and unrestricted attribution."""
     metadata = {"parameters": [1]}
     result = EvaluationResult(
         metadata=metadata, attribution="custom-domain", reason="graded"
