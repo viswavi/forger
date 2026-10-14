@@ -5,6 +5,8 @@ import copy
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+
 from pyforger.acquire import (
     RetrievalSource,
     RetrieveMode,
@@ -15,6 +17,14 @@ from pyforger.acquire import (
     retrieve_from_web,
     retrieve_from_wiki,
 )
+from pyforger.acquire.sources import (
+    ArxivRetrievalSource,
+    HFRetrievalSource,
+    S2RetrievalSource,
+    WebRetrievalSource,
+    WikiRetrievalSource,
+)
+from pyforger.op import trace
 
 
 class MockRetrievalSource(RetrievalSource):
@@ -27,6 +37,10 @@ class MockRetrievalSource(RetrievalSource):
             data: List of dicts (e.g. [{"text": "a"}]); deep-copied by fetch().
         """
         self.data = data
+
+    def cache_key(self):
+        """Identify fixed test data without serializing local source classes."""
+        return (type(self).__qualname__, self.data)
 
     def fetch(
         self,
@@ -133,48 +147,6 @@ class TestRetrieve:
         assert all(isinstance(r, dict) for r in results)
 
 
-class TestRetrieveCaching:
-    """retrieve_from_* wrappers default to uncached; cache=True memoizes via @op."""
-
-    @patch("pyforger.acquire.sources.WebRetrievalSource.fetch")
-    def test_cache_false_by_default_refetches_every_call(self, mock_fetch):
-        """With the default cache=False, repeated calls hit the source again."""
-        mock_fetch.side_effect = [
-            [{"text": "first"}],
-            [{"text": "second"}],
-        ]
-        first = retrieve_from_web(queries=["x"])
-        second = retrieve_from_web(queries=["x"])
-        assert first == [{"text": "first", "query": "x"}]
-        assert second == [{"text": "second", "query": "x"}]
-        assert mock_fetch.call_count == 2
-
-    @patch("pyforger.acquire.sources.WebRetrievalSource.fetch")
-    def test_cache_true_memoizes_identical_calls(self, mock_fetch):
-        """With cache=True, a second identical call is served from disk cache."""
-        mock_fetch.side_effect = [
-            [{"text": "first"}],
-            [{"text": "second"}],
-        ]
-        first = retrieve_from_web(queries=["x"], cache=True)
-        second = retrieve_from_web(queries=["x"], cache=True)
-        assert first == second == [{"text": "first", "query": "x"}]
-        assert mock_fetch.call_count == 1
-
-    @patch("pyforger.acquire.sources.WebRetrievalSource.fetch")
-    def test_cache_true_still_distinguishes_different_args(self, mock_fetch):
-        """cache=True keys on call arguments, so a different query still refetches."""
-        mock_fetch.side_effect = [
-            [{"text": "for-x"}],
-            [{"text": "for-y"}],
-        ]
-        for_x = retrieve_from_web(queries=["x"], cache=True)
-        for_y = retrieve_from_web(queries=["y"], cache=True)
-        assert for_x == [{"text": "for-x", "query": "x"}]
-        assert for_y == [{"text": "for-y", "query": "y"}]
-        assert mock_fetch.call_count == 2
-
-
 class TestMultiQueryRetrieve:
     """Multi-query retrieval returns flat rows with a 'query' field."""
 
@@ -221,3 +193,97 @@ class TestMultiQueryRetrieve:
         source = MockRetrievalSource([{"text": "hello", "id": "42"}])
         result = retrieve(source, queries=["a"])
         assert result == [{"text": "hello", "id": "42", "query": "a"}]
+
+
+@pytest.mark.parametrize(
+    "entry,source_type,args",
+    [
+        (retrieve, MockRetrievalSource, (MockRetrievalSource([{"text": "x"}]),)),
+        (retrieve_from_web, WebRetrievalSource, ()),
+        (retrieve_from_wiki, WikiRetrievalSource, ()),
+        (retrieve_from_hf, HFRetrievalSource, ("some/dataset",)),
+        (retrieve_from_arxiv, ArxivRetrievalSource, ()),
+        (retrieve_from_s2, S2RetrievalSource, ()),
+    ],
+)
+def test_retrieval_cache_controls(entry, source_type, args, tmp_path):
+    """Each public entry caches once, bypasses fully, and supports cache-only."""
+    with patch.object(source_type, "fetch", return_value=[{"text": "cached"}]) as fetch:
+        with pytest.raises(FileNotFoundError):
+            entry(*args, queries=["x"], _cache_only=True)
+        fetch.assert_not_called()
+        first = entry(*args, queries=["x"])
+        assert entry(*args, queries=["x"]) == first
+        assert entry(*args, queries=["x"], _cache_only=True) == first
+        assert fetch.call_count == 1
+        assert [r.cache_hit for r in trace()] == [False, True, True]
+        assert len(list(tmp_path.rglob("*.pkl"))) == 1
+
+        fetch.return_value = [{"text": "fresh"}]
+        assert entry(*args, queries=["x"], _no_cache=True)[0]["text"] == "fresh"
+        assert entry(*args, queries=["x"], _cache_only=True) == first
+        entry(*args, queries=["uncached"], _no_cache=True)
+        with pytest.raises(FileNotFoundError):
+            entry(*args, queries=["uncached"], _cache_only=True)
+        assert len(list(tmp_path.rglob("*.pkl"))) == 1
+        assert all(
+            "_no_cache" not in c.kwargs and "_cache_only" not in c.kwargs
+            for c in fetch.call_args_list
+        )
+        entry(*args, queries=["changed"])
+        assert fetch.call_count == 4
+
+
+@pytest.mark.parametrize(
+    "source,changed,runtime_attr",
+    [
+        (
+            WebRetrievalSource(base_url="a"),
+            WebRetrievalSource(base_url="b"),
+            "_session",
+        ),
+        (
+            WikiRetrievalSource(language="en"),
+            WikiRetrievalSource(language="de"),
+            "_session",
+        ),
+        (HFRetrievalSource("a"), HFRetrievalSource("b"), None),
+        (
+            ArxivRetrievalSource(page_size=10),
+            ArxivRetrievalSource(page_size=20),
+            "_client",
+        ),
+        (S2RetrievalSource(timeout=10), S2RetrievalSource(timeout=20), "_client"),
+    ],
+)
+def test_source_cache_ignores_runtime_state(source, changed, runtime_attr):
+    """Source configuration determines reuse even after a lazy client is created."""
+    same = copy.deepcopy(source)
+
+    def fetch(instance, *args, **kwargs):
+        if runtime_attr:
+            setattr(instance, runtime_attr, object())
+        return [{"text": "x"}]
+
+    with patch.object(
+        type(source), "fetch", autospec=True, side_effect=fetch
+    ) as mocked:
+        first = retrieve(source, queries=["q"])
+        assert retrieve(source, queries=["q"]) == first
+        assert retrieve(same, queries=["q"]) == first
+        assert mocked.call_count == 1
+        retrieve(changed, queries=["q"])
+        assert mocked.call_count == 2
+
+
+def test_random_retrieval_caches_without_seed():
+    """Random sampling is cached too; callers opt out for fresh samples."""
+    with patch.object(
+        WikiRetrievalSource, "fetch", return_value=[{"text": "sample"}]
+    ) as fetch:
+        first = retrieve_from_wiki(mode=RetrieveMode.RANDOM)
+        assert retrieve_from_wiki(mode=RetrieveMode.RANDOM) == first
+        assert fetch.call_count == 1
+        retrieve_from_wiki(mode=RetrieveMode.RANDOM, _no_cache=True)
+        retrieve_from_wiki(mode=RetrieveMode.RANDOM, seed=42)
+        assert fetch.call_count == 3

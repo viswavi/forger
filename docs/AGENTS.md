@@ -41,7 +41,8 @@ pause and ask the user to provide one. This identifier should include account/us
 a model name (e.g. "gpt-5.6-sol"). Within this structure, you can potentially try other models within the same account
 if the user-provided model is undesirable or unavailable. Within Azure specifically, the following models are available
 by default:
-"litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731" (fast, cheap, surprisingly good for most things), "litellm_proxy/azure_ai/FW-GLM-5.3" (accurate, strong reasoning, expensive).
+"litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731" (fast, cheap, surprisingly good for most things),
+"litellm_proxy/azure_ai/FW-GLM-5.3" (accurate, strong reasoning, expensive).
 
 Typically, the user should set LITELLM_API_KEY environment variable. If none is given, then LiteLLM will fall back to
 provider-specific environment variables (e.g. `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`). When instantiating a `Model` with
@@ -100,8 +101,11 @@ Control flow (`for`, `if`, comprehensions, helper functions) in plain Python can
 All operations are plain functions. Operations that perform LLM calls or expensive in-process work (`sample_from_LLM`,
 `generate_custom_rubric_criteria`,
 every `alter.*` op, every `filter.*` op, every `inspect.*` op) are decorated internally with `@op`, so their results
-are cached on disk and traced. The generic `retrieve` is never internally cached; wrap it with `@op` yourself. Each `retrieve_from_*`
-wrapper instead takes a `cache: bool = False` kwarg -- pass `cache=True` to memoize its results via `@op`.
+are cached on disk and traced. The retrieval functions (`retrieve`, `retrieve_from_*`) are also internally cached
+and traced by default. Pass `_no_cache=True` to skip cache reads and writes for an invocation, or
+`_cache_only=True` to read an existing result without fetching (a miss raises `FileNotFoundError`).
+This includes RANDOM mode, even without a seed: use `_no_cache=True` for a fresh sample.
+Direct calls to source `.fetch()` methods remain uncached.
 
 ### Public API summary
 
@@ -124,12 +128,12 @@ Generate or retrieve new rows.
 | `generate_custom_rubric` | per stage | Recommended: generate mixed code/prompt rubrics ready for the RL executor. |
 | `convert_rubric_criteria` | yes | Convert existing textual rubrics, preserving order and weights. |
 | `generate_custom_rubric_criteria` | yes | Generate weighted textual rubrics with optional context and candidates. |
-| `retrieve` | no | Generic retrieval against a `RetrievalSource`. |
-| `retrieve_from_web` | opt-in | Brave Search backend (QUERY only). |
-| `retrieve_from_wiki` | opt-in | Wikipedia backend (QUERY or RANDOM). |
-| `retrieve_from_hf` | opt-in | Hugging Face datasets backend. |
-| `retrieve_from_arxiv` | opt-in | arXiv backend. |
-| `retrieve_from_s2` | opt-in | Semantic Scholar backend. |
+| `retrieve` | yes | Generic retrieval against a `RetrievalSource`. |
+| `retrieve_from_web` | yes | Brave Search backend (QUERY only). |
+| `retrieve_from_wiki` | yes | Wikipedia backend (QUERY or RANDOM). |
+| `retrieve_from_hf` | yes | Hugging Face datasets backend. |
+| `retrieve_from_arxiv` | yes | arXiv backend. |
+| `retrieve_from_s2` | yes | Semantic Scholar backend. |
 | `RetrievalSource`, `RetrieveMode` |   | Abstract base class and mode enum (`QUERY`, `RANDOM`). |
 | `WebRetrievalSource`, `WikiRetrievalSource`, `HFRetrievalSource`, ... |   | Per-backend source classes. |
 | `ArxivRetrievalSource`, `S2RetrievalSource` |   |Per-backend source classes. |
@@ -396,6 +400,10 @@ can redirect it.
 Pass `_cache_only=True` to retrieve an existing result without executing the function;
 a miss raises `FileNotFoundError`.
 
+Built-in retrieval sources provide stable configuration keys that exclude runtime clients and sessions.
+Custom `RetrievalSource` implementations with mutable state should define `cache_key()` using their
+source type and result-affecting configuration, excluding counters and other runtime state.
+
 **Custom hash keys for objects.** If an argument defines `cache_key() -> Any`, this is used in place of the argument's
 canonical form. This is useful for objects that are expensive to serialize or contain ever-changing state. Here is
 an example:
@@ -469,8 +477,9 @@ Module import time should not execute work. LLM calls, file I/O, and any `@op`-d
 
 We often see some common patterns in data generation pipelines. Here is an incomplete list of examples:
 
-
-- **Agent-as-a-step:** Treat an agent as a single step in a larger pipeline. The agent can perform complex reasoning or multi-turn interactions internally, customized to an individual input in the pipeline. This can be slower but allows for more sophisticated processing within a single pipeline step.
+- **Agent-as-a-step:** Treat an agent as a single step in a larger pipeline. The agent can perform complex reasoning or
+multi-turn interactions internally, customized to an individual input in the pipeline. This can be slower but allows for
+more sophisticated processing within a single pipeline step.
 - **Retrieval-augmented generation:** First retrieve relevant information (e.g. from the web) and then condition
 data generation on this (either directly, for simple/consistently-structured content, or using the "dynamic step"
 building block to perform case-by-case extraction of usable details from the retrieved links). It is almost always
@@ -497,7 +506,7 @@ math, programming, or embodied reasoning. Sample `n` solutions per prompt from t
 run an open-weights reasoning model on-GPU via vLLM with a generous `max_tokens`/`max_model_len` so traces are not
 truncated), keep only the solutions whose final answer matches the verified answer, and use each kept trace as a
 training target. `alter.self_taught_reasoner` implements exactly this: it returns one row per correct sample (a prompt
-with 0 correct samples drops out), with the student's reasoning trace and answer split into separate fields. 
+with 0 correct samples drops out), with the student's reasoning trace and answer split into separate fields.
 
 ### Dynamic input-specific pipelines
 

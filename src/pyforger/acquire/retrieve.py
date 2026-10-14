@@ -2,14 +2,12 @@
 
 ``retrieve()`` is the generic entry point; the convenience wrappers
 construct the appropriate source for a backend (web, wiki, HF, arXiv, S2).
-Each wrapper takes ``cache=False`` by default; pass ``cache=True`` to
-memoize results on disk via ``@op``.
+All entry points cache results on disk by default, including RANDOM mode.
+Pass ``_no_cache=True`` to skip cache reads and writes, or ``_cache_only=True``
+to read an existing result without fetching.
 """
 from __future__ import annotations
 
-import inspect
-from collections.abc import Callable
-from functools import wraps
 from typing import Any
 
 from pyforger.acquire.sources import (
@@ -24,30 +22,7 @@ from pyforger.acquire.sources import (
 from pyforger.op import op
 
 
-def _cacheable(fn: Callable[..., list[dict]]) -> Callable[..., list[dict]]:
-    """Wrap fn like @op, but with a ``cache: bool = False`` kwarg (default off).
-
-    Translates ``cache`` into @op's ``_no_cache`` opt-out toggle, which
-    otherwise defaults to caching being enabled.
-    """
-    cached = op(fn, name=f"pyforger.acquire.retrieve.{fn.__name__}")
-    params = list(inspect.signature(fn).parameters.values())
-    insert_at = next(
-        (i for i, p in enumerate(params) if p.kind is p.VAR_KEYWORD), len(params)
-    )
-    params.insert(
-        insert_at,
-        inspect.Parameter("cache", inspect.Parameter.KEYWORD_ONLY, default=False),
-    )
-
-    @wraps(fn)
-    def wrapper(*args: Any, cache: bool = False, **kwargs: Any) -> list[dict]:
-        return cached(*args, _no_cache=not cache, **kwargs)
-
-    wrapper.__signature__ = inspect.Signature(params)  # type: ignore[attr-defined]
-    return wrapper  # type: ignore[return-value]
-
-
+@op(name="acquire.retrieve")
 def retrieve(
     source: RetrievalSource,
     mode: RetrieveMode = RetrieveMode.QUERY,
@@ -74,7 +49,9 @@ def retrieve(
     return all_rows
 
 
-@_cacheable
+# Backend wrappers own their cache boundary; call the unwrapped retrieval
+# implementation so bypassing a wrapper cannot hit an inner cache.
+@op(name="acquire.retrieve_from_web")
 def retrieve_from_web(
     mode: RetrieveMode = RetrieveMode.QUERY,
     *,
@@ -84,20 +61,19 @@ def retrieve_from_web(
     base_url: str | None = None,
     **kwargs: Any,
 ) -> list[dict]:
-    """Search the web via Brave Search. QUERY mode only.
-
-    cache=True memoizes results on disk via @op (default False).
-    """
+    """Search the web via Brave's LLM Context API. QUERY mode only."""
     source_kwargs = {k: v for k, v in kwargs.items() if k not in ("api_key",)}
     source = WebRetrievalSource(
         base_url=base_url,
         api_key=kwargs.get("api_key"),
         **source_kwargs,
     )
-    return retrieve(source, mode=mode, queries=queries, n=n, seed=seed, **source_kwargs)
+    return retrieve.__wrapped__(
+        source, mode=mode, queries=queries, n=n, seed=seed, **source_kwargs
+    )
 
 
-@_cacheable
+@op(name="acquire.retrieve_from_wiki")
 def retrieve_from_wiki(
     mode: RetrieveMode = RetrieveMode.QUERY,
     *,
@@ -107,15 +83,14 @@ def retrieve_from_wiki(
     language: str = "en",
     **kwargs: Any,
 ) -> list[dict]:
-    """Fetch Wikipedia articles. QUERY (full-text) or RANDOM (random article).
-
-    cache=True memoizes results on disk via @op (default False).
-    """
+    """Fetch Wikipedia articles. QUERY (full-text) or RANDOM (random article)."""
     source = WikiRetrievalSource(language=language, **kwargs)
-    return retrieve(source, mode=mode, queries=queries, n=n, seed=seed, **kwargs)
+    return retrieve.__wrapped__(
+        source, mode=mode, queries=queries, n=n, seed=seed, **kwargs
+    )
 
 
-@_cacheable
+@op(name="acquire.retrieve_from_hf")
 def retrieve_from_hf(
     dataset: str,
     config: str | None = None,
@@ -128,10 +103,7 @@ def retrieve_from_hf(
     seed: int | None = None,
     **kwargs: Any,
 ) -> list[dict]:
-    """Load rows from a Hugging Face dataset.
-
-    cache=True memoizes results on disk via @op (default False).
-    """
+    """Load rows from a Hugging Face dataset."""
     source = HFRetrievalSource(
         dataset=dataset,
         config=config,
@@ -139,10 +111,12 @@ def retrieve_from_hf(
         text_column=text_column,
         **kwargs,
     )
-    return retrieve(source, mode=mode, queries=queries, n=n, seed=seed, **kwargs)
+    return retrieve.__wrapped__(
+        source, mode=mode, queries=queries, n=n, seed=seed, **kwargs
+    )
 
 
-@_cacheable
+@op(name="acquire.retrieve_from_arxiv")
 def retrieve_from_arxiv(
     mode: RetrieveMode = RetrieveMode.QUERY,
     *,
@@ -151,15 +125,14 @@ def retrieve_from_arxiv(
     seed: int | None = None,
     **kwargs: Any,
 ) -> list[dict]:
-    """Fetch arXiv papers. QUERY (text search) or RANDOM (sample from category).
-
-    cache=True memoizes results on disk via @op (default False).
-    """
+    """Fetch arXiv papers. QUERY (text search) or RANDOM (sample from category)."""
     source = ArxivRetrievalSource(**kwargs)
-    return retrieve(source, mode=mode, queries=queries, n=n, seed=seed, **kwargs)
+    return retrieve.__wrapped__(
+        source, mode=mode, queries=queries, n=n, seed=seed, **kwargs
+    )
 
 
-@_cacheable
+@op(name="acquire.retrieve_from_s2")
 def retrieve_from_s2(
     mode: RetrieveMode = RetrieveMode.QUERY,
     *,
@@ -168,9 +141,8 @@ def retrieve_from_s2(
     seed: int | None = None,
     **kwargs: Any,
 ) -> list[dict]:
-    """Fetch papers from Semantic Scholar.
-
-    cache=True memoizes results on disk via @op (default False).
-    """
+    """Fetch papers from Semantic Scholar."""
     source = S2RetrievalSource(**kwargs)
-    return retrieve(source, mode=mode, queries=queries, n=n, seed=seed, **kwargs)
+    return retrieve.__wrapped__(
+        source, mode=mode, queries=queries, n=n, seed=seed, **kwargs
+    )
