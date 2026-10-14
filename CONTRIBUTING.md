@@ -13,7 +13,7 @@ Run the following command to install all the dependencies after you have forked 
 pip install .[dev]
 ```
 
-You should be using Python 3.9+ (our CI specifically tests Python 3.9, 3.10, and 3.11).
+You should be using Python 3.12+ (our CI specifically tests Python 3.12 and 3.13).
 
 If you're a developer, it's recommended to install
 pre-commit hooks before starting your development
