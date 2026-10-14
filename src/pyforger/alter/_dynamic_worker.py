@@ -18,7 +18,7 @@ spec.loader.exec_module(module)
 Sandbox = module.Sandbox
 
 
-def main():
+def main() -> None:
     """Execute one submitted program and write its JSON result to stdout."""
     version = importlib.metadata.version("RestrictedPython")
     if tuple(map(int, version.split(".")[:2])) < (8, 4):

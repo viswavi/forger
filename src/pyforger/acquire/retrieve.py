@@ -26,7 +26,7 @@ def retrieve(
     n: int = 10,
     seed: int | None = None,
     **kwargs: Any,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Call source.fetch() once per query and concatenate results.
 
     Each row is stamped with a ``"query"`` field. With ``queries=None``,
@@ -52,7 +52,7 @@ def retrieve_from_web(
     seed: int | None = None,
     base_url: str | None = None,
     **kwargs: Any,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Search the web via Brave's LLM Context API. QUERY mode only."""
     source_kwargs = {k: v for k, v in kwargs.items() if k not in ("api_key",)}
     source = WebRetrievalSource(
@@ -71,7 +71,7 @@ def retrieve_from_wiki(
     seed: int | None = None,
     language: str = "en",
     **kwargs: Any,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Fetch Wikipedia articles. QUERY (full-text) or RANDOM (random article)."""
     source = WikiRetrievalSource(language=language, **kwargs)
     return retrieve(source, mode=mode, queries=queries, n=n, seed=seed, **kwargs)
@@ -88,7 +88,7 @@ def retrieve_from_hf(
     n: int = 10,
     seed: int | None = None,
     **kwargs: Any,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Load rows from a Hugging Face dataset."""
     source = HFRetrievalSource(
         dataset=dataset,
@@ -107,7 +107,7 @@ def retrieve_from_arxiv(
     n: int = 10,
     seed: int | None = None,
     **kwargs: Any,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Fetch arXiv papers. QUERY (text search) or RANDOM (sample from category)."""
     source = ArxivRetrievalSource(**kwargs)
     return retrieve(source, mode=mode, queries=queries, n=n, seed=seed, **kwargs)
@@ -120,7 +120,7 @@ def retrieve_from_s2(
     n: int = 10,
     seed: int | None = None,
     **kwargs: Any,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Fetch papers from Semantic Scholar."""
     source = S2RetrievalSource(**kwargs)
     return retrieve(source, mode=mode, queries=queries, n=n, seed=seed, **kwargs)

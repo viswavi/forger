@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pyforger.acquire.model import GenerateResult, Model, Prompt
+from pyforger.acquire.model import GenerateResult, Model, Prompt, Usage
 
 
 class MockModel(Model):
@@ -50,7 +50,7 @@ class MockModel(Model):
         """Stable hash key for @op caching. Excludes mutable _call_count."""
         return (
             type(self).__name__,
-            self._model_id,
+            self.config.model_id,
             tuple(tuple(r) for r in self.responses),
             tuple(tuple(r) for r in self.reasoning),
         )
@@ -81,14 +81,9 @@ class MockModel(Model):
         results = [
             GenerateResult(
                 list(r),
-                usage={
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "reasoning_tokens": 0,
-                    "cost_usd": 0.0,
-                },
+                usage=Usage(),
                 reasoning=list(reasoning),
-                model_id=self._model_id,
+                model_id=self.config.model_id,
                 raw=None,
             )
             for r, reasoning in zip(canned, self.reasoning)
