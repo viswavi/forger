@@ -136,7 +136,7 @@ def run_agent(
                             "Unexpected SDK tools; refusing execution"
                         )
                     for attempt in range(attempts):
-                        conv.run()
+                        api.run()
                         if stop_when is None or stop_when():
                             break
                         if attempt + 1 < attempts and continuation:
@@ -158,7 +158,7 @@ def run_agent(
                                 f"{exc}. Return corrected JSON now. "
                                 "Do not reread evidence or add commentary."
                             )
-                            conv.run()
+                            api.run()
                             status = conv.state.execution_status
                             if getattr(status, "value", status) != "finished" or errors:
                                 raise AgentExecutionError(
