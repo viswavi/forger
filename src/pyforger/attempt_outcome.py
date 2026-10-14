@@ -17,6 +17,7 @@ class AttemptOutcome(BaseModel):
 
     @model_validator(mode="after")
     def coherent_grade(self) -> AttemptOutcome:
+        """Reject grades whose boolean presence disagrees with attribution."""
         if (self.attribution == "model") != (self.passed is not None):
             raise ValueError("Only model outcomes carry a boolean grade")
         return self
