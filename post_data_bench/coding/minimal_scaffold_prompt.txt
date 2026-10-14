@@ -53,7 +53,7 @@ response = completion(
 )
 ```
 
-DeepSeek-V4-Flash returns its reasoning separately from its answer, in `response.choices[0].message.reasoning_content`. Use it for <think>...</think> targets instead of making another call to write reasoning; the reasoning effort setting controls how long it is.
+DeepSeek-V4-Flash returns its reasoning separately from its answer, in `response.choices[0].message.reasoning_content`. Use it for <think>...</think> targets instead of making another call to write reasoning. DeepSeek-V4-Flash reads the effort only as `reasoning={{"effort": ...}}` and does not think at all without it; GLM-5.3 reads `reasoning_effort="low"` (or "medium", "high") instead. The setting controls how long the reasoning is.
 
 Iterate with small batches before your final generation run. Web search uses `BRAVE_API_KEY`; Semantic Scholar uses `S2_API_KEY`. Web search has no fixed usage limit, but be reasonable: do not send hundreds of thousands of queries.
 

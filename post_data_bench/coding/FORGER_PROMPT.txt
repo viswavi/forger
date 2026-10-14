@@ -36,7 +36,7 @@ Read `{GENERATION_USAGE_PATH}` for cumulative `token_units`, `remaining_token_un
 
 Credentials are provided as `LITELLM_API_KEY` and `LITELLM_BASE_URL`; load them from the environment without printing them. Forger's Model records usage against this quota automatically, so make your generation calls through Forger and do not wrap Model calls a second time.
 
-DeepSeek-V4-Flash returns its reasoning separately from its answer, and Forger keeps it: `sample_from_LLM` and `generate_from_context` put it under each output's `thinking_trace` key. Use it for <think>...</think> targets instead of making another call to write reasoning; the reasoning effort setting controls how long it is.
+DeepSeek-V4-Flash returns its reasoning separately from its answer, and Forger keeps it: `sample_from_LLM` and `generate_from_context` put it under each output's `thinking_trace` key. Use it for <think>...</think> targets instead of making another call to write reasoning. Set the effort explicitly, e.g. `Model(..., reasoning_effort="high")`: without it DeepSeek-V4-Flash does not think at all, and the setting controls how long the reasoning is.
 
 Iterate with small batches before your final generation run. Web search uses `BRAVE_API_KEY`; Semantic Scholar uses `S2_API_KEY`. Web search has no fixed usage limit, but be reasonable: do not send hundreds of thousands of queries.
 
