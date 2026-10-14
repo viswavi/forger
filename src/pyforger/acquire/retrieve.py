@@ -2,6 +2,9 @@
 
 ``retrieve()`` is the generic entry point; the convenience wrappers
 construct the appropriate source for a backend (web, wiki, HF, arXiv, S2).
+All entry points cache results on disk by default, including RANDOM mode.
+Pass ``_no_cache=True`` to skip cache reads and writes, or ``_cache_only=True``
+to read an existing result without fetching.
 """
 from __future__ import annotations
 
@@ -16,8 +19,10 @@ from pyforger.acquire.sources import (
     WebRetrievalSource,
     WikiRetrievalSource,
 )
+from pyforger.op import op
 
 
+@op(name="acquire.retrieve")
 def retrieve(
     source: RetrievalSource,
     mode: RetrieveMode = RetrieveMode.QUERY,
@@ -44,6 +49,9 @@ def retrieve(
     return all_rows
 
 
+# Backend wrappers own their cache boundary; call the unwrapped retrieval
+# implementation so bypassing a wrapper cannot hit an inner cache.
+@op(name="acquire.retrieve_from_web")
 def retrieve_from_web(
     mode: RetrieveMode = RetrieveMode.QUERY,
     *,
@@ -60,9 +68,12 @@ def retrieve_from_web(
         api_key=kwargs.get("api_key"),
         **source_kwargs,
     )
-    return retrieve(source, mode=mode, queries=queries, n=n, seed=seed, **source_kwargs)
+    return retrieve.__wrapped__(
+        source, mode=mode, queries=queries, n=n, seed=seed, **source_kwargs
+    )
 
 
+@op(name="acquire.retrieve_from_wiki")
 def retrieve_from_wiki(
     mode: RetrieveMode = RetrieveMode.QUERY,
     *,
@@ -74,9 +85,12 @@ def retrieve_from_wiki(
 ) -> list[dict]:
     """Fetch Wikipedia articles. QUERY (full-text) or RANDOM (random article)."""
     source = WikiRetrievalSource(language=language, **kwargs)
-    return retrieve(source, mode=mode, queries=queries, n=n, seed=seed, **kwargs)
+    return retrieve.__wrapped__(
+        source, mode=mode, queries=queries, n=n, seed=seed, **kwargs
+    )
 
 
+@op(name="acquire.retrieve_from_hf")
 def retrieve_from_hf(
     dataset: str,
     config: str | None = None,
@@ -97,9 +111,12 @@ def retrieve_from_hf(
         text_column=text_column,
         **kwargs,
     )
-    return retrieve(source, mode=mode, queries=queries, n=n, seed=seed, **kwargs)
+    return retrieve.__wrapped__(
+        source, mode=mode, queries=queries, n=n, seed=seed, **kwargs
+    )
 
 
+@op(name="acquire.retrieve_from_arxiv")
 def retrieve_from_arxiv(
     mode: RetrieveMode = RetrieveMode.QUERY,
     *,
@@ -110,9 +127,12 @@ def retrieve_from_arxiv(
 ) -> list[dict]:
     """Fetch arXiv papers. QUERY (text search) or RANDOM (sample from category)."""
     source = ArxivRetrievalSource(**kwargs)
-    return retrieve(source, mode=mode, queries=queries, n=n, seed=seed, **kwargs)
+    return retrieve.__wrapped__(
+        source, mode=mode, queries=queries, n=n, seed=seed, **kwargs
+    )
 
 
+@op(name="acquire.retrieve_from_s2")
 def retrieve_from_s2(
     mode: RetrieveMode = RetrieveMode.QUERY,
     *,
@@ -123,4 +143,6 @@ def retrieve_from_s2(
 ) -> list[dict]:
     """Fetch papers from Semantic Scholar."""
     source = S2RetrievalSource(**kwargs)
-    return retrieve(source, mode=mode, queries=queries, n=n, seed=seed, **kwargs)
+    return retrieve.__wrapped__(
+        source, mode=mode, queries=queries, n=n, seed=seed, **kwargs
+    )
