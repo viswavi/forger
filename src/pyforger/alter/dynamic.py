@@ -1,4 +1,4 @@
-"""Cached dynamic alter operations using the local agent backend."""
+"""Cached dynamic alter operations with interchangeable execution backends."""
 from __future__ import annotations
 
 import math
@@ -22,7 +22,8 @@ def _runner(
     if runner is not None:
         if model is not None or max_iterations != 20 or execution_timeout_s != 10.0:
             raise ValueError(
-                "An explicit runner owns its model and limits; configure them on the runner"
+                "An explicit runner owns its model and limits; "
+                "configure them on the runner"
             )
         return runner
     if model is None:
@@ -46,7 +47,8 @@ def dynamic_step_source(
     """Generate Python source once per input through Forger's standard @op cache.
 
     Call with ``_cache_only=True`` to inspect cached source without launching
-    an agent when there is a cache miss.
+    an agent when there is a cache miss. Pass an explicit ``runner`` to use
+    another backend; its model and limits are configured on the runner.
     """
     if not isinstance(goal, str) or not goal.strip():
         raise ValueError("goal must be a nonempty string")
