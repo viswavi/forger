@@ -365,24 +365,47 @@ def main(seeds, model):
 Each step prints a report when it returns, and the pipeline prints a summary at the end:
 
 ```text
-── step dedupe: 412 → 230 rows · 3.1s ──────────────────────────────────────────────────────────────
+step dedupe ────────────────────────────────────────────────────────────────────────────────────────────────────────────
   Drop near-duplicate translations.
-  in: list[Translated] ok   out: list[Translated] ok
-  op                  in  out  yield  time  tokens in/out  cost
-  filter.by_rouge_l  412  230   0.56  3.1s              -     -  min 0.50 ok
-    rouge_l  0.0  0.1  0.2  0.3  0.4  0.5  0.6  0.7  0.8  0.9
-    rows      51   87   62   21    7    2    0   41   73   68
-    keep at  [<0.7 0.56]  (scored against the kept rows; rerun to try other thresholds)
-  sample (3 of 230):
-    [0] text="¿Cuál es la capital de Francia?"
-    ...
-══ pipeline main: 2 steps · 500 → 230 rows · 41.0s · 61,200 in / 9,840 out tokens · $0.0315 ════════
-  step        in  out  yield   time     cost
-  translate  500  412   0.82  37.9s  $0.0315
-  dedupe     412  230   0.56   3.1s        -
-  pipeline warnings:
-    - no quality filter ran (e.g. filter.by_llm_score)
-    - no inspect op ran
+  412 → 381 rows (yield 0.92) · 3.1s
+  rows validated: list[Translated] → list[Translated]
+
+  op                   in   out   yield   time   yield check
+  ────────────────────────────────────────────────────────────
+  filter.by_rouge_l   412   381    0.92   3.1s   ok · min 0.50
+
+  filter.by_rouge_l · rouge_l · keeps < 0.7: 381 of 412 (0.92)
+       rouge_l  rows
+         0–0.1    12  ████
+       0.1–0.2    45  ███████████████▏
+       0.2–0.3    61  ████████████████████▋
+       0.3–0.4    76  █████████████████████████▋
+       0.4–0.5    83  ████████████████████████████
+       0.5–0.6    58  ███████████████████▋
+    ▶  0.6–0.7    46  ███████████████▌              ◀ current threshold
+       0.7–0.8    21  ███████▏
+       0.8–0.9     8  ██▊
+         0.9–1     2  ▋
+    No what-if columns: each score depends on the rows kept before it. Rerun to compare thresholds.
+
+  sample rows (3 of 381)
+  #   text
+  ──────────────────────────────────────────────────
+  0   ¿Cuál es la capital de Francia?
+  1   Explica por qué el cielo es azul en una frase.
+  2   Escribe un haiku sobre el otoño.
+
+pipeline main ──────────────────────────────────────────────────────────────────────────────────────────────────────────
+  2 steps · 500 → 381 rows (yield 0.76) · 41.0s · 61,200 in / 9,840 out tokens · $0.032
+
+  step         in   out   yield    time     cost
+  ─────────────────────────────────────────────────
+  translate   500   412    0.82   37.9s   $0.032
+  dedupe      412   381    0.92    3.1s        -
+
+  pipeline warnings
+  ⚠ no quality filter ran (e.g. filter.by_llm_score)
+  ⚠ no inspect op ran
 ```
 
 Later, `pyforger.inspect.inspect_step("dedupe")` prints the same report with up to 10 sample rows.

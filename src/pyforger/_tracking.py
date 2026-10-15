@@ -78,6 +78,7 @@ class OpCall(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cost_usd: float = 0.0
+    token_units: float = 0.0
     scores: ScoreRecord | None = None
     warnings: list[str] = Field(default_factory=list)
 
@@ -106,6 +107,7 @@ class StepRecord(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cost_usd: float = 0.0
+    token_units: float = 0.0
 
 
 class PipelineRecord(BaseModel):
@@ -118,6 +120,7 @@ class PipelineRecord(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cost_usd: float = 0.0
+    token_units: float = 0.0
 
 
 _ACTIVE_STEP: ContextVar[StepRecord | None] = ContextVar(
@@ -210,6 +213,7 @@ def step_meta(rec: StepRecord) -> str:
                 "prompt_tokens": 0,
                 "completion_tokens": 0,
                 "cost_usd": 0.0,
+                "token_units": 0.0,
                 "scores": None,
             }
         ).model_dump(mode="json")
@@ -369,6 +373,7 @@ def step_from_bare_op(call: OpCall) -> StepRecord:
         prompt_tokens=call.prompt_tokens,
         completion_tokens=call.completion_tokens,
         cost_usd=call.cost_usd,
+        token_units=call.token_units,
     )
 
 
@@ -409,7 +414,12 @@ def keep_where(items: list[Any], keep: list[bool]) -> list[Any]:
 
 
 _USAGE_LOCK = threading.Lock()
-_USAGE = {"prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0}
+_USAGE = {
+    "prompt_tokens": 0,
+    "completion_tokens": 0,
+    "cost_usd": 0.0,
+    "token_units": 0.0,
+}
 
 
 def _as_number(value: Any) -> float:
@@ -420,28 +430,42 @@ def _as_number(value: Any) -> float:
     return number if math.isfinite(number) else 0.0
 
 
-def add_usage(prompt_tokens: Any, completion_tokens: Any, cost_usd: Any) -> None:
+def add_usage(
+    prompt_tokens: Any,
+    completion_tokens: Any,
+    cost_usd: Any,
+    token_units: Any = 0.0,
+) -> None:
     """Add one LLM call's usage to the process-wide counter (NaN counts as 0)."""
     with _USAGE_LOCK:
         _USAGE["prompt_tokens"] += int(_as_number(prompt_tokens))
         _USAGE["completion_tokens"] += int(_as_number(completion_tokens))
         _USAGE["cost_usd"] += _as_number(cost_usd)
+        _USAGE["token_units"] += _as_number(token_units)
 
 
-def usage_snapshot() -> tuple[int, int, float]:
-    """Return the process-wide ``(prompt_tokens, completion_tokens, cost_usd)``."""
+def usage_snapshot() -> tuple[int, int, float, float]:
+    """Return ``(prompt_tokens, completion_tokens, cost_usd, token_units)``."""
     with _USAGE_LOCK:
         return (
             int(_USAGE["prompt_tokens"]),
             int(_USAGE["completion_tokens"]),
             float(_USAGE["cost_usd"]),
+            float(_USAGE["token_units"]),
         )
 
 
-def usage_since(start: tuple[int, int, float]) -> tuple[int, int, float]:
+def usage_since(
+    start: tuple[int, int, float, float],
+) -> tuple[int, int, float, float]:
     """Return the usage added since ``start`` (a ``usage_snapshot()``)."""
     now = usage_snapshot()
-    return now[0] - start[0], now[1] - start[1], max(0.0, now[2] - start[2])
+    return (
+        now[0] - start[0],
+        now[1] - start[1],
+        max(0.0, now[2] - start[2]),
+        max(0.0, now[3] - start[3]),
+    )
 
 
 _REGISTRY_LOCK = threading.Lock()

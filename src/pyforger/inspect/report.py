@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pyforger import _tracking
 from pyforger._tracking import StepRecord
-from pyforger.steps import render_step
+from pyforger.steps import print_step
 
 
 def inspect_step(name: str | None = None) -> StepRecord:
@@ -26,5 +26,5 @@ def inspect_step(name: str | None = None) -> StepRecord:
         rec = records[name]
     else:
         raise KeyError(f"no step named {name!r}; known steps: {', '.join(records)}")
-    print(render_step(rec, full=True), flush=True)
+    print_step(rec, full=True)
     return rec

@@ -22,22 +22,25 @@ into errors.
 from __future__ import annotations
 
 import inspect
-import json
-import math
 import os
 import sys
-import textwrap
 import time
 import typing
-from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from functools import wraps
 from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
 from pyforger import _tracking
-from pyforger._tracking import OpCall, PipelineRecord, ScoreRecord, StepRecord
+from pyforger._render import (
+    print_pipeline,
+    print_step,
+    render_pipeline,
+    render_scores,
+    render_step,
+)
+from pyforger._tracking import PipelineRecord, StepRecord
 from pyforger.op import op
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -250,13 +253,18 @@ def step(
             def finish() -> None:
                 rec.duration_s = time.perf_counter() - start
                 usage = _tracking.usage_since(usage_start)
-                rec.prompt_tokens, rec.completion_tokens, rec.cost_usd = usage
+                (
+                    rec.prompt_tokens,
+                    rec.completion_tokens,
+                    rec.cost_usd,
+                    rec.token_units,
+                ) = usage
                 _tracking.store_step(rec)
                 pipeline_rec = _tracking.pipeline_for_step()
                 if pipeline_rec is not None:
                     pipeline_rec.steps.append(rec)
                 if _reports_enabled(prod):
-                    print("\n" + render_step(rec), flush=True)
+                    print_step(rec)
 
             scope = _tracking.enter_step(rec, check)
             try:
@@ -379,7 +387,7 @@ def pipeline(
             def on_dynamic_step(step_rec: StepRecord) -> None:
                 _tracking.store_step(step_rec)
                 if _reports_enabled(prod):
-                    print("\n" + render_step(step_rec), flush=True)
+                    print_step(step_rec)
 
             scope = _tracking.enter_pipeline(rec, on_dynamic_step)
             try:
@@ -388,12 +396,17 @@ def pipeline(
                 _tracking.exit_pipeline(scope)
             rec.duration_s = time.perf_counter() - start
             usage = _tracking.usage_since(usage_start)
-            rec.prompt_tokens, rec.completion_tokens, rec.cost_usd = usage
+            (
+                rec.prompt_tokens,
+                rec.completion_tokens,
+                rec.cost_usd,
+                rec.token_units,
+            ) = usage
 
             _check_pipeline(rec)
             _tracking.store_pipeline(rec)
             if _reports_enabled(prod):
-                print("\n" + render_pipeline(rec), flush=True)
+                print_pipeline(rec)
             if strict and rec.warnings:
                 raise PipelineContractError(
                     f"pipeline {pipeline_name} has warnings (strict=True):\n"
@@ -446,389 +459,14 @@ def _check_pipeline(rec: PipelineRecord) -> None:
         )
 
 
-# --------------------------------------------------------------------------- #
-# Rendering
-# --------------------------------------------------------------------------- #
-
-
-def _fmt_int(n: int | None) -> str:
-    return "-" if n is None else f"{n:,}"
-
-
-def _fmt_yield(y: float | None) -> str:
-    return "-" if y is None or not math.isfinite(y) else f"{y:.2f}"
-
-
-def _fmt_secs(s: float) -> str:
-    return f"{s:,.1f}s" if math.isfinite(s) else "-"
-
-
-def _fmt_cost(c: float) -> str:
-    if not c or not math.isfinite(c):
-        return "-"
-    return f"${c:,.2f}" if c >= 1 else f"${c:.4f}"
-
-
-def _fmt_tokens(prompt: int, completion: int) -> str:
-    if not prompt and not completion:
-        return "-"
-    return f"{prompt:,}/{completion:,}"
-
-
-def _fmt_num(x: float) -> str:
-    """Compact number: ``3``, ``0.7``, ``0.25``, ``1,204``."""
-    if float(x).is_integer():
-        return f"{int(x):,}"
-    return f"{x:.2f}".rstrip("0") if abs(x) < 10 else f"{x:,.1f}"
-
-
-def _rule(char: str, text: str) -> str:
-    line = f"{char * 2} {text} "
-    return line + char * max(2, _RULE_WIDTH - len(line))
-
-
-def _header(char: str, title: str, parts: list[str]) -> list[str]:
-    """Rule line with ``title: parts``; the parts move to a second line if long."""
-    line = _rule(char, f"{title}: " + " · ".join(parts))
-    if len(line) <= _WIDTH:
-        return [line]
-    return [_clip(_rule(char, title)), _clip("  " + " · ".join(parts))]
-
-
-def _clip(line: str, width: int = _WIDTH) -> str:
-    return line if len(line) <= width else line[: width - 1] + "…"
-
-
-def _table(
-    headers: Sequence[str], rows: Sequence[Sequence[str]], left: Sequence[int]
-) -> list[str]:
-    """Align ``rows`` under ``headers``; columns in ``left`` are left-aligned.
-
-    The last column holds free-form notes and is never padded.
-    """
-    ncols = len(headers)
-    rows = [[_clip(r[0], _NAME_CHARS), *r[1:]] for r in rows]
-    widths = [
-        max(len(headers[i]), *(len(r[i]) for r in rows)) if rows else len(headers[i])
-        for i in range(ncols - 1)
-    ]
-
-    def fmt(cells: Sequence[str]) -> str:
-        out = []
-        for i, cell in enumerate(cells[:-1]):
-            out.append(cell.ljust(widths[i]) if i in left else cell.rjust(widths[i]))
-        out.append(cells[-1])
-        return "  ".join(out).rstrip()
-
-    return [fmt(headers)] + [fmt(r) for r in rows]
-
-
-def _op_notes(call: OpCall) -> str:
-    notes = []
-    y = call.yield_ratio
-    if call.min_yield is not None:
-        status = "-" if y is None else ("ok" if y >= call.min_yield else "LOW")
-        if call.n_in == 0 and call.min_yield > 0:
-            status = "LOW"
-        notes.append(f"min {call.min_yield:.2f} {status}")
-    if call.max_yield is not None:
-        status = "-" if y is None else ("ok" if y <= call.max_yield else "HIGH")
-        notes.append(f"max {call.max_yield:.2f} {status}")
-    if call.cache_hit:
-        notes.append("(cached)")
-    return "  ".join(notes)
-
-
-def _show_yield(call: OpCall) -> bool:
-    return (
-        call.category == "filter"
-        or call.min_yield is not None
-        or call.max_yield is not None
-        or (call.n_in is not None and call.n_out != call.n_in)
-    )
-
-
-_KEEP_SYMBOL = {"ge": ">=", "le": "<=", "lt": "<"}
-
-
-def _kept(values: list[float], keep: str, t: float) -> int:
-    if keep == "ge":
-        return sum(1 for v in values if v >= t)
-    if keep == "le":
-        return sum(1 for v in values if v <= t)
-    return sum(1 for v in values if v < t)
-
-
-def _wrap_items(prefix: str, items: list[str], indent: int) -> list[str]:
-    """Join ``items`` after ``prefix`` two spaces apart, wrapping before ``_WIDTH``."""
-    lines, line = [], prefix
-    for item in items:
-        if len(line) + 2 + len(item) > _WIDTH - indent and line != prefix:
-            lines.append(line)
-            line = " " * len(prefix)
-        line += "  " + item
-    lines.append(line)
-    return lines
-
-
-def _nice_width(span: float, integer: bool) -> float:
-    """Smallest round bin width (1, 2, 2.5, or 5 times a power of ten) for 10 bins."""
-    raw = span / 10 if span > 0 else 1.0
-    power = 10.0 ** math.floor(math.log10(raw))
-    for step in (1.0, 2.0, 2.5, 5.0, 10.0):
-        width = step * power
-        if width >= raw * (1 - 1e-9) and (not integer or width.is_integer()):
-            return width
-    return 10.0 * power
-
-
-def _fmt_edge(x: float) -> str:
-    """Compact bin edge: ``40``, ``2.5``, ``2,500``, ``12.5k``."""
-    if abs(x) >= 10_000:
-        return f"{x / 1000:,.1f}".rstrip("0").rstrip(".") + "k"
-    return _fmt_num(round(x, 6))
-
-
-def render_scores(scores: ScoreRecord, indent: int = 4) -> list[str]:
-    """Render a filter's per-row scores as histogram lines, ``indent`` spaces in.
-
-    Ints with up to 12 distinct values get one column each. Floats in [0, 1]
-    get ten bins labelled by their lower edge. Other values get round-width
-    bins labelled by their lower edge, with the width noted.
-    """
-    pad = " " * indent
-    total = len(scores.values)
-    good: list[Any] = [
-        v
-        for v in scores.values
-        if v is not None and not (isinstance(v, float) and not math.isfinite(v))
-    ]
-    unparsed = total - len(good)
-    note = f"   unparsed {unparsed:,}" if unparsed else ""
-    if not total:
-        return [f"{pad}no rows scored"]
-    if scores.keep == "true" or (good and all(isinstance(v, bool) for v in good)):
-        kept = sum(1 for v in good if v)
-        return [f"{pad}kept {kept:,}  dropped {len(good) - kept:,}{note}"]
-    if not good:
-        return [f"{pad}{scores.label}: all {unparsed:,} rows unparsed"]
-
-    nums = [float(v) for v in good]
-    distinct = sorted(set(good))
-    is_int = all(isinstance(v, int) for v in good)
-    lo, hi = min(nums), max(nums)
-    labels: list[str]
-    counts: list[int]
-    thresholds: list[float]
-    if is_int and len(distinct) <= 12:
-        tally = Counter(good)
-        labels = [_fmt_num(v) for v in distinct]
-        counts = [tally[v] for v in distinct]
-        thresholds = [float(v) for v in distinct]
-    elif not is_int and lo >= 0.0 and hi <= 1.0:
-        counts = [0] * 10
-        for v in nums:
-            # The epsilon keeps edge values in their own bin (0.3 / 0.1 < 3).
-            counts[min(int(v * 10 + 1e-9), 9)] += 1
-        labels = [f"{i / 10:.1f}" for i in range(10)]
-        thresholds = [0.5, 0.6, 0.7, 0.8, 0.9]
-    else:
-        width = _nice_width(hi - lo, is_int)
-        first = math.floor(lo / width + 1e-9) * width
-        nbins = int((hi - first) / width + 1e-9) + 1
-        counts = [0] * nbins
-        for v in nums:
-            counts[min(int((v - first) / width + 1e-9), nbins - 1)] += 1
-        edges = [first + i * width for i in range(nbins)]
-        labels = [_fmt_edge(e) for e in edges]
-        thresholds = [e for e in edges if lo < e <= hi]
-        note = f"   (bins of {_fmt_edge(width)}){note}"
-    if scores.threshold is not None and scores.threshold not in thresholds:
-        thresholds = sorted(thresholds + [scores.threshold])
-
-    head = max(len(scores.label), len("keep at"))
-    widths = [max(len(a), len(f"{b:,}")) for a, b in zip(labels, counts)]
-    label_line = scores.label.ljust(head) + "".join(
-        "  " + a.rjust(w) for a, w in zip(labels, widths)
-    )
-    count_line = "rows".ljust(head) + "".join(
-        "  " + f"{b:,}".rjust(w) for b, w in zip(counts, widths)
-    )
-    lines = [pad + label_line + note, pad + count_line]
-
-    if scores.keep == "between":
-        lower = scores.lower if scores.lower is not None else -math.inf
-        upper = scores.upper if scores.upper is not None else math.inf
-        kept = sum(1 for v in nums if lower <= v <= upper)
-        bounds = f"[{_fmt_num(lower)}, {_fmt_num(upper)}]".replace("inf", "∞")
-        lines.append(
-            f"{pad}{'keep'.ljust(head)}  {bounds}: {kept:,} of {total:,} "
-            f"({kept / total:.2f})"
-        )
-        return lines
-
-    symbol = _KEEP_SYMBOL[scores.keep]
-    items = []
-    for t in thresholds:
-        is_current = scores.threshold is not None and t == scores.threshold
-        if scores.pooled and not is_current:
-            # Each score compares a row with the rows kept at this threshold;
-            # another threshold keeps other rows, so these scores cannot say.
-            continue
-        frac = _kept(nums, scores.keep, t) / total
-        if frac in (0.0, 1.0) and not is_current:
-            continue
-        item = f"{symbol}{_fmt_num(t)} {frac:.2f}"
-        items.append(f"[{item}]" if is_current else item)
-    if scores.pooled and items:
-        items.append("(scored against the kept rows; rerun to try other thresholds)")
-    if items:
-        lines.extend(pad + ln for ln in _wrap_items("keep at".ljust(head), items, 4))
-    return lines
-
-
-def _fmt_value(value: Any, limit: int) -> str:
-    if isinstance(value, str):
-        text = " ".join(value.split())
-        if len(text) > limit:
-            text = text[: limit - 1] + "…"
-        return f'"{text}"'
-    try:
-        text = json.dumps(value, ensure_ascii=False, default=str)
-    except (TypeError, ValueError):
-        text = repr(value)
-    return text if len(text) <= limit else text[: limit - 1] + "…"
-
-
-def _sample_lines(rec: StepRecord, full: bool) -> list[str]:
-    if not rec.sample:
-        return []
-    shown = rec.sample if full else rec.sample[: max(0, rec.sample_shown)]
-    if not shown:
-        return []
-    lines = [f"  sample ({len(shown)} of {_fmt_int(rec.n_out)}):"]
-    for i, row in enumerate(shown):
-        if not full:
-            fields = " ".join(
-                f"{k}={_fmt_value(v, _COMPACT_FIELD_CHARS)}" for k, v in row.items()
-            )
-            lines.append(_clip(f"    [{i}] {fields}"))
-            continue
-        lines.append(f"    [{i}]")
-        for k, v in row.items():
-            text = f"{k}: {_fmt_value(v, _SAMPLE_FIELD_CHARS + 2)}"
-            lines.extend(
-                textwrap.wrap(
-                    text,
-                    width=_WIDTH,
-                    initial_indent="      ",
-                    subsequent_indent="        ",
-                )
-                or ["      " + text]
-            )
-    return lines
-
-
-def render_step(rec: StepRecord, *, full: bool = False) -> str:
-    """Render a step record as the report ``@step`` prints.
-
-    ``full=True`` (used by ``inspect.inspect_step``) shows the whole docstring,
-    up to 10 sample rows, and up to 500 characters per field.
-    """
-    parts = [f"{_fmt_int(rec.n_in)} → {_fmt_int(rec.n_out)} rows"]
-    parts.append(_fmt_secs(rec.duration_s))
-    if rec.cache_hit:
-        parts.append("cached")
-    if rec.prompt_tokens or rec.completion_tokens:
-        parts.append(f"{rec.prompt_tokens:,} in / {rec.completion_tokens:,} out tokens")
-    if rec.cost_usd:
-        parts.append(_fmt_cost(rec.cost_usd))
-    lines = _header("─", f"step {rec.name}", parts)
-
-    doc_lines = rec.doc.strip().splitlines()
-    if doc_lines:
-        if full:
-            lines.extend(_clip(f"  {ln}".rstrip()) for ln in doc_lines)
-        else:
-            lines.append(_clip(f"  {doc_lines[0]}"))
-    if rec.input_type or rec.output_type:
-        types = []
-        if rec.input_type:
-            types.append(f"in: {rec.input_type} ok")
-        if rec.output_type:
-            types.append(f"out: {rec.output_type} ok")
-        lines.append("  " + "   ".join(types))
-
-    if rec.ops:
-        headers = ["op", "in", "out", "yield", "time", "tokens in/out", "cost", ""]
-        rows = [
-            [
-                call.op_name,
-                _fmt_int(call.n_in),
-                _fmt_int(call.n_out),
-                _fmt_yield(call.yield_ratio) if _show_yield(call) else "-",
-                _fmt_secs(call.duration_s),
-                _fmt_tokens(call.prompt_tokens, call.completion_tokens),
-                _fmt_cost(call.cost_usd),
-                _op_notes(call),
-            ]
-            for call in rec.ops
-        ]
-        table = _table(headers, rows, left=[0])
-        lines.append(_clip("  " + table[0]))
-        for call, row_line in zip(rec.ops, table[1:]):
-            lines.append(_clip("  " + row_line))
-            if call.scores is not None and not call.cache_hit:
-                lines.extend(_clip(ln) for ln in render_scores(call.scores))
-    elif rec.cache_hit:
-        lines.append(
-            "  (cached) result loaded from the step cache; its ops did not run"
-        )
-
-    if rec.warnings:
-        lines.append("  warnings:")
-        lines.extend(_clip(f"    - {w}") for w in rec.warnings)
-    lines.extend(_sample_lines(rec, full))
-    return "\n".join(lines)
-
-
-def render_pipeline(rec: PipelineRecord) -> str:
-    """Render a pipeline record as the summary ``@pipeline`` prints."""
-    n_steps = sum(1 for s in rec.steps if s.kind != "bare")
-    first = rec.steps[0].n_in if rec.steps else None
-    last = rec.steps[-1].n_out if rec.steps else None
-    parts = [
-        f"{n_steps} step{'s' if n_steps != 1 else ''}",
-        f"{_fmt_int(first)} → {_fmt_int(last)} rows",
-        _fmt_secs(rec.duration_s),
-    ]
-    if rec.prompt_tokens or rec.completion_tokens:
-        parts.append(f"{rec.prompt_tokens:,} in / {rec.completion_tokens:,} out tokens")
-    if rec.cost_usd:
-        parts.append(_fmt_cost(rec.cost_usd))
-    lines = _header("═", f"pipeline {rec.name}", parts)
-
-    headers = ["step", "in", "out", "yield", "time", "cost", ""]
-    rows = []
-    for s in rec.steps:
-        y = s.n_out / s.n_in if s.n_in and s.n_out is not None else None
-        rows.append(
-            [
-                s.name,
-                _fmt_int(s.n_in),
-                _fmt_int(s.n_out),
-                _fmt_yield(y),
-                _fmt_secs(s.duration_s),
-                _fmt_cost(s.cost_usd),
-                "cached" if s.cache_hit else "",
-            ]
-        )
-    table = _table(headers, rows, left=[0])
-    lines.append(_clip("  " + table[0]))
-    for s, row_line in zip(rec.steps, table[1:]):
-        lines.append(_clip("  " + row_line))
-        lines.extend(_clip(f"      ! {w}") for w in dict.fromkeys(s.warnings))
-    if rec.warnings:
-        lines.append("  pipeline warnings:")
-        lines.extend(_clip(f"    - {w}") for w in rec.warnings)
-    return "\n".join(lines)
+__all__ = [
+    "PipelineContractError",
+    "StepContractError",
+    "pipeline",
+    "print_pipeline",
+    "print_step",
+    "render_pipeline",
+    "render_scores",
+    "render_step",
+    "step",
+]

@@ -493,7 +493,7 @@ def _op_call(
     *,
     cache_hit: bool,
     duration: float,
-    usage: tuple[int, int, float],
+    usage: tuple[int, int, float, float],
     scores: list[_tracking.ScoreRecord],
     min_yield: float | None,
     max_yield: float | None,
@@ -521,6 +521,7 @@ def _op_call(
         prompt_tokens=usage[0],
         completion_tokens=usage[1],
         cost_usd=usage[2],
+        token_units=usage[3],
         scores=scores[0] if scores else None,
     )
     if (min_yield is not None or max_yield is not None) and yield_ratio is None:
