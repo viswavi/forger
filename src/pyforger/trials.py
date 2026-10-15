@@ -3,44 +3,29 @@
 from __future__ import annotations
 
 import json
-import math
+import os
 from contextlib import AbstractContextManager, nullcontext
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Annotated, Any, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    StringConstraints,
+    model_validator,
+)
 
 from pyforger.artifacts import ArtifactRef
 
-_ROLLOUT_STATUSES = {
-    "completed",
-    "failed",
-    "timed_out",
-    "infrastructure_error",
-    "incomplete",
-}
+NonEmptyStr = Annotated[str, StringConstraints(pattern=r"\S")]
 
 
-def _json_object(value: dict[str, Any], name: str) -> dict[str, Any]:
-    def validate(item: Any) -> None:
-        if isinstance(item, dict):
-            if any(not isinstance(key, str) for key in item):
-                raise ValueError(f"{name} keys must be strings")
-            for child in item.values():
-                validate(child)
-        elif isinstance(item, list):
-            for child in item:
-                validate(child)
-        elif isinstance(item, float) and not math.isfinite(item):
-            raise ValueError(f"{name} must contain finite numbers")
-        elif item is not None and type(item) not in (str, bool, int, float):
-            raise ValueError(f"{name} must contain JSON values")
-
-    if not isinstance(value, dict):
-        raise ValueError(f"{name} must be a JSON object")
-    validate(value)
-    return deepcopy(value)
+def _stored_path(path: Path) -> Path:
+    path = Path(os.path.abspath(path))
+    return path.parent.resolve() / path.name
 
 
 class TrialRequest(BaseModel):
@@ -50,26 +35,12 @@ class TrialRequest(BaseModel):
     A different ``trial_id`` requests a fresh sample rather than a cached repeat.
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
-    trial_id: str
+    trial_id: NonEmptyStr
     task: ArtifactRef
-    model: str
-    configuration: dict[str, Any] = Field(default_factory=dict)
-
-    @model_validator(mode="after")
-    def validate_record(self) -> TrialRequest:
-        """Validate sample identity and snapshot JSON-compatible configuration."""
-        if not isinstance(self.trial_id, str) or not self.trial_id.strip():
-            raise ValueError("trial_id must be nonempty")
-        if not isinstance(self.model, str) or not self.model.strip():
-            raise ValueError("model must be nonempty")
-        if not isinstance(self.task, ArtifactRef):
-            raise TypeError("task must be an ArtifactRef")
-        object.__setattr__(
-            self, "configuration", _json_object(self.configuration, "configuration")
-        )
-        return self
+    model: NonEmptyStr
+    configuration: dict[str, JsonValue] = Field(default_factory=dict)
 
     def cache_key(self) -> tuple[str, str, str, str]:
         """Include sample identity and all public execution configuration."""
@@ -84,36 +55,36 @@ class TrialRequest(BaseModel):
 class RolloutResult(BaseModel):
     """Execution status and full artifacts, independent of scientific grading."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
-    status: str
+    status: Literal[
+        "completed", "failed", "timed_out", "infrastructure_error", "incomplete"
+    ]
     artifacts: ArtifactRef | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
-    usage: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, JsonValue] = Field(default_factory=dict)
+    usage: dict[str, JsonValue] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def validate_record(self) -> RolloutResult:
-        """Validate status, snapshot metadata, and check usage quantities."""
-        if self.status not in _ROLLOUT_STATUSES:
-            raise ValueError(f"Unknown rollout status: {self.status}")
-        if self.artifacts is not None and not isinstance(self.artifacts, ArtifactRef):
-            raise TypeError("artifacts must be an ArtifactRef or None")
-        object.__setattr__(self, "metadata", _json_object(self.metadata, "metadata"))
-        object.__setattr__(self, "usage", _json_object(self.usage, "usage"))
+    def validate_usage(self) -> RolloutResult:
+        """Check the known accounting keys an open usage dict cannot type."""
+        if "cost_usd" in self.usage:
+            value = self.usage["cost_usd"]
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or value < 0
+            ):
+                raise ValueError("cost_usd must be finite and nonnegative")
         for key in (
-            "cost_usd",
             "prompt_tokens",
             "completion_tokens",
             "reasoning_tokens",
+            "cached_tokens",
         ):
             if key in self.usage:
                 value = self.usage[key]
-                if (
-                    type(value) not in (int, float)
-                    or not math.isfinite(value)
-                    or value < 0
-                ):
-                    raise ValueError(f"{key} must be finite and nonnegative")
+                if type(value) is not int or value < 0:
+                    raise ValueError(f"{key} must be a nonnegative integer")
         return self
 
 
@@ -172,8 +143,7 @@ def execute_agent(
     """
     identity = request.cache_key()
     output = Path(output)
-    output.mkdir(parents=True, exist_ok=False)
-    context: AbstractContextManager[Any] = nullcontext(None)
+    environment_settings: dict[str, Any] | None = None
     if environment_factory is not None:
         environment = request.configuration.get("environment")
         if not isinstance(environment, dict):
@@ -182,13 +152,21 @@ def execute_agent(
                 "request.configuration['environment'] to be an object of "
                 "factory-specific settings"
             )
-        context = environment_factory.open(deepcopy(environment))
+        environment_settings = deepcopy(environment)
+    output.mkdir(parents=True, exist_ok=False)
+    context: AbstractContextManager[Any] = nullcontext(None)
+    if environment_factory is not None:
+        context = environment_factory.open(environment_settings or {})
     with context as environment:
         rollout = runner.run(request, output / "rollout", environment=environment)
     if not isinstance(rollout, RolloutResult):
         raise TypeError("Runner must return RolloutResult")
     if request.cache_key() != identity:
         raise ValueError("Runner changed trial request identity")
+    if rollout.artifacts is not None and rollout.artifacts.root != _stored_path(
+        output / "rollout"
+    ):
+        raise ValueError("Runner artifacts must be captured from output/rollout")
     record = RolloutRecord(request=request, rollout=rollout)
     (output / "rollout.json").write_text(
         json.dumps(

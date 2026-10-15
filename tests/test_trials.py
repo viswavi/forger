@@ -134,6 +134,15 @@ def test_invalid_usage_is_rejected(value):
         RolloutResult(status="completed", usage={"cost_usd": value})
 
 
+@pytest.mark.parametrize(
+    "field", ["prompt_tokens", "completion_tokens", "reasoning_tokens"]
+)
+def test_fractional_token_counts_are_rejected(field):
+    """Token usage fields require exact nonnegative integers."""
+    with pytest.raises(ValueError, match="nonnegative integer"):
+        RolloutResult(status="completed", usage={field: 1.5})
+
+
 def test_restored_evidence_must_still_match(tmp_path):
     """Restoring a trial verifies that retained evidence is unchanged."""
     request_record = request(tmp_path)
@@ -227,6 +236,18 @@ def test_runner_exception_preserves_partial_evidence_and_reserves_output(tmp_pat
     assert not (output / "rollout.json").exists()
     with pytest.raises(FileExistsError):
         execute_agent(req, ArithmeticRunner(), output)
+
+
+def test_runner_artifacts_must_come_from_rollout(tmp_path):
+    """Runner artifacts must be captured from the reserved rollout path."""
+
+    class ExternalRunner:
+        def run(self, request, output, *, environment=None):
+            return RolloutResult(status="completed", artifacts=request.task)
+
+    with pytest.raises(ValueError, match="captured from output/rollout"):
+        execute_agent(request(tmp_path), ExternalRunner(), tmp_path / "run")
+    assert not (tmp_path / "run" / "rollout.json").exists()
 
 
 def test_runner_must_return_current_evidence(tmp_path):

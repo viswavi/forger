@@ -282,3 +282,4 @@ def test_environment_factory_requires_environment_configuration(tmp_path):
             tmp_path / "run",
             environment_factory=LocalFactory(tmp_path / "envs"),
         )
+    assert not (tmp_path / "run").exists()
