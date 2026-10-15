@@ -167,7 +167,8 @@ def code_language(text: str) -> str | None:
     if fence is not None and fence.group(1):
         return fence.group(1).lower()
     if lines and lines[0].startswith("#!"):
-        return lines[0].rsplit("/", 1)[-1].split()[-1] or "shell"
+        words = lines[0][2:].rsplit("/", 1)[-1].split()  # "#!/usr/bin/env python3"
+        return words[-1] if words else "shell"
     head = "\n".join(lines)
     for name, pattern in _LANGUAGES:
         if pattern.search(head):
@@ -399,6 +400,10 @@ def _summarize(model: Any, prompt: str) -> str:
 
 
 def _first_sentence(text: str) -> str:
+    from pyforger.acquire.model import split_reasoning
+
+    # A reasoning model may put "<think> … </think>" before its sentence.
+    text = split_reasoning(text)[1]
     line = next((x.strip() for x in text.strip().splitlines() if x.strip()), "")
     line = line.strip("\"'` ")
     return _cut(line, _SUMMARY_CHARS)

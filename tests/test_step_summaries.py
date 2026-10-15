@@ -272,6 +272,28 @@ def test_summaries_do_not_change_the_usage_counter(monkeypatch):
     assert _tracking.usage_snapshot() == before
 
 
+def test_summary_ops_do_not_count_as_started_ops():
+    """A step running in another thread must not mistake a summary for its op."""
+    fake = _FakeSummarizer()
+    before = _tracking.ops_started()
+    _tracking.run_uncounted(_summaries._summarize_one, fake, "prompt")
+    assert fake.calls == 1
+    assert _tracking.ops_started() == before
+
+
+def test_reasoning_before_the_summary_is_dropped():
+    """An inline <think> block is not mistaken for the summary sentence."""
+    fake = _FakeSummarizer(reply="<think>\nLet me look.\n</think>\nA list of files.")
+    assert _summaries._summarize_one(fake, "prompt") == "A list of files."
+
+
+def test_shebang_without_interpreter_is_still_summarized():
+    """A '#!' line with no interpreter name does not break the code summary."""
+    code = "#!/usr/bin/ \n" + "def f(x):\n    return x\n" * 30
+    assert _compact(code).endswith("chars, shell)")
+    assert _compact("#!/usr/bin/env python3\n" + code[13:]).endswith("python3)")
+
+
 def test_summaries_are_cached_on_disk(monkeypatch):
     """Printing again, inspecting, or rerunning the step makes no new calls."""
     monkeypatch.setenv("FORGER_STEP_REPORT", "1")

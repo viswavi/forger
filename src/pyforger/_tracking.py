@@ -327,8 +327,9 @@ def enter_op(op_name: str) -> OpToken:
     if op_name.startswith(STEP_OP_PREFIX):
         # A step's own cache wrapper: the step itself does the reporting.
         return OpToken(is_step=True, depth=-1)
-    with _OPS_LOCK:
-        _OPS_STARTED[0] += 1
+    if _COUNT_USAGE.get():  # report summaries must not look like a step's ops
+        with _OPS_LOCK:
+            _OPS_STARTED[0] += 1
     depth = _OP_DEPTH.get()
     return OpToken(
         is_step=False,
@@ -448,9 +449,10 @@ _COUNT_USAGE: ContextVar[bool] = ContextVar("forger_count_usage", default=True)
 def run_uncounted(fn: Callable[..., Any], *args: Any) -> Any:
     """Call ``fn(*args)`` outside every step, pipeline, and op; skip its usage.
 
-    It runs in a fresh context: its ops join no step or pipeline report and
-    its LLM usage is not added to the counter (call it again from each worker
-    thread, since threads do not inherit the context).
+    It runs in a fresh context: its ops join no step or pipeline report, add
+    nothing to ``ops_started``, and its LLM usage is not added to the counter
+    (call it again from each worker thread, since threads do not inherit the
+    context).
     """
 
     def run() -> Any:
