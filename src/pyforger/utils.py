@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import pickle
 from typing import Any
 
@@ -113,3 +114,13 @@ def canonical(obj: Any) -> Any:
             f"@op cannot derive a stable cache key for {type(obj).__name__}: "
             f"{e}. Add a cache_key() method to this type."
         ) from e
+
+
+def redact(text: str) -> str:
+    """Remove host credential values before retaining diagnostics."""
+    for name, value in os.environ.items():
+        if len(value) >= 8 and any(
+            marker in name.upper() for marker in ("KEY", "TOKEN", "SECRET", "PASSWORD")
+        ):
+            text = text.replace(value, "[REDACTED]")
+    return text

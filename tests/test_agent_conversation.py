@@ -14,8 +14,8 @@ import pytest
 from pyforger.acquire import Model
 from pyforger.agent import CONDENSER_KEEP_FIRST, CONDENSER_MAX_TOKENS
 from pyforger.agent import AgentExecutionError as RuntimeFailure
-from pyforger.agent import redact as _redact
 from pyforger.agent import run_agent
+from pyforger.utils import redact as _redact
 
 
 def _sdk_run(prompt, model, base_url, events, iterations, **options):
@@ -249,3 +249,52 @@ def test_agent_rejects_conflicting_capabilities_before_calls(tmp_path):
         )
     with pytest.raises(ValueError, match="attempts"):
         run_agent("prompt", None, tmp_path / "events.jsonl", 1, attempts=0)
+
+
+def test_evidence_session_is_cleaned_up_when_agent_construction_fails(tmp_path):
+    """Pydantic construction failures cannot leak a registered evidence session."""
+    from pyforger.evidence import SESSIONS
+
+    before = set(SESSIONS)
+    with pytest.raises(ValueError):
+        run_agent(
+            "hello",
+            Model("openai/test", api_key="test"),
+            tmp_path / "events.jsonl",
+            1,
+            system_prompt=123,
+            evidence={"data": "retained"},
+        )
+    assert set(SESSIONS) == before
+
+
+def test_evidence_session_exists_during_real_agent_construction(tmp_path, monkeypatch):
+    """Force eager tool resolution while retaining the actual SDK constructor."""
+    import pyforger.agent as module
+    from pyforger.evidence import SESSIONS
+
+    original = module.Agent
+    observed = []
+
+    def eager_agent(**kwargs):
+        # SDK releases may resolve tools either here or in Conversation.
+        for spec in kwargs["tools"]:
+            observed.append(SESSIONS[spec.params["session_id"]])
+        return original(**kwargs)
+
+    monkeypatch.setattr(module, "Agent", eager_agent)
+    before = set(SESSIONS)
+    with completion_server({"role": "assistant", "content": "done"}) as (url, _):
+        assert (
+            _sdk_run(
+                "hello",
+                "openai/test",
+                url,
+                tmp_path / "events.jsonl",
+                1,
+                evidence={"data": "retained"},
+            )
+            == "done"
+        )
+    assert len(observed) == 1
+    assert set(SESSIONS) == before
