@@ -196,6 +196,8 @@ Remove rows by criterion. If a filter empties the list, downstream operations re
 | `by_keyword_blocklist` | Drop responses with certain keywords; default blocklist targets common refusal phrases. |
 | `by_llm_score` | LLM-as-judge with optional multi-judge consensus. |
 | `by_syntax` | Validate JSON, YAML, Python, or XML, optionally against required keys or a JSON schema. |
+| `by_comparative_difficulty` | Keep rows a strong model answers correctly and a weak model does not. |
+| `by_pass_at_k` | Sample `k` answers per row; keep rows whose pass rate is within `[min_rate, max_rate]`. |
 
 These are important for assuring quality and diversity in generated data, and one should experiment with their parameters
 and thresholds to find the right balance for a given use case. For example, `by_rouge_l` with a very low threshold
@@ -213,6 +215,39 @@ fraction of judges scoring at least `score_threshold`, which is what `agreement_
 `by_llm_score` caches the judge scores separately from its thresholds, so re-running it with a different
 `score_threshold` or `agreement_threshold` makes no new judge calls (`_no_cache=True` re-asks the judges;
 `_cache_only=True` finds only thresholds that were run before).
+
+##### Difficulty filters
+
+`filter.by_comparative_difficulty` and `filter.by_pass_at_k` ask models to solve the task in `input_field` and grade
+each answer against `ground_truth_field`. `by_comparative_difficulty` is the medium-cost filter in both cost and
+reliability: one prediction per row from `weak_model` and from `strong_model`, keeping rows only the strong model gets
+right. `by_pass_at_k` is the most expensive but most reliable difficulty filter: `k` samples per row in one `n=k` call,
+keeping rows whose pass rate (passed / valid grades) is in `[min_rate, max_rate]` (default `[0.1, 0.9]`, inclusive).
+`by_judged_difficulty` (least expensive, least reliable) only asks a judge how hard a task looks.
+
+The default prompt asks for a final `ANSWER: ...` line (`prompt_template` replaces it). `metric` is `"exact_match"`,
+`"rouge_l"` (F1 at least `rouge_l_threshold`), or a verifier `(prediction, row) -> bool | None`, e.g. one that runs
+tests against generated code. The prediction is what `extract_answer` takes from the completion (default: the first
+line after the last `ANSWER:`, else the last number); pass `extract_answer=lambda t: t` to grade whole completions. An
+empty or cut-off completion, one with no extractable answer, or a verifier returning `None` grades `None`: excluded, not
+failed. `by_pass_at_k` needs all `k` grades valid unless `min_valid` allows fewer, and a row needs both comparative
+grades. Grades use the `{group: [True | False | None, ...]}` format of `filter.by_success_rate`, and `min_rate`,
+`max_rate`, and `min_valid` mean the same there; with `outcomes_field` set, kept rows carry them (`{"model": [...]}`,
+or `{"weak": [...], "strong": [...]}`). Predictions are cached apart from grades, so changing the rate bounds makes no
+model calls and changing the metric regrades the cached predictions.
+
+```python
+hard = filter.by_pass_at_k(
+    rows,
+    model=student,
+    input_field="problem",
+    ground_truth_field="final_answer",
+    k=8,
+    min_rate=0.125,
+    max_rate=0.5,
+    outcomes_field="evaluations",  # kept rows get e.g. {"model": [True, False, ...]}
+)
+```
 
 #### `pyforger.inspect`
 
