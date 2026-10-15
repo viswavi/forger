@@ -12,7 +12,7 @@ from pyforger._render import render_scores
 from pyforger.acquire.model import GenerateResult, Model
 from pyforger.alter.generate import default_extract_answer
 from pyforger.filter import by_comparative_difficulty, by_pass_at_k
-from pyforger.filter.model_difficulty import _answer_segment
+from pyforger.filter.model_difficulty import answer_segment
 from pyforger.steps import pipeline, step
 
 # A copy of filter.by_success_rate's input contract, rate math, and selection
@@ -108,6 +108,12 @@ def _comparative(rows=ROWS, weak=None, strong=None, **kwargs):
     )
 
 
+def _answer_line(text):
+    """Read ANSWER:/boxed markers after the thinking, the way a caller would."""
+    segment = answer_segment(text)
+    return None if segment is None else default_extract_answer(segment)
+
+
 def _pass_at_k(rows, model, **kwargs):
     return by_pass_at_k(
         rows, model=model, input_field="task", ground_truth_field="answer", **kwargs
@@ -188,7 +194,7 @@ class TestComparative:
         strong = ScriptedModel("strong", {"t": ["<think>6+1</think>\nANSWER: 1,000"]})
         rows = [{"task": "t", "answer": "1000"}]
         assert _comparative(rows, weak, strong) == []  # whole segments compared
-        kept = _comparative(rows, weak, strong, extract_answer=default_extract_answer)
+        kept = _comparative(rows, weak, strong, extract_answer=_answer_line)
         assert kept == rows
         assert len(weak.calls) == len(strong.calls) == 1
 
@@ -362,13 +368,13 @@ class TestPassAtK:
         assert _pass_at_k(rows, model, rouge_l_threshold=0.6, **kw) == rows
         assert len(model.calls) == 1
 
-    def test_extract_answer_gets_answer_segment(self):
-        """extract_answer sees the stripped segment, and never unclosed thinking."""
+    def test_extract_answer_replaces_the_default(self):
+        """A custom extract_answer sees each raw completion, thinking included."""
         seen: list[str] = []
 
         def extract(text):
             seen.append(text)
-            return default_extract_answer(text)
+            return _answer_line(text)
 
         model = ScriptedModel(
             "m", {"t": ["<think>ANSWER: 7</think>\nANSWER: 3\n", "<think>ANSWER: 3"]}
@@ -384,7 +390,7 @@ class TestPassAtK:
             outcomes_field="ev",
         )
         assert kept[0]["ev"] == {"model": [True, None]}
-        assert seen == ["ANSWER: 3"]
+        assert seen == ["<think>ANSWER: 7</think>\nANSWER: 3\n", "<think>ANSWER: 3"]
 
     def test_custom_verifier(self):
         """With extract_answer, a verifier gets its output and the row."""
@@ -623,4 +629,4 @@ def test_comparative_validation(kwargs):
 )
 def test_answer_segment(text, expected):
     """The default prediction is the stripped text after a closed <think> block."""
-    assert _answer_segment(text) == expected
+    assert answer_segment(text) == expected

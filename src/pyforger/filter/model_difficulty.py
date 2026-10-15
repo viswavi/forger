@@ -5,10 +5,11 @@ does not. ``by_pass_at_k`` samples one model ``k`` times and keeps rows whose
 pass rate falls within ``[min_rate, max_rate]``.
 
 No answer format is imposed: the prompt is the task text itself unless
-``prompt_template`` is given, and each completion is graded on its answer
-segment, the text after a closed ``<think>...</think>`` block with surrounding
-whitespace stripped. ``extract_answer`` can narrow the segment further, e.g. to
-the number on an ``ANSWER:`` line.
+``prompt_template`` is given, and each completion is graded on what
+``extract_answer`` takes from it. The default, ``answer_segment``, is the text
+after a closed ``<think>...</think>`` block with surrounding whitespace
+stripped; pass another function, e.g. one reading an ``ANSWER:`` line, to
+replace it.
 
 Grades use the format of ``filter.by_success_rate``: ``{group: [True | False |
 None, ...]}``, where ``None`` is a grade that could not be made (an empty
@@ -33,8 +34,8 @@ from pyforger.alter.generate import PromptTemplate, _normalized_equal, _resolve_
 from pyforger.op import op
 from pyforger.utils import get_field, get_formatted_logger
 
-# A verifier gets the prediction (the answer segment, or what extract_answer
-# takes from it) and the full row, e.g. to run tests against generated code.
+# A verifier gets the prediction (what extract_answer takes from the
+# completion) and the full row, e.g. to run tests against generated code.
 # None means "could not grade" (excluded, not failed).
 Verifier = Callable[[str, dict], Union[bool, None]]
 Metric = Union[Literal["exact_match", "rouge_l"], Verifier]
@@ -44,6 +45,20 @@ def _logger() -> logging.Logger:
     # Looked up per call: a module-level logger read inside an @op body would
     # trigger @op's "reads globals" warning.
     return get_formatted_logger("ModelDifficulty")
+
+
+def answer_segment(text: str) -> str | None:
+    r"""Default ``extract_answer``: the stripped text after a ``<think>`` block.
+
+    E.g. ``"<think>try 3</think>\n 4 \n"`` gives ``"4"``. None when the block
+    never closes (``"<think>try 3"``: the model ran out of tokens) or nothing
+    follows it.
+    """
+    if "</think>" in text:
+        text = text.rsplit("</think>", 1)[1]
+    elif "<think>" in text:
+        return None
+    return text.strip() or None
 
 
 @op(name="filter.by_comparative_difficulty")
@@ -56,7 +71,7 @@ def by_comparative_difficulty(
     ground_truth_field: str,
     metric: Metric = "exact_match",
     rouge_l_threshold: float = 0.7,
-    extract_answer: Callable[[str], str | None] | None = None,
+    extract_answer: Callable[[str], str | None] = answer_segment,
     prompt_template: PromptTemplate | None = None,
     temperature: float | None = None,
     max_tokens: int | None = None,
@@ -69,8 +84,8 @@ def by_comparative_difficulty(
     ``None`` is dropped: e.g. a weak model that ran out of tokens has not shown
     the row is hard.
 
-    The prompt is the task text unless ``prompt_template`` is given, and without
-    ``extract_answer`` the whole answer segment (the completion after its closed
+    The prompt is the task text unless ``prompt_template`` is given, and by
+    default the whole answer segment (the completion after its closed
     ``<think>`` block, stripped) is compared. So for ``"exact_match"`` the task
     or ``prompt_template`` should ask for a bare answer, or ``extract_answer``
     should pick it out.
@@ -92,12 +107,13 @@ def by_comparative_difficulty(
             ``(prediction, row) -> bool | None``, e.g. one running tests against
             generated code.
         rouge_l_threshold: Pass threshold for ``metric="rouge_l"``.
-        extract_answer: Applied to each answer segment to give the prediction;
-            returning ``None`` grades ``None``. None uses the whole segment.
-            E.g. ``pyforger.alter.generate.default_extract_answer`` takes the
-            number from an ``ANSWER:``, ``\boxed{}``, or ``####`` marker, else
-            the last number. It is not called for an empty segment or a
-            ``<think>`` block that never closes; both grade ``None``.
+        extract_answer: Takes the prediction from each raw completion;
+            returning ``None`` grades ``None``. The default,
+            ``answer_segment``, returns the text after a closed ``<think>``
+            block, stripped, and ``None`` when the block never closes or
+            nothing follows it. A replacement sees the thinking too; e.g.
+            ``lambda t: default_extract_answer(answer_segment(t) or "")``
+            reads an ``ANSWER:``, ``\boxed{}``, or ``####`` marker after it.
         prompt_template: Format string or ``(row) -> Prompt`` callable replacing
             the default prompt (the task text), e.g. to ask for a final
             ``ANSWER: ...`` line.
@@ -172,7 +188,7 @@ def by_pass_at_k(
     min_valid: int | None = None,
     metric: Metric = "exact_match",
     rouge_l_threshold: float = 0.7,
-    extract_answer: Callable[[str], str | None] | None = None,
+    extract_answer: Callable[[str], str | None] = answer_segment,
     prompt_template: PromptTemplate | None = None,
     temperature: float = 1.0,
     max_tokens: int | None = None,
@@ -192,7 +208,7 @@ def by_pass_at_k(
     too few grades are valid.
 
     The prompt and answer extraction work as in ``by_comparative_difficulty``:
-    without ``extract_answer`` the whole answer segment is compared.
+    by default the whole answer segment is compared.
 
     Args:
         items: Input rows.
@@ -210,8 +226,8 @@ def by_pass_at_k(
             ``(prediction, row) -> bool | None``; see
             ``by_comparative_difficulty``.
         rouge_l_threshold: Pass threshold for ``metric="rouge_l"``.
-        extract_answer: Applied to each answer segment to give the prediction;
-            see ``by_comparative_difficulty``.
+        extract_answer: Takes the prediction from each raw completion
+            (default ``answer_segment``); see ``by_comparative_difficulty``.
         prompt_template: Format string or ``(row) -> Prompt`` callable replacing
             the default prompt (the task text).
         temperature: Sampling temperature; must be > 0 when ``k > 1``.
@@ -320,13 +336,12 @@ def _grades(
     ground_truth_field: str,
     metric: Metric,
     rouge_l_threshold: float,
-    extract_answer: Callable[[str], str | None] | None,
+    extract_answer: Callable[[str], str | None],
 ) -> list[list[bool | None]]:
     """Grade each row's completions against its ground truth.
 
-    A completion grades ``None`` when its answer segment is empty or missing
-    (e.g. a reasoning model cut off mid-thought), or ``extract_answer`` returns
-    ``None`` for it.
+    A completion grades ``None`` when ``extract_answer`` returns ``None`` for
+    it, e.g. by default a reasoning model cut off mid-thought.
     """
     scorer = (
         rouge_scorer.RougeScorer(["rougeL"], use_stemmer=False)
@@ -338,9 +353,7 @@ def _grades(
         reference = get_field(item, ground_truth_field, "filter.model_difficulty")
         row_grades: list[bool | None] = []
         for completion in row:
-            prediction = None if completion is None else _answer_segment(completion)
-            if prediction is not None and extract_answer is not None:
-                prediction = extract_answer(prediction)
+            prediction = None if completion is None else extract_answer(completion)
             if prediction is None:
                 row_grades.append(None)
             elif callable(metric):
@@ -355,20 +368,6 @@ def _grades(
                 row_grades.append(_normalized_equal(prediction, reference))
         out.append(row_grades)
     return out
-
-
-def _answer_segment(text: str) -> str | None:
-    r"""Stripped text after a closed ``<think>`` block, or None if there is none.
-
-    E.g. ``"<think>try 3</think>\n 4 \n"`` gives ``"4"``. None when the block
-    never closes (``"<think>try 3"``: the model ran out of tokens) or nothing
-    follows it.
-    """
-    if "</think>" in text:
-        text = text.rsplit("</think>", 1)[1]
-    elif "<think>" in text:
-        return None
-    return text.strip() or None
 
 
 def _pass_rate(grades: list[bool | None], min_valid: int | None) -> float | None:
