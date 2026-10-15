@@ -225,13 +225,16 @@ right. `by_pass_at_k` is the most expensive but most reliable difficulty filter:
 keeping rows whose pass rate (passed / valid grades) is in `[min_rate, max_rate]` (default `[0.1, 0.9]`, inclusive).
 `by_judged_difficulty` (least expensive, least reliable) only asks a judge how hard a task looks.
 
-The default prompt asks for a final `ANSWER: ...` line (`prompt_template` replaces it). `metric` is `"exact_match"`,
+No answer format is imposed. The prompt is the task text itself (`prompt_template` replaces it, e.g. to ask for a
+final `ANSWER: ...` line), and each completion is graded on its answer segment: the text after its closed `<think>`
+block, stripped of surrounding whitespace. `metric` is `"exact_match"` (normalized equality with the reference),
 `"rouge_l"` (F1 at least `rouge_l_threshold`), or a verifier `(prediction, row) -> bool | None`, e.g. one that runs
-tests against generated code. A verifier gets the whole completion after its closed `<think>` block; the string
-metrics compare what `extract_answer` takes from it (default: the first line after the last `ANSWER:`, else a
-`\boxed{}` or last number). An empty completion, an unclosed `<think>` block, one with no extractable answer, or
-a verifier returning `None` grades `None`: excluded, not failed. A completion cut off without `<think>` falls back
-to its last number.
+tests against generated code. Without `extract_answer` the whole answer segment is compared, so for `exact_match`
+the task or `prompt_template` should ask for a bare answer, or pass `extract_answer` to pick the answer out of the
+segment, e.g. `pyforger.alter.generate.default_extract_answer` for a number after `ANSWER:`, in `\boxed{}`, or after
+`####` (else the last number). An empty answer segment, an unclosed `<think>` block, `extract_answer` returning `None`,
+or a verifier returning `None` grades `None`: excluded, not failed. A model that does not return exactly `n`
+completions per prompt raises `ValueError`; missing samples are never padded.
 `by_pass_at_k` needs all `k` grades valid unless `min_valid` allows fewer, and a row needs both comparative grades.
 Grades use the `{group: [True | False | None, ...]}` format of `filter.by_success_rate`, and `min_rate`, `max_rate`, and
 `min_valid` mean the same there; with `outcomes_field` set, kept rows carry them (`{"model": [...]}`, or

@@ -4,18 +4,24 @@
 does not. ``by_pass_at_k`` samples one model ``k`` times and keeps rows whose
 pass rate falls within ``[min_rate, max_rate]``.
 
+No answer format is imposed: the prompt is the task text itself unless
+``prompt_template`` is given, and each completion is graded on its answer
+segment, the text after a closed ``<think>...</think>`` block with surrounding
+whitespace stripped. ``extract_answer`` can narrow the segment further, e.g. to
+the number on an ``ANSWER:`` line.
+
 Grades use the format of ``filter.by_success_rate``: ``{group: [True | False |
 None, ...]}``, where ``None`` is a grade that could not be made (an empty
-completion, a ``<think>`` block that never closes, no extractable answer, or a
-verifier returning ``None``) and is excluded, not failed. Predictions and
-grades are cached in separate inner ops, so changing only the rate bounds makes
-no model calls, and changing only the metric regrades the cached predictions.
+answer, a ``<think>`` block that never closes, ``extract_answer`` returning
+``None``, or a verifier returning ``None``) and is excluded, not failed.
+Predictions and grades are cached in separate inner ops, so changing only the
+rate bounds makes no model calls, and changing only the metric regrades the
+cached predictions.
 """
 from __future__ import annotations
 
 import logging
 import math
-import re
 from collections.abc import Callable
 from typing import Literal, Union
 
@@ -23,28 +29,15 @@ from rouge_score import rouge_scorer
 
 from pyforger import _tracking
 from pyforger.acquire.model import Model, Prompt
-from pyforger.alter.generate import (
-    PromptTemplate,
-    _normalized_equal,
-    _resolve_prompt,
-    default_extract_answer,
-)
+from pyforger.alter.generate import PromptTemplate, _normalized_equal, _resolve_prompt
 from pyforger.op import op
 from pyforger.utils import get_field, get_formatted_logger
 
-# A verifier gets the completion (a closed <think> block removed, unless
-# extract_answer is given) and the full row, e.g. to run tests against
-# generated code. None means "could not grade" (excluded, not failed).
+# A verifier gets the prediction (the answer segment, or what extract_answer
+# takes from it) and the full row, e.g. to run tests against generated code.
+# None means "could not grade" (excluded, not failed).
 Verifier = Callable[[str, dict], Union[bool, None]]
 Metric = Union[Literal["exact_match", "rouge_l"], Verifier]
-
-DEFAULT_SOLVE_PROMPT = (
-    "Solve the following task. Work through it, then end your response with a "
-    "final line of the form 'ANSWER: <answer>'.\n\nTask:\n{task}"
-)
-_ANSWER_MARKER = re.compile(r"ANSWER\s*:", re.I)
-# A whole answer line in \boxed{...}, allowing one level of nested braces.
-_BOXED = re.compile(r"\\boxed\{((?:[^{}]|\{[^{}]*\})*)\}")
 
 
 def _logger() -> logging.Logger:
@@ -70,11 +63,17 @@ def by_comparative_difficulty(
     batch_size: int = 10,
     outcomes_field: str | None = None,
 ) -> list[dict]:
-    """Keep rows the strong model answers correctly and the weak model does not.
+    r"""Keep rows the strong model answers correctly and the weak model does not.
 
     Each model makes one prediction per row. A row whose weak or strong grade is
     ``None`` is dropped: e.g. a weak model that ran out of tokens has not shown
     the row is hard.
+
+    The prompt is the task text unless ``prompt_template`` is given, and without
+    ``extract_answer`` the whole answer segment (the completion after its closed
+    ``<think>`` block, stripped) is compared. So for ``"exact_match"`` the task
+    or ``prompt_template`` should ask for a bare answer, or ``extract_answer``
+    should pick it out.
 
     In a ``@step`` report the per-row score is ``strong - weak``: ``1`` (kept),
     ``0`` (both right or both wrong), ``-1`` (only the weak model right), or
@@ -85,22 +84,23 @@ def by_comparative_difficulty(
         items: Input rows.
         weak_model: Model expected to fail on hard rows.
         strong_model: Model expected to succeed on rows worth keeping.
-        input_field: Key holding the task, used by the default prompt
-            (``DEFAULT_SOLVE_PROMPT``).
+        input_field: Key holding the task; its text is the default prompt.
         ground_truth_field: Key holding the reference answer.
-        metric: ``"exact_match"`` (normalized extracted answer equals the
-            reference), ``"rouge_l"`` (ROUGE-L F1 >= ``rouge_l_threshold``), or
-            a verifier ``(prediction, row) -> bool | None``. A verifier gets
-            the whole completion after its closed ``<think>`` block, e.g. code
-            to run tests against, unless ``extract_answer`` is given.
+        metric: ``"exact_match"`` (normalized prediction equals the
+            reference), ``"rouge_l"`` (ROUGE-L F1 of the prediction against the
+            reference >= ``rouge_l_threshold``), or a verifier
+            ``(prediction, row) -> bool | None``, e.g. one running tests against
+            generated code.
         rouge_l_threshold: Pass threshold for ``metric="rouge_l"``.
-        extract_answer: Applied to each completion before grading; returning
-            ``None`` grades ``None``. Default for the string metrics: the
-            first line after the last ``ANSWER:`` marker, else the number
-            ``default_extract_answer`` finds. Either default gives ``None``
-            for a ``<think>`` block that never closes.
+        extract_answer: Applied to each answer segment to give the prediction;
+            returning ``None`` grades ``None``. None uses the whole segment.
+            E.g. ``pyforger.alter.generate.default_extract_answer`` takes the
+            number from an ``ANSWER:``, ``\boxed{}``, or ``####`` marker, else
+            the last number. It is not called for an empty segment or a
+            ``<think>`` block that never closes; both grade ``None``.
         prompt_template: Format string or ``(row) -> Prompt`` callable replacing
-            the default prompt, which asks for a final ``ANSWER: ...`` line.
+            the default prompt (the task text), e.g. to ask for a final
+            ``ANSWER: ...`` line.
         temperature: Sampling temperature (each model's default when None).
         max_tokens: Max tokens per completion (each model's default when None).
         batch_size: Prompts per ``model.generate_batch()`` call.
@@ -191,11 +191,13 @@ def by_pass_at_k(
     In a ``@step`` report the per-row score is the pass rate, or ``None`` when
     too few grades are valid.
 
+    The prompt and answer extraction work as in ``by_comparative_difficulty``:
+    without ``extract_answer`` the whole answer segment is compared.
+
     Args:
         items: Input rows.
         model: Model to sample from.
-        input_field: Key holding the task, used by the default prompt
-            (``DEFAULT_SOLVE_PROMPT``).
+        input_field: Key holding the task; its text is the default prompt.
         ground_truth_field: Key holding the reference answer.
         k: Samples per row.
         min_rate: Lowest pass rate kept (inclusive); raise it to drop rows the
@@ -208,10 +210,10 @@ def by_pass_at_k(
             ``(prediction, row) -> bool | None``; see
             ``by_comparative_difficulty``.
         rouge_l_threshold: Pass threshold for ``metric="rouge_l"``.
-        extract_answer: Applied to each completion before grading; see
-            ``by_comparative_difficulty``.
+        extract_answer: Applied to each answer segment to give the prediction;
+            see ``by_comparative_difficulty``.
         prompt_template: Format string or ``(row) -> Prompt`` callable replacing
-            the default prompt.
+            the default prompt (the task text).
         temperature: Sampling temperature; must be > 0 when ``k > 1``.
         max_tokens: Max tokens per completion (the model's default when None).
         batch_size: Prompts per ``model.generate_batch()`` call.
@@ -280,38 +282,33 @@ def _predictions(
     max_tokens: int | None,
     batch_size: int,
 ) -> list[list[str | None]]:
-    """Return ``n`` completions per prompt, ``None`` for missing or empty ones.
+    """Return ``n`` completions per prompt, ``None`` for empty ones.
 
-    Exceptions from the model propagate, so a failed call is not cached.
+    Raises ``ValueError`` when the model returns a different number of results
+    than prompts, or of completions than ``n`` (e.g. a provider that ignores
+    ``n``): a missing sample is not an empty answer, so it is never padded.
+    Exceptions propagate, so a failed call is not cached.
     """
     completions: list[list[str | None]] = []
-    short = 0
     for start in range(0, len(prompts), batch_size):
         batch = prompts[start : start + batch_size]
         results = model.generate_batch(
             batch, n=n, temperature=temperature, max_tokens=max_tokens
         )
         if len(results) != len(batch):
-            _logger().warning(
-                "generate_batch returned %d results for %d prompts",
-                len(results),
-                len(batch),
+            raise ValueError(
+                f"{model!r}.generate_batch returned {len(results)} results for "
+                f"{len(batch)} prompts (prompts {start} to {start + len(batch) - 1})"
             )
-        for i in range(len(batch)):
-            got = list(results[i]) if i < len(results) else []
-            short += len(got) < n
-            got = [c if isinstance(c, str) and c.strip() else None for c in got]
-            completions.append((got + [None] * n)[:n])
-    if short:
-        # E.g. a provider that ignores n: the missing samples grade None, so with
-        # min_valid=None every such row is dropped.
-        _logger().warning(
-            "%d of %d prompts got fewer than n=%d completions; missing ones grade "
-            "None",
-            short,
-            len(prompts),
-            n,
-        )
+        for i, result in enumerate(results):
+            if len(result) != n:
+                raise ValueError(
+                    f"{model!r} returned {len(result)} completions for prompt "
+                    f"{start + i}, but n={n} were requested"
+                )
+            completions.append(
+                [c if isinstance(c, str) and c.strip() else None for c in result]
+            )
     return completions
 
 
@@ -327,15 +324,10 @@ def _grades(
 ) -> list[list[bool | None]]:
     """Grade each row's completions against its ground truth.
 
-    A completion grades ``None`` when it is empty or no answer can be extracted
-    from it, e.g. a reasoning model cut off mid-thought.
+    A completion grades ``None`` when its answer segment is empty or missing
+    (e.g. a reasoning model cut off mid-thought), or ``extract_answer`` returns
+    ``None`` for it.
     """
-    if extract_answer is not None:
-        extract = extract_answer
-    elif callable(metric):
-        extract = _without_thinking
-    else:
-        extract = _default_extract
     scorer = (
         rouge_scorer.RougeScorer(["rougeL"], use_stemmer=False)
         if metric == "rouge_l"
@@ -346,7 +338,9 @@ def _grades(
         reference = get_field(item, ground_truth_field, "filter.model_difficulty")
         row_grades: list[bool | None] = []
         for completion in row:
-            prediction = None if completion is None else extract(completion)
+            prediction = None if completion is None else _answer_segment(completion)
+            if prediction is not None and extract_answer is not None:
+                prediction = extract_answer(prediction)
             if prediction is None:
                 row_grades.append(None)
             elif callable(metric):
@@ -363,39 +357,18 @@ def _grades(
     return out
 
 
-def _default_extract(text: str) -> str | None:
-    r"""First line after the last ``ANSWER:``, else ``default_extract_answer``.
+def _answer_segment(text: str) -> str | None:
+    r"""Stripped text after a closed ``<think>`` block, or None if there is none.
 
-    E.g. ``"... ANSWER: Paris."`` gives ``"Paris"``, ``"**ANSWER:** $1,000$"``
-    gives ``"1,000"`` (matched as ``1000``), and ``"ANSWER: \boxed{42}"`` or
-    ``"... \boxed{42}"`` gives ``"42"``. A closed ``<think>`` block is ignored;
-    one that never closes (the model ran out of tokens) gives ``None``.
-    """
-    answer_text = _without_thinking(text)
-    if answer_text is None:
-        return None
-    parts = _ANSWER_MARKER.split(answer_text)
-    if len(parts) > 1:
-        lines = [line.strip(" *$") for line in parts[-1].splitlines()]
-        final = next((line for line in lines if line), "").rstrip(".").strip(" *$")
-        boxed = _BOXED.fullmatch(final)
-        if boxed:
-            final = boxed.group(1).strip()
-        return final or None
-    return default_extract_answer(answer_text)
-
-
-def _without_thinking(text: str) -> str | None:
-    r"""Text after a closed ``<think>`` block; None if the block never closes.
-
-    E.g. ``"<think>try 3</think>\nANSWER: 4"`` gives ``"\nANSWER: 4"``, and
-    ``"<think>try 3"`` (the model ran out of tokens) gives None.
+    E.g. ``"<think>try 3</think>\n 4 \n"`` gives ``"4"``. None when the block
+    never closes (``"<think>try 3"``: the model ran out of tokens) or nothing
+    follows it.
     """
     if "</think>" in text:
-        return text.rsplit("</think>", 1)[1]
-    if "<think>" in text:
+        text = text.rsplit("</think>", 1)[1]
+    elif "<think>" in text:
         return None
-    return text
+    return text.strip() or None
 
 
 def _pass_rate(grades: list[bool | None], min_valid: int | None) -> float | None:
@@ -424,10 +397,7 @@ def _prompts(
     if prompt_template is not None:
         return [_resolve_prompt(prompt_template, item) for item in items]
     return [
-        DEFAULT_SOLVE_PROMPT.format(
-            task=get_field(item, input_field, "filter.model_difficulty")
-        )
-        for item in items
+        str(get_field(item, input_field, "filter.model_difficulty")) for item in items
     ]
 
 
