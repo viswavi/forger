@@ -89,6 +89,11 @@ the ops of the run that cached it, marked `(cached)`, with that run's warnings.
 - `strict=True` on `@step` or `@pipeline` turns warnings into errors, also on cached runs; a step that fails strict
   mode is not cached. `prod=True` or the environment variable `FORGER_STEP_REPORT=0` silences the reports.
   `pyforger.inspect.inspect_step(name)` re-prints the full report of the latest run of a step, with more sample rows.
+- Long sample values are summarized by shape rather than cut, e.g. `[5 items] a.py, b.py, c.py, …` or
+  `def solve(n): … (312 lines, 9.8k chars, python)`. By default these structural summaries are all you get; they are
+  free. For a one-sentence LLM summary of each long value as well, call `pyforger.steps.set_report_model(model)` or
+  set `FORGER_REPORT_MODEL=<litellm model id>` (key from `LITELLM_API_KEY`). That costs up to 8 LLM calls per printed
+  report, cached on disk and left out of the step and pipeline totals; silenced reports make no calls.
 - Threads: ops called from `ThreadPoolExecutor` workers are not itemized in the step report (the step gets a warning
   instead of an error) unless submitted as `pool.submit(contextvars.copy_context().run, fn, arg)`. Steps called from
   workers still join the pipeline. Token and cost totals of steps running at the same time include each other's.
