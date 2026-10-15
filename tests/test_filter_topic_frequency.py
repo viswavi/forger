@@ -206,6 +206,16 @@ def test_changing_thresholds_makes_no_new_calls():
         _filter(_rows(), model, embed, num_clusters=10)
 
 
+def test_changing_clustered_values_reclusters():
+    """A new value in the clustered field is a new clustering, not a cache hit."""
+    model, embed = _FakeTopicModel(), _CountingEmbed()
+    _filter(_rows(), model, embed, max_frequency=0.5)
+    calls = (model.calls, embed.calls)
+    edited = _rows(DOCS[:-1] + ["Practicing guitar chords for an hour every night."])
+    _filter(edited, model, embed, max_frequency=0.5)
+    assert model.calls > calls[0] and embed.calls == calls[1] + 1
+
+
 def test_topics_match_topic_based_clustering():
     """The filter's topics are topic_based_clustering's, which is unchanged."""
     items = _rows()
