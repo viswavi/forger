@@ -1,7 +1,6 @@
 """Cached dynamic alter operations with interchangeable execution backends."""
 from __future__ import annotations
 
-import math
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -29,33 +28,20 @@ def _default_runner(
 def dynamic_step_source(
     item: dict[str, Any],
     goal: str,
-    model: Model | None = None,
+    runner: DynamicStepRunner,
     *,
-    max_iterations: int = 20,
-    execution_timeout_s: float = 10.0,
     source_version: str = _SOURCE_VERSION,
-    runner: DynamicStepRunner | None = None,
 ) -> str:
-    """Generate Python source once per input through Forger's standard @op cache.
+    """Cache generated source using the backend's functional identity.
 
-    Call with ``_cache_only=True`` to inspect cached source without launching
-    an agent when there is a cache miss. Pass an explicit ``runner`` to use
-    another backend; its model and limits are configured on the runner.
+    The runner is resolved by the caller. ``cache_only`` inspects retained
+    source without constructing or running another backend.
     """
     if not isinstance(goal, str) or not goal.strip():
-        raise ValueError("goal must be a nonempty string")
+        raise ValueError("goal must be nonempty")
     _record_key(item)
     if not isinstance(source_version, str) or not source_version:
-        raise ValueError("source_version must be a nonempty string")
-    if (
-        isinstance(max_iterations, bool)
-        or not isinstance(max_iterations, int)
-        or max_iterations < 1
-    ):
-        raise ValueError("max_iterations must be a positive integer")
-    if not math.isfinite(execution_timeout_s) or execution_timeout_s <= 0:
-        raise ValueError("execution_timeout_s must be positive and finite")
-    runner = runner or _default_runner(model, max_iterations, execution_timeout_s)
+        raise ValueError("source_version must be nonempty")
     return runner.generate_source(goal, item)
 
 
@@ -84,26 +70,11 @@ def dynamic_step(
     if not inputs:
         return []
 
-    backend = runner or _default_runner(model, max_iterations, execution_timeout_s)
+    runner = runner or _default_runner(model, max_iterations, execution_timeout_s)
 
     def run(item: dict[str, Any]) -> list[str]:
-        if runner is None:
-            code = dynamic_step_source(
-                item,
-                goal,
-                model,
-                max_iterations=max_iterations,
-                execution_timeout_s=execution_timeout_s,
-                source_version=source_version,
-            )
-        else:
-            code = dynamic_step_source(
-                item,
-                goal,
-                source_version=source_version,
-                runner=backend,
-            )
-        return backend.execute(code, item)
+        code = dynamic_step_source(item, goal, runner, source_version=source_version)
+        return runner.execute(code, item)
 
     unique = dict(zip(keys, inputs))
     with ThreadPoolExecutor(max_workers=min(max_parallel, len(unique))) as pool:

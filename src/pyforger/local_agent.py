@@ -8,6 +8,7 @@ Python runs without terminal, filesystem, network, or unrestricted Python access
 from __future__ import annotations
 
 import json
+import math
 import os
 import signal
 import subprocess
@@ -148,6 +149,10 @@ class LocalAgentRunner:
         execution_timeout_s: float = 10.0,
     ) -> None:
         """Configure one local SDK implementation without running it."""
+        if type(max_iterations) is not int or max_iterations < 1:
+            raise ValueError("max_iterations must be positive")
+        if not math.isfinite(execution_timeout_s) or execution_timeout_s <= 0:
+            raise ValueError("execution_timeout_s must be positive and finite")
         self.model = model
         self.max_iterations = max_iterations
         self.execution_timeout_s = execution_timeout_s

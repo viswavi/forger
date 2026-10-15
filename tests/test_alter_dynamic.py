@@ -46,7 +46,7 @@ def test_source_cache_order_and_overlap(tmp_path, monkeypatch):
         ),
     )
     monkeypatch.setattr(local_agent, "_execute", execute)
-    model = SimpleNamespace(_model_id="test")
+    model = Model("openai/test")
     first = dynamic_step(
         [{"text": "a"}, {"text": "b"}, {"text": "a"}], "uppercase", model
     )
@@ -92,7 +92,7 @@ def test_parallel_limit(tmp_path, monkeypatch):
     assert dynamic_step(
         [{"text": x} for x in "abcd"],
         "goal",
-        SimpleNamespace(_model_id="test"),
+        Model("openai/test"),
         max_parallel=2,
     ) == [[item] for item in "abcd"]
     assert peak == 2
@@ -146,7 +146,7 @@ def test_worker_restrictions_and_timeout():
 
 def test_empty_and_validation(tmp_path):
     """Test empty and validation."""
-    assert dynamic_step([], "goal", SimpleNamespace(_model_id="test")) == []
+    assert dynamic_step([], "goal", Model("openai/test")) == []
     with pytest.raises(ValueError):
         dynamic_step([], "goal", None, max_parallel=0)
     with pytest.raises(TypeError, match="each input must be a dict"):
@@ -168,7 +168,7 @@ def test_records_with_reordered_keys_share_generation(monkeypatch):
     )
     first = {"text": "challenge", "meta": {"a": 1, "b": 2}}
     second = {"meta": {"b": 2, "a": 1}, "text": "challenge"}
-    assert dynamic_step([first, second], "goal", SimpleNamespace(_model_id="test")) == [
+    assert dynamic_step([first, second], "goal", Model("openai/test")) == [
         ["challenge"],
         ["challenge"],
     ]
@@ -189,7 +189,7 @@ def test_failed_generation_is_not_cached(tmp_path, monkeypatch):
         ),
     )
     with pytest.raises(RuntimeError, match="no submission"):
-        dynamic_step([{"text": "a"}], "goal", SimpleNamespace(_model_id="test"))
+        dynamic_step([{"text": "a"}], "goal", Model("openai/test"))
     assert not list((tmp_path / "op-cache" / "alter.dynamic_step_source").glob("*.pkl"))
 
 
@@ -200,10 +200,14 @@ def test_source_is_returned_with_standard_op_cache_hit(tmp_path, monkeypatch):
         "generate_source",
         lambda *args: "def run(item):\n    return [item]",
     )
-    model = SimpleNamespace(_model_id="test")
+    model = Model("openai/test")
     clear_trace()
-    first = dynamic_step_source({"text": "a"}, "goal", model)
-    second = dynamic_step_source({"text": "a"}, "goal", model)
+    first = dynamic_step_source(
+        {"text": "a"}, "goal", local_agent.LocalAgentRunner(model)
+    )
+    second = dynamic_step_source(
+        {"text": "a"}, "goal", local_agent.LocalAgentRunner(model)
+    )
     assert first == second == "def run(item):\n    return [item]"
     hits = [
         record.cache_hit
@@ -228,11 +232,19 @@ def test_source_version_refreshes_generated_program(monkeypatch):
             goal, item, self.model, self.max_iterations, self.execution_timeout_s
         ),
     )
-    model = SimpleNamespace(_model_id="test")
-    first = dynamic_step_source({"text": "a"}, "goal", model)
-    assert dynamic_step_source({"text": "a"}, "goal", model) == first
+    model = Model("openai/test")
+    first = dynamic_step_source(
+        {"text": "a"}, "goal", local_agent.LocalAgentRunner(model)
+    )
+    assert (
+        dynamic_step_source({"text": "a"}, "goal", local_agent.LocalAgentRunner(model))
+        == first
+    )
     refreshed = dynamic_step_source(
-        {"text": "a"}, "goal", model, source_version="refresh-1"
+        {"text": "a"},
+        "goal",
+        local_agent.LocalAgentRunner(model),
+        source_version="refresh-1",
     )
     assert refreshed != first
     assert len(calls) == 2
@@ -247,7 +259,10 @@ def test_source_inspection_never_generates_when_disabled(tmp_path, monkeypatch):
     )
     with pytest.raises(FileNotFoundError, match="No cached result"):
         dynamic_step_source(
-            {"text": "a"}, "goal", SimpleNamespace(_model_id="test"), _cache_only=True
+            {"text": "a"},
+            "goal",
+            local_agent.LocalAgentRunner(Model("openai/test")),
+            _cache_only=True,
         )
 
 
@@ -333,7 +348,7 @@ def test_bad_resource_fails_before_agent_creation(monkeypatch):
         "LLM",
         lambda **kwargs: pytest.fail("LLM must not be created"),
     )
-    model = SimpleNamespace(_model_id="test")
+    model = Model("openai/test")
     with pytest.raises(ValueError, match="bad resource"):
         local_agent.LocalAgentRunner(
             model, max_iterations=3, execution_timeout_s=5
@@ -442,7 +457,10 @@ def test_real_sdk_corrects_code_and_reexecutes_cached_source(tmp_path, monkeypat
     assert executions == [invalid, corrected, corrected, corrected]
     assert (
         dynamic_step_source(
-            {"text": "hello"}, "Uppercase text", model, _cache_only=True, **options
+            {"text": "hello"},
+            "Uppercase text",
+            local_agent.LocalAgentRunner(model, **options),
+            _cache_only=True,
         )
         == corrected
     )
@@ -557,9 +575,4 @@ def test_explicit_backend_takes_precedence_over_default_configuration(monkeypatc
     monkeypatch.setattr(
         dynamic, "_default_runner", lambda *args: pytest.fail("default constructed")
     )
-    assert (
-        dynamic_step_source.no_cache(
-            {"x": 1}, "goal", Model("openai/unused"), runner=runner
-        )
-        == "retained source"
-    )
+    assert dynamic_step_source.no_cache({"x": 1}, "goal", runner) == "retained source"
