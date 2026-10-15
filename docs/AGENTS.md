@@ -195,6 +195,7 @@ Remove rows by criterion. If a filter empties the list, downstream operations re
 | `by_invalid_response` | Drop empty, identical, or near-identical responses to the instruction. |
 | `by_keyword_blocklist` | Drop responses with certain keywords; default blocklist targets common refusal phrases. |
 | `by_llm_score` | LLM-as-judge with optional multi-judge consensus. |
+| `by_judged_difficulty` | LLM judge rates each task's difficulty from 1 to 5; keeps rows within a range. |
 | `by_syntax` | Validate JSON, YAML, Python, or XML, optionally against required keys or a JSON schema. |
 
 These are important for assuring quality and diversity in generated data, and one should experiment with their parameters
@@ -213,6 +214,31 @@ fraction of judges scoring at least `score_threshold`, which is what `agreement_
 `by_llm_score` caches the judge scores separately from its thresholds, so re-running it with a different
 `score_threshold` or `agreement_threshold` makes no new judge calls (`_no_cache=True` re-asks the judges;
 `_cache_only=True` finds only thresholds that were run before).
+
+##### Difficulty filters
+
+`filter.by_judged_difficulty` asks an LLM judge to rate how hard each task in `task_field` is on a 5-point scale and
+keeps rows rated in `[min_difficulty, max_difficulty]` (default `[3, 5]`, inclusive). It is the least expensive but
+least reliable of the difficulty filters: one judge call per row, but the judge only guesses how hard the task is.
+`by_comparative_difficulty` (medium cost and reliability) and `by_pass_at_k` (most expensive, most reliable) are the
+next rungs up. The judge's fixed system prompt is anchored by three editable rubric descriptions, for levels 1, 3, and
+5 (levels 2 and 4 sit between them); their defaults are module constants in `pyforger.filter.difficulty`
+(`DEFAULT_MINIMUM_DIFFICULTY_CRITERION`, `DEFAULT_MEDIUM_DIFFICULTY_CRITERION`,
+`DEFAULT_MAXIMUM_DIFFICULTY_CRITERION`). With `num_judges > 1` (which needs `temperature > 0`) a row's difficulty is
+the mean of its judges' ratings. A row with no parseable rating is dropped. As with `by_llm_score`, ratings are cached
+apart from the bounds, so changing `min_difficulty` or `max_difficulty` makes no new judge calls.
+
+```python
+hard = filter.by_judged_difficulty(
+    rows,
+    model=model,
+    task_field="problem",
+    min_difficulty=4,
+    num_judges=3,
+    temperature=0.7,
+    maximum_difficulty_criterion="A problem that most olympiad medalists could not solve in an hour.",
+)
+```
 
 #### `pyforger.inspect`
 
