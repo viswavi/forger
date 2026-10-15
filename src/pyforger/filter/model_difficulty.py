@@ -5,11 +5,11 @@ does not. ``by_pass_at_k`` samples one model ``k`` times and keeps rows whose
 pass rate falls within ``[min_rate, max_rate]``.
 
 Grades use the format of ``filter.by_success_rate``: ``{group: [True | False |
-None, ...]}``, where ``None`` is a grade that could not be made (an empty or
-truncated completion, no extractable answer, or a verifier returning ``None``)
-and is excluded, not failed. Predictions and grades are cached in separate inner
-ops, so changing only the rate bounds makes no model calls, and changing only
-the metric regrades the cached predictions.
+None, ...]}``, where ``None`` is a grade that could not be made (an empty
+completion, a ``<think>`` block that never closes, no extractable answer, or a
+verifier returning ``None``) and is excluded, not failed. Predictions and
+grades are cached in separate inner ops, so changing only the rate bounds makes
+no model calls, and changing only the metric regrades the cached predictions.
 """
 from __future__ import annotations
 
@@ -42,6 +42,8 @@ DEFAULT_SOLVE_PROMPT = (
     "final line of the form 'ANSWER: <answer>'.\n\nTask:\n{task}"
 )
 _ANSWER_MARKER = re.compile(r"ANSWER\s*:", re.I)
+# A whole answer line in \boxed{...}, allowing one level of nested braces.
+_BOXED = re.compile(r"\\boxed\{((?:[^{}]|\{[^{}]*\})*)\}")
 
 
 def _logger() -> logging.Logger:
@@ -280,6 +282,7 @@ def _predictions(
     Exceptions from the model propagate, so a failed call is not cached.
     """
     completions: list[list[str | None]] = []
+    short = 0
     for start in range(0, len(prompts), batch_size):
         batch = prompts[start : start + batch_size]
         results = model.generate_batch(
@@ -293,8 +296,19 @@ def _predictions(
             )
         for i in range(len(batch)):
             got = list(results[i]) if i < len(results) else []
+            short += len(got) < n
             got = [c if isinstance(c, str) and c.strip() else None for c in got]
             completions.append((got + [None] * n)[:n])
+    if short:
+        # E.g. a provider that ignores n: the missing samples grade None, so with
+        # min_valid=None every such row is dropped.
+        _logger().warning(
+            "%d of %d prompts got fewer than n=%d completions; missing ones grade "
+            "None",
+            short,
+            len(prompts),
+            n,
+        )
     return completions
 
 
@@ -345,9 +359,9 @@ def _default_extract(text: str) -> str | None:
     r"""First line after the last ``ANSWER:``, else ``default_extract_answer``.
 
     E.g. ``"... ANSWER: Paris."`` gives ``"Paris"``, ``"**ANSWER:** $1,000$"``
-    gives ``"1,000"`` (matched as ``1000``), and ``"... \boxed{42}"`` gives
-    ``"42"``. A closed ``<think>`` block is ignored; one that never closes (the
-    model ran out of tokens) gives ``None``.
+    gives ``"1,000"`` (matched as ``1000``), and ``"ANSWER: \boxed{42}"`` or
+    ``"... \boxed{42}"`` gives ``"42"``. A closed ``<think>`` block is ignored;
+    one that never closes (the model ran out of tokens) gives ``None``.
     """
     if "</think>" in text:
         text = text.rsplit("</think>", 1)[1]
@@ -357,6 +371,9 @@ def _default_extract(text: str) -> str | None:
     if len(parts) > 1:
         lines = [line.strip(" *$") for line in parts[-1].splitlines()]
         final = next((line for line in lines if line), "").rstrip(".").strip(" *$")
+        boxed = _BOXED.fullmatch(final)
+        if boxed:
+            final = boxed.group(1).strip()
         return final or None
     return default_extract_answer(text)
 

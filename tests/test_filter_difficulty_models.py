@@ -1,6 +1,7 @@
 """Tests for the model-based difficulty filters (comparative and pass@k)."""
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 import pytest
@@ -178,6 +179,13 @@ class TestComparative:
         weak.fail = False
         assert [r["id"] for r in _comparative(weak=weak, strong=strong)] == ["hard"]
         assert len(weak.calls) == 2
+
+    def test_boxed_answer_line(self):
+        r"""'ANSWER: \boxed{1}' matches the reference 1."""
+        weak = ScriptedModel("weak", {"t": ["ANSWER: \\boxed{9}"]})
+        strong = ScriptedModel("strong", {"t": ["ANSWER: $\\boxed{1}$."]})
+        rows = [{"task": "t", "answer": "1"}]
+        assert _comparative(rows, weak, strong) == rows
 
     def test_threshold_change_makes_no_model_calls(self):
         """Changing only rouge_l_threshold regrades cached predictions."""
@@ -400,6 +408,58 @@ class TestPassAtK:
         warnings = _tracking.last_pipeline().warnings  # type: ignore[union-attr]
         assert not any("quality filter" in w for w in warnings)
 
+    @pytest.mark.parametrize(
+        "change",
+        [
+            {"k": 2},
+            {"temperature": 0.5},
+            {"max_tokens": 64},
+            {"prompt_template": "Task:\n{task}"},
+        ],
+    )
+    def test_sampling_changes_regenerate(self, change):
+        """A new k, temperature, max_tokens, or prompt samples again."""
+        model = ScriptedModel("m", self.SCRIPT)
+        _pass_at_k(self.ROWS, model)
+        _pass_at_k(self.ROWS, model, **change)
+        assert len(model.calls) == 2
+
+    def test_model_change_regenerates(self):
+        """Another model is sampled, not served the first model's samples."""
+        first, second = ScriptedModel("a", self.SCRIPT), ScriptedModel("b", self.SCRIPT)
+        _pass_at_k(self.ROWS, first)
+        _pass_at_k(self.ROWS, second)
+        assert len(first.calls) == len(second.calls) == 1
+
+    def test_empty_input(self):
+        """No rows: no model call, no rows out, an empty score list."""
+        model = ScriptedModel("m", {})
+        assert _pass_at_k([], model) == []
+        assert model.calls == []
+
+    def test_order_duplicates_and_no_mutation(self):
+        """Kept rows keep input order, duplicates are graded each, inputs unchanged."""
+        rows = [self.ROWS[3], self.ROWS[1], self.ROWS[3], self.ROWS[0]]
+        before = copy.deepcopy(rows)
+        kept = _pass_at_k(rows, ScriptedModel("m", self.SCRIPT), outcomes_field="ev")
+        assert [r["task"] for r in kept] == ["t4", "t2", "t4"]
+        assert rows == before
+
+    def test_fewer_completions_than_k(self, caplog):
+        """Missing samples (e.g. a provider ignoring n) grade None, with a warning."""
+
+        class OneChoice(ScriptedModel):
+            def generate_batch(self, prompts, *, n=1, **kwargs):
+                return super().generate_batch(prompts, n=1, **kwargs)
+
+        model = OneChoice("one", {"t": ["ANSWER: 1"]})
+        rows = [{"task": "t", "answer": "1"}]
+        kept = _pass_at_k(
+            rows, model, k=3, min_valid=1, max_rate=1.0, outcomes_field="ev"
+        )
+        assert kept[0]["ev"] == {"model": [True, None, None]}
+        assert "1 of 1 prompts got fewer than n=3 completions" in caplog.text
+
     def test_custom_prompt_template(self):
         """prompt_template replaces the default prompt."""
         model = ScriptedModel("m", {"Q: t1": ["ANSWER: 1"]})
@@ -463,6 +523,9 @@ def test_comparative_validation(kwargs):
         ("**ANSWER:** 42", "42"),
         ("ANSWER:\n42\n\nHope this helps.", "42"),
         ("<think>so ANSWER: 3, but wait", None),
+        ("ANSWER: \\boxed{42}", "42"),
+        ("ANSWER: $\\boxed{\\frac{1}{2}}$.", "\\frac{1}{2}"),
+        ("ANSWER: \\boxed{1} or \\boxed{2}", "\\boxed{1} or \\boxed{2}"),
     ],
 )
 def test_default_extract(text, expected):
