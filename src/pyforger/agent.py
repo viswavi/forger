@@ -14,8 +14,8 @@ from openhands.sdk.conversation import BaseConversation, LocalConversation
 from openhands.sdk.tool import Tool
 
 from pyforger.acquire.model import Model
-from pyforger.alter.dynamic import agent_llm
 from pyforger.evidence import SESSIONS, EvidenceReader, EvidenceTool
+from pyforger.local_agent import agent_llm
 from pyforger.utils import redact
 
 CONDENSER_KEEP_FIRST = 2

@@ -11,7 +11,7 @@ from openhands.sdk import Action, Observation, TextContent, ToolDefinition
 from openhands.sdk.tool import ToolExecutor, register_tool
 
 from pyforger.alter._dynamic_resources import prepare_input
-from pyforger.alter.dynamic import _execute
+from pyforger.local_agent import _execute
 
 if TYPE_CHECKING:
     from openhands.sdk.conversation import ConversationState, LocalConversation

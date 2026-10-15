@@ -342,17 +342,17 @@ def test_generated_program_receives_prepared_url(monkeypatch):
     version = importlib.metadata.version("RestrictedPython")
     if tuple(map(int, version.split(".")[:2])) < (8, 4):
         pytest.skip("Dynamic worker requires RestrictedPython >=8.4")
-    from pyforger.alter import dynamic
+    from pyforger import local_agent
 
     try:
-        dynamic._require_dynamic_platform()
+        local_agent._require_dynamic_platform()
     except NotImplementedError:
         pytest.skip("Dynamic worker requires Unix signal timers")
 
     prepared = {"kind": "html", "url": "https://example.org", "content": "hello"}
-    monkeypatch.setattr(dynamic, "prepare_input", lambda item: prepared)
+    monkeypatch.setattr(local_agent, "prepare_input", lambda item: prepared)
     code = 'def run(item):\n    return [item["content"]]'
-    assert dynamic._execute(code, {"url": "https://example.org"}, 5) == ["hello"]
+    assert local_agent._execute(code, {"url": "https://example.org"}, 5) == ["hello"]
 
 
 def test_public_fetch_rejects_invalid_limits_before_network():

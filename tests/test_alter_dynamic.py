@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 from completion import completion_server
 
+from pyforger import local_agent
 from pyforger.acquire import Model
 from pyforger.acquire.model import ModelSettings
 from pyforger.alter import dynamic_step, dynamic_step_source
@@ -37,8 +38,14 @@ def test_source_cache_order_and_overlap(tmp_path, monkeypatch):
         executions.append(item["text"])
         return [item["text"].upper(), item["text"].lower()]
 
-    monkeypatch.setattr(dynamic, "_generate", generate)
-    monkeypatch.setattr(dynamic, "_execute", execute)
+    monkeypatch.setattr(
+        local_agent.LocalAgentRunner,
+        "generate_source",
+        lambda self, goal, item: generate(
+            goal, item, self.model, self.max_iterations, self.execution_timeout_s
+        ),
+    )
+    monkeypatch.setattr(local_agent, "_execute", execute)
     model = SimpleNamespace(_model_id="test")
     first = dynamic_step(
         [{"text": "a"}, {"text": "b"}, {"text": "a"}], "uppercase", model
@@ -72,8 +79,16 @@ def test_parallel_limit(tmp_path, monkeypatch):
             active -= 1
         return "code"
 
-    monkeypatch.setattr(dynamic, "_generate", generate)
-    monkeypatch.setattr(dynamic, "_execute", lambda code, item, timeout: [item["text"]])
+    monkeypatch.setattr(
+        local_agent.LocalAgentRunner,
+        "generate_source",
+        lambda self, goal, item: generate(
+            goal, item, self.model, self.max_iterations, self.execution_timeout_s
+        ),
+    )
+    monkeypatch.setattr(
+        local_agent, "_execute", lambda code, item, timeout: [item["text"]]
+    )
     assert dynamic_step(
         [{"text": x} for x in "abcd"],
         "goal",
@@ -89,10 +104,10 @@ def test_worker_restrictions_and_timeout():
     if tuple(map(int, version.split(".")[:2])) < (8, 4):
         pytest.skip("Dynamic worker requires RestrictedPython >=8.4")
     try:
-        dynamic._require_dynamic_platform()
+        local_agent._require_dynamic_platform()
     except NotImplementedError:
         pytest.skip("Dynamic worker requires Unix signal timers")
-    assert dynamic._execute(
+    assert local_agent._execute(
         "def run(item):\n    return [item['text'].lower(), item['text'].upper()]",
         {"text": "hello"},
         5,
@@ -104,22 +119,27 @@ def test_worker_restrictions_and_timeout():
         "url": "https://programiz.pro/community-challenges/python",
         "query": "Very hard programming challenges in Python",
     }
-    assert dynamic._execute(
+    assert local_agent._execute(
         "def run(item):\n    return [item['title'], item['text'], item['query']]",
         record,
         5,
     ) == [record["title"], record["text"], record["query"]]
-    assert dynamic._execute("def run(item):\n    return []", {"text": "hello"}, 5) == []
+    assert (
+        local_agent._execute("def run(item):\n    return []", {"text": "hello"}, 5)
+        == []
+    )
     with pytest.raises(ValueError, match="not allowed"):
-        dynamic._execute(
+        local_agent._execute(
             "import os\ndef run(item):\n    return os.environ", {"text": "hello"}, 5
         )
     with pytest.raises(ValueError, match="list of strings"):
-        dynamic._execute("def run(item):\n    return 3", {"text": "hello"}, 5)
+        local_agent._execute("def run(item):\n    return 3", {"text": "hello"}, 5)
     with pytest.raises(ValueError, match="list of strings"):
-        dynamic._execute("def run(item):\n    return ['ok', 3]", {"text": "hello"}, 5)
+        local_agent._execute(
+            "def run(item):\n    return ['ok', 3]", {"text": "hello"}, 5
+        )
     with pytest.raises(ValueError, match="SandboxTimeout"):
-        dynamic._execute(
+        local_agent._execute(
             "def run(item):\n    while True:\n        pass", {"text": "hello"}, 0.5
         )
 
@@ -138,8 +158,14 @@ def test_empty_and_validation(tmp_path):
 def test_records_with_reordered_keys_share_generation(monkeypatch):
     """Nested record key order must not launch a duplicate agent."""
     calls = []
-    monkeypatch.setattr(dynamic, "_generate", lambda *args: calls.append(1) or "code")
-    monkeypatch.setattr(dynamic, "_execute", lambda code, item, timeout: [item["text"]])
+    monkeypatch.setattr(
+        local_agent.LocalAgentRunner,
+        "generate_source",
+        lambda *args: calls.append(1) or "code",
+    )
+    monkeypatch.setattr(
+        local_agent, "_execute", lambda code, item, timeout: [item["text"]]
+    )
     first = {"text": "challenge", "meta": {"a": 1, "b": 2}}
     second = {"meta": {"b": 2, "a": 1}, "text": "challenge"}
     assert dynamic_step([first, second], "goal", SimpleNamespace(_model_id="test")) == [
@@ -155,7 +181,13 @@ def test_failed_generation_is_not_cached(tmp_path, monkeypatch):
     def fail(*args):
         raise RuntimeError("no submission")
 
-    monkeypatch.setattr(dynamic, "_generate", fail)
+    monkeypatch.setattr(
+        local_agent.LocalAgentRunner,
+        "generate_source",
+        lambda self, goal, item: fail(
+            goal, item, self.model, self.max_iterations, self.execution_timeout_s
+        ),
+    )
     with pytest.raises(RuntimeError, match="no submission"):
         dynamic_step([{"text": "a"}], "goal", SimpleNamespace(_model_id="test"))
     assert not list((tmp_path / "op-cache" / "alter.dynamic_step_source").glob("*.pkl"))
@@ -164,7 +196,9 @@ def test_failed_generation_is_not_cached(tmp_path, monkeypatch):
 def test_source_is_returned_with_standard_op_cache_hit(tmp_path, monkeypatch):
     """Test source is returned with standard op cache hit."""
     monkeypatch.setattr(
-        dynamic, "_generate", lambda *args: "def run(item):\n    return [item]"
+        local_agent.LocalAgentRunner,
+        "generate_source",
+        lambda *args: "def run(item):\n    return [item]",
     )
     model = SimpleNamespace(_model_id="test")
     clear_trace()
@@ -187,7 +221,13 @@ def test_source_version_refreshes_generated_program(monkeypatch):
         calls.append(None)
         return f"def run(item): return [{str(len(calls))!r}]"
 
-    monkeypatch.setattr(dynamic, "_generate", generate)
+    monkeypatch.setattr(
+        local_agent.LocalAgentRunner,
+        "generate_source",
+        lambda self, goal, item: generate(
+            goal, item, self.model, self.max_iterations, self.execution_timeout_s
+        ),
+    )
     model = SimpleNamespace(_model_id="test")
     first = dynamic_step_source({"text": "a"}, "goal", model)
     assert dynamic_step_source({"text": "a"}, "goal", model) == first
@@ -201,7 +241,9 @@ def test_source_version_refreshes_generated_program(monkeypatch):
 def test_source_inspection_never_generates_when_disabled(tmp_path, monkeypatch):
     """Test source inspection never generates when disabled."""
     monkeypatch.setattr(
-        dynamic, "_generate", lambda *args: pytest.fail("agent launched")
+        local_agent.LocalAgentRunner,
+        "generate_source",
+        lambda *args: pytest.fail("agent launched"),
     )
     with pytest.raises(FileNotFoundError, match="No cached result"):
         dynamic_step_source(
@@ -220,10 +262,10 @@ def test_execution_timeout_reaches_worker(monkeypatch):
         assert kwargs["timeout"] == 32
         return SimpleNamespace(returncode=0, stdout='["ok"]', stderr="")
 
-    monkeypatch.setattr(dynamic.subprocess, "run", run)
-    assert dynamic._execute("def run(item): return ['ok']", {"text": "plain"}, 30) == [
-        "ok"
-    ]
+    monkeypatch.setattr(local_agent.subprocess, "run", run)
+    assert local_agent._execute(
+        "def run(item): return ['ok']", {"text": "plain"}, 30
+    ) == ["ok"]
 
 
 def test_agent_retries_text_and_keeps_successful_submission(monkeypatch):
@@ -262,13 +304,15 @@ def test_agent_retries_text_and_keeps_successful_submission(monkeypatch):
             calls.append(("close", None))
 
     monkeypatch.setattr(sdk, "Conversation", FakeConversation)
-    monkeypatch.setattr(dynamic, "agent_llm", lambda model: object())
+    monkeypatch.setattr(local_agent, "agent_llm", lambda model: object())
     monkeypatch.setattr(sdk, "Agent", lambda **kwargs: SimpleNamespace(**kwargs))
-    monkeypatch.setattr(dynamic, "prepare_input", lambda item: item)
+    monkeypatch.setattr(local_agent, "prepare_input", lambda item: item)
     monkeypatch.setattr(tool, "prepare_input", lambda item: item)
     model = SimpleNamespace(config=ModelSettings(model_id="test", temperature=0))
-    assert dynamic._generate("goal", {"text": "input"}, model, 3, 5).startswith(
-        "def run"
+    assert (
+        local_agent.LocalAgentRunner(model, max_iterations=3, execution_timeout_s=5)
+        .generate_source("goal", {"text": "input"})
+        .startswith("def run")
     )
     assert len([x for x in calls if x[0] == "run"]) == 2
     assert len([x for x in calls if x[0] == "message"]) == 2
@@ -291,14 +335,18 @@ def test_bad_resource_fails_before_agent_creation(monkeypatch):
     )
     model = SimpleNamespace(_model_id="test")
     with pytest.raises(ValueError, match="bad resource"):
-        dynamic._generate("goal", {"url": "https://example.org/missing"}, model, 3, 5)
+        local_agent.LocalAgentRunner(
+            model, max_iterations=3, execution_timeout_s=5
+        ).generate_source("goal", {"url": "https://example.org/missing"})
 
 
 def test_unsupported_platform_fails_before_agent(monkeypatch):
     """Reject missing Unix timers before any SDK or resource work."""
-    monkeypatch.delattr(dynamic.signal, "setitimer", raising=False)
+    monkeypatch.delattr(local_agent.signal, "setitimer", raising=False)
     with pytest.raises(NotImplementedError, match="setitimer"):
-        dynamic._generate("goal", {"text": "input"}, None, 3, 5)
+        local_agent.LocalAgentRunner(
+            None, max_iterations=3, execution_timeout_s=5
+        ).generate_source("goal", {"text": "input"})
 
 
 def test_real_agent_retains_restricted_tools(monkeypatch):
@@ -352,14 +400,14 @@ def test_real_sdk_corrects_code_and_reexecutes_cached_source(tmp_path, monkeypat
         }
 
     executions = []
-    real_run = dynamic.subprocess.run
+    real_run = local_agent.subprocess.run
 
     def record_run(command, **kwargs):
         if command[-1].endswith("_dynamic_worker.py"):
             executions.append(json.loads(kwargs["input"])["code"])
         return real_run(command, **kwargs)
 
-    monkeypatch.setattr(dynamic.subprocess, "run", record_run)
+    monkeypatch.setattr(local_agent.subprocess, "run", record_run)
     clear_trace()
     with completion_server(
         [
@@ -432,7 +480,7 @@ def test_agent_llm_real_settings_translation(options, monkeypatch, tmp_path):
         num_retries=0,
         **options,
     )
-    llm = dynamic.agent_llm(model)
+    llm = local_agent.agent_llm(model)
     assert llm.model == model.config.model_id
     assert llm.temperature == 0
     assert llm.max_output_tokens == 123
@@ -456,6 +504,14 @@ def test_agent_llm_env_fallback(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("LITELLM_API_KEY", "env-key")
     monkeypatch.setenv("LITELLM_BASE_URL", "http://localhost:9876")
-    llm = dynamic.agent_llm(Model("gpt-4o"))
+    llm = local_agent.agent_llm(Model("gpt-4o"))
     assert llm.api_key.get_secret_value() == "env-key"
     assert llm.base_url == "http://localhost:9876"
+
+
+def test_local_runner_executes_saved_source_without_model():
+    """A retained program can be executed without starting another conversation."""
+    runner = local_agent.LocalAgentRunner(Model("openai/test"), execution_timeout_s=5)
+    assert runner.execute(
+        "def run(item): return [item['text'].upper()]", {"text": "hello"}
+    ) == ["HELLO"]
