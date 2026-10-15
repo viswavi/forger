@@ -121,16 +121,18 @@ def _topics_of(rows):
     return [_topic(row["text"]) for row in rows]
 
 
-def test_drops_over_represented_topic():
-    """Rows of a topic above max_frequency are dropped; order is kept."""
+def test_downsamples_over_represented_topic():
+    """A topic above max_frequency keeps max_frequency of the input rows."""
     kept = _filter(_rows(), max_frequency=0.5)
-    assert kept == _rows()[7:]
-    assert _topics_of(kept) == ["space", "space", "music"]
+    topics = _topics_of(kept)
+    # 0.5 of 10 rows: 5 of the 7 cooking rows, plus every other row.
+    assert topics.count("cooking") == 5
+    assert topics[-3:] == ["space", "space", "music"]
 
 
 def test_default_max_frequency_is_twice_the_uniform_share():
-    """With 3 topics the default cap is 2/3, so the 0.7 topic goes."""
-    assert _topics_of(_filter(_rows())) == ["space", "space", "music"]
+    """With 3 topics the default cap is 2/3, so the 0.7 topic keeps 6 of 10."""
+    assert _topics_of(_filter(_rows())) == ["cooking"] * 6 + ["space", "space", "music"]
     assert len(_filter(_rows(), num_clusters=3, max_frequency=0.7)) == len(DOCS)
 
 
@@ -144,13 +146,14 @@ def test_min_frequency_drops_rare_topics():
 def test_bounds_are_inclusive():
     """A topic exactly at min_frequency or max_frequency is kept."""
     assert len(_filter(_rows(), min_frequency=0.1, max_frequency=0.7)) == len(DOCS)
-    only_space = _filter(_rows(), min_frequency=0.2, max_frequency=0.2)
-    assert _topics_of(only_space) == ["space", "space"]
+    # Cooking is capped at 0.2 (2 rows), which is still >= min_frequency.
+    capped = _filter(_rows(), min_frequency=0.2, max_frequency=0.2)
+    assert _topics_of(capped) == ["cooking", "cooking", "space", "space"]
 
 
 def test_downsample_caps_over_represented_topic():
-    """A large topic keeps max_frequency of the input rows with downsample."""
-    kept = _filter(_rows(), max_frequency=0.3, downsample=True)
+    """A large topic keeps max_frequency of the input rows."""
+    kept = _filter(_rows(), max_frequency=0.3)
     topics = _topics_of(kept)
     # 0.3 of 10 rows: 3 of the 7 cooking rows, plus every other row.
     assert topics.count("cooking") == 3
@@ -160,42 +163,43 @@ def test_downsample_caps_over_represented_topic():
 
 
 def test_downsample_is_seeded():
-    """The same seed keeps the same rows, even when the clustering reruns."""
-    kwargs = dict(max_frequency=0.3, downsample=True)
-    first = _filter(_rows(), **kwargs)
-    assert _filter(_rows(), _no_cache=True, **kwargs) == first
-    other_seeds = [_filter(_rows(), seed=seed, **kwargs) for seed in range(1, 6)]
+    """The same sample_seed keeps the same rows, even when the clustering reruns."""
+    model, embed = _FakeTopicModel(), _CountingEmbed()
+    first = _filter(_rows(), model, embed, max_frequency=0.3)
+    assert _filter(_rows(), max_frequency=0.3, _no_cache=True) == first
+    calls = (model.calls, embed.calls)
+    other_seeds = [
+        _filter(_rows(), model, embed, max_frequency=0.3, sample_seed=seed)
+        for seed in range(1, 6)
+    ]
     assert any(kept != first for kept in other_seeds)
+    assert (model.calls, embed.calls) == calls  # no re-clustering
 
 
 def test_downsample_drops_cap_below_min_frequency():
     """A cap under min_frequency leaves too few rows, so the topic is dropped."""
     # The cap is 2 of 10 rows (0.2), below min_frequency 0.25.
-    assert (
-        _filter(_rows(), min_frequency=0.25, max_frequency=0.25, downsample=True) == []
-    )
+    assert _filter(_rows(), min_frequency=0.25, max_frequency=0.25) == []
 
 
 def test_topic_field_names_each_kept_row():
     """topic_field adds the topic name to kept rows; input rows are untouched."""
     items = _rows()
-    kept = _filter(items, max_frequency=0.5, topic_field="topic")
-    assert [row["topic"] for row in kept] == ["space", "space", "music"]
-    assert [{k: v for k, v in row.items() if k != "topic"} for row in kept] == (
-        items[7:]
-    )
+    kept = _filter(items, max_frequency=1.0, topic_field="topic")
+    assert [row["topic"] for row in kept] == _topics_of(items)
+    assert [{k: v for k, v in row.items() if k != "topic"} for row in kept] == items
     assert items == _rows()
 
 
 def test_changing_thresholds_makes_no_new_calls():
-    """New frequency bounds, downsample, or topic_field reuse the clustering."""
+    """New frequency bounds, sample_seed, or topic_field reuse the clustering."""
     model, embed = _FakeTopicModel(), _CountingEmbed()
     _filter(_rows(), model, embed, max_frequency=0.5)
     calls = (model.calls, embed.calls)
     assert calls[0] > 0 and calls[1] == 1
     _filter(_rows(), model, embed, max_frequency=0.8)
     _filter(_rows(), model, embed, min_frequency=0.15, max_frequency=0.9)
-    _filter(_rows(), model, embed, max_frequency=0.3, downsample=True)
+    _filter(_rows(), model, embed, max_frequency=0.3, sample_seed=7)
     _filter(_rows(), model, embed, max_frequency=0.5, topic_field="topic")
     # Rows that differ only outside the clustered field reuse it too.
     relabeled = [{**row, "id": -row["id"]} for row in _rows()]
@@ -246,22 +250,24 @@ def test_scores_recorded_in_step(monkeypatch):
     scores = _tracking.step_records()["balanced"].ops[0].scores
     assert scores is not None
     assert (scores.label, scores.keep, scores.lower, scores.upper) == (
-        "topic share",
+        "topic share, capped",
         "between",
         0.15,
         0.5,
     )
-    assert scores.values == pytest.approx([0.7] * 7 + [0.2] * 2 + [0.1])
-    assert len(kept) == 2
+    # Cooking (0.7) keeps 5 rows at the capped 0.5; music (0.1) is too rare.
+    assert sorted(scores.values[:7]) == pytest.approx([0.5] * 5 + [0.7] * 2)
+    assert scores.values[7:] == pytest.approx([0.2, 0.2, 0.1])
+    assert len(kept) == 7
 
 
 def test_downsample_scores_match_kept_rows(monkeypatch):
-    """With downsample, kept rows of a capped topic score at the capped share."""
+    """Kept rows of a capped topic score at the capped share."""
     monkeypatch.setenv("FORGER_STEP_REPORT", "0")
 
     @step
     def capped(rows):
-        return _filter(rows, max_frequency=0.3, downsample=True)
+        return _filter(rows, max_frequency=0.3)
 
     kept = capped(_rows())
     scores = _tracking.step_records()["capped"].ops[0].scores

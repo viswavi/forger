@@ -1,7 +1,8 @@
 """Topic-distribution filter.
 
-Cluster rows into LLM-named topics (``inspect.topic_based_clustering``) and
-drop rows whose topic holds too large (or too small) a share of the rows.
+Cluster rows into LLM-named topics (``inspect.topic_based_clustering``),
+downsample topics that hold too large a share of the rows, and drop topics
+that hold too small a share.
 """
 from __future__ import annotations
 
@@ -27,34 +28,31 @@ def by_topic_frequency(
     num_clusters: int = 20,
     min_frequency: float = 0.0,
     max_frequency: float | None = None,
-    downsample: bool = False,
     topic_field: str | None = None,
     embed_fn: Callable[[list[str]], Any] | None = None,
     seed: int = 0,
+    sample_seed: int = 0,
     **cluster_kwargs: Any,
 ) -> list[dict]:
-    """Drop rows whose topic's share of ``items`` is outside the frequency bounds.
+    """Downsample over-represented topics and drop rare ones.
 
     Rows are clustered by ``field`` into ``num_clusters`` topics with
     ``inspect.topic_based_clustering`` (``context``, ``embed_fn``, ``seed``,
     and ``cluster_kwargs`` such as ``embedding_model=`` go to it). A topic's
     frequency is its share of the input rows, so ``1 / num_clusters`` is the
-    uniform share; a row is kept when
-    ``min_frequency <= frequency <= max_frequency``. ``max_frequency`` defaults
-    to ``2 / num_clusters``: with 20 topics, a topic holding more than 10% of
-    the rows is dropped.
-
-    ``downsample=True`` keeps a random (``seed``-ed) subset of each
-    over-represented topic instead of dropping it: as many rows as fit in
-    ``max_frequency`` of the input, e.g. 10 of 100 rows at 0.1. Rare topics
-    below ``min_frequency`` are always dropped. ``topic_field="topic"`` adds
-    each kept row's topic name to it.
+    uniform share. A topic above ``max_frequency`` keeps a random subset of its
+    rows, as many as fit in ``max_frequency`` of the input (e.g. 10 of 100 rows
+    at 0.1); ``max_frequency`` defaults to ``2 / num_clusters``. A topic below
+    ``min_frequency`` is dropped, and so is an over-represented topic whose
+    capped share would fall below it. Kept rows stay in input order.
+    ``sample_seed`` picks the subset; changing it does not re-cluster.
+    ``topic_field="topic"`` adds each kept row's topic name to it.
 
     The clustering is cached by its own op, so changing ``min_frequency``,
-    ``max_frequency``, ``downsample``, or ``topic_field`` makes no new model
+    ``max_frequency``, ``sample_seed``, or ``topic_field`` makes no new model
     or embedding calls. In a ``@step`` report each row's score is its topic's
-    share; with ``downsample``, the rows kept from a capped topic are scored at
-    the capped share, so the report's kept count matches the rows returned.
+    share; the rows kept from a capped topic are scored at the capped share, so
+    the report's kept count matches the rows returned.
     """
     if num_clusters < 2:
         raise ValueError("num_clusters must be at least 2")
@@ -67,10 +65,9 @@ def by_topic_frequency(
             f"min_frequency must be in [0, max_frequency], got {min_frequency} "
             f"with max_frequency {max_frequency}"
         )
-    label = "topic share, capped" if downsample else "topic share"
     if not items:
         _tracking.record_scores(
-            label, [], keep="between", lower=min_frequency, upper=max_frequency
+            "topic share", [], keep="between", lower=min_frequency, upper=max_frequency
         )
         return []
 
@@ -91,20 +88,20 @@ def by_topic_frequency(
     share = {topic: count / n for topic, count in Counter(topics).items()}
     keep = [min_frequency <= share[topic] <= max_frequency for topic in topics]
     scores = [share[topic] for topic in topics]
-    if downsample:
-        # The most rows a topic may keep, e.g. 10 of 100 rows at 0.1.
-        cap = sum(1 for count in range(1, n + 1) if count / n <= max_frequency)
-        rng = random.Random(seed)
-        over = sorted(topic for topic, s in share.items() if s > max_frequency)
-        if cap / n < min_frequency:
-            # The capped share is itself too rare (e.g. 2 of 7 rows = 0.29 with
-            # min_frequency 0.3), so these topics are dropped.
-            over = []
-        for topic in over:
-            rows = [i for i, t in enumerate(topics) if t == topic]
-            for i in rng.sample(rows, cap):
-                keep[i] = True
-                scores[i] = cap / n
+    # The most rows a topic may keep, e.g. 10 of 100 rows at 0.1.
+    cap = sum(1 for count in range(1, n + 1) if count / n <= max_frequency)
+    rng = random.Random(sample_seed)
+    over = sorted(topic for topic, s in share.items() if s > max_frequency)
+    if cap / n < min_frequency:
+        # The capped share is itself too rare (e.g. 2 of 7 rows = 0.29 with
+        # min_frequency 0.3), so these topics are dropped.
+        over = []
+    for topic in over:
+        rows = [i for i, t in enumerate(topics) if t == topic]
+        for i in rng.sample(rows, cap):
+            keep[i] = True
+            scores[i] = cap / n
+    label = "topic share, capped" if over else "topic share"
     _tracking.record_scores(
         label, scores, keep="between", lower=min_frequency, upper=max_frequency
     )
