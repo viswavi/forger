@@ -378,7 +378,8 @@ def rl_run(args):
 
 def final_evaluation(sampler_path, out_dir):
     """Secret-test evaluation of the final RL weights; charged to the eval ledger."""
-    env = {**os.environ, "TINKER_EVAL_BUDGET": "eval"}
+    # Pin Tinker as the agent sandbox does, whatever the host shell exported.
+    env = {**os.environ, "TINKER_EVAL_BUDGET": "eval", "PDB_EVAL_BACKEND": "tinker"}
     env.setdefault(
         "TINKER_EVAL_USAGE_FILE",
         str(Path(out_dir).resolve().parents[2] / "tinker_eval_usage.json"),

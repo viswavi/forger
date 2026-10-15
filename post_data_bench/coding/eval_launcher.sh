@@ -4,9 +4,11 @@ set -euo pipefail
 HELPER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TASK_DIR="$1"; shift
 cd "$TASK_DIR"
-MODEL_PATH=Qwen/Qwen3-4B
+# Without --model-path, evaluate the base student (agent sandboxes set PDB_STUDENT_MODEL).
+MODEL_PATH="${PDB_STUDENT_MODEL:-Qwen/Qwen3-8B}"
 SPLIT=
 # Agent sandboxes set PDB_EVAL_BACKEND=tinker, so validation never starts a local server.
+# Local-checkpoint callers pass --server-backend (or SERVER_BACKEND) explicitly.
 SERVER_BACKEND="${SERVER_BACKEND:-${PDB_EVAL_BACKEND:-vllm}}"
 OUT_DIR=
 NUM_SHARDS=

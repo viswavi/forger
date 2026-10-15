@@ -824,6 +824,7 @@ _HOST_RL_CACHE_ENV = {
         "HF_HUB_DISABLE_IMPLICIT_TOKEN",
         "TINKER_EVAL_BUDGET",
         "PDB_EVAL_BACKEND",
+        "PDB_STUDENT_MODEL",
     )
 }
 # Container-side paths, forwarded into the sandbox via forward_env below. Set
@@ -842,8 +843,10 @@ else:
     os.environ["HF_HOME"] = "/tmp/hf_cache"
 # The agent's validation evaluations draw on its SFT dollar budget and run on
 # Tinker only: eval_launcher.sh defaults to PDB_EVAL_BACKEND and refuses others.
+# Without --model-path they evaluate the base student, PDB_STUDENT_MODEL.
 os.environ["TINKER_EVAL_BUDGET"] = "sft"
 os.environ["PDB_EVAL_BACKEND"] = "tinker"
+os.environ["PDB_STUDENT_MODEL"] = args.model
 
 
 def host_posix_tz():
@@ -1026,6 +1029,7 @@ try:
             "FORGER_TINKER_USAGE_FILE",
             "FORGER_TINKER_USD_LIMIT",
             "PDB_EVAL_BACKEND",
+            "PDB_STUDENT_MODEL",
             "PDB_RUN_TAG",
             "TZ",
             "CUDA_VISIBLE_DEVICES",

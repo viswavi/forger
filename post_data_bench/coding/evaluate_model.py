@@ -43,8 +43,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--model-path",
         type=str,
-        default="Qwen/Qwen3-4B",
-        help="Model id/path; must match the name the vLLM server serves.",
+        default=os.environ.get("PDB_STUDENT_MODEL") or "Qwen/Qwen3-8B",
+        help="Model id/path; must match the name the vLLM server serves. "
+        "Defaults to the base student ($PDB_STUDENT_MODEL, else Qwen/Qwen3-8B).",
     )
     p.add_argument("--split", type=str, choices=["val", "test"], default=None)
     p.add_argument(
@@ -76,7 +77,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min-p", type=float, default=0.0)
     p.add_argument("--max-connections", type=int, default=128)
     # tinker: sample remotely; --model-path is a base model or tinker://... path.
-    p.add_argument("--backend", choices=["openai", "tinker"], default="openai")
+    # Agent sandboxes set PDB_EVAL_BACKEND=tinker, which makes it the default.
+    p.add_argument(
+        "--backend",
+        choices=["openai", "tinker"],
+        default="tinker"
+        if os.environ.get("PDB_EVAL_BACKEND") == "tinker"
+        else "openai",
+    )
     p.add_argument("--grade-workers", type=int, default=8)
     p.add_argument("--grade-timeout", type=int, default=6)
     p.add_argument(
@@ -99,7 +107,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--out-dir", type=str, default=None, help="Output dir for --merge-shards mode."
     )
-    return p.parse_args()
+    args = p.parse_args()
+    # Where Tinker is pinned (agent sandboxes), refuse a local server here too,
+    # as eval_launcher.sh does. Merging saved shards samples nothing.
+    if (
+        os.environ.get("PDB_EVAL_BACKEND") == "tinker"
+        and args.backend != "tinker"
+        and not args.merge_shards
+    ):
+        p.error("only --backend tinker is available here")
+    return args
 
 
 def load_tasks(args: argparse.Namespace) -> list[dict]:

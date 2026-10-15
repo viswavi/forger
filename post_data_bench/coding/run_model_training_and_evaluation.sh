@@ -142,4 +142,5 @@ fi
 
 EVAL_ARGS=("${EXTRA_ARGS[@]}")
 [[ "$NO_THINKING" -eq 1 ]] && EVAL_ARGS+=(--no-thinking)
-./evaluate_model.sh --split "$SPLIT" --model-path "$OUTPUT_DIR" "${EVAL_ARGS[@]}"
+# A local checkpoint: serve it with vLLM unless SERVER_BACKEND or --eval-arg says otherwise.
+./evaluate_model.sh --server-backend "${SERVER_BACKEND:-vllm}" --split "$SPLIT" --model-path "$OUTPUT_DIR" "${EVAL_ARGS[@]}"

@@ -110,11 +110,14 @@ class LauncherWiringTests(unittest.TestCase):
             "FORGER_TINKER_USAGE_FILE",
             "FORGER_TINKER_USD_LIMIT",
             "PDB_EVAL_BACKEND",
+            "PDB_STUDENT_MODEL",
             "TINKER_EVAL_BUDGET",
         ):
             self.assertIn(name, forwarded)
         source = (ROOT / "launch_agent.py").read_text()
         self.assertIn('os.environ["PDB_EVAL_BACKEND"] = "tinker"', source)
+        # eval_launcher.sh defaults --model-path to the student being trained.
+        self.assertIn('os.environ["PDB_STUDENT_MODEL"] = args.model', source)
         # Saved before the session and restored after it, so host-side
         # secret-test evaluation keeps its own backend.
         restored = next(
@@ -131,13 +134,17 @@ class LauncherWiringTests(unittest.TestCase):
             )
         )
         self.assertIn("PDB_EVAL_BACKEND", restored)
+        self.assertIn("PDB_STUDENT_MODEL", restored)
 
 
 class EvalLauncherBackendTests(unittest.TestCase):
     """PDB_EVAL_BACKEND makes Tinker the default and only evaluation backend."""
 
-    def run_launcher(self, *args, backend="tinker"):
-        """Run eval_launcher.sh with a fake python that logs its arguments."""
+    def run_launcher(self, *args, backend="tinker", student=None):
+        """Run eval_launcher.sh with a fake python that logs its arguments.
+
+        Returns (result, logged python calls, the scratch root).
+        """
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         root = Path(directory.name)
@@ -148,12 +155,19 @@ class EvalLauncherBackendTests(unittest.TestCase):
         fake = bin_dir / "python"
         fake.write_text(f'#!/usr/bin/env bash\necho "$*" >> "{log}"\n')
         fake.chmod(0o755)
+        # No GPUs: a local-server run stops before starting any server.
+        no_gpu = bin_dir / "nvidia-smi"
+        no_gpu.write_text("#!/usr/bin/env bash\nexit 1\n")
+        no_gpu.chmod(0o755)
         env = {
             **os.environ,
             "PATH": f"{bin_dir}:{os.environ['PATH']}",
             "PDB_EVAL_BACKEND": backend,
         }
-        env.pop("SERVER_BACKEND", None)
+        for name in ("SERVER_BACKEND", "PDB_STUDENT_MODEL", "CUDA_VISIBLE_DEVICES"):
+            env.pop(name, None)
+        if student is not None:
+            env["PDB_STUDENT_MODEL"] = student
         result = subprocess.run(
             ["bash", str(ROOT / "coding/eval_launcher.sh"), str(task), *args],
             env=env,
@@ -162,27 +176,171 @@ class EvalLauncherBackendTests(unittest.TestCase):
             text=True,
         )
         calls = log.read_text().splitlines() if log.exists() else []
-        return result, calls
+        return result, calls, root
 
     def test_defaults_to_tinker(self):
         """Without --server-backend, the launcher samples on Tinker."""
-        result, calls = self.run_launcher(
+        result, calls, _ = self.run_launcher(
             "--split", "val", "--model-path", QWEN, "--limit", "1"
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--backend tinker", calls[-1])
         self.assertIn(f"--model-path {QWEN}", calls[-1])
 
+    def test_defaults_to_the_student_model(self):
+        """Without --model-path, the launcher evaluates PDB_STUDENT_MODEL on Tinker.
+
+        The old Qwen/Qwen3-4B default has no Tinker prices, so it failed in the
+        sandbox before sampling anything.
+        """
+        for student, expected in ((QWEN, QWEN), (None, QWEN), ("Org/Other-1B", None)):
+            with self.subTest(student=student):
+                expected = expected or student
+                result, calls, root = self.run_launcher(
+                    "--split", "val", "--limit", "1", student=student
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue(calls)
+                for call in calls:  # --validate-only and the evaluation itself
+                    self.assertIn(f"--model-path {expected}", call)
+                    self.assertNotIn("Qwen3-4B", call)
+                escaped = expected.replace("/", "__")
+                self.assertIn(
+                    f"--log-dir model_outputs/{escaped}_tinker/val", calls[-1]
+                )
+                # The baseline directory launch_agent copies into sandboxes.
+                if expected == QWEN:
+                    self.assertTrue(
+                        (root / "task/model_outputs/Qwen__Qwen3-8B_tinker/val").is_dir()
+                    )
+
+    def test_local_backend_keeps_the_student_default(self):
+        """Outside the sandbox (no pin), an explicit local backend still works."""
+        result, calls, _ = self.run_launcher(
+            "--split", "val", "--server-backend", "vllm", "--limit", "1", backend=""
+        )
+        # With no GPUs the launcher stops after validating the arguments, which
+        # carry the student default; no server or evaluation starts.
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertFalse(any("--log-dir" in call for call in calls))
+        self.assertTrue(calls, result.stderr)
+        self.assertIn(f"--model-path {QWEN}", calls[0])
+        self.assertIn("--validate-only", calls[0])
+
     def test_refuses_local_servers(self):
         """A local vLLM or sglang server is refused before anything starts."""
         for backend in ("vllm", "sglang"):
             with self.subTest(backend=backend):
-                result, calls = self.run_launcher(
+                result, calls, _ = self.run_launcher(
                     "--split", "val", "--server-backend", backend, "--limit", "1"
                 )
                 self.assertEqual(result.returncode, 2)
                 self.assertIn("Only --server-backend tinker", result.stderr)
                 self.assertEqual(calls, [])
+
+
+EVALUATOR_ARGS = r"""
+import json, sys, types
+sys.argv = ["evaluate_model.py", *json.loads(sys.argv[1])]
+# Grading code (and its vendored grader checkout) is not needed to parse arguments.
+checkers = types.ModuleType("checkers")
+checkers.__getattr__ = lambda name: object  # e.g. checkers.CodeGenerationProblem
+sys.modules["checkers"] = checkers
+import evaluate_model
+args = evaluate_model.parse_args()
+print(json.dumps({"backend": args.backend, "model_path": args.model_path}))
+"""
+
+
+class EvaluatorDefaultTests(unittest.TestCase):
+    """Calling evaluate_model.py directly follows the same pin and student default."""
+
+    def parse(self, *argv, **environ):
+        """Parse evaluator arguments in a subprocess under exactly these variables."""
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key not in ("PDB_EVAL_BACKEND", "PDB_STUDENT_MODEL")
+        }
+        env.update(environ)
+        result = subprocess.run(
+            [sys.executable, "-c", EVALUATOR_ARGS, json.dumps(argv)],
+            env=env,
+            cwd=ROOT / "coding",
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode:
+            return result
+        return json.loads(result.stdout.strip().splitlines()[-1])
+
+    def test_sandbox_defaults(self):
+        """With the sandbox variables, the defaults are Tinker and the student."""
+        parsed = self.parse(
+            "--split", "val", PDB_EVAL_BACKEND="tinker", PDB_STUDENT_MODEL=QWEN
+        )
+        self.assertEqual(parsed, {"backend": "tinker", "model_path": QWEN})
+
+    def test_host_defaults(self):
+        """Without them, a local server and the base student, never Qwen3-4B."""
+        parsed = self.parse("--split", "val")
+        self.assertEqual(parsed, {"backend": "openai", "model_path": QWEN})
+
+    def test_pinned_backend_refuses_a_local_server(self):
+        """--backend openai is refused under the pin; merging shards is not sampling."""
+        refused = self.parse(
+            "--split", "val", "--backend", "openai", PDB_EVAL_BACKEND="tinker"
+        )
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn("only --backend tinker", refused.stderr)
+        merged = self.parse(
+            "--backend",
+            "openai",
+            "--merge-shards",
+            "a.jsonl",
+            PDB_EVAL_BACKEND="tinker",
+        )
+        self.assertEqual(merged["backend"], "openai")
+
+
+class HostEvaluationTests(unittest.TestCase):
+    """Host evaluation in Tinker mode samples on Tinker; legacy callers say so."""
+
+    def test_secret_test_evaluation_pins_tinker(self):
+        """final_evaluation names Tinker and pins it against a stray host export."""
+        from coding.rl import agent_training
+
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            os.environ, {"PDB_EVAL_BACKEND": "vllm", "SERVER_BACKEND": "sglang"}
+        ), patch.object(agent_training, "run") as run:
+            out = Path(directory) / "final/rl/.hidden/final_eval"
+            agent_training.final_evaluation("tinker://run/sampler_weights/final", out)
+        command, env = run.call_args.args[0], run.call_args.kwargs["env"]
+        backend = command[command.index("--server-backend") + 1]
+        self.assertEqual(backend, "tinker")
+        self.assertEqual(env["PDB_EVAL_BACKEND"], "tinker")
+        self.assertEqual(env["TINKER_EVAL_BUDGET"], "eval")
+        self.assertEqual(
+            command[command.index("--model-path") + 1],
+            "tinker://run/sampler_weights/final",
+        )
+
+    def test_local_checkpoint_callers_name_their_backend(self):
+        """Every caller that evaluates a local checkpoint names a local backend."""
+        callers = {
+            "coding/run_model_training_and_evaluation.sh": '"${SERVER_BACKEND:-vllm}"',
+            "coding/rl/eval_rl_checkpoint.sh": '"${SERVER_BACKEND:-vllm}"',
+            "coding/rl/run_rl_training_and_evaluation.sh": "sglang",
+        }
+        for name, backend in callers.items():
+            with self.subTest(name=name):
+                source = (ROOT / name).read_text()
+                call = source[source.rindex("./evaluate_model.sh") :]
+                self.assertIn(f"--server-backend {backend}", " ".join(call.split()))
+        # run_evaluate_only.sh exports its sglang default for evaluate_model.sh.
+        for task in ("coding", "culture"):
+            source = (ROOT / task / "run_evaluate_only.sh").read_text()
+            self.assertIn('export SERVER_BACKEND="${SERVER_BACKEND:-sglang}"', source)
 
 
 PARITY = r"""

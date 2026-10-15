@@ -73,7 +73,9 @@ export MAX_NUM_SEQS=12
 export MAX_CONN=12
 export GPU_MEM=0.90
 
+# A local HF checkpoint: serve it with vLLM unless SERVER_BACKEND says otherwise.
 ./evaluate_model.sh \
+  --server-backend "${SERVER_BACKEND:-vllm}" \
   --no-merge \
   --out-dir "$PARTIAL_DIR" \
   --split "$SPLIT" \
