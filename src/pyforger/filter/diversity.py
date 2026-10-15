@@ -60,10 +60,13 @@ def by_rouge_l(
             default=0.0,
         )
         max_scores.append(max_score)
-        if max_score < threshold:
+        # The first item is always kept, even with threshold <= 0.
+        if not kept_texts or max_score < threshold:
             kept.append(item)
             kept_texts.append(text)
-    _tracking.record_scores("rouge_l", max_scores, keep="lt", threshold=threshold)
+    _tracking.record_scores(
+        "rouge_l", max_scores, keep="lt", threshold=threshold, pooled=True
+    )
     return kept
 
 
@@ -90,7 +93,9 @@ def by_n_gram_overlap(
             continue
         kept.append(item)
         pool.update(item_ngrams)
-    _tracking.record_scores("overlap", overlaps, keep="lt", threshold=threshold)
+    _tracking.record_scores(
+        "overlap", overlaps, keep="lt", threshold=threshold, pooled=True
+    )
     return kept
 
 

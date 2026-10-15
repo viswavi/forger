@@ -16,8 +16,10 @@ from pyforger.acquire.sources import (
     WebRetrievalSource,
     WikiRetrievalSource,
 )
+from pyforger.op import tracked
 
 
+@tracked("acquire.retrieve")
 def retrieve(
     source: RetrievalSource,
     mode: RetrieveMode = RetrieveMode.QUERY,
@@ -31,6 +33,8 @@ def retrieve(
 
     Each row is stamped with a ``"query"`` field. With ``queries=None``,
     a single fetch with no query is performed (e.g. random sampling).
+    Calls are not cached; inside a ``@step`` they are listed as
+    ``acquire.retrieve``.
     """
     resolved_queries: list[str | None] = (
         list(queries) if queries is not None else [None]

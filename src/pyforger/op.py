@@ -18,13 +18,16 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import io
 import os
 import pickle
+import shutil
 import threading
 import time
 import types
 from collections import deque
 from collections.abc import Callable
+from contextvars import ContextVar
 from functools import wraps
 from pathlib import Path
 from typing import Any, TypeVar
@@ -96,8 +99,31 @@ _HASH_WARN_LOCK = threading.Lock()
 
 
 def _hash(obj: Any) -> tuple[str, int]:
-    payload = pickle.dumps(canonical(obj), protocol=4)
+    """Hash ``canonical(obj)``; equal values always hash equally.
+
+    The pickler runs without its memo (``fast``), so the bytes do not depend on
+    which equal strings happen to be the same object. With the memo, a field
+    name typed in the source and the same name read back from a cached result
+    hash differently. ``canonical`` output is acyclic, which fast mode needs.
+    """
+    buf = io.BytesIO()
+    pickler = pickle.Pickler(buf, protocol=4)
+    pickler.fast = True
+    pickler.dump(canonical(obj))
+    payload = buf.getvalue()
     return hashlib.sha256(payload).hexdigest(), len(payload)
+
+
+def _legacy_hash(obj: Any) -> str:
+    """Return the cache key older Forger versions used (memoized pickle)."""
+    return hashlib.sha256(pickle.dumps(canonical(obj), protocol=4)).hexdigest()
+
+
+# True while an op called with ``_no_cache=True`` runs, so the ops it calls
+# also skip the cache (e.g. by_llm_score's inner judge-score op).
+_NO_CACHE_SCOPE: ContextVar[bool] = ContextVar("forger_no_cache_scope", default=False)
+
+_STEP_META_SUFFIX = ".step.json"
 
 
 def _maybe_warn_hash_cost(op_name: str, duration: float, size: int) -> None:
@@ -169,14 +195,16 @@ def op(
         @op(name="custom", cache=False)
         def debug_op(x): ...
 
-    Pass ``_no_cache=True`` at call time to bypass the cache for one call.
-    Pass ``_cache_only=True`` to return only an existing cached result, raising
-    ``FileNotFoundError`` on a miss without executing the function.
+    Pass ``_no_cache=True`` at call time to bypass the cache for one call,
+    including the ops that call makes. Pass ``_cache_only=True`` to return only
+    an existing cached result, raising ``FileNotFoundError`` on a miss without
+    executing the function.
 
     Pass ``min_yield=`` / ``max_yield=`` (fractions in [0, 1]) to check the
     ratio of output rows to input rows, e.g. ``filter.by_length(rows, ...,
     min_yield=0.5)``. A violation is a warning in the ``@step`` report (or a
     logged warning outside steps). Neither keyword is part of the cache key.
+    ``acquire.*`` ops take no input rows and reject both keywords.
     """
 
     def decorate(fn: Callable[..., T]) -> Callable[..., T]:
@@ -214,8 +242,18 @@ def op(
         ) -> T:
             if _cache_only and (_no_cache or not cache):
                 raise ValueError("_cache_only requires an enabled cache")
+            if not _cache_only and _NO_CACHE_SCOPE.get():
+                _no_cache = True
             _check_yield_bounds(min_yield, max_yield)
+            if (min_yield is not None or max_yield is not None) and (
+                _tracking.category_of(op_name) == "acquire"
+            ):
+                raise ValueError(
+                    f"{op_name} takes no input rows, so min_yield / max_yield do "
+                    "not apply; put them on the alter or filter op that follows"
+                )
             token = _tracking.enter_op(op_name)
+            scope_token = _NO_CACHE_SCOPE.set(True) if _no_cache else None
             usage_start = _tracking.usage_snapshot()
             call: _tracking.OpCall | None = None
             try:
@@ -234,6 +272,8 @@ def op(
                     max_yield=max_yield,
                 )
             finally:
+                if scope_token is not None:
+                    _NO_CACHE_SCOPE.reset(scope_token)
                 _tracking.exit_op(token, call)
             return result
 
@@ -261,8 +301,9 @@ def op(
                     normalized = {"args": list(args), "kwargs": dict(kwargs)}
             else:
                 normalized = {"args": list(args), "kwargs": dict(kwargs)}
+            key = [op_name, body_key, normalized]
             t0 = time.perf_counter()
-            input_hash, hash_size = _hash([op_name, body_key, normalized])
+            input_hash, hash_size = _hash(key)
             _maybe_warn_hash_cost(op_name, time.perf_counter() - t0, hash_size)
 
             cache_root = _cache_dir()
@@ -275,6 +316,11 @@ def op(
 
             use_cache = cache and not _no_cache
             cache_hit = False
+            is_step = op_name.startswith(_tracking.STEP_OP_PREFIX)
+            meta_path = cache_path.with_name(input_hash + _STEP_META_SUFFIX)
+
+            if use_cache and not cache_path.exists():
+                _adopt_legacy_entry(cache_root / safe_op_name, key, cache_path)
 
             if use_cache and cache_path.exists():
                 try:
@@ -290,6 +336,8 @@ def op(
                     with cache_path.open("rb") as f:
                         result = pickle.load(f)
                     cache_hit = True
+                    if is_step and meta_path.exists():
+                        _tracking.restore_step_meta(meta_path.read_text())
                 except Exception as exc:
                     if _cache_only:
                         raise RuntimeError(
@@ -311,20 +359,17 @@ def op(
                         f"No cached result for {op_name} with these arguments"
                     )
                 result = fn(*args, **kwargs)
-                if op_name.startswith(_tracking.STEP_OP_PREFIX):
+                meta = None
+                if is_step:
                     # Raises before caching when a @step breaks its contract.
-                    _tracking.check_step_result(result)
+                    meta = _tracking.check_step_result(result)
 
                 if use_cache:
-                    # Atomic write to prevent corruption from concurrent threads
                     cache_path.parent.mkdir(parents=True, exist_ok=True)
-                    tmp_path = (
-                        cache_path.parent
-                        / f"{cache_path.name}.tmp.{os.getpid()}.{threading.get_ident()}"
-                    )
-                    with tmp_path.open("wb") as f:
-                        pickle.dump(result, f, protocol=4)
-                    os.replace(tmp_path, cache_path)
+                    if meta is not None:
+                        # Written first, so a cached step always has its ops.
+                        _atomic_write(meta_path, meta.encode())
+                    _atomic_write(cache_path, pickle.dumps(result, protocol=4))
 
             duration = time.time() - start
             # If tracing is enabled, record this call on the in-memory trace.
@@ -360,6 +405,73 @@ def op(
 
     if _fn is not None:
         return decorate(_fn)
+    return decorate
+
+
+def _atomic_write(path: Path, data: bytes) -> None:
+    """Write ``data`` to ``path`` so concurrent readers never see a partial file."""
+    tmp_path = path.parent / f"{path.name}.tmp.{os.getpid()}.{threading.get_ident()}"
+    tmp_path.write_bytes(data)
+    os.replace(tmp_path, path)
+
+
+def _adopt_legacy_entry(op_dir: Path, key: Any, cache_path: Path) -> None:
+    """Copy a result cached under the old cache key to ``cache_path``, if any.
+
+    Caches written before keys were hashed without the pickle memo are found
+    under their old key once and copied to the new one, so they stay valid.
+    """
+    if not op_dir.is_dir():
+        return
+    try:
+        legacy = op_dir / f"{_legacy_hash(key)}.pkl"
+        if not legacy.exists() or (
+            hasattr(os, "getuid") and legacy.stat().st_uid != os.getuid()
+        ):
+            return
+        for suffix in (_STEP_META_SUFFIX, ".pkl"):
+            src = legacy.with_name(legacy.stem + suffix)
+            if src.exists():
+                tmp = cache_path.with_name(f"{cache_path.name}.legacy.{os.getpid()}")
+                shutil.copyfile(src, tmp)
+                os.replace(tmp, cache_path.with_name(cache_path.stem + suffix))
+    except Exception as exc:  # the old entry is only a shortcut; never fail on it
+        logger.debug("legacy cache lookup failed in %s: %s", op_dir, exc)
+
+
+def tracked(op_name: str) -> Callable[[Callable[..., T]], Callable[..., T]]:
+    """Report calls in ``@step`` reports like an op, without caching or hashing.
+
+    For functions whose arguments cannot be hashed into a cache key, e.g.
+    ``acquire.retrieve`` (a retrieval source holds a client and credentials).
+    """
+
+    def decorate(fn: Callable[..., T]) -> Callable[..., T]:
+        @wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any) -> T:
+            token = _tracking.enter_op(op_name)
+            usage_start = _tracking.usage_snapshot()
+            start = time.perf_counter()
+            call: _tracking.OpCall | None = None
+            try:
+                result = fn(*args, **kwargs)
+                call = _op_call(
+                    op_name,
+                    args[0] if args else None,
+                    result,
+                    cache_hit=False,
+                    duration=time.perf_counter() - start,
+                    usage=_tracking.usage_since(usage_start),
+                    scores=_tracking.current_scores(),
+                    min_yield=None,
+                    max_yield=None,
+                )
+            finally:
+                _tracking.exit_op(token, call)
+            return result
+
+        return wrapper
+
     return decorate
 
 
@@ -411,6 +523,18 @@ def _op_call(
         cost_usd=usage[2],
         scores=scores[0] if scores else None,
     )
+    if (min_yield is not None or max_yield is not None) and yield_ratio is None:
+        if n_in == 0 and n_out is not None:
+            if min_yield:
+                call.warnings.append(
+                    f"{op_name}: no input rows, so yield is 0 and below min_yield "
+                    f"{min_yield:.2f}"
+                )
+        else:
+            call.warnings.append(
+                f"{op_name}: yield unchecked; min_yield / max_yield need a list of "
+                "rows in and a list out"
+            )
     if yield_ratio is not None:
         if min_yield is not None and yield_ratio < min_yield:
             call.warnings.append(

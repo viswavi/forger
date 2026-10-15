@@ -77,23 +77,28 @@ Structure a pipeline as a `@pyforger.pipeline` function that calls `@pyforger.st
 function from rows to rows built from Forger ops (typically acquire or alter, then filter). Each step is cached like
 an `@op` and, when it returns, prints a report: every op it ran with rows in/out, yield, time, tokens, and cost; a
 histogram of each filter's scores with what other thresholds would have kept; warnings; and a few sample output rows.
-The pipeline prints a summary table of its steps at the end. Read these reports after every run.
+The pipeline prints a summary table of its steps at the end. Read these reports after every run. A cached step lists
+the ops of the run that cached it, marked `(cached)`, with that run's warnings.
 
 - Hard errors (`StepContractError` / `PipelineContractError`): a step returns a non-list, a step calls no Forger ops
   (keep pure-Python helpers as plain functions), a step is called inside another step, a pipeline calls no steps, or
   rows do not match a `list[X]` type hint where `X` is a pydantic model (rows stay dicts).
-- Warnings: a step ends without a filter; an op misses its `min_yield` / `max_yield`; a pipeline has only one step; no
-  quality filter, no diversity filter, or no inspect op ran anywhere; an op was called in the pipeline outside a step.
-- `strict=True` on `@step` or `@pipeline` turns warnings into errors. `prod=True` or the environment variable
-  `FORGER_STEP_REPORT=0` silences the reports. `pyforger.inspect.inspect_step(name)` re-prints the full report of the
-  latest run of a step, with more sample rows.
+- Warnings: a step ends without a filter; an op misses its `min_yield` / `max_yield`; a step's type hints cannot be
+  resolved; a pipeline has only one step; no quality filter, no diversity filter, or no inspect op ran anywhere; an op
+  was called in the pipeline outside a step.
+- `strict=True` on `@step` or `@pipeline` turns warnings into errors, also on cached runs; a step that fails strict
+  mode is not cached. `prod=True` or the environment variable `FORGER_STEP_REPORT=0` silences the reports.
+  `pyforger.inspect.inspect_step(name)` re-prints the full report of the latest run of a step, with more sample rows.
+- Threads: ops called from `ThreadPoolExecutor` workers are not itemized in the step report (the step gets a warning
+  instead of an error) unless submitted as `pool.submit(contextvars.copy_context().run, fn, arg)`. Steps called from
+  workers still join the pipeline. Token and cost totals of steps running at the same time include each other's.
 
 ### Operation reference
 
 All operations are plain functions. Operations that perform LLM calls or expensive in-process work (`sample_from_LLM`
 every `alter.*` op, every `filter.*` op, every `inspect.*` op) are decorated internally with `@op`, so their results
 are cached on disk and traced. The retrieval functions (`retrieve`, `retrieve_from_*`) are not internally cached; wrap
-them with `@op` to memoize their results.
+them with `@op` to memoize their results. Inside a `@step` they are listed as `acquire.retrieve`.
 
 ### Public API summary
 
@@ -197,12 +202,17 @@ and thresholds to find the right balance for a given use case. For example, `by_
 produces more diverse outputs but may filter out many rows; `by_llm_score` with multiple judges and a high consensus
 threshold produces higher-quality outputs but at the cost of more LLM calls.
 
-Every op (filters included) accepts `min_yield=` and `max_yield=`: the expected range of output rows over input rows,
-e.g. `filter.by_llm_score(rows, ..., min_yield=0.3, max_yield=0.8)`. A violation is a warning in the step report
-(`strict=True` raises); neither keyword is part of the cache key. Filters also record a score per row, so the step
-report shows a histogram and the fraction of rows each nearby threshold would keep. Use it to choose thresholds.
+Every op that takes input rows (alter, filter, inspect) accepts `min_yield=` and `max_yield=`: the expected range of
+output rows over input rows, e.g. `filter.by_llm_score(rows, ..., min_yield=0.3, max_yield=0.8)`. A violation, or an
+empty input with `min_yield`, is a warning in the step report (`strict=True` raises); neither keyword is part of the
+cache key. `acquire.*` ops reject them. Filters also record a score per row, so the step report shows a histogram and
+the fraction of rows each nearby threshold would keep; use it to choose thresholds. `by_rouge_l` and
+`by_n_gram_overlap` are the exception: each score compares a row with the rows kept so far, so another threshold would
+change the scores, and the report shows only the current threshold. With `num_judges > 1`, `by_llm_score` records the
+fraction of judges scoring at least `score_threshold`, which is what `agreement_threshold` is compared with.
 `by_llm_score` caches the judge scores separately from its thresholds, so re-running it with a different
-`score_threshold` or `agreement_threshold` makes no new judge calls.
+`score_threshold` or `agreement_threshold` makes no new judge calls (`_no_cache=True` re-asks the judges;
+`_cache_only=True` finds only thresholds that were run before).
 
 #### `pyforger.inspect`
 
@@ -295,8 +305,8 @@ unrelated helper does not.
 **Cache location.** `$FORGER_CACHE` if set, otherwise `~/.cache/forger`. The variable is read at call time, so tests
 can redirect it.
 
-**Per-call bypass.** Pass `_no_cache=True` at the call site to skip the cache for a single invocation.
-Pass `_cache_only=True` to retrieve an existing result without executing the function;
+**Per-call bypass.** Pass `_no_cache=True` at the call site to skip the cache for a single invocation, including the
+ops it calls. Pass `_cache_only=True` to retrieve an existing result without executing the function;
 a miss raises `FileNotFoundError`.
 
 **Custom hash keys for objects.** If an argument defines `cache_key() -> Any`, this is used in place of the argument's
@@ -362,12 +372,12 @@ Each step prints a report when it returns, and the pipeline prints a summary at 
   filter.by_rouge_l  412  230   0.56  3.1s              -     -  min 0.50 ok
     rouge_l  0.0  0.1  0.2  0.3  0.4  0.5  0.6  0.7  0.8  0.9
     rows      51   87   62   21    7    2    0   41   73   68
-    keep at  <0.5 0.55  <0.6 0.56  [<0.7 0.56]  <0.8 0.66  <0.9 0.83
+    keep at  [<0.7 0.56]  (scored against the kept rows; rerun to try other thresholds)
   sample (3 of 230):
     [0] text="¿Cuál es la capital de Francia?"
     ...
 ══ pipeline main: 2 steps · 500 → 230 rows · 41.0s · 61,200 in / 9,840 out tokens · $0.0315 ════════
-  step        in  out  yield   time     cost  notes
+  step        in  out  yield   time     cost
   translate  500  412   0.82  37.9s  $0.0315
   dedupe     412  230   0.56   3.1s        -
   pipeline warnings:
@@ -453,11 +463,12 @@ prefer the cheap answer check first.
 ### Dynamic input-specific pipelines
 
 `alter.dynamic_step(inputs, goal, model, max_parallel=4, max_iterations=20)`
-returns a `list[list[str]]` in input order. Called directly in a `@pipeline`, it counts as a step.
-Each inner list contains the strings
-produced for one input and may be empty. The default `pyforger` install includes
-OpenHands SDK and its dynamic-step dependencies; Python 3.12+ and Unix signal
-timers are required for execution.
+returns a `list[list[str]]` in input order. Each inner list contains the strings
+produced for one input and may be empty. Called directly in a `@pipeline`, it
+counts as a step: it prints a step report, and `inspect_step("dynamic_step")`
+shows it. The default `pyforger` install includes OpenHands SDK and its
+dynamic-step dependencies; Python 3.12+ and Unix signal timers are required for
+execution.
 Inputs are JSON-compatible records (`list[dict]`). Each uncached unique input
 gets its own bare-metal OpenHands conversation with
 restricted Python, resource inspection, Git inspection, and finish tools. Agents revise code

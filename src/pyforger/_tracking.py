@@ -6,13 +6,20 @@ circular imports.
 
 Context variables do not propagate into ``ThreadPoolExecutor`` workers (for
 example, ``alter.dynamic_step`` runs ``dynamic_step_source`` in threads). Ops
-called from such workers see no active step and are not attributed to one; the
-LLM usage they cause still lands in the process-wide counter, so the enclosing
-op's token and cost deltas include it.
+called from such workers see no active step and are not itemized in its report,
+unless the work is submitted as ``pool.submit(contextvars.copy_context().run,
+fn, arg)``. A step whose ops all ran in workers gets a warning instead of the
+"called no Forger operations" error, and a step called from a worker thread
+still joins the pipeline when exactly one pipeline is running.
+
+Token and cost totals are deltas of one process-wide counter, so the LLM usage
+of worker threads lands in the enclosing op. When several ops or steps run at
+the same time in different threads, each one's totals include the others'.
 """
 
 from __future__ import annotations
 
+import json
 import math
 import threading
 from collections.abc import Callable
@@ -50,6 +57,10 @@ class ScoreRecord(BaseModel):
     threshold: float | None = None
     lower: float | None = None
     upper: float | None = None
+    # True when each score compares a row with the rows kept so far (e.g.
+    # by_rouge_l): another threshold would change the scores themselves, so the
+    # report cannot say what it would keep.
+    pooled: bool = False
 
 
 class OpCall(BaseModel):
@@ -120,9 +131,16 @@ _ACTIVE_SCORES: ContextVar[list[ScoreRecord] | None] = ContextVar(
     "forger_active_scores", default=None
 )
 # Set by the active step; ``op.py`` calls it on a step's fresh result before
-# caching it, so a result that breaks the step's contract is never cached.
-_STEP_RESULT_CHECK: ContextVar[Callable[[Any], None] | None] = ContextVar(
+# caching it, so a result that breaks the step's contract (or, under
+# strict=True, has warnings) is never cached. It returns the step metadata that
+# ``op.py`` stores next to the cached result (see ``step_meta``).
+_STEP_RESULT_CHECK: ContextVar[Callable[[Any], str | None] | None] = ContextVar(
     "forger_step_result_check", default=None
+)
+# Set by the active pipeline; called with each ``alter.dynamic_step`` record
+# so it is stored and printed like a step.
+_ON_DYNAMIC_STEP: ContextVar[Callable[[StepRecord], None] | None] = ContextVar(
+    "forger_on_dynamic_step", default=None
 )
 
 
@@ -147,10 +165,10 @@ class ScopeToken:
 
     owner_token: Token[Any]
     depth_token: Token[int]
-    check_token: Token[Callable[[Any], None] | None] | None = None
+    hook_token: Token[Any] | None = None
 
 
-def enter_step(rec: StepRecord, check: Callable[[Any], None]) -> ScopeToken:
+def enter_step(rec: StepRecord, check: Callable[[Any], str | None]) -> ScopeToken:
     """Make ``rec`` the active step; ops it calls are top level (depth 0) again.
 
     ``check`` validates the step's result; see ``check_step_result``.
@@ -162,28 +180,112 @@ def enter_step(rec: StepRecord, check: Callable[[Any], None]) -> ScopeToken:
 
 def exit_step(token: ScopeToken) -> None:
     """Undo ``enter_step``."""
-    if token.check_token is not None:
-        _STEP_RESULT_CHECK.reset(token.check_token)
+    if token.hook_token is not None:
+        _STEP_RESULT_CHECK.reset(token.hook_token)
     _OP_DEPTH.reset(token.depth_token)
     _ACTIVE_STEP.reset(token.owner_token)
 
 
-def check_step_result(result: Any) -> None:
-    """Run the active step's result check (it raises on a contract violation)."""
+def check_step_result(result: Any) -> str | None:
+    """Run the active step's result check; return the metadata to cache with it.
+
+    The check raises on a contract violation, so the result is not cached.
+    """
     check = _STEP_RESULT_CHECK.get()
-    if check is not None:
-        check(result)
+    return check(result) if check is not None else None
 
 
-def enter_pipeline(rec: PipelineRecord) -> ScopeToken:
-    """Make ``rec`` the active pipeline; ops it calls directly are top level."""
-    return ScopeToken(_ACTIVE_PIPELINE.set(rec), _OP_DEPTH.set(0))
+def step_meta(rec: StepRecord) -> str:
+    """Serialize the ops a step ran, to store next to its cached result.
+
+    On a cache hit ``restore_step_meta`` puts them back (marked cached, with no
+    time, usage, or scores), so the cached step reports the same ops and yield
+    warnings, and ``strict=True`` still sees them.
+    """
+    ops = [
+        call.model_copy(
+            update={
+                "cache_hit": True,
+                "duration_s": 0.0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "cost_usd": 0.0,
+                "scores": None,
+            }
+        ).model_dump(mode="json")
+        for call in rec.ops
+    ]
+    return json.dumps({"version": 1, "ops": ops})
+
+
+def restore_step_meta(text: str) -> None:
+    """Give the active step the ops stored by ``step_meta`` (on a cache hit)."""
+    step = _ACTIVE_STEP.get()
+    if step is None:
+        return
+    try:
+        step.ops = [OpCall.model_validate(d) for d in json.loads(text)["ops"]]
+    except (ValueError, KeyError, TypeError):
+        step.ops = []  # unreadable metadata: report the step as fully cached
+
+
+_RUNNING_PIPELINES: list[PipelineRecord] = []
+_RUNNING_LOCK = threading.Lock()
+
+
+def enter_pipeline(
+    rec: PipelineRecord, on_dynamic_step: Callable[[StepRecord], None] | None = None
+) -> ScopeToken:
+    """Make ``rec`` the active pipeline; ops it calls directly are top level.
+
+    ``on_dynamic_step`` is called with the record of each ``alter.dynamic_step``
+    call made directly in the pipeline.
+    """
+    with _RUNNING_LOCK:
+        _RUNNING_PIPELINES.append(rec)
+    return ScopeToken(
+        _ACTIVE_PIPELINE.set(rec),
+        _OP_DEPTH.set(0),
+        _ON_DYNAMIC_STEP.set(on_dynamic_step),
+    )
 
 
 def exit_pipeline(token: ScopeToken) -> None:
     """Undo ``enter_pipeline``."""
+    rec = _ACTIVE_PIPELINE.get()
+    with _RUNNING_LOCK:
+        for i, running in enumerate(_RUNNING_PIPELINES):
+            if running is rec:
+                del _RUNNING_PIPELINES[i]
+                break
+    if token.hook_token is not None:
+        _ON_DYNAMIC_STEP.reset(token.hook_token)
     _OP_DEPTH.reset(token.depth_token)
     _ACTIVE_PIPELINE.reset(token.owner_token)
+
+
+def pipeline_for_step() -> PipelineRecord | None:
+    """Return the pipeline a finished step belongs to, if any.
+
+    That is the pipeline active in this context or, for a step called from a
+    worker thread (where context variables are unset), the only pipeline
+    running in the process.
+    """
+    rec = _ACTIVE_PIPELINE.get()
+    if rec is not None:
+        return rec
+    with _RUNNING_LOCK:
+        return _RUNNING_PIPELINES[0] if len(_RUNNING_PIPELINES) == 1 else None
+
+
+_OPS_STARTED = [0]
+_OPS_LOCK = threading.Lock()
+
+
+def ops_started() -> int:
+    """Return how many ops (not steps) this process has started, in any thread."""
+    with _OPS_LOCK:
+        return _OPS_STARTED[0]
 
 
 @dataclass(frozen=True)
@@ -201,6 +303,8 @@ def enter_op(op_name: str) -> OpToken:
     if op_name.startswith(STEP_OP_PREFIX):
         # A step's own cache wrapper: the step itself does the reporting.
         return OpToken(is_step=True, depth=-1)
+    with _OPS_LOCK:
+        _OPS_STARTED[0] += 1
     depth = _OP_DEPTH.get()
     return OpToken(
         is_step=False,
@@ -239,7 +343,11 @@ def exit_op(token: OpToken, call: OpCall | None) -> None:
         return
     pipeline = _ACTIVE_PIPELINE.get()
     if pipeline is not None:
-        pipeline.steps.append(step_from_bare_op(call))
+        rec = step_from_bare_op(call)
+        pipeline.steps.append(rec)
+        on_dynamic_step = _ON_DYNAMIC_STEP.get()
+        if rec.kind == "dynamic_step" and on_dynamic_step is not None:
+            on_dynamic_step(rec)
 
 
 def step_from_bare_op(call: OpCall) -> StepRecord:
@@ -272,8 +380,12 @@ def record_scores(
     threshold: float | None = None,
     lower: float | None = None,
     upper: float | None = None,
+    pooled: bool = False,
 ) -> None:
-    """Record one per-row score list for the active op; a no-op outside ops."""
+    """Record one per-row score list for the active op; a no-op outside ops.
+
+    Pass ``pooled=True`` when each score depends on the rows kept so far.
+    """
     scores = _ACTIVE_SCORES.get()
     if scores is None:
         return
@@ -285,6 +397,7 @@ def record_scores(
             threshold=threshold,
             lower=lower,
             upper=upper,
+            pooled=pooled,
         )
     )
 

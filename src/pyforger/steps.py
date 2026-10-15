@@ -25,6 +25,7 @@ import inspect
 import json
 import math
 import os
+import sys
 import textwrap
 import time
 import typing
@@ -52,6 +53,7 @@ _SAMPLE_FIELD_CHARS = 500  # stored per string field; inspect_step shows all of 
 _COMPACT_FIELD_CHARS = 80  # per field in the step report's sample lines
 _WIDTH = 120  # report lines never exceed this many characters
 _RULE_WIDTH = 100  # header rules are padded to this width
+_NAME_CHARS = 40  # step and op names in report tables are cut to this length
 _NOT_DICTS = "rows are not dicts; schema checks and samples skipped"
 
 
@@ -84,16 +86,29 @@ def _row_model(hint: Any) -> type[BaseModel] | None:
 
 
 def _row_models(
-    fn: Callable[..., Any],
-) -> tuple[type[BaseModel] | None, type[BaseModel] | None]:
-    """Row models for ``fn``'s first parameter and its return value, if any."""
-    try:
-        hints = typing.get_type_hints(fn)
-    except Exception:  # unresolved forward references: no schema checks
-        return None, None
+    fn: Callable[..., Any], localns: dict[str, Any] | None = None
+) -> tuple[type[BaseModel] | None, type[BaseModel] | None, str | None]:
+    """Row models for ``fn``'s first parameter and return value, if any.
+
+    ``localns`` holds the names of the scope that defined ``fn``, so string
+    annotations naming a class defined in a function body still resolve. The
+    third item is a warning when the annotations could not be resolved.
+    """
     params = list(inspect.signature(fn).parameters)
+    try:
+        hints = typing.get_type_hints(fn, localns=localns)
+    except Exception as exc:
+        annotations = getattr(fn, "__annotations__", {}) or {}
+        if not ({"return", *params[:1]} & set(annotations)):
+            return None, None, None
+        return (
+            None,
+            None,
+            "type hints could not be resolved "
+            f"({type(exc).__name__}: {exc}); schema checks skipped",
+        )
     first = hints.get(params[0]) if params else None
-    return _row_model(first), _row_model(hints.get("return"))
+    return _row_model(first), _row_model(hints.get("return")), None
 
 
 def _pydantic_message(exc: ValidationError) -> str:
@@ -161,16 +176,23 @@ def step(
     Errors (``StepContractError``): the result is not a list, the step called no
     Forger ops, rows do not match the annotated row model, or the step was called
     inside another step. Warnings: the last op is not a filter, an op missed its
-    ``min_yield`` / ``max_yield``, or the rows are not dicts.
+    ``min_yield`` / ``max_yield``, the rows are not dicts, or the type hints
+    could not be resolved.
 
     Args:
         _fn: The function, when used as ``@step`` without parentheses.
         name: Step name in reports and the cache; defaults to the function name.
         cache: Cache the step's result on disk, like ``@op(cache=...)``.
         prod: Do not print the report.
-        strict: Raise ``StepContractError`` when the step has any warning.
+        strict: Raise ``StepContractError`` when the step has any warning; such
+            a result is not cached.
         sample: Number of output rows shown in the report.
     """
+    # The scope that defines the step (where ``step`` is called, both for
+    # ``@step`` and ``@step(...)``), for resolving string annotations.
+    frame = sys._getframe(1)
+    localns = dict(frame.f_locals) if frame.f_locals is not frame.f_globals else None
+    del frame
 
     def decorate(fn: F) -> F:
         step_name = name or fn.__name__
@@ -178,6 +200,7 @@ def step(
         params = list(inspect.signature(fn).parameters)
         first_param = params[0] if params else None
         doc = inspect.getdoc(fn) or ""
+        hints: list[Any] = []  # resolved on the first call, when names exist
 
         @wraps(fn)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -187,7 +210,9 @@ def step(
                     f"step {step_name} was called inside step {outer.name}; steps "
                     "cannot nest, so call both from the @pipeline"
                 )
-            in_model, out_model = _row_models(fn)
+            if not hints or hints[0][2] is not None:
+                hints[:] = [_row_models(fn, localns)]
+            in_model, out_model, hint_warning = hints[0]
             rec = StepRecord(
                 name=step_name,
                 doc=doc,
@@ -195,6 +220,8 @@ def step(
                 input_type=f"list[{in_model.__name__}]" if in_model else None,
                 output_type=f"list[{out_model.__name__}]" if out_model else None,
             )
+            if hint_warning:
+                rec.warnings.append(hint_warning)
             rows_in = args[0] if args else kwargs.get(first_param or "")
             if isinstance(rows_in, list):
                 rec.n_in = len(rows_in)
@@ -202,36 +229,50 @@ def step(
                     _validate_rows(rows_in, in_model, step_name, "input")
 
             checked: list[bool] = []
+            strict_failed: list[bool] = []
+            ops_before = _tracking.ops_started()
 
-            def check(result: Any) -> None:
-                # Called by @op on a fresh result, before it is cached.
-                _check_step_result(rec, result, out_model)
+            def check(result: Any) -> str:
+                # Called by @op on a fresh result, before it is cached: raising
+                # here keeps a result that breaks the contract out of the cache.
                 checked.append(True)
+                _check_step_result(
+                    rec, result, out_model, _tracking.ops_started() - ops_before
+                )
+                if strict and rec.warnings:
+                    strict_failed.append(True)
+                    raise _strict_error(rec)
+                return _tracking.step_meta(rec)
 
             usage_start = _tracking.usage_snapshot()
             start = time.perf_counter()
+
+            def finish() -> None:
+                rec.duration_s = time.perf_counter() - start
+                usage = _tracking.usage_since(usage_start)
+                rec.prompt_tokens, rec.completion_tokens, rec.cost_usd = usage
+                _tracking.store_step(rec)
+                pipeline_rec = _tracking.pipeline_for_step()
+                if pipeline_rec is not None:
+                    pipeline_rec.steps.append(rec)
+                if _reports_enabled(prod):
+                    print("\n" + render_step(rec), flush=True)
+
             scope = _tracking.enter_step(rec, check)
             try:
                 result = cached(*args, **kwargs)
+            except StepContractError:
+                if strict_failed:  # report the step, then raise
+                    finish()
+                raise
             finally:
                 _tracking.exit_step(scope)
-            rec.duration_s = time.perf_counter() - start
-            usage = _tracking.usage_since(usage_start)
-            rec.prompt_tokens, rec.completion_tokens, rec.cost_usd = usage
 
             if not checked:  # a cache hit
-                _check_step_result(rec, result, out_model)
-            _tracking.store_step(rec)
-            pipeline_rec = _tracking.active_pipeline()
-            if pipeline_rec is not None:
-                pipeline_rec.steps.append(rec)
-            if _reports_enabled(prod):
-                print("\n" + render_step(rec), flush=True)
+                _check_step_result(rec, result, out_model, 0)
+            finish()
             if strict and rec.warnings:
-                raise StepContractError(
-                    f"step {step_name} has warnings (strict=True):\n"
-                    + "\n".join(f"  - {w}" for w in rec.warnings)
-                )
+                raise _strict_error(rec)
             return result
 
         return typing.cast(F, wrapper)
@@ -241,10 +282,24 @@ def step(
     return decorate
 
 
+def _strict_error(rec: StepRecord) -> StepContractError:
+    return StepContractError(
+        f"step {rec.name} has warnings (strict=True):\n"
+        + "\n".join(f"  - {w}" for w in rec.warnings)
+    )
+
+
 def _check_step_result(
-    rec: StepRecord, result: Any, out_model: type[BaseModel] | None
+    rec: StepRecord,
+    result: Any,
+    out_model: type[BaseModel] | None,
+    ops_started: int,
 ) -> None:
-    """Validate a step's result and fill in its row count, sample, and warnings."""
+    """Validate a step's result and fill in its row count, sample, and warnings.
+
+    ``ops_started`` is how many ops the process started while the step ran; ops
+    from worker threads count there but not in ``rec.ops``.
+    """
     if not isinstance(result, list):
         raise StepContractError(
             f"step {rec.name} returned {type(result).__name__}; a step must return "
@@ -261,6 +316,12 @@ def _check_step_result(
         rec.warnings.append(_NOT_DICTS)
 
     if not rec.cache_hit and not rec.ops:
+        if ops_started > 0:
+            rec.warnings.append(
+                "its ops ran in worker threads and are not itemized; submit with "
+                "pool.submit(contextvars.copy_context().run, fn, arg) to list them"
+            )
+            return
         raise StepContractError(
             f"step {rec.name} called no Forger operations; build steps from "
             "pyforger.acquire/alter/filter/inspect ops and keep pure-Python helpers "
@@ -314,7 +375,13 @@ def pipeline(
             rec = PipelineRecord(name=pipeline_name)
             usage_start = _tracking.usage_snapshot()
             start = time.perf_counter()
-            scope = _tracking.enter_pipeline(rec)
+
+            def on_dynamic_step(step_rec: StepRecord) -> None:
+                _tracking.store_step(step_rec)
+                if _reports_enabled(prod):
+                    print("\n" + render_step(step_rec), flush=True)
+
+            scope = _tracking.enter_pipeline(rec, on_dynamic_step)
             try:
                 result = fn(*args, **kwargs)
             finally:
@@ -354,8 +421,8 @@ def _check_pipeline(rec: PipelineRecord) -> None:
             "only one step ran; split the work into separate @step functions "
             "(e.g. generate, then filter) so each gets a report"
         )
-    # A cached step did not run its ops, so they are unknown; skip the checks
-    # for which ops ran rather than warn about ops that may have run before.
+    # A step cached by an older Forger version has no record of its ops; skip
+    # the checks for which ops ran rather than warn about ops that may have run.
     ops_known = all(s.ops or not s.cache_hit for s in rec.steps)
     names = {call.op_name for s in rec.steps for call in s.ops}
     if ops_known:
@@ -420,6 +487,14 @@ def _rule(char: str, text: str) -> str:
     return line + char * max(2, _RULE_WIDTH - len(line))
 
 
+def _header(char: str, title: str, parts: list[str]) -> list[str]:
+    """Rule line with ``title: parts``; the parts move to a second line if long."""
+    line = _rule(char, f"{title}: " + " · ".join(parts))
+    if len(line) <= _WIDTH:
+        return [line]
+    return [_clip(_rule(char, title)), _clip("  " + " · ".join(parts))]
+
+
 def _clip(line: str, width: int = _WIDTH) -> str:
     return line if len(line) <= width else line[: width - 1] + "…"
 
@@ -432,6 +507,7 @@ def _table(
     The last column holds free-form notes and is never padded.
     """
     ncols = len(headers)
+    rows = [[_clip(r[0], _NAME_CHARS), *r[1:]] for r in rows]
     widths = [
         max(len(headers[i]), *(len(r[i]) for r in rows)) if rows else len(headers[i])
         for i in range(ncols - 1)
@@ -452,6 +528,8 @@ def _op_notes(call: OpCall) -> str:
     y = call.yield_ratio
     if call.min_yield is not None:
         status = "-" if y is None else ("ok" if y >= call.min_yield else "LOW")
+        if call.n_in == 0 and call.min_yield > 0:
+            status = "LOW"
         notes.append(f"min {call.min_yield:.2f} {status}")
     if call.max_yield is not None:
         status = "-" if y is None else ("ok" if y <= call.max_yield else "HIGH")
@@ -493,8 +571,31 @@ def _wrap_items(prefix: str, items: list[str], indent: int) -> list[str]:
     return lines
 
 
+def _nice_width(span: float, integer: bool) -> float:
+    """Smallest round bin width (1, 2, 2.5, or 5 times a power of ten) for 10 bins."""
+    raw = span / 10 if span > 0 else 1.0
+    power = 10.0 ** math.floor(math.log10(raw))
+    for step in (1.0, 2.0, 2.5, 5.0, 10.0):
+        width = step * power
+        if width >= raw * (1 - 1e-9) and (not integer or width.is_integer()):
+            return width
+    return 10.0 * power
+
+
+def _fmt_edge(x: float) -> str:
+    """Compact bin edge: ``40``, ``2.5``, ``2,500``, ``12.5k``."""
+    if abs(x) >= 10_000:
+        return f"{x / 1000:,.1f}".rstrip("0").rstrip(".") + "k"
+    return _fmt_num(round(x, 6))
+
+
 def render_scores(scores: ScoreRecord, indent: int = 4) -> list[str]:
-    """Render a filter's per-row scores as histogram lines, ``indent`` spaces in."""
+    """Render a filter's per-row scores as histogram lines, ``indent`` spaces in.
+
+    Ints with up to 12 distinct values get one column each. Floats in [0, 1]
+    get ten bins labelled by their lower edge. Other values get round-width
+    bins labelled by their lower edge, with the width noted.
+    """
     pad = " " * indent
     total = len(scores.values)
     good: list[Any] = [
@@ -503,43 +604,45 @@ def render_scores(scores: ScoreRecord, indent: int = 4) -> list[str]:
         if v is not None and not (isinstance(v, float) and not math.isfinite(v))
     ]
     unparsed = total - len(good)
-    unparsed_note = f"   unparsed {unparsed:,}" if unparsed else ""
+    note = f"   unparsed {unparsed:,}" if unparsed else ""
     if not total:
         return [f"{pad}no rows scored"]
     if scores.keep == "true" or (good and all(isinstance(v, bool) for v in good)):
         kept = sum(1 for v in good if v)
-        return [f"{pad}kept {kept:,}  dropped {len(good) - kept:,}{unparsed_note}"]
+        return [f"{pad}kept {kept:,}  dropped {len(good) - kept:,}{note}"]
     if not good:
         return [f"{pad}{scores.label}: all {unparsed:,} rows unparsed"]
 
     nums = [float(v) for v in good]
     distinct = sorted(set(good))
+    is_int = all(isinstance(v, int) for v in good)
+    lo, hi = min(nums), max(nums)
     labels: list[str]
     counts: list[int]
     thresholds: list[float]
-    if all(isinstance(v, int) for v in good) and len(distinct) <= 12:
+    if is_int and len(distinct) <= 12:
         tally = Counter(good)
         labels = [_fmt_num(v) for v in distinct]
         counts = [tally[v] for v in distinct]
         thresholds = [float(v) for v in distinct]
-    else:
-        lo, hi = min(nums), max(nums)
-        if lo >= 0.0 and hi <= 1.0:
-            lo, hi = 0.0, 1.0
-        nbins = 10 if hi > lo else 1
-        width = (hi - lo) / nbins if hi > lo else 1.0
-        counts = [0] * nbins
+    elif not is_int and lo >= 0.0 and hi <= 1.0:
+        counts = [0] * 10
         for v in nums:
             # The epsilon keeps edge values in their own bin (0.3 / 0.1 < 3).
-            counts[min(int((v - lo) / width + 1e-9), nbins - 1)] += 1
-        edges = [lo + i * width for i in range(nbins)]
-        if hi - lo >= 10:
-            labels = [f"{round(e):,}" for e in edges]
-        else:
-            labels = [f"{e:.1f}" if hi - lo >= 1 else f"{e:.2f}" for e in edges]
-        if lo == 0.0 and hi == 1.0:
-            labels = [f"{e:.1f}" for e in edges]
-        thresholds = [t for t in (0.5, 0.6, 0.7, 0.8, 0.9) if lo < t < hi]
+            counts[min(int(v * 10 + 1e-9), 9)] += 1
+        labels = [f"{i / 10:.1f}" for i in range(10)]
+        thresholds = [0.5, 0.6, 0.7, 0.8, 0.9]
+    else:
+        width = _nice_width(hi - lo, is_int)
+        first = math.floor(lo / width + 1e-9) * width
+        nbins = int((hi - first) / width + 1e-9) + 1
+        counts = [0] * nbins
+        for v in nums:
+            counts[min(int((v - first) / width + 1e-9), nbins - 1)] += 1
+        edges = [first + i * width for i in range(nbins)]
+        labels = [_fmt_edge(e) for e in edges]
+        thresholds = [e for e in edges if lo < e <= hi]
+        note = f"   (bins of {_fmt_edge(width)}){note}"
     if scores.threshold is not None and scores.threshold not in thresholds:
         thresholds = sorted(thresholds + [scores.threshold])
 
@@ -551,7 +654,7 @@ def render_scores(scores: ScoreRecord, indent: int = 4) -> list[str]:
     count_line = "rows".ljust(head) + "".join(
         "  " + f"{b:,}".rjust(w) for b, w in zip(counts, widths)
     )
-    lines = [pad + label_line + unparsed_note, pad + count_line]
+    lines = [pad + label_line + note, pad + count_line]
 
     if scores.keep == "between":
         lower = scores.lower if scores.lower is not None else -math.inf
@@ -567,12 +670,18 @@ def render_scores(scores: ScoreRecord, indent: int = 4) -> list[str]:
     symbol = _KEEP_SYMBOL[scores.keep]
     items = []
     for t in thresholds:
-        frac = _kept(nums, scores.keep, t) / total
         is_current = scores.threshold is not None and t == scores.threshold
+        if scores.pooled and not is_current:
+            # Each score compares a row with the rows kept at this threshold;
+            # another threshold keeps other rows, so these scores cannot say.
+            continue
+        frac = _kept(nums, scores.keep, t) / total
         if frac in (0.0, 1.0) and not is_current:
             continue
         item = f"{symbol}{_fmt_num(t)} {frac:.2f}"
         items.append(f"[{item}]" if is_current else item)
+    if scores.pooled and items:
+        items.append("(scored against the kept rows; rerun to try other thresholds)")
     if items:
         lines.extend(pad + ln for ln in _wrap_items("keep at".ljust(head), items, 4))
     return lines
@@ -634,7 +743,7 @@ def render_step(rec: StepRecord, *, full: bool = False) -> str:
         parts.append(f"{rec.prompt_tokens:,} in / {rec.completion_tokens:,} out tokens")
     if rec.cost_usd:
         parts.append(_fmt_cost(rec.cost_usd))
-    lines = [_rule("─", f"step {rec.name}: " + " · ".join(parts))]
+    lines = _header("─", f"step {rec.name}", parts)
 
     doc_lines = rec.doc.strip().splitlines()
     if doc_lines:
@@ -697,13 +806,12 @@ def render_pipeline(rec: PipelineRecord) -> str:
         parts.append(f"{rec.prompt_tokens:,} in / {rec.completion_tokens:,} out tokens")
     if rec.cost_usd:
         parts.append(_fmt_cost(rec.cost_usd))
-    lines = [_rule("═", f"pipeline {rec.name}: " + " · ".join(parts))]
+    lines = _header("═", f"pipeline {rec.name}", parts)
 
-    headers = ["step", "in", "out", "yield", "time", "cost", "notes"]
+    headers = ["step", "in", "out", "yield", "time", "cost", ""]
     rows = []
     for s in rec.steps:
         y = s.n_out / s.n_in if s.n_in and s.n_out is not None else None
-        notes = (["cached"] if s.cache_hit else []) + list(s.warnings)
         rows.append(
             [
                 s.name,
@@ -712,10 +820,14 @@ def render_pipeline(rec: PipelineRecord) -> str:
                 _fmt_yield(y),
                 _fmt_secs(s.duration_s),
                 _fmt_cost(s.cost_usd),
-                "; ".join(dict.fromkeys(notes)),
+                "cached" if s.cache_hit else "",
             ]
         )
-    lines.extend(_clip("  " + ln) for ln in _table(headers, rows, left=[0]))
+    table = _table(headers, rows, left=[0])
+    lines.append(_clip("  " + table[0]))
+    for s, row_line in zip(rec.steps, table[1:]):
+        lines.append(_clip("  " + row_line))
+        lines.extend(_clip(f"      ! {w}") for w in dict.fromkeys(s.warnings))
     if rec.warnings:
         lines.append("  pipeline warnings:")
         lines.extend(_clip(f"    - {w}") for w in rec.warnings)

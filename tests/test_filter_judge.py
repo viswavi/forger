@@ -543,3 +543,40 @@ class TestByLlmScoreCacheAndScores:
         judged_bad(_THRESHOLD_DATA[:2])
         scores = _tracking.step_records()["judged_bad"].ops[0].scores
         assert scores is not None and scores.values == [None, 4]
+
+    def test_no_cache_asks_the_judges_again(self):
+        """_no_cache=True re-runs the judge calls, not only the threshold step."""
+        judge = _KeyedJudge()
+        kwargs = dict(model=judge, input_field="instruction", output_field="response")
+        by_llm_score(_THRESHOLD_DATA, **kwargs)
+        assert judge.call_count == len(_THRESHOLD_DATA)
+        by_llm_score(_THRESHOLD_DATA, _no_cache=True, **kwargs)
+        assert judge.call_count == 2 * len(_THRESHOLD_DATA)
+
+    def test_several_judges_record_the_approval_fraction(self, monkeypatch):
+        """With num_judges > 1 the recorded score is what agreement_threshold sees."""
+        monkeypatch.setenv("FORGER_STEP_REPORT", "0")
+        judge = _BadJudge([json.dumps({"score": 5}), json.dumps({"score": 2})])
+
+        @step
+        def split_vote(rows):
+            return by_llm_score(
+                rows,
+                model=judge,
+                input_field="instruction",
+                output_field="response",
+                score_threshold=4,
+                num_judges=2,
+                agreement_threshold=0.5,
+                temperature=0.7,
+            )
+
+        assert len(split_vote(_THRESHOLD_DATA[:1])) == 1
+        scores = _tracking.step_records()["split_vote"].ops[0].scores
+        assert scores is not None
+        assert (scores.label, scores.keep, scores.threshold) == (
+            "approval >=4",
+            "ge",
+            0.5,
+        )
+        assert scores.values == [0.5]

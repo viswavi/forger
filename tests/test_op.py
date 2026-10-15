@@ -2,14 +2,23 @@
 
 from __future__ import annotations
 
+import importlib
+import json
 import logging
 import os
+import subprocess
+import sys
 import threading
+from pathlib import Path
 
 import pytest
 from pydantic import BaseModel, ValidationError
 
+import pyforger
 from pyforger.op import CallRecord, clear_trace, op, trace
+
+# The attribute pyforger.op is the decorator, so fetch the module itself.
+op_module = importlib.import_module("pyforger.op")
 
 _SOME_CONFIG = "v1"
 
@@ -220,3 +229,120 @@ def test_call_record_validates_fields(field, value):
     data[field] = value
     with pytest.raises(ValidationError):
         CallRecord(**data)
+
+
+def test_no_cache_applies_to_nested_ops() -> None:
+    """_no_cache=True on an op also skips the cache of the ops it calls."""
+    calls = []
+
+    @op(name="test.inner")
+    def inner(x):
+        calls.append(x)
+        return x
+
+    @op(name="test.outer")
+    def outer(x):
+        return inner(x)
+
+    outer(1)
+    outer(1, _no_cache=True)
+    assert calls == [1, 1]
+    outer(1)
+    assert calls == [1, 1]
+
+
+def test_cache_written_under_the_old_key_is_still_found(monkeypatch) -> None:
+    """Entries cached under the memoized-pickle key are adopted, not recomputed."""
+    calls = []
+
+    @op(name="test.legacy")
+    def double(rows):
+        calls.append(1)
+        return [r * 2 for r in rows]
+
+    key = ["text", {"text": 1}]
+    assert op_module._hash(key)[0] != op_module._legacy_hash(key)
+    new_hash = op_module._hash
+    monkeypatch.setattr(
+        op_module, "_hash", lambda obj: (op_module._legacy_hash(obj), 0)
+    )
+    double([1, 2])
+    monkeypatch.setattr(op_module, "_hash", new_hash)
+    assert double([1, 2]) == [2, 4] and calls == [1]
+    assert trace()[-1].cache_hit
+
+
+_CROSS_PROCESS_SCRIPT = """
+import json, sys
+from pyforger import filter, op
+from pyforger.op import trace
+from pyforger.steps import step
+
+
+class Judge:
+    calls = 0
+
+    def cache_key(self):
+        return ("Judge",)
+
+    def generate(self, prompt, *, n=1, temperature=None, max_tokens=None):
+        Judge.calls += 1
+        return [json.dumps({"score": 4})] * n
+
+
+@op(name="alter.make")
+def make(k):
+    return [{"instruction": f"q{i}", "response": f"a{i}"} for i in range(k)]
+
+
+@step
+def first(rows):
+    return filter.by_length(rows, instruction_field="instruction", min_len=1)
+
+
+@step
+def second(rows):
+    return filter.by_exact_match(rows, field="instruction")
+
+
+rows = make(3)
+second(first(rows))
+filter.by_llm_score(rows, model=Judge(), input_field="instruction",
+                    output_field="response", score_threshold=int(sys.argv[1]))
+hits = {r.op_name: r.cache_hit for r in trace() if r.op_name.startswith("step.")}
+print(json.dumps({"hits": hits, "judge_calls": Judge.calls}))
+"""
+
+
+def test_cache_keys_match_across_processes(tmp_path) -> None:
+    """A rerun in a new process hits every step, and re-thresholding reuses scores.
+
+    Rows read back from the cache must hash like the rows that were cached,
+    whatever the identity of their strings.
+    """
+    script = tmp_path / "rerun.py"
+    script.write_text(_CROSS_PROCESS_SCRIPT)
+    src = str(Path(pyforger.__file__).resolve().parents[1])
+    env = {
+        **os.environ,
+        "FORGER_CACHE": str(tmp_path / "cache"),
+        "FORGER_STEP_REPORT": "0",
+        "PYTHONPATH": src,
+    }
+
+    def run(threshold: int) -> dict:
+        out = subprocess.run(
+            [sys.executable, str(script), str(threshold)],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return json.loads(out.stdout.strip().splitlines()[-1])
+
+    first_run = run(3)
+    assert first_run["hits"] == {"step.first": False, "step.second": False}
+    assert first_run["judge_calls"] == 3
+    second_run = run(4)
+    assert second_run["hits"] == {"step.first": True, "step.second": True}
+    assert second_run["judge_calls"] == 0

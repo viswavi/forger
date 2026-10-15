@@ -33,6 +33,11 @@ def by_llm_score(
 
     Judge scores are cached separately from the thresholds, so re-running with a
     different ``score_threshold`` or ``agreement_threshold`` makes no new calls.
+    ``_no_cache=True`` also re-asks the judges.
+
+    In a ``@step`` report the per-row score is the judge's score when
+    ``num_judges == 1``, and otherwise the fraction of judges scoring at least
+    ``score_threshold`` (compared with ``agreement_threshold``).
     """
     if num_judges < 1:
         raise ValueError("num_judges must be at least 1")
@@ -60,7 +65,9 @@ def by_llm_score(
         temperature=temperature,
     )
     kept: list[dict] = []
-    mean_scores: list[float | int | None] = []
+    # One judge: its score. Several: the fraction of judges approving, which is
+    # what agreement_threshold is compared with. None when nothing parsed.
+    row_scores: list[float | int | None] = []
     parse_failures = 0
     for item, scores in zip(items, all_scores):
         parsed = [score for score in scores if score is not None]
@@ -68,12 +75,25 @@ def by_llm_score(
         approvals = sum(1 for score in parsed if score >= score_threshold)
         if approvals / num_judges >= agreement_threshold:
             kept.append(item)
-        mean_scores.append(_mean(parsed))
+        if not parsed:
+            row_scores.append(None)
+        elif num_judges == 1:
+            row_scores.append(parsed[0])
+        else:
+            row_scores.append(approvals / num_judges)
     if parse_failures:
         logger.warning("by_llm_score: %d judge responses unparseable", parse_failures)
-    _tracking.record_scores(
-        "score", mean_scores, keep="ge", threshold=float(score_threshold)
-    )
+    if num_judges == 1:
+        _tracking.record_scores(
+            "score", row_scores, keep="ge", threshold=float(score_threshold)
+        )
+    else:
+        _tracking.record_scores(
+            f"approval >={score_threshold}",
+            row_scores,
+            keep="ge",
+            threshold=agreement_threshold,
+        )
     return kept
 
 
@@ -98,14 +118,6 @@ def _judge_scores(
         responses = model.generate(prompt, n=num_judges, temperature=temperature)
         all_scores.append([_parse_judge_response(raw, max_score) for raw in responses])
     return all_scores
-
-
-def _mean(scores: list[int]) -> float | int | None:
-    """Mean judge score; an int when it is whole, None when nothing parsed."""
-    if not scores:
-        return None
-    mean = sum(scores) / len(scores)
-    return int(mean) if mean.is_integer() else mean
 
 
 def _parse_judge_response(raw: str, max_score: int) -> int | None:

@@ -17,6 +17,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from pyforger import _tracking
 from pyforger.acquire.model import LocalModel, Model
 from pyforger.alter._dynamic_resources import prepare_input
 from pyforger.op import op
@@ -131,6 +132,24 @@ def agent_llm(model):
     return LLM(**config)
 
 
+def _record_agent_usage(conversation) -> None:
+    """Add an OpenHands conversation's LLM tokens and cost to Forger's totals.
+
+    The agent calls LiteLLM through OpenHands, not ``Model.generate_batch``, so
+    its usage only reaches ``@step`` reports through this hook.
+    """
+    try:
+        metrics = conversation.conversation_stats.get_combined_metrics()
+        usage = getattr(metrics, "accumulated_token_usage", None)
+        _tracking.add_usage(
+            getattr(usage, "prompt_tokens", 0) or 0,
+            getattr(usage, "completion_tokens", 0) or 0,
+            getattr(metrics, "accumulated_cost", 0.0) or 0.0,
+        )
+    except Exception:  # usage is reporting only; never fail the agent run on it
+        return
+
+
 def _generate(goal, item, model, max_iterations, execution_timeout_s):
     _require_dynamic_platform()
     if isinstance(model, LocalModel):
@@ -219,6 +238,7 @@ def _generate(goal, item, model, max_iterations, execution_timeout_s):
                             "Use the python tool with submit=true after testing."
                         )
             finally:
+                _record_agent_usage(conversation)
                 conversation.close()
     finally:
         unregister_executor(session_id)
