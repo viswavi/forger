@@ -196,6 +196,7 @@ Remove rows by criterion. If a filter empties the list, downstream operations re
 | `by_keyword_blocklist` | Drop responses with certain keywords; default blocklist targets common refusal phrases. |
 | `by_llm_score` | LLM-as-judge with optional multi-judge consensus. |
 | `by_syntax` | Validate JSON, YAML, Python, or XML, optionally against required keys or a JSON schema. |
+| `by_topic_frequency` | Cluster rows into topics; drop rows whose topic is over- (or under-) represented. |
 
 These are important for assuring quality and diversity in generated data, and one should experiment with their parameters
 and thresholds to find the right balance for a given use case. For example, `by_rouge_l` with a very low threshold
@@ -213,6 +214,26 @@ fraction of judges scoring at least `score_threshold`, which is what `agreement_
 `by_llm_score` caches the judge scores separately from its thresholds, so re-running it with a different
 `score_threshold` or `agreement_threshold` makes no new judge calls (`_no_cache=True` re-asks the judges;
 `_cache_only=True` finds only thresholds that were run before).
+
+`by_topic_frequency` balances topics. It clusters `field` into `num_clusters` topics with
+[`inspect.topic_based_clustering`](#pyforgerinspect) and keeps a row when its topic's share of the input rows is in
+`[min_frequency, max_frequency]` (bounds inclusive). `1 / num_clusters` is the uniform share, and `max_frequency`
+defaults to twice that. `downsample=True` keeps a seeded random `max_frequency` share of each over-represented
+topic instead of dropping all of it, and `topic_field="topic"` adds each kept row's topic name. The clustering is
+the expensive part (one LLM call per unique value) and is cached as its own op, so trying other bounds makes no new
+model or embedding calls; use the report's histogram of topic shares to choose them.
+
+```python
+balanced = filter.by_topic_frequency(
+    rows,
+    field="problem",
+    model=model,
+    context="competition mathematics problems. Topics should describe the technique, NOT the numeric answer.",
+    num_clusters=20,
+    max_frequency=0.1,  # no topic keeps more than 10% of the rows
+    downsample=True,
+)
+```
 
 #### `pyforger.inspect`
 
@@ -242,6 +263,8 @@ clusters = topic_based_clustering(
 )
 # clusters[i] is the topic name of rows[i]
 ```
+
+`filter.by_topic_frequency` runs this clustering (cached) to drop or downsample rows of over-represented topics.
 
 ### Models, prompts, and credentials
 

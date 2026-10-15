@@ -46,7 +46,12 @@ from pyforger.op import op
 F = TypeVar("F", bound=Callable[..., Any])
 
 _DIVERSITY_FILTERS = frozenset(
-    {"filter.by_exact_match", "filter.by_rouge_l", "filter.by_n_gram_overlap"}
+    {
+        "filter.by_exact_match",
+        "filter.by_rouge_l",
+        "filter.by_n_gram_overlap",
+        "filter.by_topic_frequency",
+    }
 )
 # Every other filter.* op counts as a quality filter.
 _NON_QUALITY_FILTERS = _DIVERSITY_FILTERS | {"filter.by_length"}
@@ -445,8 +450,8 @@ def _check_pipeline(rec: PipelineRecord) -> None:
             rec.warnings.append("no quality filter ran (e.g. filter.by_llm_score)")
         if not names & _DIVERSITY_FILTERS:
             rec.warnings.append(
-                "no diversity filter ran (filter.by_exact_match, by_rouge_l, or "
-                "by_n_gram_overlap)"
+                "no diversity filter ran (filter.by_exact_match, by_rouge_l, "
+                "by_n_gram_overlap, or by_topic_frequency)"
             )
         if not any(n.startswith("inspect.") for n in names):
             rec.warnings.append("no inspect op ran")
