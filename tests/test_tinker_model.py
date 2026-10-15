@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from pyforger import op
+from pyforger import tinker_usage as tinker_usage_module
 from pyforger.acquire import (
     GenerateResult,
     TinkerBudgetExceeded,
@@ -581,6 +582,52 @@ class TestBudget:
         assert len(world.calls) == 1
         assert len(model.history) == 1
         assert json.loads(path.read_text())["calls"] == 1
+
+    def test_concurrent_requests_cannot_jointly_overshoot(
+        self, world, monkeypatch, tmp_path
+    ):
+        """In-flight worst cases count against the limit, so 8 at once send 1."""
+        path = tmp_path / "ledger.json"
+        worst = (len(expected_prompt("x")) * 0.195 + 20 * 0.6) / 1e6
+        limit = 1.5 * worst
+        self.configure(monkeypatch, path, limit)
+        world.delay = 0.05
+        world.respond = lambda call: ["y" * 19]  # the full 20-token worst case
+        model = TinkerModel(QWEN, max_tokens=20, max_concurrent=8)
+        with pytest.raises(TinkerBudgetExceeded):
+            model.generate_batch(["x"] * 8)
+        assert len(world.calls) == 1
+        assert json.loads(path.read_text())["cost_usd"] <= limit
+        assert tinker_usage_module._RESERVED == {}
+
+    def test_request_waits_for_in_flight_spend_then_runs(
+        self, world, monkeypatch, tmp_path
+    ):
+        """A request that only fits once others are charged waits instead of failing."""
+        path = tmp_path / "ledger.json"
+        prompt_cost = len(expected_prompt("x")) * 0.195 / 1e6
+        worst, actual = prompt_cost + 20 * 0.6 / 1e6, prompt_cost + 0.6 / 1e6
+        limit = worst + 2 * actual + 1e-9
+        assert 2 * worst > limit  # two worst cases never fit side by side
+        self.configure(monkeypatch, path, limit)
+        world.delay = 0.02
+        world.respond = lambda call: [""]  # just <|im_end|>: 1 sampled token
+        model = TinkerModel(QWEN, max_tokens=20, max_concurrent=4)
+        assert model.generate_batch(["x"] * 3) == [[""]] * 3
+        assert world.max_active == 1
+        assert json.loads(path.read_text())["cost_usd"] == pytest.approx(3 * actual)
+
+    def test_failed_request_releases_its_reservation(
+        self, world, monkeypatch, tmp_path
+    ):
+        """An error mid-request does not leave its worst case held."""
+        self.configure(monkeypatch, tmp_path / "ledger.json", 150.0)
+        world.failures = [world.tinker.BadRequestError("bad")]
+        model = TinkerModel(QWEN)
+        with pytest.raises(world.tinker.BadRequestError):
+            model.generate("x")
+        assert tinker_usage_module._RESERVED == {}
+        assert model.generate("x") == ["<think>t0</think>a0"]
 
     def test_half_configured_env_raises(self, world, monkeypatch, tmp_path):
         """Setting only one of the two variables is an error, not a free pass."""

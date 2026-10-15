@@ -115,6 +115,22 @@ class LauncherWiringTests(unittest.TestCase):
             self.assertIn(name, forwarded)
         source = (ROOT / "launch_agent.py").read_text()
         self.assertIn('os.environ["PDB_EVAL_BACKEND"] = "tinker"', source)
+        # Saved before the session and restored after it, so host-side
+        # secret-test evaluation keeps its own backend.
+        restored = next(
+            {
+                constant.value
+                for constant in ast.walk(node.value)
+                if isinstance(constant, ast.Constant)
+            }
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "_HOST_RL_CACHE_ENV"
+                for target in node.targets
+            )
+        )
+        self.assertIn("PDB_EVAL_BACKEND", restored)
 
 
 class EvalLauncherBackendTests(unittest.TestCase):

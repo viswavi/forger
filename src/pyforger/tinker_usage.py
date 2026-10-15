@@ -12,6 +12,7 @@ import json
 import math
 import os
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,11 @@ TINKER_PRICES_PER_MILLION: dict[str, dict[str, float]] = {
 # Tinker allows ~2000 in-flight sample requests per account; a lower per-process
 # cap leaves room for several processes running in parallel.
 DEFAULT_MAX_CONCURRENT_SAMPLES = 600
+
+# Worst-case dollars of this process's in-flight calls, per ledger file, so
+# concurrent calls cannot each pass the limit check on the same spend.
+_RESERVED: dict[Path, tuple[int, float]] = {}
+_RESERVED_CHANGED = threading.Condition()
 
 
 class TinkerBudgetExceeded(RuntimeError):
@@ -85,8 +91,9 @@ class TinkerUsageLedger:
     """Share Tinker spend across processes; refuse calls that would exceed the limit.
 
     One ledger covers one base model and prices it with the built-in rate card,
-    whatever prices a caller reports. Concurrent in-flight calls can overshoot
-    the limit by at most their own cost. Needs POSIX file locks.
+    whatever prices a caller reports. Calls made through `reserve` in one
+    process never jointly overshoot the limit; calls in other processes can
+    overshoot it by at most their own in-flight cost. Needs POSIX file locks.
     """
 
     def __init__(
@@ -218,6 +225,37 @@ class TinkerUsageLedger:
                 f"${self.limit:.2f}; next call needs up to ${estimate_usd:.2f}"
             )
         return state
+
+    @contextlib.contextmanager
+    def reserve(self, estimate_usd: float):
+        """Hold a call's worst-case cost against the limit while it runs.
+
+        The check counts this process's other reservations on the same file, so
+        e.g. 600 concurrent requests with $1 left cannot all start. When the
+        call does not fit but others are in flight, it waits for them to finish
+        and be recorded; when none are, it raises `TinkerBudgetExceeded`. Record
+        the call's tokens before leaving the block.
+        """
+        with _RESERVED_CHANGED:
+            while True:
+                count, reserved = _RESERVED.get(self.path, (0, 0.0))
+                try:
+                    self.check(reserved + estimate_usd)
+                except TinkerBudgetExceeded:
+                    if not count:
+                        raise
+                    _RESERVED_CHANGED.wait()
+                    continue
+                _RESERVED[self.path] = (count + 1, reserved + estimate_usd)
+                break
+        try:
+            yield
+        finally:
+            with _RESERVED_CHANGED:
+                count, reserved = _RESERVED.pop(self.path)
+                if count > 1:
+                    _RESERVED[self.path] = (count - 1, reserved - estimate_usd)
+                _RESERVED_CHANGED.notify_all()
 
     def record(
         self, tokens: dict[str, int], session_id: str | None = None

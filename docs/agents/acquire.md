@@ -41,7 +41,9 @@ concurrently, at most `TINKER_MAX_CONCURRENT_SAMPLES` (default 600) requests at 
 reason (`"length"` means truncated), and `cost_usd` from Tinker's rate card (Qwen3-8B is built in; pass `prices=` for
 other models). When `FORGER_TINKER_USAGE_FILE` and `FORGER_TINKER_USD_LIMIT` are set, every request is charged to that
 shared dollar ledger, and a request whose worst-case cost would cross the limit raises `TinkerBudgetExceeded` instead
-of being sent. Install with `pip install "pyforger[tinker]"`; the SDK reads `TINKER_API_KEY`.
+of being sent. The worst cases of requests still in flight in the same process count against the limit, so a request
+that only fits once they are charged waits for them. Install with `pip install "pyforger[tinker]"`; the SDK reads
+`TINKER_API_KEY`.
 
 ```python
 from pyforger.acquire import TinkerModel, split_reasoning

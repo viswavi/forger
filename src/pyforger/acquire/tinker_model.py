@@ -9,6 +9,7 @@ without pyforger.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 import time
@@ -301,12 +302,18 @@ class TinkerModel(Model):
         )
         return runtime.tokenizer.encode(text, add_special_tokens=False)
 
-    def _check_budgets(self, runtime: _Runtime, tokens: dict[str, int]) -> None:
-        if runtime.ledger is not None:
-            runtime.ledger.check(runtime.ledger.cost(tokens))
-        if self._budget is not None:
-            assert runtime.rates is not None
-            self._budget.check(tinker_cost_usd(tokens, runtime.rates))
+    @contextlib.contextmanager
+    def _budgeted(self, runtime: _Runtime, estimate: dict[str, int]):
+        """Check budgets for a request's worst case; hold it on the ledger meanwhile."""
+        if runtime.ledger is None:
+            reservation: Any = contextlib.nullcontext()
+        else:
+            reservation = runtime.ledger.reserve(runtime.ledger.cost(estimate))
+        with reservation:
+            if self._budget is not None:
+                assert runtime.rates is not None
+                self._budget.check(tinker_cost_usd(estimate, runtime.rates))
+            yield
 
     def _charge(self, runtime: _Runtime, tokens: dict[str, int]) -> None:
         if runtime.ledger is not None:
@@ -327,15 +334,22 @@ class TinkerModel(Model):
         slots = _sample_slots(self._max_concurrent)
         for attempt in range(self._num_retries + 1):
             try:
-                with slots:
-                    # Checked once a slot is free, before every attempt: neither
-                    # a queued request nor a retry may start past the limit.
-                    self._check_budgets(runtime, estimate)
+                # Checked once a slot is free, before every attempt: neither a
+                # queued request nor a retry may start past the limit. The
+                # worst case stays reserved on the ledger until it is charged.
+                with slots, self._budgeted(runtime, estimate):
                     response = runtime.sampler.sample(
                         prompt=runtime.types.ModelInput.from_ints(prompt),
                         num_samples=n,
                         sampling_params=params,
                     ).result()
+                    billed = sample_tokens(
+                        len(prompt),
+                        n,
+                        getattr(response, "prompt_cache_hit_tokens", 0) or 0,
+                        [len(sequence.tokens) for sequence in response.sequences],
+                    )
+                    self._charge(runtime, billed)
             except runtime.transient as exc:
                 if attempt == self._num_retries:
                     raise
@@ -349,13 +363,6 @@ class TinkerModel(Model):
                 )
                 time.sleep(delay)
                 continue
-            billed = sample_tokens(
-                len(prompt),
-                n,
-                getattr(response, "prompt_cache_hit_tokens", 0) or 0,
-                [len(sequence.tokens) for sequence in response.sequences],
-            )
-            self._charge(runtime, billed)
             return response, billed
         raise AssertionError("unreachable")
 
