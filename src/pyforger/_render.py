@@ -31,19 +31,27 @@ from rich.rule import Rule
 from rich.table import Table
 from rich.text import Text
 
-from pyforger._tracking import OpCall, PipelineRecord, ScoreRecord, StepRecord
+from pyforger import _summaries
+from pyforger._tracking import (
+    FieldSummary,
+    OpCall,
+    PipelineRecord,
+    ScoreRecord,
+    StepRecord,
+)
 
 WIDTH = 120  # reports never exceed this many columns
 COMPACT_FIELD_CHARS = 80  # per sample field in the step report
 FULL_FIELD_CHARS = 500  # per sample field in inspect_step
 _FULL_FIELD_LINES = 30  # lines kept per multi-line sample field in inspect_step
+_SAMPLE_ITEMS = 20  # items of a list kept in a step's stored sample
 _BAR_CHARS = 28  # length of the longest histogram bar
 _MAX_TABLE_FIELDS = 4  # samples with more fields are listed as field / value
 _MAX_DISTINCT_BINS = 12  # up to this many distinct values get one bin each
 _TOKENS_MIN_WIDTH = 110  # narrower terminals drop the per-op token columns
 _EIGHTHS = " ▏▎▍▌▋▊▉"
 _KEEP_SYMBOL = {"ge": "≥", "le": "≤", "lt": "<"}
-_LINE_BREAK = " ⏎ "  # shows where a compact sample value had a newline
+_LINE_BREAK = _summaries.LINE_BREAK  # where a compact sample value had a newline
 _MIN_NAME = 12  # narrowest the op / step name column gets before others drop
 _PRINT_LOCK = threading.Lock()  # keeps reports from threads apart
 
@@ -811,23 +819,89 @@ def _op_table(ops: list[OpCall], width: int) -> Table:
     return _fit_table(headers, rows, width, left={"", "yield check"})
 
 
-def _fmt_value(value: Any, limit: int, *, full: bool) -> str:
+def _value_text(value: Any, *, full: bool) -> tuple[str, bool]:
+    """The value as report text, uncut, and whether it has too many lines."""
     if isinstance(value, str):
         lines = [line.rstrip() for line in value.strip("\n").splitlines()]
         if full:
-            if len(lines) > _FULL_FIELD_LINES:
-                lines = lines[:_FULL_FIELD_LINES] + ["…"]
-            text = "\n".join(lines)
-        else:
-            text = _LINE_BREAK.join(" ".join(line.split()) for line in lines if line)
-    else:
+            return "\n".join(lines), len(lines) > _FULL_FIELD_LINES
+        return _LINE_BREAK.join(" ".join(line.split()) for line in lines if line), False
+    try:
+        return json.dumps(value, ensure_ascii=False, default=str), False
+    except (TypeError, ValueError):
+        return repr(value), False
+
+
+def _fits(value: Any, *, full: bool) -> bool:
+    text, too_tall = _value_text(value, full=full)
+    return not too_tall and len(text) <= (
+        FULL_FIELD_CHARS if full else COMPACT_FIELD_CHARS
+    )
+
+
+def sample_summaries(row: dict) -> dict[int, FieldSummary]:
+    """Summaries of the long values in one sample row, keyed by field position.
+
+    Made from the whole row when the step returns (the stored sample is cut to
+    500 characters per string). A value that cannot be summarized is skipped.
+    """
+    out: dict[int, FieldSummary] = {}
+    for i, value in enumerate(row.values()):
         try:
-            text = json.dumps(value, ensure_ascii=False, default=str)
-        except (TypeError, ValueError):
-            text = repr(value)
+            compact_fits = _fits(value, full=False)
+            if compact_fits:
+                continue
+            # The stored sample keeps only the first 20 items of a list.
+            cut_list = isinstance(value, (list, tuple)) and len(value) > _SAMPLE_ITEMS
+            full_fits = _fits(value, full=True) and not cut_list
+            compact = _summaries.compact_summary(value, COMPACT_FIELD_CHARS)
+            full = (
+                None if full_fits else _summaries.full_summary(value, FULL_FIELD_CHARS)
+            )
+            if compact is None and full is None:
+                continue
+            out[i] = FieldSummary(
+                shape=_summaries.shape_of(value),
+                compact=compact,
+                full=full,
+                source=_summaries.summary_source(value),
+            )
+        except Exception:  # an odd value keeps the plain, cut view
+            continue
+    return out
+
+
+def _cut_value(text: str, limit: int, *, full: bool) -> str:
     # Control characters (ANSI escapes, tabs) would move the cursor in a log.
     text = _clean(text, single_line=not full)
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _fmt_value(
+    value: Any, limit: int, *, full: bool, summary: FieldSummary | None = None
+) -> str:
+    """One sample value as report text: as is, summarized, or cut to ``limit``.
+
+    ``summary`` comes from the step run; without one, a value too long for
+    ``limit`` is summarized from the (possibly already cut) sample value.
+    """
+    if summary is None and not _fits(value, full=full):
+        summary = sample_summaries({"": value}).get(0)
+    shown = None if summary is None else (summary.full if full else summary.compact)
+    llm = summary.llm if summary is not None else None
+    if full:
+        if shown is None:
+            text, too_tall = _value_text(value, full=True)
+            if too_tall:
+                text = "\n".join(text.split("\n")[:_FULL_FIELD_LINES] + ["…"])
+            shown = _cut_value(text, limit, full=True)
+        shown = _cut_value(shown, 2 * limit, full=True)
+        return f"{_clean(llm)}\n{shown}" if llm else shown
+    if llm and summary is not None and shown is not None:
+        return _cut_value(f"{llm} · {summary.shape}", 3 * limit, full=False)
+    if shown is not None:
+        return _cut_value(shown, 2 * limit, full=False)
+    return _cut_value(_value_text(value, full=False)[0], limit, full=False)
 
 
 def _samples(rec: StepRecord, full: bool, width: int = WIDTH) -> RenderableType | None:
@@ -840,11 +914,16 @@ def _samples(rec: StepRecord, full: bool, width: int = WIDTH) -> RenderableType 
     heading = Text(f"sample rows ({len(shown)} of {fmt_int(rec.n_out)})", style="bold")
     keys = list(dict.fromkeys(k for row in shown for k in row))
     fields = list(dict.fromkeys(_clean(k) for k in keys))
+    summaries = list(rec.sample_summaries)
 
-    def cell(row: dict, name: str) -> Text:
-        for k, v in row.items():
+    def value_text(i: int, j: int, value: Any) -> Text:
+        summary = summaries[i].get(j) if i < len(summaries) else None
+        return Text(_fmt_value(value, limit, full=full, summary=summary))
+
+    def cell(i: int, row: dict, name: str) -> Text:
+        for j, (k, v) in enumerate(row.items()):
             if _clean(k) == name:
-                return Text(_fmt_value(v, limit, full=full))
+                return value_text(i, j, v)
         return Text("")
 
     # The table view needs one column per key; colliding names (1 and "1")
@@ -855,7 +934,7 @@ def _samples(rec: StepRecord, full: bool, width: int = WIDTH) -> RenderableType 
         for name in fields:
             table.add_column(Text(name), overflow="fold", ratio=1)
         for i, row in enumerate(shown):
-            table.add_row(Text(str(i)), *(cell(row, name) for name in fields))
+            table.add_row(Text(str(i)), *(cell(i, row, name) for name in fields))
         return Group(heading, table)
     # Many fields, or the full view: one block per row, one line per field.
     blocks: list[RenderableType] = [heading]
@@ -864,10 +943,10 @@ def _samples(rec: StepRecord, full: bool, width: int = WIDTH) -> RenderableType 
         key_width = max(4, min(30, width // 3))
         grid.add_column(style="dim", no_wrap=True, max_width=key_width)
         grid.add_column(overflow="fold")
-        for k, v in row.items():
+        for j, (k, v) in enumerate(row.items()):
             key = Text(_clean(k))
             key.truncate(key_width, overflow="ellipsis")
-            grid.add_row(key, Text(_fmt_value(v, limit, full=full)))
+            grid.add_row(key, value_text(i, j, v))
         blocks.append(Text(f"[{i}]", style="dim"))
         blocks.append(Padding(grid, (0, 0, 0, 2)))
     return Group(*blocks)
@@ -1066,7 +1145,7 @@ def render_step(rec: StepRecord, *, full: bool = False) -> str:
 
     ``full=True`` (used by ``inspect.inspect_step``) shows the whole docstring,
     every stored sample row, and up to 500 characters per field with line
-    breaks kept.
+    breaks kept. Longer values are summarized (see ``pyforger._summaries``).
     """
     return _plain(step_renderable(rec, full=full))
 

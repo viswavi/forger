@@ -19,6 +19,7 @@ the same time in different threads, each one's totals include the others'.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import math
 import threading
@@ -83,12 +84,30 @@ class OpCall(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class FieldSummary(BaseModel):
+    """What a report shows for one long value in a sample row.
+
+    The stored sample keeps only the first 500 characters of a string, so the
+    summaries are made from the whole value when the step returns. ``compact``
+    is None when the value fits the step report as is, ``full`` when it fits
+    ``inspect_step``. ``source`` is the clipped text an LLM summary reads, and
+    ``llm`` that summary ("" when it failed, None before it is asked for).
+    """
+
+    shape: str  # e.g. "312 lines, 9.8k chars, python" or "[5 items]"
+    compact: str | None = None
+    full: str | None = None
+    source: str = ""
+    llm: str | None = None
+
+
 class StepRecord(BaseModel):
     """Everything a ``@step`` call reports: its ops, totals, warnings, and samples.
 
     ``kind`` is ``"step"`` for a ``@step`` function, ``"dynamic_step"`` for
     ``alter.dynamic_step`` called directly in a pipeline, and ``"bare"`` for any
-    other op called in a pipeline outside a step.
+    other op called in a pipeline outside a step. ``sample_summaries[i]`` maps
+    the position of a long field in ``sample[i]`` to its summary.
     """
 
     name: str
@@ -101,6 +120,7 @@ class StepRecord(BaseModel):
     ops: list[OpCall] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     sample: list[Any] = Field(default_factory=list)
+    sample_summaries: list[dict[int, FieldSummary]] = Field(default_factory=list)
     sample_shown: int = 3
     input_type: str | None = None
     output_type: str | None = None
@@ -420,6 +440,24 @@ _USAGE = {
     "cost_usd": 0.0,
     "token_units": 0.0,
 }
+# False inside ``run_uncounted``: LLM calls Forger makes for its own reports
+# (summaries of sample values) stay out of every op, step, and pipeline total.
+_COUNT_USAGE: ContextVar[bool] = ContextVar("forger_count_usage", default=True)
+
+
+def run_uncounted(fn: Callable[..., Any], *args: Any) -> Any:
+    """Call ``fn(*args)`` outside every step, pipeline, and op; skip its usage.
+
+    It runs in a fresh context: its ops join no step or pipeline report and
+    its LLM usage is not added to the counter (call it again from each worker
+    thread, since threads do not inherit the context).
+    """
+
+    def run() -> Any:
+        _COUNT_USAGE.set(False)
+        return fn(*args)
+
+    return contextvars.Context().run(run)
 
 
 def _as_number(value: Any) -> float:
@@ -437,6 +475,8 @@ def add_usage(
     token_units: Any = 0.0,
 ) -> None:
     """Add one LLM call's usage to the process-wide counter (NaN counts as 0)."""
+    if not _COUNT_USAGE.get():
+        return
     with _USAGE_LOCK:
         _USAGE["prompt_tokens"] += int(_as_number(prompt_tokens))
         _USAGE["completion_tokens"] += int(_as_number(completion_tokens))

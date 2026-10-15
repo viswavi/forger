@@ -17,6 +17,10 @@ filter's scores, warnings, and a few sample rows. A pipeline prints a summary
 table of its steps. ``@step(prod=True)``, ``@pipeline(prod=True)``, or
 ``FORGER_STEP_REPORT=0`` silence the reports; ``strict=True`` turns warnings
 into errors.
+
+Long sample values are summarized by shape (``[5 items] a.py, b.py, …``).
+``set_report_model(model)`` or ``FORGER_REPORT_MODEL`` adds a one-sentence LLM
+summary of each; see ``pyforger._summaries``.
 """
 
 from __future__ import annotations
@@ -32,14 +36,16 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
-from pyforger import _tracking
+from pyforger import _summaries, _tracking
 from pyforger._render import (
     print_pipeline,
     print_step,
     render_pipeline,
     render_scores,
     render_step,
+    sample_summaries,
 )
+from pyforger._summaries import set_report_model
 from pyforger._tracking import PipelineRecord, StepRecord
 from pyforger.op import op
 
@@ -264,6 +270,7 @@ def step(
                 if pipeline_rec is not None:
                     pipeline_rec.steps.append(rec)
                 if _reports_enabled(prod):
+                    _summaries.add_llm_summaries(rec, rows=rec.sample_shown)
                     print_step(rec)
 
             scope = _tracking.enter_step(rec, check)
@@ -317,9 +324,10 @@ def _check_step_result(
     if out_model is not None:
         _validate_rows(result, out_model, rec.name, "output")
     if all(isinstance(row, dict) for row in result):
-        rec.sample = [
-            _truncate(row, _SAMPLE_FIELD_CHARS) for row in result[:_SAMPLE_ROWS_KEPT]
-        ]
+        rows = result[:_SAMPLE_ROWS_KEPT]
+        rec.sample = [_truncate(row, _SAMPLE_FIELD_CHARS) for row in rows]
+        # Summaries of long values need the whole value, not the cut sample.
+        rec.sample_summaries = [sample_summaries(row) for row in rows]
     else:
         rec.warnings.append(_NOT_DICTS)
 
@@ -468,5 +476,6 @@ __all__ = [
     "render_pipeline",
     "render_scores",
     "render_step",
+    "set_report_model",
     "step",
 ]

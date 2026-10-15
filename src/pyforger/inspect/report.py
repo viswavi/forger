@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from pyforger import _tracking
+from pyforger import _summaries, _tracking
 from pyforger._tracking import StepRecord
-from pyforger.steps import print_step
+from pyforger.steps import _reports_enabled, print_step
 
 
 def inspect_step(name: str | None = None) -> StepRecord:
@@ -12,7 +12,8 @@ def inspect_step(name: str | None = None) -> StepRecord:
 
     With no name, use the most recent step that ran in this process. The full
     report shows the whole docstring, up to 10 sample rows, and up to 500
-    characters per field.
+    characters per field; a longer value is summarized by its shape, and with
+    a report model (``pyforger.steps.set_report_model``) also in one sentence.
 
     Raises:
         KeyError: No step with that name has run; the message lists known steps.
@@ -26,5 +27,7 @@ def inspect_step(name: str | None = None) -> StepRecord:
         rec = records[name]
     else:
         raise KeyError(f"no step named {name!r}; known steps: {', '.join(records)}")
+    if _reports_enabled(prod=False):
+        _summaries.add_llm_summaries(rec, rows=len(rec.sample))
     print_step(rec, full=True)
     return rec
