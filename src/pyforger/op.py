@@ -31,6 +31,7 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
+from pyforger import _tracking
 from pyforger.utils import canonical, get_formatted_logger
 
 logger = get_formatted_logger("forger.op")
@@ -171,6 +172,11 @@ def op(
     Pass ``_no_cache=True`` at call time to bypass the cache for one call.
     Pass ``_cache_only=True`` to return only an existing cached result, raising
     ``FileNotFoundError`` on a miss without executing the function.
+
+    Pass ``min_yield=`` / ``max_yield=`` (fractions in [0, 1]) to check the
+    ratio of output rows to input rows, e.g. ``filter.by_length(rows, ...,
+    min_yield=0.5)``. A violation is a warning in the ``@step`` report (or a
+    logged warning outside steps). Neither keyword is part of the cache key.
     """
 
     def decorate(fn: Callable[..., T]) -> Callable[..., T]:
@@ -181,9 +187,9 @@ def op(
             logger.debug("inspect.signature failed for %s: %s", fn, exc)
             sig = None
         else:
-            # These names are reserved for per-call cache controls.
+            # These names are reserved for per-call cache controls and yield checks.
             assert sig is not None  # mypy hint
-            for reserved in ("_no_cache", "_cache_only"):
+            for reserved in ("_no_cache", "_cache_only", "min_yield", "max_yield"):
                 if reserved in sig.parameters:
                     raise TypeError(
                         "Forger functions decorated with @op cannot use the reserved "
@@ -202,10 +208,42 @@ def op(
             *args: Any,
             _no_cache: bool = False,
             _cache_only: bool = False,
+            min_yield: float | None = None,
+            max_yield: float | None = None,
             **kwargs: Any,
         ) -> T:
             if _cache_only and (_no_cache or not cache):
                 raise ValueError("_cache_only requires an enabled cache")
+            _check_yield_bounds(min_yield, max_yield)
+            token = _tracking.enter_op(op_name)
+            usage_start = _tracking.usage_snapshot()
+            call: _tracking.OpCall | None = None
+            try:
+                result, cache_hit, first_arg, duration = _call(
+                    args, kwargs, _no_cache, _cache_only
+                )
+                call = _op_call(
+                    op_name,
+                    first_arg,
+                    result,
+                    cache_hit=cache_hit,
+                    duration=duration,
+                    usage=_tracking.usage_since(usage_start),
+                    scores=_tracking.current_scores(),
+                    min_yield=min_yield,
+                    max_yield=max_yield,
+                )
+            finally:
+                _tracking.exit_op(token, call)
+            return result
+
+        def _call(
+            args: tuple[Any, ...],
+            kwargs: dict[str, Any],
+            _no_cache: bool,
+            _cache_only: bool,
+        ) -> tuple[Any, bool, Any, float]:
+            """Run or load the op; return (result, cache_hit, first arg, seconds)."""
             start = time.time()
             if sig is not None:
                 try:
@@ -273,6 +311,9 @@ def op(
                         f"No cached result for {op_name} with these arguments"
                     )
                 result = fn(*args, **kwargs)
+                if op_name.startswith(_tracking.STEP_OP_PREFIX):
+                    # Raises before caching when a @step breaks its contract.
+                    _tracking.check_step_result(result)
 
                 if use_cache:
                     # Atomic write to prevent corruption from concurrent threads
@@ -313,10 +354,73 @@ def op(
                     duration,
                 )
 
-            return result
+            return result, cache_hit, (args[0] if args else None), duration
 
         return wrapper
 
     if _fn is not None:
         return decorate(_fn)
     return decorate
+
+
+def _check_yield_bounds(min_yield: float | None, max_yield: float | None) -> None:
+    """Raise ValueError unless 0 <= min_yield <= max_yield <= 1 (either optional)."""
+    for label, bound in (("min_yield", min_yield), ("max_yield", max_yield)):
+        if bound is not None and not 0.0 <= bound <= 1.0:
+            raise ValueError(f"{label} must be in [0, 1], got {bound}")
+    if min_yield is not None and max_yield is not None and min_yield > max_yield:
+        raise ValueError(
+            f"min_yield ({min_yield}) must not exceed max_yield ({max_yield})"
+        )
+
+
+def _op_call(
+    op_name: str,
+    first_arg: Any,
+    result: Any,
+    *,
+    cache_hit: bool,
+    duration: float,
+    usage: tuple[int, int, float],
+    scores: list[_tracking.ScoreRecord],
+    min_yield: float | None,
+    max_yield: float | None,
+) -> _tracking.OpCall:
+    """Build the step-report entry for one op call and apply its yield bounds."""
+    category = _tracking.category_of(op_name)
+    # An acquire op's first argument is a prompt or query, not input rows.
+    n_in = (
+        len(first_arg)
+        if isinstance(first_arg, list) and category != "acquire"
+        else None
+    )
+    n_out = len(result) if isinstance(result, list) else None
+    yield_ratio = n_out / n_in if n_in and n_out is not None else None
+    call = _tracking.OpCall(
+        op_name=op_name,
+        category=category,
+        n_in=n_in,
+        n_out=n_out,
+        yield_ratio=yield_ratio,
+        min_yield=min_yield,
+        max_yield=max_yield,
+        cache_hit=cache_hit,
+        duration_s=duration,
+        prompt_tokens=usage[0],
+        completion_tokens=usage[1],
+        cost_usd=usage[2],
+        scores=scores[0] if scores else None,
+    )
+    if yield_ratio is not None:
+        if min_yield is not None and yield_ratio < min_yield:
+            call.warnings.append(
+                f"{op_name}: yield {yield_ratio:.2f} below min_yield {min_yield:.2f}"
+            )
+        if max_yield is not None and yield_ratio > max_yield:
+            call.warnings.append(
+                f"{op_name}: yield {yield_ratio:.2f} above max_yield {max_yield:.2f}"
+            )
+    if not _tracking.is_reporting():
+        for warning in call.warnings:
+            logger.warning(warning)
+    return call

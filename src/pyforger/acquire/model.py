@@ -12,6 +12,8 @@ from typing import Any, Union
 
 import litellm
 
+from pyforger import _tracking
+
 # Type aliases
 Message = dict[str, str]
 Prompt = Union[str, list[Message]]
@@ -453,6 +455,11 @@ class Model:
             )
             results.append(result)
             self.history.append(result)
+            _tracking.add_usage(
+                result.usage.get("prompt_tokens", 0) or 0,
+                result.usage.get("completion_tokens", 0) or 0,
+                result.usage.get("cost_usd", 0.0) or 0.0,
+            )
 
         return results
 
@@ -695,6 +702,11 @@ class LocalModel(Model):
             )
             results.append(result)
             self.history.append(result)
+            _tracking.add_usage(
+                result.usage.get("prompt_tokens", 0) or 0,
+                result.usage.get("completion_tokens", 0) or 0,
+                result.usage.get("cost_usd", 0.0) or 0.0,
+            )
 
         return results
 

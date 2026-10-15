@@ -260,7 +260,7 @@ def dynamic_step_source(
     return _generate(goal, item, model, max_iterations, execution_timeout_s)
 
 
-@op(cache=False)
+@op(name="alter.dynamic_step", cache=False)
 def dynamic_step(
     inputs: list[dict],
     goal: str,

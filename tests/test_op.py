@@ -23,6 +23,15 @@ def test_op_rejects_reserved_cache_arg_name() -> None:
             return x
 
 
+@pytest.mark.parametrize("reserved", ["_cache_only", "min_yield", "max_yield"])
+def test_op_rejects_other_reserved_arg_names(reserved: str) -> None:
+    """Cache controls and yield bounds are reserved call-time keywords."""
+    namespace: dict = {}
+    exec(f"def _sample(x, *, {reserved}=None):\n    return x", namespace)
+    with pytest.raises(TypeError, match=f"reserved argument name '{reserved}'"):
+        op(namespace["_sample"])
+
+
 def test_cache_only_never_executes_on_miss(tmp_path, monkeypatch) -> None:
     """Test cache only never executes on miss."""
     monkeypatch.setenv("FORGER_CACHE", str(tmp_path))

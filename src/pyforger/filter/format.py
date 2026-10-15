@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from difflib import SequenceMatcher
 
+from pyforger import _tracking
 from pyforger.op import op
 from pyforger.utils import get_field
 
@@ -40,13 +41,17 @@ def by_length(
     max_len: int = 10000,
 ) -> list[dict]:
     """Keep items whose ``instruction_field`` word count is in [min_len, max_len]."""
-    return [
-        item
-        for item in items
-        if min_len
-        <= len(get_field(item, instruction_field, "by_length").split())
-        <= max_len
-    ]
+    word_counts: list[int] = []
+    kept: list[dict] = []
+    for item in items:
+        words = len(get_field(item, instruction_field, "by_length").split())
+        word_counts.append(words)
+        if min_len <= words <= max_len:
+            kept.append(item)
+    _tracking.record_scores(
+        "words", word_counts, keep="between", lower=min_len, upper=max_len
+    )
+    return kept
 
 
 @op(name="filter.by_invalid_response")
@@ -81,7 +86,7 @@ def by_invalid_response(
         ratio = SequenceMatcher(None, instruction, response).ratio()
         return ratio >= similarity_threshold
 
-    return [item for item in items if not _is_invalid(item)]
+    return _tracking.keep_where(items, [not _is_invalid(item) for item in items])
 
 
 @op(name="filter.by_keyword_blocklist")
@@ -94,15 +99,15 @@ def by_keyword_blocklist(
 ) -> list[dict]:
     """Drop items whose ``response_field`` contains any blocklisted phrase."""
     keywords = blocklist if blocklist is not None else DEFAULT_BLOCKLIST
-    return [
-        item
-        for item in items
-        if not _contains_blocked(
+    keep = [
+        not _contains_blocked(
             get_field(item, response_field, "by_keyword_blocklist"),
             keywords,
             case_sensitive,
         )
+        for item in items
     ]
+    return _tracking.keep_where(items, keep)
 
 
 def _contains_blocked(text: str, blocklist: list[str], case_sensitive: bool) -> bool:

@@ -6,7 +6,9 @@ import random
 
 import pytest
 
+from pyforger import _tracking
 from pyforger.filter import by_llm_score
+from pyforger.steps import step
 
 
 class _FakeJudge:
@@ -474,3 +476,70 @@ class TestMalformedResponses:
         )
         assert len(result) == 1
         assert result[0]["instruction"] == "Q2"
+
+
+class _KeyedJudge(_FakeJudge):
+    """_FakeJudge with a stable cache key, so call_count does not change the key."""
+
+    def cache_key(self):
+        """Exclude the mutable call counters from the @op cache key."""
+        return ("_KeyedJudge",)
+
+
+_THRESHOLD_DATA = [
+    {"instruction": "Explain gravity", "response": "Gravity is a force..."},
+    {"instruction": "What is 2+2?", "response": "The answer is 4."},
+    {"instruction": "Write a poem", "response": "Roses are red..."},
+    {"instruction": "Name a color", "response": "Blue."},
+]
+
+
+class TestByLlmScoreCacheAndScores:
+    """by_llm_score caches judge scores apart from thresholds and records them."""
+
+    def test_changing_threshold_reuses_judge_scores(self):
+        """A new score_threshold or agreement_threshold makes no new judge calls."""
+        judge = _KeyedJudge()
+        kwargs = dict(model=judge, input_field="instruction", output_field="response")
+        lenient = by_llm_score(_THRESHOLD_DATA, score_threshold=1, **kwargs)
+        assert judge.call_count == len(_THRESHOLD_DATA)
+        strict = by_llm_score(_THRESHOLD_DATA, score_threshold=5, **kwargs)
+        assert judge.call_count == len(_THRESHOLD_DATA)
+        assert len(strict) <= len(lenient) == len(_THRESHOLD_DATA)
+
+    def test_scores_recorded_in_step(self, monkeypatch):
+        """Inside a step, the judge's per-row scores land on the op's record."""
+        monkeypatch.setenv("FORGER_STEP_REPORT", "0")
+        judge = _KeyedJudge()
+
+        @step
+        def judged(rows):
+            return by_llm_score(
+                rows,
+                model=judge,
+                score_threshold=3,
+                input_field="instruction",
+                output_field="response",
+            )
+
+        kept = judged(_THRESHOLD_DATA)
+        scores = _tracking.step_records()["judged"].ops[0].scores
+        assert scores is not None
+        assert (scores.label, scores.keep, scores.threshold) == ("score", "ge", 3)
+        assert len(scores.values) == len(_THRESHOLD_DATA)
+        assert sum(1 for v in scores.values if v >= 3) == len(kept)
+
+    def test_unparsed_scores_recorded_as_none(self, monkeypatch):
+        """An unparseable judge response is recorded as a None score."""
+        monkeypatch.setenv("FORGER_STEP_REPORT", "0")
+        judge = _BadJudge(["not json", json.dumps({"score": 4})])
+
+        @step
+        def judged_bad(rows):
+            return by_llm_score(
+                rows, model=judge, input_field="instruction", output_field="response"
+            )
+
+        judged_bad(_THRESHOLD_DATA[:2])
+        scores = _tracking.step_records()["judged_bad"].ops[0].scores
+        assert scores is not None and scores.values == [None, 4]

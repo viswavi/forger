@@ -73,6 +73,21 @@ and `pyforger.inspect`. Each operation takes a `list[dict]` (or generation param
 operations return a `list[dict]`; inspect operations instead return a report about the rows without modifying rows.
 Control flow (`for`, `if`, comprehensions, helper functions) in plain Python can be used
 
+Structure a pipeline as a `@pyforger.pipeline` function that calls `@pyforger.step` functions. A step is a named
+function from rows to rows built from Forger ops (typically acquire or alter, then filter). Each step is cached like
+an `@op` and, when it returns, prints a report: every op it ran with rows in/out, yield, time, tokens, and cost; a
+histogram of each filter's scores with what other thresholds would have kept; warnings; and a few sample output rows.
+The pipeline prints a summary table of its steps at the end. Read these reports after every run.
+
+- Hard errors (`StepContractError` / `PipelineContractError`): a step returns a non-list, a step calls no Forger ops
+  (keep pure-Python helpers as plain functions), a step is called inside another step, a pipeline calls no steps, or
+  rows do not match a `list[X]` type hint where `X` is a pydantic model (rows stay dicts).
+- Warnings: a step ends without a filter; an op misses its `min_yield` / `max_yield`; a pipeline has only one step; no
+  quality filter, no diversity filter, or no inspect op ran anywhere; an op was called in the pipeline outside a step.
+- `strict=True` on `@step` or `@pipeline` turns warnings into errors. `prod=True` or the environment variable
+  `FORGER_STEP_REPORT=0` silences the reports. `pyforger.inspect.inspect_step(name)` re-prints the full report of the
+  latest run of a step, with more sample rows.
+
 ### Operation reference
 
 All operations are plain functions. Operations that perform LLM calls or expensive in-process work (`sample_from_LLM`
@@ -85,6 +100,8 @@ them with `@op` to memoize their results.
 | Name | Location | Description |
 |---|---|---|
 | `pyforger.op` | `src/pyforger/op.py` | Decorator for caching operations. |
+| `pyforger.step` | `src/pyforger/steps.py` | Decorator for a named, cached, reported group of ops (rows to rows). |
+| `pyforger.pipeline` | `src/pyforger/steps.py` | Decorator for a function that calls steps; prints a summary table. |
 | `pyforger.acquire` | `src/pyforger/acquire/` | Generate or retrieve rows. |
 | `pyforger.alter` | `src/pyforger/alter/` | Transform rows without removing items. |
 | `pyforger.filter` | `src/pyforger/filter/` | Remove rows by criterion. |
@@ -180,6 +197,13 @@ and thresholds to find the right balance for a given use case. For example, `by_
 produces more diverse outputs but may filter out many rows; `by_llm_score` with multiple judges and a high consensus
 threshold produces higher-quality outputs but at the cost of more LLM calls.
 
+Every op (filters included) accepts `min_yield=` and `max_yield=`: the expected range of output rows over input rows,
+e.g. `filter.by_llm_score(rows, ..., min_yield=0.3, max_yield=0.8)`. A violation is a warning in the step report
+(`strict=True` raises); neither keyword is part of the cache key. Filters also record a score per row, so the step
+report shows a histogram and the fraction of rows each nearby threshold would keep. Use it to choose thresholds.
+`by_llm_score` caches the judge scores separately from its thresholds, so re-running it with a different
+`score_threshold` or `agreement_threshold` makes no new judge calls.
+
 #### `pyforger.inspect`
 
 Examine rows without modifying them: inspect ops return a *report* about the rows (e.g. `list[str]`), not rows. At any
@@ -189,6 +213,7 @@ producing new rows in the pipeline.
 | Export | Cached | Description |
 |---|---|---|
 | `topic_based_clustering` | yes | Interpretable clustering of contents of one field from the input rows. |
+| `inspect_step` | no | Print the full report of the latest run of a `@step` and return its `StepRecord`. |
 
 Topic-based clustering uses the ClusterFusion clustering algorithm ([arXiv:2512.04350](https://arxiv.org/abs/2512.04350)),
 a hybrid method in which embeddings guide how rows are partitioned and an LLM summarizes the partitions into
@@ -302,38 +327,71 @@ in the current process up to a certain maximum (default 10000). `clear_trace()` 
 
 ### Composing a pipeline
 
-A single-pass pipeline:
+A single-pass pipeline with two steps:
 
 ```python
-import pyforger
-from pyforger import acquire, alter, filter, op
+from pydantic import BaseModel
+from pyforger import acquire, alter, filter, pipeline, step
 
-@op
-def build_dataset(seeds, model):
-    rows = alter.translate.to_language(
-        seeds, target_language="Spanish", fields=["text"], model=model,
-    )
-    rows = filter.by_length(rows, instruction_field="text", min_len=3, max_len=200)
-    rows = filter.by_rouge_l(rows, field="text", threshold=0.7)
-    return rows
+class Translated(BaseModel):
+    text: str
 
+@step
+def translate(seeds, model) -> list[Translated]:
+    """Translate each seed into Spanish and drop empty or very long results."""
+    rows = alter.translate.to_language(seeds, target_language="Spanish", fields=["text"], model=model)
+    return filter.by_length(rows, instruction_field="text", min_len=3, max_len=200)
+
+@step
+def dedupe(rows: list[Translated]) -> list[Translated]:
+    """Drop near-duplicate translations."""
+    return filter.by_rouge_l(rows, field="text", threshold=0.7, min_yield=0.5)
+
+@pipeline
 def main(seeds, model):
-    return pyforger.run(build_dataset, seeds, model)
+    return dedupe(translate(seeds, model))
 ```
 
-An iterative pipeline keeps the outer loop in Python and decorates each round's helper with `@op` so that cached
-rounds are reused across runs:
+Each step prints a report when it returns, and the pipeline prints a summary at the end:
+
+```text
+── step dedupe: 412 → 230 rows · 3.1s ──────────────────────────────────────────────────────────────
+  Drop near-duplicate translations.
+  in: list[Translated] ok   out: list[Translated] ok
+  op                  in  out  yield  time  tokens in/out  cost
+  filter.by_rouge_l  412  230   0.56  3.1s              -     -  min 0.50 ok
+    rouge_l  0.0  0.1  0.2  0.3  0.4  0.5  0.6  0.7  0.8  0.9
+    rows      51   87   62   21    7    2    0   41   73   68
+    keep at  <0.5 0.55  <0.6 0.56  [<0.7 0.56]  <0.8 0.66  <0.9 0.83
+  sample (3 of 230):
+    [0] text="¿Cuál es la capital de Francia?"
+    ...
+══ pipeline main: 2 steps · 500 → 230 rows · 41.0s · 61,200 in / 9,840 out tokens · $0.0315 ════════
+  step        in  out  yield   time     cost  notes
+  translate  500  412   0.82  37.9s  $0.0315
+  dedupe     412  230   0.56   3.1s        -
+  pipeline warnings:
+    - no quality filter ran (e.g. filter.by_llm_score)
+    - no inspect op ran
+```
+
+Later, `pyforger.inspect.inspect_step("dedupe")` prints the same report with up to 10 sample rows.
+
+An iterative pipeline keeps the outer loop in Python and makes each round a `@step`, so cached rounds are reused
+across runs:
 
 ```python
 import random
 
-@op
+@step
 def one_round(rows, model):
+    """Sample new rows from in-context examples and keep the diverse ones."""
     in_context_examples = random.sample(rows, min(len(rows), 5))
     prompt = ...  # construct a prompt using the in-context examples
     new = acquire.sample_from_LLM(prompt=prompt, model=model, n=64)
     return rows + filter.by_rouge_l(new, field="text", threshold=0.7)
 
+@pipeline
 def run_pipeline(seeds, model, rounds=5):
     rows = seeds
     for _ in range(rounds):
@@ -395,7 +453,8 @@ prefer the cheap answer check first.
 ### Dynamic input-specific pipelines
 
 `alter.dynamic_step(inputs, goal, model, max_parallel=4, max_iterations=20)`
-returns a `list[list[str]]` in input order. Each inner list contains the strings
+returns a `list[list[str]]` in input order. Called directly in a `@pipeline`, it counts as a step.
+Each inner list contains the strings
 produced for one input and may be empty. The default `pyforger` install includes
 OpenHands SDK and its dynamic-step dependencies; Python 3.12+ and Unix signal
 timers are required for execution.

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 
+from pyforger import _tracking
 from pyforger.acquire.model import Model
 from pyforger.op import op
 from pyforger.utils import get_field, get_formatted_logger
@@ -28,7 +29,11 @@ def by_llm_score(
     criteria: str = "overall quality, relevance, and correctness",
     temperature: float = 0.0,
 ) -> list[dict]:
-    """Keep items where ``num_judges`` LLM judges sufficiently agree on quality."""
+    """Keep items where ``num_judges`` LLM judges sufficiently agree on quality.
+
+    Judge scores are cached separately from the thresholds, so re-running with a
+    different ``score_threshold`` or ``agreement_threshold`` makes no new calls.
+    """
     if num_judges < 1:
         raise ValueError("num_judges must be at least 1")
     if not (0.0 < agreement_threshold <= 1.0):
@@ -44,26 +49,63 @@ def by_llm_score(
             "deterministic sampling defeats multi-judge consensus"
         )
 
+    all_scores = _judge_scores(
+        items,
+        model=model,
+        input_field=input_field,
+        output_field=output_field,
+        criteria=criteria,
+        max_score=max_score,
+        num_judges=num_judges,
+        temperature=temperature,
+    )
     kept: list[dict] = []
+    mean_scores: list[float | int | None] = []
     parse_failures = 0
+    for item, scores in zip(items, all_scores):
+        parsed = [score for score in scores if score is not None]
+        parse_failures += len(scores) - len(parsed)
+        approvals = sum(1 for score in parsed if score >= score_threshold)
+        if approvals / num_judges >= agreement_threshold:
+            kept.append(item)
+        mean_scores.append(_mean(parsed))
+    if parse_failures:
+        logger.warning("by_llm_score: %d judge responses unparseable", parse_failures)
+    _tracking.record_scores(
+        "score", mean_scores, keep="ge", threshold=float(score_threshold)
+    )
+    return kept
+
+
+@op(name="filter.by_llm_score.scores")
+def _judge_scores(
+    items: list[dict],
+    *,
+    model: Model,
+    input_field: str,
+    output_field: str,
+    criteria: str,
+    max_score: int,
+    num_judges: int,
+    temperature: float,
+) -> list[list[int | None]]:
+    """Return each item's ``num_judges`` parsed scores (None when unparseable)."""
+    all_scores: list[list[int | None]] = []
     for item in items:
         prompt = _build_judge_prompt(
             item, input_field, output_field, criteria, max_score
         )
         responses = model.generate(prompt, n=num_judges, temperature=temperature)
-        approvals = 0
-        for raw in responses:
-            score = _parse_judge_response(raw, max_score)
-            if score is None:
-                parse_failures += 1
-                continue
-            if score >= score_threshold:
-                approvals += 1
-        if approvals / num_judges >= agreement_threshold:
-            kept.append(item)
-    if parse_failures:
-        logger.warning("by_llm_score: %d judge responses unparseable", parse_failures)
-    return kept
+        all_scores.append([_parse_judge_response(raw, max_score) for raw in responses])
+    return all_scores
+
+
+def _mean(scores: list[int]) -> float | int | None:
+    """Mean judge score; an int when it is whole, None when nothing parsed."""
+    if not scores:
+        return None
+    mean = sum(scores) / len(scores)
+    return int(mean) if mean.is_integer() else mean
 
 
 def _parse_judge_response(raw: str, max_score: int) -> int | None:
