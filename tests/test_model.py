@@ -197,7 +197,7 @@ class TestGenerateBatch:
     @patch("pyforger.acquire.model.litellm")
     def test_forwards_parameters(self, mock_litellm):
         """Model parameters are forwarded to litellm.completion."""
-        mock_litellm.completion.return_value = make_litellm_response(["ok"])
+        mock_litellm.completion.return_value = make_litellm_response(["ok", "ok"])
         model = Model(
             "gpt-4o",
             api_key="sk-test",
@@ -299,7 +299,7 @@ class TestGenerate:
     @patch("pyforger.acquire.model.litellm")
     def test_delegates_to_generate_batch(self, mock_litellm):
         """Generate forwards all parameters to litellm.completion."""
-        mock_litellm.completion.return_value = make_litellm_response(["ok"])
+        mock_litellm.completion.return_value = make_litellm_response(["ok", "ok"])
         model = Model("gpt-4o", api_key="sk-test")
         model.generate("Hi", n=2, temperature=0.3, max_tokens=50)
         call_args = mock_litellm.completion.call_args
@@ -628,14 +628,14 @@ class TestFamily:
 class TestValueConstraints:
     """_VALUE_CONSTRAINTS table contents."""
 
-    def test_o_series_require_temp_1_n_1(self):
-        """O series require temp 1 n 1."""
+    def test_o_series_require_temp_1(self):
+        """O series require temp 1; n > 1 fans out instead of raising."""
         for key in ("o1", "o3", "o4", "gpt-5"):
-            assert _VALUE_CONSTRAINTS[key] == {"temperature": 1.0, "n": 1}
+            assert _VALUE_CONSTRAINTS[key] == {"temperature": 1.0}
 
-    def test_gemini_3_requires_temp_1_n_1(self):
-        """Gemini 3 requires temp 1 n 1."""
-        assert _VALUE_CONSTRAINTS["gemini-3"] == {"temperature": 1.0, "n": 1}
+    def test_gemini_3_requires_temp_1(self):
+        """Gemini 3 requires temp 1; n > 1 fans out instead of raising."""
+        assert _VALUE_CONSTRAINTS["gemini-3"] == {"temperature": 1.0}
 
     def test_no_constraint_for_gpt_4o(self):
         """No constraint for gpt 4o."""
@@ -662,16 +662,15 @@ class TestValidateParams:
             _validate_params("openai/o1", temperature=0.5, n=1)
 
     @patch("pyforger.acquire.model.litellm")
-    def test_value_constraint_violation_n(self, mock_litellm):
-        """Value constraint violation n."""
+    def test_n_is_not_constrained(self, mock_litellm):
+        """No n constraint: generate_batch fans n > 1 out instead of raising."""
         mock_litellm.get_supported_openai_params.return_value = [
             "temperature",
             "n",
             "max_tokens",
             "stop",
         ]
-        with pytest.raises(ValueError, match="requires n=1"):
-            _validate_params("gemini/gemini-3.5-flash", temperature=1.0, n=2)
+        _validate_params("gemini/gemini-3.5-flash", temperature=1.0, n=2)
 
     @patch("pyforger.acquire.model.litellm")
     def test_value_constraint_satisfied_passes(self, mock_litellm):
@@ -1246,17 +1245,20 @@ class TestPerCallValidation:
             model.generate("Hi", temperature=0.5)
 
     @patch("pyforger.acquire.model.litellm")
-    def test_per_call_n_violates_constraint(self, mock_litellm):
-        """Per call n violates constraint."""
+    def test_per_call_n_fans_out(self, mock_litellm):
+        """Per call n > 1 on gemini-3 fans out instead of raising."""
         mock_litellm.get_supported_openai_params.return_value = [
             "temperature",
             "n",
             "max_tokens",
             "stop",
         ]
+        mock_litellm.batch_completion.return_value = [
+            make_litellm_response([f"r{i}"]) for i in range(3)
+        ]
         model = Model("gemini/gemini-3.5-flash", api_key="sk-test", temperature=1.0)
-        with pytest.raises(ValueError, match="requires n=1"):
-            model.generate("Hi", n=3)
+        assert model.generate("Hi", n=3) == ["r0", "r1", "r2"]
+        assert mock_litellm.batch_completion.call_args.kwargs["n"] == 1
 
     @patch("pyforger.acquire.model.litellm")
     def test_per_call_unconstrained_passes(self, mock_litellm):
@@ -1267,7 +1269,7 @@ class TestPerCallValidation:
             "max_tokens",
             "stop",
         ]
-        mock_litellm.completion.return_value = make_litellm_response(["ok"])
+        mock_litellm.completion.return_value = make_litellm_response(["ok", "ok"])
         model = Model("gpt-4o", api_key="sk-test")
         model.generate("Hi", temperature=0.2, n=2)  # no raise
 

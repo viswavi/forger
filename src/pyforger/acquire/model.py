@@ -54,7 +54,11 @@ def _batch_completion_with_progress(
 
 
 class GenerateResult(list):
-    """list[str] with `usage` / `reasoning` / `model_id` / `raw` attributes."""
+    """list[str] with `usage` / `reasoning` / `model_id` / `raw` attributes.
+
+    `raw` is the LiteLLM response. When `Model.generate_batch` fans `n` out into
+    separate requests, it is the list of those responses, in completions order.
+    """
 
     usage: dict[str, Any]
     reasoning: list[str | None]
@@ -99,14 +103,22 @@ def _rebuild_generate_result(
 
 
 _VALUE_CONSTRAINTS: dict[str, dict[str, Any]] = {
-    "o1": {"temperature": 1.0, "n": 1},
-    "o3": {"temperature": 1.0, "n": 1},
-    "o4": {"temperature": 1.0, "n": 1},
-    "gpt-5": {"temperature": 1.0, "n": 1},
-    "gemini-3": {"temperature": 1.0, "n": 1},
+    "o1": {"temperature": 1.0},
+    "o3": {"temperature": 1.0},
+    "o4": {"temperature": 1.0},
+    "gpt-5": {"temperature": 1.0},
+    "gemini-3": {"temperature": 1.0},
 }
 
 _PROVIDER_PREFIXES = ("openai/", "anthropic/", "gemini/", "xai/", "deepseek/")
+
+# Models that reject or ignore n > 1 (directly or through a LiteLLM proxy).
+# generate_batch sends them n separate n=1 requests and merges the results.
+# Brands match anywhere in the model name ("us.anthropic.claude-sonnet-4-5"),
+# version prefixes only at the start ("gpt-5.6-terra", "o4-mini").
+_NO_N_BRANDS = ("claude", "grok", "gemini")
+_NO_N_PREFIXES = ("o1", "o3", "o4", "gpt-5")
+_NO_N_PROVIDERS = ("anthropic", "xai", "gemini")
 
 
 def _family(model_id: str) -> str:
@@ -121,6 +133,68 @@ def _family(model_id: str) -> str:
             s = s[len(prefix) :]
             break
     return s
+
+
+def _fans_out_n(model_id: str) -> bool:
+    """True when n > 1 must be sent as n separate requests for this model.
+
+    E.g. "litellm_proxy/claude-sonnet-4-5", "azure_ai/gpt-5.6-terra",
+    "litellm_proxy/xai/grok-4", or any model whose LiteLLM supported-params
+    list is known and lacks "n".
+    """
+    *providers, name = _family(model_id).lower().split("/")
+    if any(p in _NO_N_PROVIDERS for p in providers):
+        return True
+    if any(brand in name for brand in _NO_N_BRANDS):
+        return True
+    for prefix in _NO_N_PREFIXES:
+        if name == prefix or (name.startswith(prefix) and name[len(prefix)] in "-."):
+            return True
+    supported = set(litellm.get_supported_openai_params(model=model_id) or [])
+    return bool(supported) and "n" not in supported
+
+
+def _merge_responses(responses: list[Any], model_id: str) -> GenerateResult:
+    """One GenerateResult from one prompt's responses, summing their usage."""
+    completions: list[str] = []
+    reasoning: list[str | None] = []
+    usage: dict[str, Any] = {}
+    for response in responses:
+        completions.extend(choice.message.content or "" for choice in response.choices)
+        reasoning.extend(_extract_reasoning(response, model_id))
+        for key, value in _extract_usage(response).items():
+            usage[key] = usage.get(key, 0) + value
+        usage["cost_usd"] = usage.get("cost_usd", 0.0) + _extract_cost(
+            response, model_id
+        )
+    return GenerateResult(
+        completions,
+        usage=usage,
+        reasoning=reasoning,
+        model_id=model_id,
+        raw=responses[0] if len(responses) == 1 else list(responses),
+    )
+
+
+def _check_completion_count(
+    model_id: str, n: int, results: list[GenerateResult], fanned_out: bool
+) -> None:
+    """Raise `ValueError` when a prompt got other than `n` completions."""
+    for i, result in enumerate(results):
+        if len(result) == n:
+            continue
+        if fanned_out:
+            hint = f"{n} separate n=1 requests did not return one completion each."
+        else:
+            hint = (
+                "The model or provider may not support n > 1; add it to "
+                "_NO_N_BRANDS / _NO_N_PREFIXES in pyforger/acquire/model.py "
+                "to send n separate requests instead."
+            )
+        raise ValueError(
+            f"{model_id} returned {len(result)} completions for prompt {i}, "
+            f"but n={n} were requested. {hint}"
+        )
 
 
 def _validate_params(model_id: str, **params: Any) -> None:
@@ -277,8 +351,9 @@ class Model:
             max_tokens: Default max tokens. None lets the provider decide.
             num_retries: Retries with exponential backoff on transient
                 failures.
-            show_progress: When True, a multi-prompt generate_batch() call
-                (len(prompts) > 1) shows a live tqdm progress bar to stderr.
+            show_progress: When True, a generate_batch() call that sends more
+                than one request (several prompts, or n > 1 on a model that
+                does not support n) shows a live tqdm progress bar to stderr.
             **kwargs: Passed through to litellm.completion()
                 (e.g. api_base, timeout, organization).
         """
@@ -381,6 +456,11 @@ class Model:
     ) -> list[GenerateResult]:
         """Generate n responses for each prompt in a batch.
 
+        Models that do not support n > 1 (Claude, Grok, Gemini, o1/o3/o4,
+        gpt-5, or any whose LiteLLM supported params lack "n") get n separate
+        concurrent n=1 requests per prompt, merged into one GenerateResult
+        with summed usage and cost. Other models get one request with n.
+
         Args:
             prompts: List of prompts. Each prompt is either a string or
                 a list of chat messages in OpenAI format.
@@ -395,6 +475,10 @@ class Model:
             List of GenerateResult, one per prompt. Each GenerateResult
             is a list of n completion strings carrying usage / reasoning
             / model_id / raw as attributes.
+
+        Raises:
+            ValueError: If a prompt gets other than n completions. Usage is
+                recorded in history before raising.
         """
         if not prompts:
             return []
@@ -402,20 +486,25 @@ class Model:
         temperature = temperature if temperature is not None else self._temperature
         max_tokens = max_tokens if max_tokens is not None else self._max_tokens
 
-        validate_kwargs: dict[str, Any] = {
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "stop": stop,
-            "thinking": self._kwargs.get("thinking"),
-        }
-        if n != 1:
-            validate_kwargs["n"] = n
-        self._check_params(**validate_kwargs)
+        self._check_params(
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stop=stop,
+            thinking=self._kwargs.get("thinking"),
+        )
 
-        all_messages = [_to_messages(prompt) for prompt in prompts]
+        # Models that ignore or reject n > 1 get n concurrent n=1 requests per
+        # prompt, e.g. prompts [A, B] with n=2 send [A, A, B, B].
+        fan_out = n != 1 and _fans_out_n(self._model_id)
+        copies = n if fan_out else 1
+        all_messages = [
+            [dict(message) for message in messages] if fan_out else messages
+            for messages in map(_to_messages, prompts)
+            for _ in range(copies)
+        ]
         call_kwargs = dict(
             model=self._model_id,
-            n=n,
+            n=1 if fan_out else n,
             temperature=temperature,
             max_tokens=max_tokens,
             stop=stop,
@@ -440,28 +529,24 @@ class Model:
             if isinstance(response, Exception):
                 raise response
 
-        results: list[GenerateResult] = []
-        for response in responses:
-            completions = [choice.message.content or "" for choice in response.choices]
-            usage: dict[str, Any] = dict(_extract_usage(response))
-            usage["cost_usd"] = _extract_cost(response, self._model_id)
-            reasoning = _extract_reasoning(response, self._model_id)
-            result = GenerateResult(
-                completions,
-                usage=usage,
-                reasoning=reasoning,
-                model_id=self._model_id,
-                raw=response,
-            )
-            results.append(result)
+        results = [
+            _merge_responses(responses[i : i + copies], self._model_id)
+            for i in range(0, len(responses), copies)
+        ]
+        self._record(results)
+        if n != 1:
+            _check_completion_count(self._model_id, n, results, fanned_out=fan_out)
+        return results
+
+    def _record(self, results: list[GenerateResult]) -> None:
+        """Add each result to history and its usage to the step report, once."""
+        for result in results:
             self.history.append(result)
             _tracking.add_usage(
                 result.usage.get("prompt_tokens", 0) or 0,
                 result.usage.get("completion_tokens", 0) or 0,
                 result.usage.get("cost_usd", 0.0) or 0.0,
             )
-
-        return results
 
 
 # Default cap on generated tokens for a local reasoning model. Reasoning traces
@@ -701,13 +786,10 @@ class LocalModel(Model):
                 raw=None,
             )
             results.append(result)
-            self.history.append(result)
-            _tracking.add_usage(
-                result.usage.get("prompt_tokens", 0) or 0,
-                result.usage.get("completion_tokens", 0) or 0,
-                result.usage.get("cost_usd", 0.0) or 0.0,
-            )
 
+        self._record(results)
+        if n != 1:
+            _check_completion_count(self._model_id, n, results, fanned_out=False)
         return results
 
 
