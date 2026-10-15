@@ -127,7 +127,7 @@ Transform rows without removing items.
 | `translate.to_language` | LLM translation of selected fields into a target natural language. |
 | `translate.to_code` | LLM conversion of fields into code in a target programming language. Strips markdown fences. |
 | `execute_code` | Execute Python code in a sandboxed environment and return the result. |
-| `execute_agent` | Execute fresh agent samples with an explicit runner and retained rollout evidence (`@op(cache=False)`: traced, never memoized). |
+| `execute_agent` | Execute fresh agent samples with an explicit runner; traced, never memoized. |
 | `dynamic_step` | Run dynamic input-specific sub-pipelines that return a string list per input. |
 | `dynamic_step_source` | Generate or inspect sub-pipeline generated for a single input. |
 
