@@ -86,23 +86,26 @@ class TinkerChat:
             top_k=args.top_k,
             stop=self.stop,
         )
-        # Raises TinkerBudgetExceeded; resume the run once the budget allows.
-        self.budget.check(
-            cost_usd(self.base_model, sample_tokens(len(prompt), 1, 0, [max_tokens]))
+        worst_case = cost_usd(
+            self.base_model, sample_tokens(len(prompt), 1, 0, [max_tokens])
         )
-        start = time.monotonic()
-        resp = await self.client.sample_async(
-            prompt=self.types.ModelInput.from_ints(prompt),
-            num_samples=1,
-            sampling_params=params,
-        )
-        seq = resp.sequences[0]
-        self.budget.record(
-            sample_tokens(
-                len(prompt), 1, resp.prompt_cache_hit_tokens, [len(seq.tokens)]
-            ),
-            self.session_id,
-        )
+        # Holds the worst case until the call is recorded, waiting for other
+        # requests when it does not fit; raises TinkerBudgetExceeded when none
+        # are in flight. Resume the run once the budget allows.
+        async with self.budget.reserve(worst_case):
+            start = time.monotonic()
+            resp = await self.client.sample_async(
+                prompt=self.types.ModelInput.from_ints(prompt),
+                num_samples=1,
+                sampling_params=params,
+            )
+            seq = resp.sequences[0]
+            self.budget.record(
+                sample_tokens(
+                    len(prompt), 1, resp.prompt_cache_hit_tokens, [len(seq.tokens)]
+                ),
+                self.session_id,
+            )
         completion = self.tokenizer.decode(seq.tokens, skip_special_tokens=True)
         usage = {
             "base_model": self.base_model,

@@ -263,13 +263,12 @@ async def sample_group(
     import tinker
 
     prompt = prompt_tokens(tokenizer, messages)
-    budget.check(
-        cost_usd(
-            BASE_MODEL,
-            sample_tokens(len(prompt), num_samples, 0, [max_tokens] * num_samples),
-        )
+    worst_case = cost_usd(
+        BASE_MODEL,
+        sample_tokens(len(prompt), num_samples, 0, [max_tokens] * num_samples),
     )
-    async with _sample_slot():
+    # The worst case stays reserved on the ledger until the call is recorded.
+    async with _sample_slot(), budget.reserve(worst_case):
         response = await sampler.sample_async(
             prompt=tinker.ModelInput.from_ints(prompt),
             num_samples=num_samples,
@@ -281,15 +280,15 @@ async def sample_group(
                 stop=stop_token_ids(tokenizer),
             ),
         )
-    budget.record(
-        sample_tokens(
-            len(prompt),
-            num_samples,
-            response.prompt_cache_hit_tokens,
-            [len(sequence.tokens) for sequence in response.sequences],
-        ),
-        session_id(service),
-    )
+        budget.record(
+            sample_tokens(
+                len(prompt),
+                num_samples,
+                response.prompt_cache_hit_tokens,
+                [len(sequence.tokens) for sequence in response.sequences],
+            ),
+            session_id(service),
+        )
     return prompt, list(response.sequences)
 
 
@@ -488,19 +487,22 @@ async def _run_rl(data_dir, init_checkpoint, output_dir, budget, **config):
             train_started = time.time()
             if data:
                 train_tokens = sum(d.model_input.length for d in data)
-                budget.check(cost_usd(BASE_MODEL, {"train": train_tokens}))
-                backward = await trainer.forward_backward_async(
-                    data, "importance_sampling"
-                )
-                update = await trainer.optim_step_async(
-                    tinker.AdamParams(
-                        learning_rate=config["lr"] * LORA_LR_MULTIPLIER,
-                        grad_clip_norm=1.0,
+                # Counts the next batch's in-flight samples too.
+                async with budget.reserve(
+                    cost_usd(BASE_MODEL, {"train": train_tokens})
+                ):
+                    backward = await trainer.forward_backward_async(
+                        data, "importance_sampling"
                     )
-                )
-                await backward.result_async()
-                await update.result_async()
-                budget.record({"train": train_tokens}, session_id(service))
+                    update = await trainer.optim_step_async(
+                        tinker.AdamParams(
+                            learning_rate=config["lr"] * LORA_LR_MULTIPLIER,
+                            grad_clip_norm=1.0,
+                        )
+                    )
+                    await backward.result_async()
+                    await update.result_async()
+                    budget.record({"train": train_tokens}, session_id(service))
             completed = step
             if step < total and pending is None:
                 pending = asyncio.create_task(collect(next_batch(), n))

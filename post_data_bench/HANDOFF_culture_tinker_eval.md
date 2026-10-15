@@ -74,8 +74,9 @@ scope").
   tokens, and samples with the eos ids from `generation_config`
   (`<|im_end|>`, `<|endoftext|>`) as stops. It clamps `max_tokens` to the model
   context and decodes with `skip_special_tokens=True`, so `<think>...</think>`
-  stays inline. It rejects `min_p != 0`. Each request calls `budget.check(worst
-  case)`, then `budget.record(billed tokens, session_id)`. The ledger is the one
+  stays inline. It rejects `min_p != 0`. Each request holds
+  `budget.reserve(worst case)` until `budget.record(billed tokens,
+  session_id)`. The ledger is the one
   named by `TINKER_EVAL_BUDGET` (`sft` | `rl` | `eval`, via
   `rl.tinker_budget.budget_from_env`), or else a record-only
   `<log_dir>/tinker_usage.json`. `usage_summary(rows)` totals tokens and
@@ -260,12 +261,15 @@ triples. `rubric_data`, `rubric_rm` and the final RL defaults (`PDB_TASK` and
   sampled thinking: with ~2k sampled tokens per row it is about $0.0013 a row,
   a few dollars for the full test split. Each request's pre-check reserves its
   worst case, `max_tokens` x $0.60/M (about $0.017 at 28,672).
-- `TinkerChat` checks the ledger against recorded spend only. Unlike Forger's
-  `TinkerUsageLedger`, `TinkerBudget` has no in-flight reservation, so up to
-  `max_connections` concurrent requests can pass the same remaining dollars.
-  With 600 in flight that is up to about $10 past the cap. Coding has the same
-  gap. If culture validation runs inside the $150 SFT cap, add a reservation to
-  `TinkerBudget` (as in commit 9977076 for pyforger) or lower `MAX_CONN`.
+- `TinkerChat` reserves each request's worst case on the ledger
+  (`TinkerBudget.reserve`, the same scheme as Forger's
+  `TinkerUsageLedger.reserve`) until it is recorded, so concurrent requests
+  in one evaluator cannot jointly pass the cap; one that does not fit waits
+  for the others. Reusing `TinkerChat` for culture inherits this. Separate
+  processes (e.g. a TinkerModel pipeline and an evaluation running at once)
+  each overshoot by at most their own in-flight cost, and Forger's and
+  PostDataBench's reservations are separate registries even within one
+  process.
 - Tinker has no `min_p`; keep `--min-p 0`.
 - Never resume a directory across backends; see the resume identity above.
 - The baseline directory name is fixed in two places: `launch_agent.py`

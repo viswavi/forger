@@ -8,11 +8,13 @@ cannot gate calls. Standard library only, so agents can import it directly.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import math
 import os
 import tempfile
+import threading
 from pathlib import Path
 
 BASE_MODEL = "Qwen/Qwen3-8B"
@@ -31,6 +33,13 @@ DEFAULT_LIMITS_USD = {"sft": 150.0, "rl": 400.0}
 DEFAULT_MAX_CONCURRENT_SAMPLES = 600
 # eval: host-side secret-test evaluation; recorded, never limited.
 BUDGETS = ("sft", "rl", "eval")
+
+# Worst-case dollars of this process's in-flight calls, per ledger file, so
+# concurrent calls cannot each pass the limit check on the same spend.
+_RESERVED: dict[Path, tuple[int, float]] = {}  # path -> (calls, dollars)
+_RESERVED_LOCK = threading.Lock()
+# (event loop, future) of calls waiting for an in-flight call to finish.
+_WAITERS: list[tuple[asyncio.AbstractEventLoop, asyncio.Future]] = []
 
 
 class TinkerBudgetExceeded(RuntimeError):
@@ -90,11 +99,18 @@ def budget_from_env(name):
     return TinkerBudget(path, limit, name=name)
 
 
+def _wake(waiter):
+    if not waiter.done():
+        waiter.set_result(None)
+
+
 class TinkerBudget:
     """Share Tinker spend across processes; refuse calls that would exceed the limit.
 
-    `limit=None` records without limiting. Concurrent in-flight calls can
-    overshoot by at most their own cost. Needs POSIX locks (not GCS FUSE).
+    `limit=None` records without limiting. Calls made through `reserve` in one
+    process never jointly overshoot the limit; calls in other processes, or
+    checked with `check` alone, can overshoot it by at most their own in-flight
+    cost. Needs POSIX locks (not GCS FUSE).
     """
 
     def __init__(self, path, limit, name="sft", model=BASE_MODEL):
@@ -187,6 +203,47 @@ class TinkerBudget:
                 f"${self.limit:.2f}; next call needs up to ${estimate_usd:.2f}"
             )
         return state
+
+    @contextlib.asynccontextmanager
+    async def reserve(self, estimate_usd):
+        """Hold a call's worst-case cost against the limit while it runs.
+
+        `async with budget.reserve(cost): ...` checks spend plus this process's
+        other reservations on the same ledger, so e.g. 600 concurrent requests
+        with $1 left cannot all start. When the call does not fit but others
+        are in flight, it waits (without blocking the event loop) for them to
+        finish; when none are, it raises `TinkerBudgetExceeded`. Record the
+        call's tokens before leaving the block. The reservation is released on
+        exit, including on errors and cancellation.
+        """
+        loop = asyncio.get_running_loop()
+        while True:
+            with _RESERVED_LOCK:
+                count, reserved = _RESERVED.get(self.path, (0, 0.0))
+                try:
+                    self.check(reserved + estimate_usd)
+                except TinkerBudgetExceeded:
+                    if not count:
+                        raise
+                    # Registered under the lock, so the next release wakes it.
+                    waiter = loop.create_future()
+                    _WAITERS.append((loop, waiter))
+                else:
+                    _RESERVED[self.path] = (count + 1, reserved + estimate_usd)
+                    break
+            await waiter
+        try:
+            yield
+        finally:
+            with _RESERVED_LOCK:
+                count, reserved = _RESERVED.pop(self.path)
+                if count > 1:
+                    _RESERVED[self.path] = (count - 1, reserved - estimate_usd)
+                waiters = list(_WAITERS)
+                _WAITERS.clear()
+            for waiter_loop, waiter in waiters:
+                with contextlib.suppress(RuntimeError):  # its loop has closed
+                    waiter_loop.call_soon_threadsafe(_wake, waiter)
 
     def record(self, tokens, session_id=None):
         """Charge one call's billed tokens, e.g. {"train": n} or sample_tokens(...)."""

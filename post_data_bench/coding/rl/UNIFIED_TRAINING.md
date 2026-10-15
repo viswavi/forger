@@ -146,7 +146,12 @@ Charges use Tinker's own per-call counts: training tokens per datum, sampled
 tokens, and each sample response's `prompt_cache_hit_tokens` (the shared prompt
 of an n-sample request is billed once, its other copies as cache hits). Each
 call is checked against the remaining budget before it is sent, using its
-maximum cost, so the limit is not crossed except by concurrent in-flight calls.
+maximum cost. Sampling calls (validation evaluation, RL rollouts) and RL
+training steps hold that maximum on the ledger until they are charged, so
+concurrent calls in one process cannot jointly cross the limit: a call that
+does not fit waits for the others, and is refused only when none are in
+flight. Calls in separate processes can still overshoot by their own
+in-flight cost.
 Ledgers live in the persistent agent directory and need POSIX locks; never
 reset them. `tinker_budget.py LEDGER --reconcile START END` compares a ledger
 with Tinker's billing records for the sessions it lists (billing lags by a few
