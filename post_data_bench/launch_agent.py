@@ -256,6 +256,10 @@ def configure_run_token_budgets(directory, task):
         if limit is not None:
             budget_env[f"TINKER_{name.upper()}_USD_LIMIT"] = str(limit)
         TinkerBudget(path, limit, name=name).snapshot()
+    # Forger's TinkerModel (e.g. sampling the student for STaR traces) charges the
+    # same SFT ledger as SFT trials and validation evaluations.
+    budget_env["FORGER_TINKER_USAGE_FILE"] = budget_env["TINKER_SFT_USAGE_FILE"]
+    budget_env["FORGER_TINKER_USD_LIMIT"] = budget_env["TINKER_SFT_USD_LIMIT"]
     if new_config:
         atomic_text(config_path, json.dumps(config, sort_keys=True) + "\n")
     os.environ.update(budget_env)
@@ -819,6 +823,7 @@ _HOST_RL_CACHE_ENV = {
         "HF_HOME",
         "HF_HUB_DISABLE_IMPLICIT_TOKEN",
         "TINKER_EVAL_BUDGET",
+        "PDB_EVAL_BACKEND",
     )
 }
 # Container-side paths, forwarded into the sandbox via forward_env below. Set
@@ -835,8 +840,10 @@ else:
     # bound, so downloads would fill the sandbox's RAM-backed layer. /tmp is
     # this run's local disk. The host value is restored after the session.
     os.environ["HF_HOME"] = "/tmp/hf_cache"
-# The agent's validation evaluations draw on its SFT dollar budget.
+# The agent's validation evaluations draw on its SFT dollar budget and run on
+# Tinker only: eval_launcher.sh defaults to PDB_EVAL_BACKEND and refuses others.
 os.environ["TINKER_EVAL_BUDGET"] = "sft"
+os.environ["PDB_EVAL_BACKEND"] = "tinker"
 
 
 def host_posix_tz():
@@ -1015,6 +1022,10 @@ try:
             "TINKER_RL_USD_LIMIT",
             "TINKER_EVAL_BUDGET",
             "TINKER_MAX_CONCURRENT_SAMPLES",
+            # Forger's TinkerModel charges this ledger (the SFT one).
+            "FORGER_TINKER_USAGE_FILE",
+            "FORGER_TINKER_USD_LIMIT",
+            "PDB_EVAL_BACKEND",
             "PDB_RUN_TAG",
             "TZ",
             "CUDA_VISIBLE_DEVICES",

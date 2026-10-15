@@ -38,11 +38,13 @@ Credentials are provided as `LITELLM_API_KEY` and `LITELLM_BASE_URL`; load them 
 
 DeepSeek-V4-Flash returns its reasoning separately from its answer, and Forger keeps it: `sample_from_LLM` and `generate_from_context` put it under each output's `thinking_trace` key. Use it for <think>...</think> targets instead of making another call to write reasoning. Set the effort explicitly, e.g. `Model(..., reasoning_effort="high")`: without it DeepSeek-V4-Flash does not think at all, and the setting controls how long the reasoning is.
 
+To query the student model itself ({STUDENT_MODEL}, or an SFT trial's tinker:// sampler_path), use `pyforger.acquire.TinkerModel`, never a model on the local GPU. For example: sample reasoning traces in the student's own distribution for STaR targets (`alter.self_taught_reasoner`), check how often the student already solves a candidate problem by sampling it k times (pass@k), or sanity-check a trial's outputs before a full validation run. TinkerModel works with `sample_from_LLM`, `generate_from_context`, and the other operations that take a model; it renders prompts exactly as the validation evaluator does and keeps the student's thinking inline in <think>...</think> (`split_reasoning` separates it). The `n` samples of one prompt are a single request that shares one prefill, so ask for several samples per prompt rather than repeating the prompt. Its calls are charged automatically to the Tinker SFT budget (${TINKER_SFT_USD_LIMIT}, {TINKER_SFT_USAGE_PATH}) shared with SFT trials and validation evaluations, and are refused once that budget is spent.
+
 Iterate with small batches before your final generation run. Web search uses `BRAVE_API_KEY`; Semantic Scholar uses `S2_API_KEY`. Web search has no fixed usage limit, but be reasonable: do not send hundreds of thousands of queries.
 
 # Training and Validation
 
-Your sandbox has {GPU_DESCRIPTION}. Do not train or serve LLMs on it. SFT, RL probes, and all sampling of the student model run on Tinker (remote LoRA training of {STUDENT_MODEL}) through these commands, run from {TASK_DIR}:
+Your sandbox has {GPU_DESCRIPTION}. Do not train or serve LLMs on it. SFT, RL probes, and all sampling of the student model run on Tinker (remote LoRA training of {STUDENT_MODEL}). Train, validate, and probe with these commands, run from {TASK_DIR}:
 
 - SFT trial (use a new output directory per trial):
   python -m rl.agent_training sft --data {RAW_DATA_PATH} --output-dir {AGENT_DATA_DIR}/sft_trial_1
@@ -57,7 +59,7 @@ After your session ends, the host runs a fixed RL recipe on your rubrics, starti
 
 # Budgets
 
-- Tinker usage is billed in dollars from Tinker's own token counts. SFT trials and validation evaluations share ${TINKER_SFT_USD_LIMIT} ({TINKER_SFT_USAGE_PATH}). RL probes share ${TINKER_RL_USD_LIMIT} with the final RL run ({TINKER_RL_USAGE_PATH}): whatever probes spend is unavailable to final RL, which stops when the budget runs out. Prices per million tokens: train $0.44, sampled $0.60, prompt $0.195 ($0.039 when prefix-cached); one SFT epoch costs about (training tokens) x $0.44/1M. Read cost_usd and remaining_usd in those files. The commands refuse calls that would exceed a limit. Use only these commands for Tinker; do not call the Tinker API (TINKER_API_KEY) directly.
+- Tinker usage is billed in dollars from Tinker's own token counts. SFT trials and validation evaluations share ${TINKER_SFT_USD_LIMIT} ({TINKER_SFT_USAGE_PATH}). RL probes share ${TINKER_RL_USD_LIMIT} with the final RL run ({TINKER_RL_USAGE_PATH}): whatever probes spend is unavailable to final RL, which stops when the budget runs out. Prices per million tokens: train $0.44, sampled $0.60, prompt $0.195 ($0.039 when prefix-cached); one SFT epoch costs about (training tokens) x $0.44/1M. Read cost_usd and remaining_usd in those files. Every Tinker call checks its ledger first and is refused if it would exceed the limit. Use only these commands and the Tinker access described under LLM API Usage; do not call the Tinker API (TINKER_API_KEY) directly.
 - The judge has a separate quota of {JUDGE_TOKEN_UNIT_LIMIT} token units ({JUDGE_USAGE_PATH}), shared by your judge experiments, RL probes, and final RL. Exhausting it stops RL at its latest checkpoint. Judge credentials are `LITELLM_JUDGE_API_KEY` (and `LITELLM_JUDGE_BASE_URL`, defaulting to `LITELLM_BASE_URL`). For your own judge calls, use `completion` or `acompletion` from `rl.token_budget` (in {TASK_DIR}) with budget="judge"; they load the judge credentials and record usage. JUDGE_MODEL defaults to litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731, with reasoning effort JUDGE_REASONING_EFFORT (default low).
 - Never delete or reset any usage ledger or change its environment settings.
 

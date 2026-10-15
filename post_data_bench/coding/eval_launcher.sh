@@ -6,7 +6,8 @@ TASK_DIR="$1"; shift
 cd "$TASK_DIR"
 MODEL_PATH=Qwen/Qwen3-4B
 SPLIT=
-SERVER_BACKEND="${SERVER_BACKEND:-vllm}"
+# Agent sandboxes set PDB_EVAL_BACKEND=tinker, so validation never starts a local server.
+SERVER_BACKEND="${SERVER_BACKEND:-${PDB_EVAL_BACKEND:-vllm}}"
 OUT_DIR=
 NUM_SHARDS=
 INDICES=
@@ -31,6 +32,7 @@ while (($#)); do
 done
 [[ "$SPLIT" == val || "$SPLIT" == test ]] || { echo 'Specify --split val|test' >&2; exit 2; }
 [[ "$SERVER_BACKEND" == vllm || "$SERVER_BACKEND" == sglang || "$SERVER_BACKEND" == tinker ]] || { echo 'Unknown server backend' >&2; exit 2; }
+[[ -z "${PDB_EVAL_BACKEND:-}" || "$SERVER_BACKEND" == "$PDB_EVAL_BACKEND" ]] || { echo "Only --server-backend $PDB_EVAL_BACKEND is available here" >&2; exit 2; }
 # Tinker samples remotely, so default to its per-process cap rather than a GPU server's.
 [[ "$SERVER_BACKEND" != tinker ]] || MAX_CONN="${MAX_CONN:-${TINKER_MAX_CONCURRENT_SAMPLES:-600}}"
 DEFAULT_ARGS=(--model-path "$MODEL_PATH" --split "$SPLIT" --max-tokens "${MAX_TOKENS:-28672}" --max-connections "${MAX_CONN:-128}" --temperature 0.6 --top-p 0.95 --top-k 20 --min-p 0)

@@ -35,6 +35,8 @@ response = completion(
 )
 ```
 
+To query the student model itself ({STUDENT_MODEL}), use `pyforger.acquire.TinkerModel("{STUDENT_MODEL}")`, never a model on the local GPU. For example: check which of your candidate situations the student already labels correctly by sampling each a few times, or sample thinking traces in the student's own style. TinkerModel works with `sample_from_LLM`, `generate_from_context`, and the other operations that take a model; it keeps the student's thinking inline in <think>...</think> (`split_reasoning` separates it). The `n` samples of one prompt are a single request that shares one prefill, so ask for several samples per prompt rather than repeating the prompt. Its calls are charged automatically to a Tinker budget of ${TINKER_SFT_USD_LIMIT} ({TINKER_SFT_USAGE_PATH}) and are refused once that budget is spent; do not call the Tinker API (TINKER_API_KEY) any other way.
+
 Iterate with small batches before your final generation run. Web search uses `BRAVE_API_KEY`; Semantic Scholar uses `S2_API_KEY`.
 
 # High-Level Approach

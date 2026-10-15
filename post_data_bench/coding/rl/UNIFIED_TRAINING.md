@@ -78,9 +78,11 @@ env -u SLURM_SUBMIT_DIR bash ./evaluate_model.sh --split val \
 Compare `metrics.json` and inspect `predictions.jsonl` in that output directory
 before selecting a trial. Thinking stays enabled. `--model-path Qwen/Qwen3-8B`
 evaluates the base model. The vLLM and sglang backends remain available for
-local checkpoints. Use a fresh output directory for changed weights or
-settings: existing predictions are resumed, not recomputed. Keeping outputs under `AGENT_DATA_DIR` makes them
-persistent. `env -u SLURM_SUBMIT_DIR` prevents a scheduler working directory
+local checkpoints outside the sandbox; inside it the launcher sets
+`PDB_EVAL_BACKEND=tinker`, which makes Tinker the default and only backend.
+Use a fresh output directory for changed weights or settings: existing
+predictions are resumed, not recomputed. Keeping outputs under
+`AGENT_DATA_DIR` makes them persistent. `env -u SLURM_SUBMIT_DIR` prevents a scheduler working directory
 from overriding the evaluator's location.
 
 The sandbox includes the unchanged evaluator, its explicitly allowlisted code
@@ -125,6 +127,9 @@ tokens: train $0.44, sampled $0.60, prompt prefill $0.195, cached prefill $0.039
   final RL run, sharing one ledger like the judge quota.
 * `TINKER_EVAL_USAGE_FILE`: the host's secret-test evaluation, recorded without
   a limit so the agent cannot starve it.
+* `FORGER_TINKER_USAGE_FILE` / `FORGER_TINKER_USD_LIMIT`: the SFT ledger and
+  limit again, so Forger's `TinkerModel` (student sampling inside pipelines)
+  draws on the SFT budget and refuses calls past it.
 
 Charges use Tinker's own per-call counts: training tokens per datum, sampled
 tokens, and each sample response's `prompt_cache_hit_tokens` (the shared prompt
