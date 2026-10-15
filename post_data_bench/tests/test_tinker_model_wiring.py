@@ -138,12 +138,21 @@ class LauncherWiringTests(unittest.TestCase):
 
 
 class EvalLauncherBackendTests(unittest.TestCase):
-    """PDB_EVAL_BACKEND makes Tinker the default and only evaluation backend."""
+    """Tinker is the default backend; PDB_EVAL_BACKEND makes it the only one."""
 
-    def run_launcher(self, *args, backend="tinker", student=None):
-        """Run eval_launcher.sh with a fake python that logs its arguments.
+    def run_launcher(
+        self,
+        *args,
+        backend="tinker",
+        student=None,
+        launcher="coding/eval_launcher.sh",
+        **environ,
+    ):
+        """Run a launcher with a fake python that logs its arguments.
 
-        Returns (result, logged python calls, the scratch root).
+        `launcher` is eval_launcher.sh (given a scratch task directory) or a
+        task's evaluate_model.sh. Returns (result, logged python calls, the
+        scratch root).
         """
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
@@ -168,8 +177,12 @@ class EvalLauncherBackendTests(unittest.TestCase):
             env.pop(name, None)
         if student is not None:
             env["PDB_STUDENT_MODEL"] = student
+        env.update(environ)
+        command = ["bash", str(ROOT / launcher)]
+        if launcher == "coding/eval_launcher.sh":
+            command.append(str(task))
         result = subprocess.run(
-            ["bash", str(ROOT / "coding/eval_launcher.sh"), str(task), *args],
+            [*command, *args],
             env=env,
             cwd=root,
             capture_output=True,
@@ -213,6 +226,61 @@ class EvalLauncherBackendTests(unittest.TestCase):
                     self.assertTrue(
                         (root / "task/model_outputs/Qwen__Qwen3-8B_tinker/val").is_dir()
                     )
+
+    def test_host_defaults_to_tinker(self):
+        """Outside the sandbox (no pin), the default backend is Tinker too."""
+        result, calls, _ = self.run_launcher(
+            "--split", "val", "--limit", "1", backend=""
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--backend tinker", calls[-1])
+        self.assertIn(
+            f"--log-dir model_outputs/{QWEN.replace('/', '__')}_tinker/val", calls[-1]
+        )
+
+    def test_host_server_backend_variable_selects_a_local_server(self):
+        """SERVER_BACKEND still picks a local server outside the sandbox."""
+        result, calls, _ = self.run_launcher(
+            "--split", "val", "--limit", "1", backend="", SERVER_BACKEND="sglang"
+        )
+        # No GPUs: it stops after checking that sglang is installed.
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertFalse(any("--backend tinker" in call for call in calls))
+        self.assertTrue(any(call.endswith(" sglang") for call in calls), calls)
+
+    def test_culture_keeps_its_local_default(self):
+        """Culture's evaluator has no Tinker backend: its entry point stays local."""
+        for name in ("evaluate_model.sh", "evaluate_normad.sh"):
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as out:
+                    result, calls, _ = self.run_launcher(
+                        "--split",
+                        "val",
+                        "--limit",
+                        "1",
+                        "--out-dir",
+                        out,
+                        backend="",
+                        launcher=f"culture/{name}",
+                    )
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertTrue(calls, result.stderr)
+                self.assertIn("--validate-only", calls[0])
+                self.assertFalse(any("--backend tinker" in call for call in calls))
+                self.assertTrue(any(call.endswith(" vllm") for call in calls), calls)
+        # The sandbox pin still wins, as before.
+        with tempfile.TemporaryDirectory() as out:
+            result, calls, _ = self.run_launcher(
+                "--split",
+                "val",
+                "--limit",
+                "1",
+                "--out-dir",
+                out,
+                launcher="culture/evaluate_model.sh",
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--backend tinker", calls[-1])
 
     def test_local_backend_keeps_the_student_default(self):
         """Outside the sandbox (no pin), an explicit local backend still works."""

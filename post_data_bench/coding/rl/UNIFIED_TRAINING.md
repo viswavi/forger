@@ -78,14 +78,19 @@ env -u SLURM_SUBMIT_DIR bash ./evaluate_model.sh --split val \
 Compare `metrics.json` and inspect `predictions.jsonl` in that output directory
 before selecting a trial. Thinking stays enabled. Omitting `--model-path`
 evaluates the base student, `PDB_STUDENT_MODEL` (the launcher sets it to
-`--model`; otherwise Qwen/Qwen3-8B). The vLLM and sglang backends remain
-available for local checkpoints outside the sandbox; inside it the launcher sets
-`PDB_EVAL_BACKEND=tinker`, which makes Tinker the default and only backend (for
+`--model`; otherwise Qwen/Qwen3-8B). Tinker is the evaluation launcher's
+default backend everywhere for now; a Tinker/Local split of the benchmark is
+planned, and the local default will be revisited then. The vLLM and sglang
+backends remain available for local checkpoints outside the sandbox with
+`--server-backend vllm|sglang` (or `SERVER_BACKEND`); inside it the launcher
+sets `PDB_EVAL_BACKEND=tinker`, which makes Tinker the only backend (for
 `evaluate_model.py --backend` too). The host's secret-test evaluation pins the
 same backend. Scripts that evaluate local checkpoints
 (`run_model_training_and_evaluation.sh`, `rl/eval_rl_checkpoint.sh`,
 `rl/run_rl_training_and_evaluation.sh`, `run_evaluate_only.sh`) name their
-local backend explicitly.
+local backend explicitly, and `culture/evaluate_model.sh`, whose evaluator has
+no Tinker backend yet, keeps its previous default (`PDB_EVAL_BACKEND`, else
+vLLM).
 Use a fresh output directory for changed weights or settings: existing
 predictions are resumed, not recomputed. Keeping outputs under
 `AGENT_DATA_DIR` makes them persistent. `env -u SLURM_SUBMIT_DIR` prevents a scheduler working directory

@@ -240,7 +240,10 @@ the agent time limit. An error or iteration limit still permits validation of an
 already saved submission. See [the unified contract](coding/rl/UNIFIED_TRAINING.md).
 
 For direct evaluation, set `PDB_BENCHMARK_DIR` to the selected task's benchmark
-build and run `{coding,culture}/evaluate_model.sh`. Coding grades only the answer
+build and run `{coding,culture}/evaluate_model.sh`. Coding samples on Tinker by
+default (a Tinker/Local split is planned); `--server-backend vllm|sglang` serves a
+local checkpoint instead. Culture has no Tinker backend yet and defaults to vLLM.
+Coding grades only the answer
 after the final `</think>` in thinking mode; an unclosed trace is not an answer.
 Abstention requires the exact marker in that answer. This rule is shared with the
 legacy execution reward. Request/grading failures fail the run and remain

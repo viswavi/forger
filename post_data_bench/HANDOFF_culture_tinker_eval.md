@@ -46,6 +46,12 @@ scope").
   `--validate-only` pass, so the launcher fails before sampling. The launcher's
   `MODEL_PATH` now defaults to `${PDB_STUDENT_MODEL:-Qwen/Qwen3-8B}` for both
   tasks.
+- The launcher's default backend is Tinker (`${PDB_EVAL_BACKEND:-tinker}`), on
+  the host too, until a Tinker/Local split of the benchmark. Culture cannot use
+  that default yet, so `culture/evaluate_model.sh` exports
+  `SERVER_BACKEND="${SERVER_BACKEND:-${PDB_EVAL_BACKEND:-vllm}}"`, its previous
+  default; `evaluate_normad.sh` and `run_evaluate_only.sh` (which exports
+  sglang) go through it.
 - `launch_agent.py` rejects `--training-mode sft-rl` unless `--task coding` and
   `--model Qwen/Qwen3-8B`. Culture runs only in legacy `--training-mode sft`:
   the sandbox gets `validation_tasks_de_obfuscated.jsonl` (decoded gold labels)
@@ -151,7 +157,10 @@ scope").
    shared package. Pick whichever also works from the flattened sandbox copy in
    Phase 2.
 3. `coding/eval_launcher.sh` should need no change. Confirm that culture
-   accepts every `DEFAULT_ARGS` flag (`--top-k 20 --min-p 0` today).
+   accepts every `DEFAULT_ARGS` flag (`--top-k 20 --min-p 0` today). Remove
+   the local `SERVER_BACKEND` default from `culture/evaluate_model.sh` (and
+   update `test_culture_keeps_its_local_default`) so culture follows the
+   launcher's Tinker default.
 4. Produce the baseline:
    `PDB_BENCHMARK_DIR=/path/to/culture bash culture/evaluate_model.sh --split val --server-backend tinker`.
    It writes `culture/model_outputs/Qwen__Qwen3-8B_tinker/val/`, the directory

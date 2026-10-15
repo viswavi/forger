@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared local-server evaluation launcher for coding and culture.
+# Shared evaluation launcher for coding and culture: Tinker or a local server.
 set -euo pipefail
 HELPER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TASK_DIR="$1"; shift
@@ -7,9 +7,11 @@ cd "$TASK_DIR"
 # Without --model-path, evaluate the base student (agent sandboxes set PDB_STUDENT_MODEL).
 MODEL_PATH="${PDB_STUDENT_MODEL:-Qwen/Qwen3-8B}"
 SPLIT=
-# Agent sandboxes set PDB_EVAL_BACKEND=tinker, so validation never starts a local server.
-# Local-checkpoint callers pass --server-backend (or SERVER_BACKEND) explicitly.
-SERVER_BACKEND="${SERVER_BACKEND:-${PDB_EVAL_BACKEND:-vllm}}"
+# Tinker by default, on the host too. Agent sandboxes also set PDB_EVAL_BACKEND=tinker,
+# which refuses local servers there. Elsewhere, --server-backend vllm|sglang (or
+# SERVER_BACKEND) serves a local checkpoint; culture's evaluate_model.sh exports a local
+# default. A Tinker/Local split of the benchmark is coming; revisit this default then.
+SERVER_BACKEND="${SERVER_BACKEND:-${PDB_EVAL_BACKEND:-tinker}}"
 OUT_DIR=
 NUM_SHARDS=
 INDICES=

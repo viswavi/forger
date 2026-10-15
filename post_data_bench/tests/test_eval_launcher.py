@@ -65,6 +65,8 @@ class LauncherTests(unittest.TestCase):
                         str(task),
                         "--split",
                         "val",
+                        "--server-backend",
+                        "vllm",
                         "--out-dir",
                         str(root / "out"),
                     ],
