@@ -227,10 +227,11 @@ keeping rows whose pass rate (passed / valid grades) is in `[min_rate, max_rate]
 
 The default prompt asks for a final `ANSWER: ...` line (`prompt_template` replaces it). `metric` is `"exact_match"`,
 `"rouge_l"` (F1 at least `rouge_l_threshold`), or a verifier `(prediction, row) -> bool | None`, e.g. one that runs
-tests against generated code. The prediction is what `extract_answer` takes from the completion (default: the first line
-after the last `ANSWER:`, else a `\boxed{}` or last number); pass `extract_answer=lambda t: t` to grade whole
-completions. An empty completion, an unclosed `<think>` block, one with no extractable answer, or a verifier returning
-`None` grades `None`: excluded, not failed. A completion cut off without `<think>` falls back to its last number.
+tests against generated code. A verifier gets the whole completion after its closed `<think>` block; the string
+metrics compare what `extract_answer` takes from it (default: the first line after the last `ANSWER:`, else a
+`\boxed{}` or last number). An empty completion, an unclosed `<think>` block, one with no extractable answer, or
+a verifier returning `None` grades `None`: excluded, not failed. A completion cut off without `<think>` falls back
+to its last number.
 `by_pass_at_k` needs all `k` grades valid unless `min_valid` allows fewer, and a row needs both comparative grades.
 Grades use the `{group: [True | False | None, ...]}` format of `filter.by_success_rate`, and `min_rate`, `max_rate`, and
 `min_valid` mean the same there; with `outcomes_field` set, kept rows carry them (`{"model": [...]}`, or

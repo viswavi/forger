@@ -255,7 +255,9 @@ class TestPassAtK:
         """Switching metric regrades the cached samples."""
         model = ScriptedModel("m", self.SCRIPT)
         _pass_at_k(self.ROWS, model)
-        kept = _pass_at_k(self.ROWS, model, metric=lambda pred, row: pred == "0")
+        kept = _pass_at_k(
+            self.ROWS, model, metric=lambda pred, row: pred.strip() == "ANSWER: 0"
+        )
         assert [r["task"] for r in kept] == ["t2", "t4"]  # rates 3/4 and 1/4
         assert len(model.calls) == 1
 
@@ -285,20 +287,36 @@ class TestPassAtK:
         assert kept[0]["evaluations"] == {"model": [True, None]}
 
     def test_whole_completion_for_verifier(self):
-        """extract_answer=lambda t: t hands the verifier the raw completion."""
+        """A verifier gets the completion after its closed <think> block."""
         code = "def f():\n    return 1"
-        model = ScriptedModel("m", {"t": [code]})
+        seen: list[str] = []
+
+        def verify(prediction, row):
+            seen.append(prediction)
+            return prediction.strip() == code
+
+        model = ScriptedModel("m", {"t": [f"<think>plan</think>\n{code}"]})
         rows = [{"task": "t", "answer": "1"}]
+        kept = _pass_at_k(rows, model, k=1, metric=verify, min_rate=1.0, max_rate=1.0)
+        assert kept == rows
+        assert seen == [f"\n{code}"]
+
+    def test_verifier_skips_unclosed_thinking(self):
+        """A verifier is not called on a <think> block that never closes."""
+        calls: list[str] = []
+        model = ScriptedModel("m", {"t": ["<think>still going", "42"]})
+        rows = [{"task": "t", "answer": "42"}]
         kept = _pass_at_k(
             rows,
             model,
-            k=1,
-            metric=lambda prediction, row: prediction == code,
-            extract_answer=lambda text: text,
-            min_rate=1.0,
+            k=2,
+            metric=lambda prediction, row: calls.append(prediction) or True,
+            min_valid=1,
+            outcomes_field="evaluations",
             max_rate=1.0,
         )
-        assert kept == rows
+        assert kept[0]["evaluations"] == {"model": [None, True]}
+        assert calls == ["42"]
 
     def test_rouge_l_threshold(self):
         """rouge_l passes at F1 >= rouge_l_threshold."""
@@ -310,7 +328,7 @@ class TestPassAtK:
         assert len(model.calls) == 1
 
     def test_custom_verifier(self):
-        """A verifier gets the extracted prediction and the row; None excludes."""
+        """With extract_answer, a verifier gets its output and the row."""
         seen: list[tuple[str, str]] = []
 
         def verify(prediction, row):
@@ -320,7 +338,13 @@ class TestPassAtK:
         model = ScriptedModel("m", {"t": ["ANSWER: yes", "ANSWER: skip", "ANSWER: no"]})
         rows = [{"task": "t", "answer": "yes"}]
         kept = _pass_at_k(
-            rows, model, k=3, metric=verify, min_valid=2, outcomes_field="evaluations"
+            rows,
+            model,
+            k=3,
+            metric=verify,
+            extract_answer=lambda text: text.removeprefix("ANSWER: "),
+            min_valid=2,
+            outcomes_field="evaluations",
         )
         assert kept[0]["evaluations"] == {"model": [True, None, False]}
         assert seen == [("yes", "t"), ("skip", "t"), ("no", "t")]
