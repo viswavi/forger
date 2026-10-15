@@ -13,19 +13,11 @@ from pyforger.op import op
 _SOURCE_VERSION = "resource-v4-record"
 
 
-def _runner(
+def _default_runner(
     model: Model | None,
-    runner: DynamicStepRunner | None,
     max_iterations: int,
     execution_timeout_s: float,
-) -> DynamicStepRunner:
-    if runner is not None:
-        if model is not None or max_iterations != 20 or execution_timeout_s != 10.0:
-            raise ValueError(
-                "An explicit runner owns its model and limits; "
-                "configure them on the runner"
-            )
-        return runner
+) -> LocalAgentRunner:
     if model is None:
         raise ValueError("Provide a model or an explicit runner")
     return LocalAgentRunner(
@@ -63,9 +55,8 @@ def dynamic_step_source(
         raise ValueError("max_iterations must be a positive integer")
     if not math.isfinite(execution_timeout_s) or execution_timeout_s <= 0:
         raise ValueError("execution_timeout_s must be positive and finite")
-    return _runner(model, runner, max_iterations, execution_timeout_s).generate_source(
-        goal, item
-    )
+    runner = runner or _default_runner(model, max_iterations, execution_timeout_s)
+    return runner.generate_source(goal, item)
 
 
 @op(cache=False)
@@ -93,7 +84,7 @@ def dynamic_step(
     if not inputs:
         return []
 
-    backend = _runner(model, runner, max_iterations, execution_timeout_s)
+    backend = runner or _default_runner(model, max_iterations, execution_timeout_s)
 
     def run(item: dict[str, Any]) -> list[str]:
         if runner is None:

@@ -550,8 +550,16 @@ def test_explicit_local_backend_shares_dynamic_step_contract(tmp_path):
     assert other.generated == 1
 
 
-def test_explicit_backend_rejects_conflicting_outer_configuration():
-    """Model/limits belong to the supplied backend rather than being ignored."""
+def test_explicit_backend_takes_precedence_over_default_configuration(monkeypatch):
+    """A supplied backend bypasses construction of the default local runner."""
     runner = local_agent.LocalAgentRunner(Model("openai/test"))
-    with pytest.raises(ValueError, match="owns its model"):
-        dynamic_step([{"x": 1}], "goal", Model("openai/test"), runner=runner)
+    monkeypatch.setattr(runner, "generate_source", lambda goal, item: "retained source")
+    monkeypatch.setattr(
+        dynamic, "_default_runner", lambda *args: pytest.fail("default constructed")
+    )
+    assert (
+        dynamic_step_source.no_cache(
+            {"x": 1}, "goal", Model("openai/unused"), runner=runner
+        )
+        == "retained source"
+    )
