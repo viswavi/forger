@@ -152,6 +152,15 @@ class LocalAgentRunner:
         self.max_iterations = max_iterations
         self.execution_timeout_s = execution_timeout_s
 
+    def cache_key(self) -> tuple[object, ...]:
+        """Identify local synthesis and execution settings without credentials."""
+        return (
+            "local-restricted-python-v1",
+            (self.model.cache_key(), self.model.config.api_base),
+            self.max_iterations,
+            self.execution_timeout_s,
+        )
+
     def generate_source(self, goal: str, item: dict[str, Any]) -> str:
         """Synthesize and validate a restricted program for a row."""
         model = self.model

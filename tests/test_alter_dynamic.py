@@ -515,3 +515,43 @@ def test_local_runner_executes_saved_source_without_model():
     assert runner.execute(
         "def run(item): return [item['text'].upper()]", {"text": "hello"}
     ) == ["HELLO"]
+
+
+def test_explicit_local_backend_shares_dynamic_step_contract(tmp_path):
+    """An explicit backend preserves source inspection, caching, and execution."""
+
+    class ProgramRunner:
+        def __init__(self, identity):
+            self.identity = identity
+            self.generated = 0
+            self.executed = 0
+
+        def cache_key(self):
+            return self.identity
+
+        def generate_source(self, goal, item):
+            self.generated += 1
+            return "def run(item): return [item['text'].upper()]"
+
+        def execute(self, code, item):
+            self.executed += 1
+            return local_agent._execute(code, item, 5)
+
+    first = ProgramRunner("backend-one")
+    rows = [{"text": "hello"}]
+    assert dynamic_step(rows, "uppercase", runner=first) == [["HELLO"]]
+    assert dynamic_step(rows, "uppercase", runner=first) == [["HELLO"]]
+    assert first.generated == 1 and first.executed == 2
+    assert dynamic_step_source.cache_only(
+        rows[0], "uppercase", runner=first
+    ).startswith("def")
+    other = ProgramRunner("backend-two")
+    assert dynamic_step(rows, "uppercase", runner=other) == [["HELLO"]]
+    assert other.generated == 1
+
+
+def test_explicit_backend_rejects_conflicting_outer_configuration():
+    """Model/limits belong to the supplied backend rather than being ignored."""
+    runner = local_agent.LocalAgentRunner(Model("openai/test"))
+    with pytest.raises(ValueError, match="owns its model"):
+        dynamic_step([{"x": 1}], "goal", Model("openai/test"), runner=runner)
