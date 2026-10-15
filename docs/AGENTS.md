@@ -232,11 +232,10 @@ of surrounding whitespace. `metric` is `"exact_match"` (normalized equality with
 least `rouge_l_threshold`), or a verifier `(prediction, row) -> bool | None`, e.g. one that runs tests against
 generated code. By default the whole answer segment is compared, so for `exact_match` the task or `prompt_template`
 should ask for a bare answer, or pass your own `extract_answer(completion) -> str | None`. It replaces the default and
-sees the raw completion, thinking included; e.g. `lambda t: default_extract_answer(answer_segment(t) or "")` takes the
-number after `ANSWER:`, in `\boxed{}`, or after `####` (else the last number) from the answer segment. By default an
-empty answer segment or an unclosed `<think>` block grades `None`, as does `extract_answer` or a verifier returning
-`None`: excluded, not failed. A model that does not return exactly `n` completions per prompt raises `ValueError`;
-missing samples are never padded.
+sees the raw completion, thinking included; e.g. `lambda t: t.rsplit("ANSWER:", 1)[-1].strip()` keeps what follows
+the last `ANSWER:`. By default an empty answer segment or an unclosed `<think>` block grades `None`, as does
+`extract_answer` or a verifier returning `None`: excluded, not failed. A model that does not return exactly `n`
+completions per prompt raises `ValueError`; missing samples are never padded.
 `by_pass_at_k` needs all `k` grades valid unless `min_valid` allows fewer, and a row needs both comparative grades.
 Grades use the `{group: [True | False | None, ...]}` format of `filter.by_success_rate`, and `min_rate`, `max_rate`, and
 `min_valid` mean the same there; with `outcomes_field` set, kept rows carry them (`{"model": [...]}`, or

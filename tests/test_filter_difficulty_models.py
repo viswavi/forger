@@ -10,7 +10,6 @@ from pydantic import StrictBool, TypeAdapter
 from pyforger import _tracking
 from pyforger._render import render_scores
 from pyforger.acquire.model import GenerateResult, Model
-from pyforger.alter.generate import default_extract_answer
 from pyforger.filter import by_comparative_difficulty, by_pass_at_k
 from pyforger.filter.model_difficulty import answer_segment
 from pyforger.steps import pipeline, step
@@ -109,9 +108,11 @@ def _comparative(rows=ROWS, weak=None, strong=None, **kwargs):
 
 
 def _answer_line(text):
-    """Read ANSWER:/boxed markers after the thinking, the way a caller would."""
+    """Keep what follows the last ANSWER: after the thinking, as a caller might."""
     segment = answer_segment(text)
-    return None if segment is None else default_extract_answer(segment)
+    if segment is None or "ANSWER:" not in segment:
+        return None
+    return segment.rsplit("ANSWER:", 1)[1].strip().replace(",", "")
 
 
 def _pass_at_k(rows, model, **kwargs):

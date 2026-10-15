@@ -112,8 +112,8 @@ def by_comparative_difficulty(
             ``answer_segment``, returns the text after a closed ``<think>``
             block, stripped, and ``None`` when the block never closes or
             nothing follows it. A replacement sees the thinking too; e.g.
-            ``lambda t: default_extract_answer(answer_segment(t) or "")``
-            reads an ``ANSWER:``, ``\boxed{}``, or ``####`` marker after it.
+            ``lambda t: t.rsplit("ANSWER:", 1)[-1].strip()`` keeps what
+            follows the last ``ANSWER:``.
         prompt_template: Format string or ``(row) -> Prompt`` callable replacing
             the default prompt (the task text), e.g. to ask for a final
             ``ANSWER: ...`` line.
