@@ -1,4 +1,4 @@
-"""Uncached row operations for executing fresh agent samples."""
+"""Row operations for executing fresh agent samples."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
+from pyforger.op import op
 from pyforger.trials import AgentRunner, EnvironmentFactory, TrialRequest
 from pyforger.trials import execute_agent as execute_one
 from pyforger.utils import get_field
@@ -30,6 +31,7 @@ def _output(root: Path, request: TrialRequest) -> Path:
     return Path(root) / hashlib.sha256(request.trial_id.encode()).hexdigest()
 
 
+@op(name="alter.execute_agent", cache=False)
 def execute_agent(
     items: list[dict[str, Any]],
     *,
@@ -39,7 +41,12 @@ def execute_agent(
     output_field: str = "rollout",
     environment_factory: EnvironmentFactory | None = None,
 ) -> list[dict[str, Any]]:
-    """Execute explicit row requests once; never implicitly cache samples."""
+    """Execute explicit row requests once per call.
+
+    Decorated with ``@op(cache=False)`` like every other alter operation:
+    calls are traced, but samples are always executed fresh and never
+    memoized, because a rollout must be an independent sample.
+    """
     return [
         {
             **item,

@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from pyforger.artifacts import ArtifactRef
+from pyforger.op import clear_trace, trace
 from pyforger.trials import (
     RolloutRecord,
     RolloutResult,
@@ -213,12 +214,15 @@ def test_rows_are_not_cached_and_outputs_have_safe_explicit_identity(tmp_path):
     items = [{"request": req.model_dump(mode="json"), "upstream": 3}]
     factory = LocalFactory(tmp_path / "envs")
     runner = CommandAgentRunner()
+    clear_trace()
     one = execute_rows(
         items, runner=runner, output=tmp_path / "one", environment_factory=factory
     )
     two = execute_rows(
         items, runner=runner, output=tmp_path / "two", environment_factory=factory
     )
+    records = [r for r in trace() if r.op_name == "alter.execute_agent"]
+    assert len(records) == 2 and not any(r.cache_hit for r in records)
     assert len(factory.environments) == 2
     assert one[0]["upstream"] == two[0]["upstream"] == 3
     assert "rollout" not in items[0]
