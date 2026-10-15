@@ -70,8 +70,10 @@ approach ([Zelikman et al., 2022](https://arxiv.org/abs/2203.14465)), closely re
 answers (e.g. competition-math problems with checked integer answers) but want long chain-of-thought traces for SFT,
 do not copy reasoning from a stronger teacher -- generate it from the *student* you intend to finetune. This is
 generally necessary for training reasoning-style models on tasks that require extended reasoning, such as difficult
-math, programming, or embodied reasoning. Sample `n` solutions per prompt from the student (use `acquire.LocalModel` to
-run an open-weights reasoning model on-GPU via vLLM with a generous `max_tokens`/`max_model_len` so traces are not
-truncated), keep only the solutions whose final answer matches the verified answer, and use each kept trace as a
-training target. `alter.self_taught_reasoner` implements exactly this: it returns one row per correct sample (a prompt
-with 0 correct samples drops out), with the student's reasoning trace and answer split into separate fields.
+math, programming, or embodied reasoning. Sample `n` solutions per prompt from the student (use `acquire.TinkerModel`
+to sample the base student or its `tinker://` checkpoint on Tinker, where the `n` samples share one prefill, or
+`acquire.LocalModel` to run it on a local GPU via vLLM; set a generous `max_tokens` so traces are not truncated), keep
+only the solutions whose final answer matches the verified answer, and use each kept trace as a training target.
+`alter.self_taught_reasoner` implements exactly this: it returns one row per correct sample (a prompt with 0 correct
+samples drops out), with the student's reasoning trace and answer split into separate fields. Tinker samples are
+charged to the Tinker dollar budget when one is configured (see `acquire.md`).

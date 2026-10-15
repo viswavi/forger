@@ -27,10 +27,11 @@ output row carrying the student's raw response plus, when `split_thinking=True`,
 the inline `<think>` block); the matched student answer becomes the new ground truth.
 
 ```python
-# LocalModel needs vLLM: pip install "pyforger[vllm]"
 from pyforger.alter import self_taught_reasoner
-from pyforger.acquire import LocalModel
+from pyforger.acquire import TinkerModel
 
-student = LocalModel("Qwen/Qwen3-4B", max_model_len=40960)
+student = TinkerModel("Qwen/Qwen3-8B", max_tokens=16384)  # n samples per problem share one prefill
 rows = self_taught_reasoner(problems, solver_prompt, student, n=8, reference_field="final_answer")
 ```
+
+`LocalModel("Qwen/Qwen3-8B", max_model_len=40960)` samples the same student on a local GPU via vLLM instead.

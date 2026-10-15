@@ -19,12 +19,38 @@ Generate or retrieve new rows.
 | `ArxivRetrievalSource`, `S2RetrievalSource` |   |Per-backend source classes. |
 | `Model` |   | LLM wrapper (initialized by user). Otherwise, LLM generation should be called with `sample_from_LLM`. |
 | `LocalModel` |   | On-GPU vLLM model with `Model`'s interface (needs the `vllm` extra). Zero cost, `<think>` inline. |
+| `TinkerModel` |   | Base model or `tinker://` checkpoint sampled on Tinker; `Model`'s interface, `<think>` inline. |
 | `split_reasoning` |   | `str -> (thinking, answer)`: splits a reasoning-model completion on `</think>`. |
 
 `sample_from_LLM` performs `n` LLM calls per input and returns parsed dicts. It does under-the-hood batching and
 validation, making this a superior choice to calling `Model` directly. Any reasoning traces contained in a completion are
-contained in the output dict under a `thinking_trace` key. Inline traces are not extracted: `LocalModel` leaves `<think>`
-blocks in the completion text and supplies `None` for that metadata; use `split_reasoning` to separate them out.
+contained in the output dict under a `thinking_trace` key. Inline traces are not extracted: `LocalModel` and
+`TinkerModel` leave `<think>` blocks in the completion text and supply `None` for that metadata; use `split_reasoning`
+to separate them out.
+
+`TinkerModel` samples a base model (e.g. `"Qwen/Qwen3-8B"`) or a trained `tinker://...` sampler checkpoint remotely on
+Tinker. Use it whenever you need a student model's own outputs: STaR traces, pass@k difficulty checks, or sanity
+checks of a checkpoint. It works with every op that takes a `Model` (`sample_from_LLM`, `generate_from_context`,
+`self_taught_reasoner`, `filter.by_llm_score`, ...). Prompts are rendered with the model's chat template and stop at its
+eos tokens, as a vLLM chat server would; defaults are Qwen3's thinking-mode settings (`temperature=0.6`, `top_p=0.95`,
+`top_k=20`), and `enable_thinking=False` turns thinking off. The `n` samples of one prompt are a single request, so
+they share one prefill: the prompt is billed once and its other `n - 1` copies at the cheaper cached rate. Prompts run
+concurrently, at most `TINKER_MAX_CONCURRENT_SAMPLES` (default 600) requests at a time.
+
+`result.usage` reports prompt, completion and cached prompt tokens, Tinker's billed token kinds, each sample's stop
+reason (`"length"` means truncated), and `cost_usd` from Tinker's rate card (Qwen3-8B is built in; pass `prices=` for
+other models). When `FORGER_TINKER_USAGE_FILE` and `FORGER_TINKER_USD_LIMIT` are set, every request is charged to that
+shared dollar ledger, and a request whose worst-case cost would cross the limit raises `TinkerBudgetExceeded` instead
+of being sent. Install with `pip install "pyforger[tinker]"`; the SDK reads `TINKER_API_KEY`.
+
+```python
+from pyforger.acquire import TinkerModel, split_reasoning
+
+student = TinkerModel("Qwen/Qwen3-8B", max_tokens=16384)  # or TinkerModel("tinker://<run>/sampler_weights/<name>")
+samples = student.generate("How many primes are there below 100? End with ANSWER: <n>.", n=8)  # one request
+thinking, answer = split_reasoning(samples[0])
+solved = sum(s.rstrip().endswith("ANSWER: 25") for s in samples) / len(samples)  # pass rate over 8 samples
+```
 
 The retrieval functions take one query string or a list of queries as their first argument and return a flat list of
 rows, each stamped with its `query`. `mode` is keyword-only (`mode=RetrieveMode.RANDOM` for random sampling where

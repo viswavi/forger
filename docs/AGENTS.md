@@ -66,7 +66,9 @@ do not add reasoning tokens again. Other model families have no defined unit wei
 plus cumulative `model.total_token_units`, `model.total_cost`, and raw `model.total_usage`.
 Unknown model weights or missing usage produce `NaN` token units, including in the
 cumulative total. Local GPU inference has zero API cost and is exempt from quotas;
-models outside the fixed list still report `NaN` units.
+models outside the fixed list still report `NaN` units. `TinkerModel` reports Tinker
+dollars in `cost_usd` and is charged to a separate dollar ledger, not to token units
+(see `acquire.md`).
 INFO logs show both totals after the first call and every million units (raw tokens
 when weights are unknown). Dollar costs use provider metadata or LiteLLM pricing;
 unavailable prices warn and contribute zero to `total_cost`.
@@ -117,7 +119,8 @@ Direct calls to source `.fetch()` methods remain uncached.
 
 The detailed reference is split by topic under `docs/agents/`; read the file for the operations you use:
 
-- [`docs/agents/acquire.md`](agents/acquire.md): Generation with `sample_from_LLM`, retrieval, rubric generation.
+- [`docs/agents/acquire.md`](agents/acquire.md): Generation with `sample_from_LLM`, `TinkerModel` student sampling,
+  retrieval, rubric generation.
 - [`docs/agents/alter.md`](agents/alter.md): Row transforms: `generate_from_context`, translation, code execution, STaR.
 - [`docs/agents/filter.md`](agents/filter.md): Quality and diversity filters, including the LLM judge.
 - [`docs/agents/inspect.md`](agents/inspect.md): Reports on rows: `topic_based_clustering` and `eval_tree`.

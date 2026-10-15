@@ -24,11 +24,15 @@ from pyforger.acquire.sources import (
     WebRetrievalSource,
     WikiRetrievalSource,
 )
+from pyforger.acquire.tinker_model import TinkerModel
+from pyforger.tinker_usage import TinkerBudgetExceeded
 
 __all__ = [
     "GenerateResult",
     "Model",
     "LocalModel",
+    "TinkerModel",
+    "TinkerBudgetExceeded",
     "split_reasoning",
     "retrieve",
     "retrieve_from_web",
