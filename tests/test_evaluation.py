@@ -132,6 +132,22 @@ def test_evidence_is_verified_after_adapter_returns(tmp_path):
         evaluate(artifact(tmp_path), MutatingEvaluator(), tmp_path / "grade")
 
 
+def test_evaluator_evidence_must_come_from_reserved_output(tmp_path):
+    """Evaluator evidence must be captured from the reserved evidence path."""
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / "grade.json").write_text("{}")
+    evidence = ArtifactRef.capture(external)
+
+    class ExternalEvaluator:
+        def evaluate(self, artifact, output):
+            return EvaluationResult(passed=True, evidence=evidence)
+
+    with pytest.raises(ValueError, match="captured from output/evidence"):
+        evaluate(artifact(tmp_path), ExternalEvaluator(), tmp_path / "grade")
+    assert not (tmp_path / "grade" / "evaluation.json").exists()
+
+
 def test_invalid_adapter_result(tmp_path):
     """Invalid adapter result."""
 

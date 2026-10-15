@@ -76,9 +76,10 @@ Control flow (`for`, `if`, comprehensions, helper functions) in plain Python can
 ### Operation reference
 
 All operations are plain functions. Operations that perform LLM calls or expensive in-process work (`sample_from_LLM`
-every `alter.*` op, every `filter.*` op, every `inspect.*` op) are decorated internally with `@op`, so their results
+every `filter.*` op, every `inspect.*` op, and most `alter.*` ops) are decorated internally with `@op`, so their results
 are cached on disk and traced. The retrieval functions (`retrieve`, `retrieve_from_*`) are not internally cached; wrap
-them with `@op` to memoize their results.
+them with `@op` to memoize their results. `alter.execute_agent` is a deliberate exception: it executes fresh agent
+samples and therefore is not cached or traced by `@op`.
 
 ### Public API summary
 
@@ -126,6 +127,7 @@ Transform rows without removing items.
 | `translate.to_language` | LLM translation of selected fields into a target natural language. |
 | `translate.to_code` | LLM conversion of fields into code in a target programming language. Strips markdown fences. |
 | `execute_code` | Execute Python code in a sandboxed environment and return the result. |
+| `execute_agent` | Execute fresh, uncached agent samples with an explicit runner and retained rollout evidence. |
 | `dynamic_step` | Run dynamic input-specific sub-pipelines that return a string list per input. |
 | `dynamic_step_source` | Generate or inspect sub-pipeline generated for a single input. |
 

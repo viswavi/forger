@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import json
-import math
-from copy import deepcopy
+import os
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Annotated, Protocol
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    JsonValue,
     StrictBool,
     StrictFloat,
     StrictInt,
@@ -20,41 +20,29 @@ from pydantic import (
 
 from pyforger.artifacts import ArtifactRef
 
+FiniteScore = Annotated[StrictFloat, Field(allow_inf_nan=False)]
+
+
+def _stored_path(path: Path) -> Path:
+    path = Path(os.path.abspath(path))
+    return path.parent.resolve() / path.name
+
 
 class EvaluationResult(BaseModel):
     """Optional outcomes, attribution, metadata, and independently saved evidence."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
-    score: StrictFloat | StrictInt | None = None
+    score: FiniteScore | StrictInt | None = None
     passed: StrictBool | None = None
     evidence: ArtifactRef | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, JsonValue] = Field(default_factory=dict)
     attribution: str | None = None
     reason: str | None = None
 
     @model_validator(mode="after")
-    def validate_record(self) -> EvaluationResult:
-        """Require lossless JSON metadata and finite scores; verify evidence."""
-        if self.score is not None and not math.isfinite(self.score):
-            raise ValueError("score must be finite or None")
-
-        def validate(value: Any) -> None:
-            if isinstance(value, dict):
-                if any(not isinstance(key, str) for key in value):
-                    raise ValueError("metadata keys must be strings")
-                for child in value.values():
-                    validate(child)
-            elif isinstance(value, list):
-                for child in value:
-                    validate(child)
-            elif isinstance(value, float) and not math.isfinite(value):
-                raise ValueError("metadata must contain finite numbers")
-            elif value is not None and type(value) not in (str, bool, int, float):
-                raise ValueError("metadata must contain JSON values")
-
-        validate(self.metadata)
-        object.__setattr__(self, "metadata", deepcopy(self.metadata))
+    def verify_evidence(self) -> EvaluationResult:
+        """Verify retained evidence whenever an outcome is validated."""
         self.verify()
         return self
 
@@ -87,6 +75,10 @@ def evaluate(
     result = evaluator.evaluate(artifact, output / "evidence")
     if not isinstance(result, EvaluationResult):
         raise TypeError("Evaluator.evaluate must return EvaluationResult")
+    if result.evidence is not None and result.evidence.root != _stored_path(
+        output / "evidence"
+    ):
+        raise ValueError("Evaluator evidence must be captured from output/evidence")
     # The evaluator had write access to its evidence directory and read access
     # to the artifact; verify both once before persisting the result.
     artifact.verify()
