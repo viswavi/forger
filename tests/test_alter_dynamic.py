@@ -48,11 +48,15 @@ def test_source_cache_order_and_overlap(tmp_path, monkeypatch):
     monkeypatch.setattr(local_agent, "_execute", execute)
     model = Model("openai/test")
     first = dynamic_step(
-        [{"text": "a"}, {"text": "b"}, {"text": "a"}], "uppercase", model
+        [{"text": "a"}, {"text": "b"}, {"text": "a"}],
+        "uppercase",
+        local_agent.LocalAgentRunner(model),
     )
     assert first == [["A", "a"], ["B", "b"], ["A", "a"]]
     assert first[0] is not first[2]
-    assert dynamic_step([{"text": "b"}, {"text": "c"}], "uppercase", model) == [
+    assert dynamic_step(
+        [{"text": "b"}, {"text": "c"}], "uppercase", local_agent.LocalAgentRunner(model)
+    ) == [
         ["B", "b"],
         ["C", "c"],
     ]
@@ -92,7 +96,7 @@ def test_parallel_limit(tmp_path, monkeypatch):
     assert dynamic_step(
         [{"text": x} for x in "abcd"],
         "goal",
-        Model("openai/test"),
+        local_agent.LocalAgentRunner(Model("openai/test")),
         max_parallel=2,
     ) == [[item] for item in "abcd"]
     assert peak == 2
@@ -146,7 +150,10 @@ def test_worker_restrictions_and_timeout():
 
 def test_empty_and_validation(tmp_path):
     """Test empty and validation."""
-    assert dynamic_step([], "goal", Model("openai/test")) == []
+    assert (
+        dynamic_step([], "goal", local_agent.LocalAgentRunner(Model("openai/test")))
+        == []
+    )
     with pytest.raises(ValueError):
         dynamic_step([], "goal", None, max_parallel=0)
     with pytest.raises(TypeError, match="each input must be a dict"):
@@ -168,7 +175,9 @@ def test_records_with_reordered_keys_share_generation(monkeypatch):
     )
     first = {"text": "challenge", "meta": {"a": 1, "b": 2}}
     second = {"meta": {"b": 2, "a": 1}, "text": "challenge"}
-    assert dynamic_step([first, second], "goal", Model("openai/test")) == [
+    assert dynamic_step(
+        [first, second], "goal", local_agent.LocalAgentRunner(Model("openai/test"))
+    ) == [
         ["challenge"],
         ["challenge"],
     ]
@@ -189,7 +198,9 @@ def test_failed_generation_is_not_cached(tmp_path, monkeypatch):
         ),
     )
     with pytest.raises(RuntimeError, match="no submission"):
-        dynamic_step([{"text": "a"}], "goal", Model("openai/test"))
+        dynamic_step(
+            [{"text": "a"}], "goal", local_agent.LocalAgentRunner(Model("openai/test"))
+        )
     assert not list((tmp_path / "op-cache" / "alter.dynamic_step_source").glob("*.pkl"))
 
 
@@ -442,7 +453,9 @@ def test_real_sdk_corrects_code_and_reexecutes_cached_source(tmp_path, monkeypat
         )
         options = {"max_iterations": 3, "execution_timeout_s": 5}
         assert dynamic_step(
-            [{"text": "hello"}], "Uppercase text", model, **options
+            [{"text": "hello"}],
+            "Uppercase text",
+            local_agent.LocalAgentRunner(model, **options),
         ) == [["HELLO"]]
         assert len(requests) == 3
         assert "list of strings" in json.dumps(requests[1]["messages"])
@@ -451,9 +464,11 @@ def test_real_sdk_corrects_code_and_reexecutes_cached_source(tmp_path, monkeypat
         assert tools == {"python", "resource", "git", "finish"}
 
     # The API is closed: a cache miss cannot silently generate another program.
-    assert dynamic_step([{"text": "hello"}], "Uppercase text", model, **options) == [
-        ["HELLO"]
-    ]
+    assert dynamic_step(
+        [{"text": "hello"}],
+        "Uppercase text",
+        local_agent.LocalAgentRunner(model, **options),
+    ) == [["HELLO"]]
     assert executions == [invalid, corrected, corrected, corrected]
     assert (
         dynamic_step_source(
@@ -568,11 +583,7 @@ def test_explicit_local_backend_shares_dynamic_step_contract(tmp_path):
     assert other.generated == 1
 
 
-def test_explicit_backend_takes_precedence_over_default_configuration(monkeypatch):
-    """A supplied backend bypasses construction of the default local runner."""
-    runner = local_agent.LocalAgentRunner(Model("openai/test"))
-    monkeypatch.setattr(runner, "generate_source", lambda goal, item: "retained source")
-    monkeypatch.setattr(
-        dynamic, "_default_runner", lambda *args: pytest.fail("default constructed")
-    )
-    assert dynamic_step_source.no_cache({"x": 1}, "goal", runner) == "retained source"
+def test_dynamic_step_requires_a_runner():
+    """The operation does not hide model or execution-limit configuration."""
+    with pytest.raises(TypeError):
+        dynamic_step([{"text": "hello"}], "uppercase")

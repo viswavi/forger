@@ -394,7 +394,7 @@ prefer the cheap answer check first.
 
 ### Dynamic input-specific pipelines
 
-`alter.dynamic_step(inputs, goal, model, max_parallel=4, max_iterations=20)`
+`alter.dynamic_step(inputs, goal, runner, max_parallel=4)`
 returns a `list[list[str]]` in input order. Each inner list contains the strings
 produced for one input and may be empty. The default `pyforger` install includes
 OpenHands SDK and its dynamic-step dependencies; Python 3.12+ and Unix signal
@@ -406,14 +406,17 @@ against execution feedback and submit a function accepting one dict and
 returning a list of strings. The last defined function is the entry point.
 
 ```python
+from pyforger.local_agent import LocalAgentRunner
+
+runner = LocalAgentRunner(model, max_iterations=20, execution_timeout_s=10.0)
 outputs = alter.dynamic_step(
     [{"text": "Alice <alice@example.org>"}, {"text": "Bob <bob@example.net>"}],
-    "Return a list containing the email address's domain", model, max_parallel=2,
+    "Return a list containing the email address's domain", runner, max_parallel=2,
 )
 # Example output: [["example.org"], ["example.net"]]
 ```
 
-`dynamic_step_source(item, goal, model)` stores generated source through standard
+`dynamic_step_source(item, goal, runner)` stores generated source through standard
 `@op` caching under `$FORGER_CACHE` (otherwise `~/.cache/forger`). Use `trace()`
 to inspect hits and `_cache_only=True` to inspect source without launching an
 agent on a miss. Reordered or overlapping batches reuse source, and cached code

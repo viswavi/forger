@@ -4,24 +4,11 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from pyforger.acquire.model import Model
 from pyforger.dynamic_backend import DynamicStepRunner
-from pyforger.local_agent import LocalAgentRunner, _record_key
+from pyforger.local_agent import _record_key
 from pyforger.op import op
 
 _SOURCE_VERSION = "resource-v4-record"
-
-
-def _default_runner(
-    model: Model | None,
-    max_iterations: int,
-    execution_timeout_s: float,
-) -> LocalAgentRunner:
-    if model is None:
-        raise ValueError("Provide a model or an explicit runner")
-    return LocalAgentRunner(
-        model, max_iterations=max_iterations, execution_timeout_s=execution_timeout_s
-    )
 
 
 @op(name="alter.dynamic_step_source")
@@ -49,13 +36,10 @@ def dynamic_step_source(
 def dynamic_step(
     inputs: list[dict[str, Any]],
     goal: str,
-    model: Model | None = None,
+    runner: DynamicStepRunner,
     *,
     max_parallel: int = 10,
-    max_iterations: int = 20,
-    execution_timeout_s: float = 10.0,
     source_version: str = _SOURCE_VERSION,
-    runner: DynamicStepRunner | None = None,
 ) -> list[list[str]]:
     """Build source per unique input and return one string list per input."""
     if not isinstance(inputs, list):
@@ -69,8 +53,6 @@ def dynamic_step(
         raise ValueError("max_parallel must be a positive integer")
     if not inputs:
         return []
-
-    runner = runner or _default_runner(model, max_iterations, execution_timeout_s)
 
     def run(item: dict[str, Any]) -> list[str]:
         code = dynamic_step_source(item, goal, runner, source_version=source_version)
