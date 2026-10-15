@@ -14,6 +14,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -102,8 +103,16 @@ def _execute(
 def agent_llm(model: Model) -> LLM:
     """Construct the SDK model shared by dynamic and artifact-aware agents."""
     # Read the caller's .env without mutating process-wide environment in threads.
+    from dataclasses import replace
+
     from dotenv import dotenv_values
-    from openhands.sdk import LLM
+    from openhands.sdk import LLM, ToolDefinition
+    from openhands.sdk.llm import (
+        LLMCallContext,
+        LLMResponse,
+        Message,
+        TokenCallbackType,
+    )
     from pydantic import SecretStr
 
     dotenv = dotenv_values(Path.cwd() / ".env")
@@ -113,7 +122,35 @@ def agent_llm(model: Model) -> LLM:
         or os.environ.get("LITELLM_API_KEY")
         or dotenv.get("LITELLM_API_KEY")
     )
-    return LLM(
+
+    class ConfiguredLLM(LLM):
+        def generate(
+            self,
+            messages: list[Message],
+            tools: Sequence[ToolDefinition[Any, Any]] | None = None,
+            include: list[str] | None = None,
+            store: bool | None = None,
+            add_security_risk_prediction: bool = False,
+            on_token: TokenCallbackType | None = None,
+            call_context: LLMCallContext | None = None,
+            **kwargs: Any,
+        ) -> LLMResponse:
+            call_context = replace(
+                call_context or LLMCallContext(), prompt_cache_key=None
+            )
+            return super().generate(
+                messages=messages,
+                tools=tools,
+                include=include,
+                store=store,
+                add_security_risk_prediction=add_security_risk_prediction,
+                on_token=on_token,
+                call_context=call_context,
+                **kwargs,
+            )
+
+    llm_type = ConfiguredLLM if model._kwargs.get("disable_prompt_cache_key") else LLM
+    return llm_type(
         model=config.model_id,
         temperature=config.temperature,
         base_url=config.api_base
