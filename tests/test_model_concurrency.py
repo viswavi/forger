@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import copy
 import logging
 import pickle
@@ -608,3 +609,43 @@ class TestInterrupt:
         # Every request that finished was recorded, also those after the interrupt.
         assert add_usage.call_count == fake.calls
         assert model.history == []
+
+
+_CALLER = contextvars.ContextVar("caller", default="unset")
+
+
+class TestWorkerContext:
+    """Request workers run in a copy of the caller's context."""
+
+    def test_worker_sees_the_callers_contextvar(self, mock_litellm):
+        """A ContextVar set by the caller is visible inside every request."""
+        seen = []
+        lock = threading.Lock()
+
+        def fake_completion(messages, n=1, **kwargs):
+            with lock:
+                seen.append(_CALLER.get())
+            return make_response(messages[0]["content"])
+
+        mock_litellm.completion.side_effect = fake_completion
+        token = _CALLER.set("step-a")
+        try:
+            Model("gpt-4o", show_progress=False).generate_batch(["A", "B", "C"])
+        finally:
+            _CALLER.reset(token)
+        assert seen == ["step-a"] * 3
+
+    def test_add_usage_runs_in_the_callers_context(self, mock_litellm):
+        """_tracking.add_usage, called in the worker, reads the caller's value."""
+        mock_litellm.completion.side_effect = InFlight(delay=0)
+        seen = []
+        token = _CALLER.set("step-b")
+        try:
+            with patch(
+                "pyforger.acquire.model._tracking.add_usage",
+                side_effect=lambda *a, **k: seen.append(_CALLER.get()),
+            ):
+                Model("xai/grok-4", show_progress=False).generate("Q", n=4)
+        finally:
+            _CALLER.reset(token)
+        assert seen == ["step-b"] * 4

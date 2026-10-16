@@ -6,12 +6,13 @@ completions from any supported LLM provider.
 
 from __future__ import annotations
 
+import contextvars
 import os
 import sys
 import threading
 import time
 import warnings
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from typing import Any, Union
 
@@ -140,10 +141,13 @@ def _batch_completion_with_progress(
     desc = f"LLM calls ({call_kwargs.get('model', '?')})"
     executor = ThreadPoolExecutor(max_workers=min(max_workers, total))
     try:
-        future_to_idx = {
-            executor.submit(_complete, msgs, n, call_kwargs, semaphore): i
-            for i, (msgs, n) in enumerate(requests)
-        }
+        future_to_idx: dict[Future, int] = {}
+        for i, (msgs, n) in enumerate(requests):
+            # One context copy per request, so add_usage in the worker sees the
+            # caller's op / step / pipeline contextvars.
+            run: Callable[..., Any] = contextvars.copy_context().run
+            future = executor.submit(run, _complete, msgs, n, call_kwargs, semaphore)
+            future_to_idx[future] = i
         finished: Iterable[Future] = as_completed(future_to_idx)
         if progress == "bar":
             from tqdm import tqdm
