@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 
 from pyforger import _tracking
-from pyforger.acquire.model import Model
+from pyforger.acquire.model import Model, _cache_kwargs
 from pyforger.op import op
 from pyforger.utils import get_field, get_formatted_logger
 
@@ -97,7 +97,7 @@ def by_llm_score(
     return kept
 
 
-@op(name="filter.by_llm_score.scores")
+@op(name="filter.by_llm_score.scores", samples_arg="num_judges")
 def _judge_scores(
     items: list[dict],
     *,
@@ -115,7 +115,12 @@ def _judge_scores(
         prompt = _build_judge_prompt(
             item, input_field, output_field, criteria, max_score
         )
-        responses = model.generate(prompt, n=num_judges, temperature=temperature)
+        responses = model.generate(
+            prompt,
+            n=num_judges,
+            temperature=temperature,
+            **_cache_kwargs(model.generate, cache_row=item),
+        )
         all_scores.append([_parse_judge_response(raw, max_score) for raw in responses])
     return all_scores
 

@@ -7,70 +7,208 @@ completions from any supported LLM provider.
 from __future__ import annotations
 
 import contextvars
+import inspect
+import os
+import sys
+import threading
+import time
 import warnings
-from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections.abc import Callable, Iterable, Iterator
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from typing import Any, Union
 
 import litellm
 
 from pyforger import _tracking
+from pyforger.acquire import _request_cache
+from pyforger.op import _NO_CACHE_SCOPE, _REQUEST_SCOPE, _hash
+from pyforger.utils import get_formatted_logger
 
 # Type aliases
 Message = dict[str, str]
 Prompt = Union[str, list[Message]]
 
+# Threads per generate_batch call when the Model sets no max_concurrency.
+_DEFAULT_MAX_WORKERS = 100
+# Most completions asked of one request. A larger n is split into concurrent
+# requests, e.g. n=40 on gpt-4o sends n=14, 13 and 13.
+_MAX_N_PER_REQUEST = 16
+# Without a terminal (stderr redirected to a log file), progress is a plain log
+# line at most this often instead of a redrawn bar.
+_PROGRESS_LOG_INTERVAL_S = 30.0
+
+_logger = get_formatted_logger(__name__)
+
+
+def _progress_mode(show_progress: bool | None) -> str:
+    """Return "bar" in a terminal, "log" if stderr is redirected, or "off".
+
+    `show_progress=None` reads `FORGER_PROGRESS` (on unless "0"/"false"/"no").
+    """
+    if show_progress is None:
+        flag = os.environ.get("FORGER_PROGRESS", "").strip().lower()
+        show_progress = flag not in {"0", "false", "no"}
+    if not show_progress:
+        return "off"
+    isatty = getattr(sys.stderr, "isatty", None)
+    return "bar" if isatty is not None and isatty() else "log"
+
+
+def _log_progress(futures: Iterable[Future], total: int, desc: str) -> Iterator[Future]:
+    """Yield `futures` and log "<desc>: 120/500 done, 31s" at most every 30s.
+
+    A batch that finishes within the interval logs nothing.
+    """
+    start = last = time.monotonic()
+    done = 0
+    for future in futures:
+        done += 1
+        now = time.monotonic()
+        if now - last >= _PROGRESS_LOG_INTERVAL_S or (done == total and last > start):
+            _logger.info("%s: %d/%d done, %.0fs", desc, done, total, now - start)
+            last = now
+        yield future
+
+
+def _make_semaphore(max_concurrency: int | None) -> threading.BoundedSemaphore | None:
+    """The per-Model request cap, or None for no cap."""
+    if max_concurrency is None:
+        return None
+    return threading.BoundedSemaphore(max_concurrency)
+
+
+def _request_sizes(n: int, fan_out: bool) -> list[int]:
+    """Per-request n values for one prompt, e.g. 40 -> [14, 13, 13].
+
+    Fan-out models get n ones; others get near-equal parts of at most
+    _MAX_N_PER_REQUEST.
+    """
+    if fan_out:
+        return [1] * n
+    parts = -(-n // _MAX_N_PER_REQUEST)
+    return [n // parts + (1 if i < n % parts else 0) for i in range(parts)]
+
+
+def _add_response_usage(response: Any, model_id: str) -> None:
+    """Add one response's tokens and cost to the step report as it arrives."""
+    usage = _extract_usage(response)
+    _tracking.add_usage(
+        usage["prompt_tokens"],
+        usage["completion_tokens"],
+        _extract_cost(response, model_id),
+        model_id=model_id,
+    )
+
+
+def _complete(
+    messages: list[Message],
+    n: int,
+    call_kwargs: dict[str, Any],
+    semaphore: threading.BoundedSemaphore | None,
+) -> Any:
+    """One litellm.completion call, holding a `max_concurrency` slot if any.
+
+    The response's usage is recorded here, in the worker, before the caller
+    sees it: a batch that later raises or is interrupted keeps every
+    finished request in the step report.
+    """
+    if semaphore is None:
+        response = litellm.completion(messages=messages, n=n, **call_kwargs)
+    else:
+        with semaphore:
+            response = litellm.completion(messages=messages, n=n, **call_kwargs)
+    _add_response_usage(response, call_kwargs.get("model", "?"))
+    return response
+
+
+def _complete_and_report(
+    i: int,
+    messages: list[Message],
+    n: int,
+    call_kwargs: dict[str, Any],
+    semaphore: threading.BoundedSemaphore | None,
+    on_response: Callable[[int, Any], None] | None,
+) -> Any:
+    """`_complete`, then `on_response(i, response)` in the same worker thread."""
+    response = _complete(messages, n, call_kwargs, semaphore)
+    if on_response is not None:
+        on_response(i, response)
+    return response
+
 
 def _batch_completion_with_progress(
-    all_messages: list[list[dict[str, str]]],
+    requests: list[tuple[list[Message], int]],
     call_kwargs: dict[str, Any],
-    on_response: Callable[[Any], Any] | None = None,
+    *,
+    semaphore: threading.BoundedSemaphore | None = None,
+    max_workers: int = _DEFAULT_MAX_WORKERS,
+    progress: str = "bar",
+    on_response: Callable[[int, Any], None] | None = None,
 ) -> list[Any]:
-    """Concurrent, progress-tracked replacement for litellm.batch_completion.
+    """Send (messages, n) requests concurrently; return responses or errors.
 
-    Unlike `litellm.batch_completion` -- which retrieves `future.result()`
-    in submission order, so the whole call looks frozen until the *slowest*
-    early-submitted item finishes even if later ones completed first -- this
-    updates a tqdm bar via `as_completed` as each call actually finishes.
+    Results are in request order. `on_response(i, response)` runs in the worker
+    as each request succeeds (the request cache writes there, so a run killed
+    mid-batch keeps every finished request).
 
-    ``on_response`` turns each response into the returned item as soon as it
-    arrives, in the worker thread but in a copy of the caller's context (so
-    usage it records lands in the caller's op and step, even when the caller
-    is interrupted while other requests are still running).
+    A replacement for `litellm.batch_completion`, which retrieves
+    `future.result()` in submission order, so the whole call looks frozen until
+    the *slowest* early-submitted item finishes. This reports progress via
+    `as_completed` as each call actually finishes: a tqdm bar (`progress="bar"`),
+    a log line every 30s (`"log"`), or nothing (`"off"`). Each request holds a
+    slot of `semaphore` (the Model's `max_concurrency`) while in flight.
     """
-    from tqdm import tqdm
+    results: list[Any] = [None] * len(requests)
+    total = len(requests)
+    desc = f"LLM calls ({call_kwargs.get('model', '?')})"
+    executor = ThreadPoolExecutor(max_workers=min(max_workers, total))
+    try:
+        future_to_idx: dict[Future, int] = {}
+        for i, (msgs, n) in enumerate(requests):
+            # One context copy per request, so add_usage in the worker sees the
+            # caller's op / step / pipeline contextvars.
+            run: Callable[..., Any] = contextvars.copy_context().run
+            future = executor.submit(
+                run,
+                _complete_and_report,
+                i,
+                msgs,
+                n,
+                call_kwargs,
+                semaphore,
+                on_response,
+            )
+            future_to_idx[future] = i
+        finished: Iterable[Future] = as_completed(future_to_idx)
+        if progress == "bar":
+            from tqdm import tqdm
 
-    def request(msgs: list[dict[str, str]]) -> Any:
-        response = litellm.completion(messages=msgs, **call_kwargs)
-        return on_response(response) if on_response is not None else response
-
-    def run_in(context: contextvars.Context, msgs: list[dict[str, str]]) -> Any:
-        return context.run(request, msgs)
-
-    results: list[Any] = [None] * len(all_messages)
-    model_id = call_kwargs.get("model", "?")
-    max_workers = min(100, len(all_messages))
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_idx = {
-            executor.submit(run_in, contextvars.copy_context(), msgs): i
-            for i, msgs in enumerate(all_messages)
-        }
-        for future in tqdm(
-            as_completed(future_to_idx),
-            total=len(all_messages),
-            desc=f"LLM calls ({model_id})",
-            leave=False,
-        ):
+            finished = tqdm(finished, total=total, desc=desc, leave=False)
+        elif progress == "log":
+            finished = _log_progress(finished, total, desc)
+        for future in finished:
             idx = future_to_idx[future]
             try:
                 results[idx] = future.result()
             except Exception as exc:
                 results[idx] = exc
+    except BaseException:
+        # Ctrl-C (or any error here): send no queued request; requests already
+        # in flight finish in the background and still record their usage.
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise
+    executor.shutdown()
     return results
 
 
 class GenerateResult(list):
-    """list[str] with `usage` / `reasoning` / `model_id` / `raw` attributes."""
+    """list[str] with `usage` / `reasoning` / `model_id` / `raw` attributes.
+
+    `raw` is the LiteLLM response. When `Model.generate_batch` fans `n` out into
+    separate requests, it is the list of those responses, in completions order.
+    It holds only the requests actually sent: None when every completion came
+    from the request cache.
+    """
 
     usage: dict[str, Any]
     reasoning: list[str | None]
@@ -115,14 +253,41 @@ def _rebuild_generate_result(
 
 
 _VALUE_CONSTRAINTS: dict[str, dict[str, Any]] = {
-    "o1": {"temperature": 1.0, "n": 1},
-    "o3": {"temperature": 1.0, "n": 1},
-    "o4": {"temperature": 1.0, "n": 1},
-    "gpt-5": {"temperature": 1.0, "n": 1},
-    "gemini-3": {"temperature": 1.0, "n": 1},
+    "o1": {"temperature": 1.0},
+    "o3": {"temperature": 1.0},
+    "o4": {"temperature": 1.0},
+    "gpt-5": {"temperature": 1.0},
+    "gemini-3": {"temperature": 1.0},
 }
 
 _PROVIDER_PREFIXES = ("openai/", "anthropic/", "gemini/", "xai/", "deepseek/")
+
+# Models that reject or ignore n > 1 (directly or through a LiteLLM proxy).
+# generate_batch sends them n separate n=1 requests and merges the results.
+# Brands match anywhere in the model name ("us.anthropic.claude-sonnet-4-5"),
+# version prefixes only at the start ("gpt-5.6-terra", "o4-mini").
+_NO_N_BRANDS = ("claude", "grok", "gemini")
+_NO_N_PREFIXES = ("o1", "o3", "o4", "gpt-5")
+_NO_N_PROVIDERS = ("anthropic", "xai", "gemini")
+# Model ids that returned fewer than n completions for one n request in this
+# process (e.g. a gateway alias that ignores n). They fan out from then on.
+_LEARNED_NO_N: set[str] = set()
+_LEARNED_NO_N_LOCK = threading.Lock()
+
+
+def _learn_no_n(model_id: str, n: int, got: int) -> None:
+    """Fan out `model_id` from now on; warn the first time."""
+    with _LEARNED_NO_N_LOCK:
+        if model_id in _LEARNED_NO_N:
+            return
+        _LEARNED_NO_N.add(model_id)
+    _logger.warning(
+        "%s returned %d completions for n=%d; sending the missing ones as n=1 "
+        "requests, and fanning out n for this model from now on.",
+        model_id,
+        got,
+        n,
+    )
 
 
 def _family(model_id: str) -> str:
@@ -137,6 +302,150 @@ def _family(model_id: str) -> str:
             s = s[len(prefix) :]
             break
     return s
+
+
+def _fans_out_n(model_id: str) -> bool:
+    """True when n > 1 must be sent as n separate requests for this model.
+
+    E.g. "litellm_proxy/claude-sonnet-4-5", "azure_ai/gpt-5.6-terra",
+    "litellm_proxy/xai/grok-4", or any model whose LiteLLM supported-params
+    list is known and lacks "n".
+    """
+    if model_id in _LEARNED_NO_N:
+        return True
+    *providers, name = _family(model_id).lower().split("/")
+    if any(p in _NO_N_PROVIDERS for p in providers):
+        return True
+    if any(brand in name for brand in _NO_N_BRANDS):
+        return True
+    for prefix in _NO_N_PREFIXES:
+        if name == prefix or (name.startswith(prefix) and name[len(prefix)] in "-."):
+            return True
+    supported = set(litellm.get_supported_openai_params(model=model_id) or [])
+    return bool(supported) and "n" not in supported
+
+
+def _merge_responses(
+    slots: range,
+    hits: dict[int, dict[str, Any]],
+    fresh: list[tuple[list[int], Any]],
+    model_id: str,
+) -> GenerateResult:
+    """One prompt's GenerateResult: cached and fresh completions in slot order.
+
+    `hits` maps slot -> cached entry; `fresh` pairs each successful response
+    with the slots it was asked for, e.g. ([2, 3], response with 2 choices).
+    Usage and cost sum the fresh responses only: a cache hit costs nothing.
+    A short response fills the first of its slots (the rest are refilled or
+    stay missing); choices beyond the slots asked come after the slotted ones,
+    so the completion-count check still sees the mismatch.
+    """
+    by_slot: dict[int, tuple[str, str | None]] = {
+        slot: (entry["text"], entry.get("reasoning")) for slot, entry in hits.items()
+    }
+    unslotted: list[tuple[str, str | None]] = []
+    usage: dict[str, Any] = {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "reasoning_tokens": 0,
+        "cost_usd": 0.0,
+    }
+    responses = [response for _, response in fresh]
+    for asked, response in fresh:
+        texts = [choice.message.content or "" for choice in response.choices]
+        pairs = list(zip(texts, _extract_reasoning(response, model_id)))
+        by_slot.update(zip(asked, pairs))
+        unslotted.extend(pairs[len(asked) :])
+        for key, value in _extract_usage(response).items():
+            usage[key] += value
+        usage["cost_usd"] += _extract_cost(response, model_id)
+    if hits:
+        usage["cached_completions"] = len(hits)
+    ordered = [by_slot[slot] for slot in slots if slot in by_slot] + unslotted
+    return GenerateResult(
+        [text for text, _ in ordered],
+        usage=usage,
+        reasoning=[reasoning for _, reasoning in ordered],
+        model_id=model_id,
+        raw=(
+            None
+            if not responses
+            else responses[0]
+            if len(responses) == 1
+            else responses
+        ),
+    )
+
+
+def _cache_entry(choice: Any, reasoning: Any) -> dict[str, Any] | None:
+    """What the request cache stores for one choice, or None to not cache it.
+
+    Only plain text is cached. Empty or missing text (often a transient glitch),
+    a content-filter stop, and choices carrying tool calls, a function call, or
+    a refusal are not: a replay could not rebuild them, so they are asked again.
+    """
+    message = choice.message
+    text = message.content
+    finish_reason = getattr(choice, "finish_reason", None)
+    if not isinstance(text, str) or not text or finish_reason == "content_filter":
+        return None
+    for extra in ("tool_calls", "function_call", "refusal"):
+        if getattr(message, extra, None):
+            return None
+    return {
+        "text": text,
+        "reasoning": reasoning if isinstance(reasoning, str) else None,
+        "finish_reason": finish_reason if isinstance(finish_reason, str) else None,
+    }
+
+
+def _cache_kwargs(method: Callable[..., Any], **values: Any) -> dict[str, Any]:
+    """The request-cache keywords (`cache_rows`, `cache_salt`, ...) `method` takes.
+
+    Values that are None are dropped, and so are keywords a subclass's own
+    generate_batch does not accept (test fakes, backends written before these keywords),
+    e.g. ``model.generate_batch(prompts, **_cache_kwargs(model.generate_batch,
+    cache_rows=items))``.
+    """
+    try:
+        params = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        return {}
+    takes_any = any(p.kind is p.VAR_KEYWORD for p in params.values())
+    return {
+        name: value
+        for name, value in values.items()
+        if value is not None and (takes_any or name in params)
+    }
+
+
+def _check_completion_count(
+    model_id: str,
+    n: int,
+    results: list[Any],
+    fanned_out: bool,
+    skip: set[int] = frozenset(),  # type: ignore[assignment]
+) -> None:
+    """Raise `ValueError` when a prompt got other than `n` completions.
+
+    Exceptions (from `return_exceptions=True`) and prompts in `skip` (partial
+    fan-out results) are not checked.
+    """
+    for i, result in enumerate(results):
+        if isinstance(result, BaseException) or i in skip or len(result) == n:
+            continue
+        if fanned_out:
+            hint = f"{n} separate n=1 requests did not return one completion each."
+        else:
+            hint = (
+                "The model or provider may not support n > 1; add it to "
+                "_NO_N_BRANDS / _NO_N_PREFIXES in pyforger/acquire/model.py "
+                "to send n separate requests instead."
+            )
+        raise ValueError(
+            f"{model_id} returned {len(result)} completions for prompt {i}, "
+            f"but n={n} were requested. {hint}"
+        )
 
 
 def _validate_params(model_id: str, **params: Any) -> None:
@@ -279,7 +588,9 @@ class Model:
         temperature: float = 0.7,
         max_tokens: int | None = None,
         num_retries: int = 2,
-        show_progress: bool = False,
+        show_progress: bool | None = None,
+        max_concurrency: int | None = None,
+        request_cache: bool = True,
         **kwargs: Any,
     ) -> None:
         """Create a Model instance.
@@ -293,17 +604,34 @@ class Model:
             max_tokens: Default max tokens. None lets the provider decide.
             num_retries: Retries with exponential backoff on transient
                 failures.
-            show_progress: When True, a multi-prompt generate_batch() call
-                (len(prompts) > 1) shows a live tqdm progress bar to stderr.
+            show_progress: Progress for a generate_batch() call that sends
+                more than one request (several prompts, or n > 1 on a model
+                that does not support n): a tqdm bar when stderr is a
+                terminal, otherwise a log line every 30 seconds. None (default)
+                shows it unless the environment sets FORGER_PROGRESS=0.
+            max_concurrency: Most requests this instance has in flight at once,
+                across all generate_batch() calls and threads (each n fan-out
+                copy counts). None (default) caps each call at 100 requests.
+                Not part of cache_key().
+            request_cache: Keep each completion on disk under
+                $FORGER_CACHE/requests and reuse it when the same op call asks
+                the same request again (see generate_batch). False, or the
+                environment variable FORGER_REQUEST_CACHE=0, turns it off. Not
+                part of cache_key().
             **kwargs: Passed through to litellm.completion()
                 (e.g. api_base, timeout, organization).
         """
+        if max_concurrency is not None and max_concurrency <= 0:
+            raise ValueError("max_concurrency must be positive")
+        self._request_cache = request_cache
         self._model_id = model_id
         self._api_key = api_key
         self._temperature = temperature
         self._max_tokens = max_tokens
         self._num_retries = num_retries
         self._show_progress = show_progress
+        self._max_concurrency = max_concurrency
+        self._semaphore = _make_semaphore(max_concurrency)
         self._kwargs = kwargs
         self.history: list[GenerateResult] = []
         self._check_params(
@@ -315,6 +643,17 @@ class Model:
     def __repr__(self) -> str:
         """Show model id for debugging."""
         return f"Model({self._model_id!r})"
+
+    def __getstate__(self) -> dict[str, Any]:
+        """Pickle/copy without the semaphore (locks cannot be pickled)."""
+        state = self.__dict__.copy()
+        state.pop("_semaphore", None)
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        """Restore, with a fresh semaphore of the same max_concurrency."""
+        self.__dict__.update(state)
+        self._semaphore = _make_semaphore(state.get("_max_concurrency"))
 
     def _check_params(self, **params: Any) -> None:
         """Validate params against LiteLLM's registry for this model id."""
@@ -331,6 +670,20 @@ class Model:
             self._num_retries,
             kwargs_items,
         )
+
+    def request_scope_key(self) -> tuple:
+        """This Model as an op argument in request-cache scopes.
+
+        Only what can change a completion: the model id and output-changing
+        params. Unlike cache_key(), retries and timeouts are left out, so
+        changing them reuses the request cache.
+        """
+        params = _request_cache.keyed_params(
+            dict(temperature=self._temperature, max_tokens=self._max_tokens)
+            | self._kwargs
+        )
+        items = tuple(sorted(params.items(), key=lambda kv: str(kv[0])))
+        return (type(self).__name__, self._model_id, items)
 
     @property
     def total_cost(self) -> float:
@@ -358,6 +711,8 @@ class Model:
         temperature: float | None = None,
         max_tokens: int | None = None,
         stop: list[str] | None = None,
+        cache_salt: str | None = None,
+        cache_row: Any = None,
     ) -> GenerateResult:
         """Generate n responses for a single prompt.
 
@@ -373,6 +728,9 @@ class Model:
             max_tokens: Max tokens. Overrides the instance default.
             stop: Stop sequences. Generation stops when any of these
                 strings is produced.
+            cache_salt: Request-cache salt (see generate_batch).
+            cache_row: The row the prompt was built from (see generate_batch's
+                cache_rows).
 
         Returns:
             List of n response strings.
@@ -383,6 +741,11 @@ class Model:
             temperature=temperature,
             max_tokens=max_tokens,
             stop=stop,
+            **_cache_kwargs(
+                self.generate_batch,
+                cache_salt=cache_salt,
+                cache_rows=None if cache_row is None else [cache_row],
+            ),
         )[0]
 
     def generate_batch(
@@ -394,8 +757,33 @@ class Model:
         max_tokens: int | None = None,
         stop: list[str] | None = None,
         show_progress: bool | None = None,
+        return_exceptions: bool = False,
+        cache_salt: str | None = None,
+        cache_rows: list[Any] | None = None,
     ) -> list[GenerateResult]:
         """Generate n responses for each prompt in a batch.
+
+        Models that do not support n > 1 (Claude, Grok, Gemini, o1/o3/o4,
+        gpt-5, or any whose LiteLLM supported params lack "n") get n separate
+        concurrent n=1 requests per prompt, merged into one GenerateResult
+        with summed usage and cost. Other models get one request with n, or
+        several when n > 16 (n=40 sends n=14, 13, 13), merged the same way.
+        All requests are sent at once, up to the Model's max_concurrency.
+
+        Request cache (unless off, see __init__): each completion is stored
+        under a key of the enclosing @op call (op, body, and every argument
+        but its rows), the prompt's row (`cache_rows`, else all of the op's
+        rows), the messages, output-changing params, and `cache_salt`, plus a
+        slot index. Slots are numbered per op call: n=4 fills slots 0..3, and
+        the same request asked again in that op call (a duplicate row, a
+        retry, a later chunk) fills 4..7. A rerun of the op asks the same
+        requests in the same order, so it reuses cached slots and requests only
+        missing ones. Results are written as each request finishes; errors,
+        empty text, and tool calls are never cached. A reused completion adds
+        no usage or cost, and `usage["cached_completions"]` counts them.
+        `_no_cache=True` on an enclosing op skips reading (fresh results are
+        still written). Outside any @op / @step (or from a thread that did not
+        copy the context) the request cache is off.
 
         Args:
             prompts: List of prompts. Each prompt is either a string or
@@ -406,37 +794,55 @@ class Model:
             stop: Stop sequences.
             show_progress: Per-call override of the instance's show_progress
                 (see __init__). None (default) uses the instance setting.
+            return_exceptions: When True, a request that still fails after
+                retries (e.g. a gateway 504) does not discard the others: a
+                prompt whose requests all failed gets the exception in its
+                slot, and a prompt with only some failed requests (fan-out
+                copies or n > 16 parts) gets the completions that arrived
+                (fewer than n, not checked).
+                When False (default), the first failure is raised.
+            cache_salt: Part of the request-cache key. Pass a new value to get
+                fresh completions for a prompt asked before on purpose, e.g.
+                "retry 1" when re-asking prompts whose output failed to parse.
+            cache_rows: For an op that builds one prompt per row, the row
+                each prompt came from (aligned with `prompts`; None entries
+                allowed). Changing one row then re-sends only its requests.
+                Without it, a prompt is keyed on all of the op's rows.
 
         Returns:
-            List of GenerateResult, one per prompt. Each GenerateResult
-            is a list of n completion strings carrying usage / reasoning
-            / model_id / raw as attributes.
+            List with one entry per prompt. Each GenerateResult is a list of
+            n completion strings carrying usage / reasoning / model_id / raw
+            as attributes; with return_exceptions=True an entry can instead be
+            the exception its requests raised.
 
         Raises:
             BudgetExceededError: Spend already reached the running pipeline's
                 ``max_cost_usd`` or ``FORGER_MAX_COST_USD``; nothing is sent.
+            ValueError: If a prompt whose requests all succeeded gets other
+                than n completions. Usage is recorded in history before
+                raising.
         """
         if not prompts:
             return []
+        if cache_rows is not None and len(cache_rows) != len(prompts):
+            raise ValueError(
+                f"cache_rows has {len(cache_rows)} entries for {len(prompts)} prompts"
+            )
         _tracking.check_budget()  # raises BudgetExceededError at a spending cap
 
         temperature = temperature if temperature is not None else self._temperature
         max_tokens = max_tokens if max_tokens is not None else self._max_tokens
 
-        validate_kwargs: dict[str, Any] = {
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "stop": stop,
-            "thinking": self._kwargs.get("thinking"),
-        }
-        if n != 1:
-            validate_kwargs["n"] = n
-        self._check_params(**validate_kwargs)
+        self._check_params(
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stop=stop,
+            thinking=self._kwargs.get("thinking"),
+        )
 
-        all_messages = [_to_messages(prompt) for prompt in prompts]
+        conversations = [_to_messages(prompt) for prompt in prompts]
         call_kwargs = dict(
             model=self._model_id,
-            n=n,
             temperature=temperature,
             max_tokens=max_tokens,
             stop=stop,
@@ -444,55 +850,214 @@ class Model:
             num_retries=self._num_retries,
             **self._kwargs,
         )
-        # Each response's usage is recorded (and written to the spend ledger)
-        # by _record as soon as it is turned into a result: per request on the
-        # progress path, after the whole batch with litellm.batch_completion.
-        outputs: list[Any]
-        if len(all_messages) == 1:
-            response = litellm.completion(messages=all_messages[0], **call_kwargs)
-            outputs = [self._record(response)]
-        else:
-            use_progress = (
-                self._show_progress if show_progress is None else show_progress
-            )
-            if use_progress:
-                outputs = _batch_completion_with_progress(
-                    all_messages, call_kwargs, self._record
+        # Key each prompt on the op call it comes from and its row, e.g. in
+        # generate_from_context(rows, "Solve {q}", model) the row {"q": "2+2"}.
+        # Slots are handed out per op call, so the same request asked twice in
+        # it (two identical rows, three judge copies) gets new slots each time.
+        # Outside any op (a direct call, or a thread that did not copy the
+        # context) the request cache is off: a key of prompt text and params
+        # alone would share samples between unrelated call sites.
+        scope = _REQUEST_SCOPE.get()
+        caching = (
+            scope is not None
+            and _request_cache.enabled(getattr(self, "_request_cache", True))
+            and _request_cache.cacheable(call_kwargs)
+        )
+        keys: list[str | None] = [None] * len(prompts)
+        slot_ranges: list[range] = [range(n)] * len(prompts)
+        hits: list[dict[int, dict[str, Any]]] = [{} for _ in prompts]
+        if caching:
+            assert scope is not None  # mypy hint
+            read = not _NO_CACHE_SCOPE.get()  # an enclosing op got _no_cache=True
+            for i, messages in enumerate(conversations):
+                row = None if cache_rows is None else cache_rows[i]
+                row_key = _hash(row)[0] if row is not None else scope.rows_key
+                key = _request_cache.request_key(
+                    scope.key, row_key, messages, call_kwargs, cache_salt
                 )
+                first = scope.take_slots(key, n)
+                keys[i], slot_ranges[i] = key, range(first, first + n)
+                if read:
+                    for slot in slot_ranges[i]:
+                        entry = _request_cache.read_slot(key, slot)
+                        if entry is not None:
+                            hits[i][slot] = entry
+
+        # Request only the missing slots. Models that ignore or reject n > 1
+        # get one n=1 request per slot, e.g. prompts [A, B] with n=2 send
+        # [A, A, B, B]. Others get requests of at most _MAX_N_PER_REQUEST, e.g.
+        # n=40 sends n=14, 13, 13.
+        fan_out = n != 1 and _fans_out_n(self._model_id)
+        requests: list[tuple[list[Message], int]] = []
+        owners: list[tuple[int, list[int]]] = []  # (prompt, slots asked)
+        for i, messages in enumerate(conversations):
+            missing = [slot for slot in slot_ranges[i] if slot not in hits[i]]
+            if not missing:
+                continue
+            sizes = _request_sizes(len(missing), fan_out)
+            start = 0
+            for size in sizes:
+                copy = [dict(m) for m in messages] if len(sizes) > 1 else messages
+                requests.append((copy, size))
+                owners.append((i, missing[start : start + size]))
+                start += size
+
+        if caching:
+            # The op logs one INFO line per call; each batch only at DEBUG.
+            reused = sum(len(h) for h in hits)
+            if scope is not None:
+                scope.count(reused, n * len(prompts))
+            _logger.debug(
+                "request cache: %d of %d completions reused (%s)",
+                reused,
+                n * len(prompts),
+                self._model_id,
+            )
+
+        def store(j: int, response: Any) -> None:
+            """Cache request j's completions as soon as it succeeds."""
+            i, asked = owners[j]
+            key = keys[i]
+            if key is None:
+                return
+            try:
+                if len(response.choices) > len(asked):
+                    return  # the count check reports it; slots would be guesses
+                reasoning = _extract_reasoning(response, self._model_id)
+                for slot, choice, thinking in zip(asked, response.choices, reasoning):
+                    entry = _cache_entry(choice, thinking)
+                    if entry is not None:
+                        _request_cache.write_slot(key, slot, entry)
+            except Exception as exc:  # a full disk must not fail the request
+                _logger.warning("request cache write failed: %s", exc)
+
+        progress = _progress_mode(
+            self._show_progress if show_progress is None else show_progress
+        )
+        responses = self._send(
+            requests, call_kwargs, progress, return_exceptions, store
+        )
+
+        # A model that should support n but returned fewer completions (e.g. a
+        # gateway alias that ignores n): send each missing slot as an n=1
+        # request. A short response keeps the first of its slots.
+        refilled = False
+        if n != 1 and not fan_out:
+            failed = {
+                i for (i, _), r in zip(owners, responses) if isinstance(r, Exception)
+            }
+            refill_owners = [
+                (i, [slot])
+                for (i, asked), r in zip(owners, responses)
+                if i not in failed
+                for slot in asked[len(r.choices) :]
+            ]
+            if refill_owners:
+                first_short = next(
+                    (len(asked), len(r.choices))
+                    for (_, asked), r in zip(owners, responses)
+                    if not isinstance(r, Exception) and len(r.choices) < len(asked)
+                )
+                _learn_no_n(self._model_id, *first_short)
+                offset = len(owners)
+                owners.extend(refill_owners)
+                refill = [
+                    ([dict(m) for m in conversations[i]], 1) for i, _ in refill_owners
+                ]
+                responses += self._send(
+                    refill,
+                    call_kwargs,
+                    progress,
+                    return_exceptions,
+                    lambda j, response: store(offset + j, response),
+                )
+                refilled = True
+
+        fresh: list[list[tuple[list[int], Any]]] = [[] for _ in prompts]
+        errors: list[list[Exception]] = [[] for _ in prompts]
+        for (i, asked), response in zip(owners, responses):
+            if isinstance(response, Exception):
+                errors[i].append(response)
             else:
-                outputs = [
-                    # batch_completion returns (rather than raises) per-request
-                    # exceptions; the other responses were paid for.
-                    r if isinstance(r, Exception) else self._record(r)
-                    for r in litellm.batch_completion(
-                        messages=all_messages, **call_kwargs
+                fresh[i].append((asked, response))
+
+        results: list[Any] = []
+        partial: set[int] = set()
+        for i in range(len(prompts)):
+            if errors[i] and not fresh[i] and not hits[i]:
+                results.append(errors[i][0])
+                continue
+            if errors[i]:
+                partial.add(i)
+            results.append(
+                _merge_responses(slot_ranges[i], hits[i], fresh[i], self._model_id)
+            )
+        # Usage already reached the step report per response (see _complete),
+        # and a cache hit adds none.
+        self._record(
+            [r for r in results if isinstance(r, GenerateResult)], add_usage=False
+        )
+        if n != 1:
+            _check_completion_count(
+                self._model_id,
+                n,
+                results,
+                fanned_out=fan_out or refilled,
+                skip=partial,
+            )
+        return results
+
+    def _send(
+        self,
+        requests: list[tuple[list[Message], int]],
+        call_kwargs: dict[str, Any],
+        progress: str,
+        return_exceptions: bool,
+        on_response: Callable[[int, Any], None] | None = None,
+    ) -> list[Any]:
+        """Send (messages, n) requests; raise the first failure unless asked not to.
+
+        `on_response(i, response)` runs as each request succeeds.
+        """
+        responses: list[Any] = []
+        if len(requests) == 1:
+            messages, size = requests[0]
+            try:
+                responses = [
+                    _complete_and_report(
+                        0, messages, size, call_kwargs, self._semaphore, on_response
                     )
                 ]
-        for output in outputs:
-            if isinstance(output, Exception):
-                raise output  # a failed batch adds nothing to self.history
-        self.history.extend(outputs)
-        return outputs
+            except Exception as exc:
+                if not return_exceptions:
+                    raise
+                responses = [exc]
+        elif requests:
+            responses = _batch_completion_with_progress(
+                requests,
+                call_kwargs,
+                semaphore=self._semaphore,
+                max_workers=self._max_concurrency or _DEFAULT_MAX_WORKERS,
+                progress=progress,
+                on_response=on_response,
+            )
+        if not return_exceptions:
+            for response in responses:
+                if isinstance(response, Exception):
+                    raise response
+        return responses
 
-    def _record(self, response: Any) -> GenerateResult:
-        """Turn one LiteLLM response into a result and record its usage."""
-        completions = [choice.message.content or "" for choice in response.choices]
-        usage: dict[str, Any] = dict(_extract_usage(response))
-        usage["cost_usd"] = _extract_cost(response, self._model_id)
-        result = GenerateResult(
-            completions,
-            usage=usage,
-            reasoning=_extract_reasoning(response, self._model_id),
-            model_id=self._model_id,
-            raw=response,
-        )
-        _tracking.add_usage(
-            usage.get("prompt_tokens", 0) or 0,
-            usage.get("completion_tokens", 0) or 0,
-            usage.get("cost_usd", 0.0) or 0.0,
-            model_id=self._model_id,
-        )
-        return result
+    def _record(self, results: list[GenerateResult], *, add_usage: bool = True) -> None:
+        """Add each result to history and, with add_usage, to the step report."""
+        for result in results:
+            self.history.append(result)
+            if add_usage:
+                _tracking.add_usage(
+                    result.usage.get("prompt_tokens", 0) or 0,
+                    result.usage.get("completion_tokens", 0) or 0,
+                    result.usage.get("cost_usd", 0.0) or 0.0,
+                    model_id=self._model_id,
+                )
 
 
 # Default cap on generated tokens for a local reasoning model. Reasoning traces
@@ -661,8 +1226,14 @@ class LocalModel(Model):
         max_tokens: int | None = None,
         stop: list[str] | None = None,
         show_progress: bool | None = None,
+        return_exceptions: bool = False,
+        cache_salt: str | None = None,
+        cache_rows: list[Any] | None = None,
     ) -> list[GenerateResult]:
         """Generate `n` completions per prompt with the local vLLM engine.
+
+        Not request-cached: local inference is free. `cache_salt` and `cache_rows`
+        are accepted for interface compatibility and ignored.
 
         Args:
             prompts: List of prompts (string or OpenAI-format message list).
@@ -673,6 +1244,9 @@ class LocalModel(Model):
             stop: Optional stop strings.
             show_progress: Per-call override of the instance's show_progress.
                 None (default) uses the instance setting.
+            return_exceptions: vLLM runs the batch as one engine call, so when
+                True an engine error fills every prompt's slot instead of
+                being raised.
 
         Returns:
             List of GenerateResult, one per prompt, in input order. Each is a
@@ -703,12 +1277,19 @@ class LocalModel(Model):
             stop=stop,
             seed=self._seed,
         )
-        outputs = self._engine().chat(
-            conversations,
-            sampling_params,
-            chat_template_kwargs=self._template_kwargs(),
-            use_tqdm=self._show_progress if show_progress is None else show_progress,
-        )
+        try:
+            outputs = self._engine().chat(
+                conversations,
+                sampling_params,
+                chat_template_kwargs=self._template_kwargs(),
+                use_tqdm=(
+                    self._show_progress if show_progress is None else show_progress
+                ),
+            )
+        except Exception as exc:
+            if not return_exceptions:
+                raise
+            return [exc] * len(prompts)  # type: ignore[list-item]
 
         results: list[GenerateResult] = []
         for output in outputs:
@@ -733,14 +1314,10 @@ class LocalModel(Model):
                 raw=None,
             )
             results.append(result)
-            self.history.append(result)
-            _tracking.add_usage(
-                result.usage.get("prompt_tokens", 0) or 0,
-                result.usage.get("completion_tokens", 0) or 0,
-                result.usage.get("cost_usd", 0.0) or 0.0,
-                model_id=self._model_id,
-            )
 
+        self._record(results)
+        if n != 1:
+            _check_completion_count(self._model_id, n, results, fanned_out=False)
         return results
 
 

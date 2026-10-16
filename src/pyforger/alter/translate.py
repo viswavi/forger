@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from pyforger.acquire.model import Message, Model, Prompt
+from pyforger.acquire.model import Message, Model, Prompt, _cache_kwargs
 from pyforger.op import op
 from pyforger.utils import get_field
 
@@ -184,13 +184,17 @@ def _translate(
     write_fields = target_fields if target_fields is not None else fields
 
     prompts: list[Prompt] = []
+    rows: list[dict] = []  # the item each prompt came from
     for item in items:
         for field in fields:
             value = get_field(item, field, caller_name)
             user_message: Message = {"role": "user", "content": value}
             prompts.append([system_message, user_message])
+            rows.append(item)
 
-    responses = model.generate_batch(prompts, n=1)
+    responses = model.generate_batch(
+        prompts, n=1, **_cache_kwargs(model.generate_batch, cache_rows=rows)
+    )
 
     if len(responses) != len(prompts):
         raise ValueError(
