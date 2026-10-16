@@ -253,6 +253,7 @@ Remove rows by criterion. If a filter empties the list, downstream operations re
 | `by_invalid_response` | Drop empty, identical, or near-identical responses to the instruction. |
 | `by_keyword_blocklist` | Drop responses with certain keywords; default blocklist targets common refusal phrases. |
 | `by_llm_score` | LLM-as-judge with optional multi-judge consensus. |
+| `by_comparative_judge` | LLM judge ranks the candidates for one input side by side; keeps the top `keep` per group. |
 | `by_syntax` | Validate JSON, YAML, Python, or XML, optionally against required keys or a JSON schema. |
 | `by_predicate` | Keep rows where `fn(row)` is truthy: a plain Python check that shows in the step report. Not cached. |
 
@@ -280,6 +281,52 @@ diversity filter.
 
 ```python
 rows = filter.by_predicate(rows, lambda r: len(r["papers"]) >= 3, label="has ≥3 papers", min_yield=0.5)
+```
+
+##### LLM judges
+
+Both judges send all their calls (rows × `num_judges`) in one `model.generate_batch` call, one `n=1` request each,
+so they run concurrently. Judge answers are read leniently: only the text after a closed `</think>` block (an
+unclosed `<think>` is unparseable), then the last JSON object with the expected key, also inside code fences or
+prose, else the last `"score": <number>` (or `"ranking": [...]`) pattern. Scores keep fractions (`4.9` stays `4.9`,
+so it fails `score_threshold=5`), and a string score gives its leading number (`"4/5"` is 4). Ranking entries may
+carry words after the label (`"A (best)"`, `"Candidate B:"`); an entry that names no shown label voids that judge's
+ranking. Unparseable answers count as no vote.
+
+- **Absolute (`by_llm_score`)** rates each row alone on 1 to `max_score`. Absolute judges tend to score nearly
+  everything at the top of the scale, so check the step report's histogram; if it is piled up at the top, the
+  threshold is not separating anything. Use it for a pass/fail floor (refusals, wrong format, off-topic).
+- **Comparative (`by_comparative_judge`)** ranks the candidates for the same input against each other, which
+  discriminates far better. Use it whenever there are several candidates per input (e.g. `n=4` samples per prompt,
+  grouped by `group_by="prompt"`). The judge sees the input once and the candidates labelled A, B, C, ..., answers
+  `{"ranking": ["C", "A", "B"], "explanation": "..."}`, and the top `keep` per group survive. Candidates are
+  shuffled per group (seeded by `seed`) and judge `j` sees that order rotated by `j`, so each candidate takes each
+  position equally often; `num_judges > 1` needs `temperature > 0`, as for `by_llm_score`. Rankings combine by Borda
+  count; ties go to the earlier row. Every group of two or more rows is judged, whatever `keep` is, so changing
+  `keep` makes no new judge calls; a single row is kept without a call. The report histogram shows each row's rank
+  in its group.
+
+`prompt_template` replaces either judge's prompt: a format string or a callable taking a dict. The placeholders are
+the row's fields (for the comparative judge, the group's first row) plus `{input}`, `{criteria}`, and for
+`by_llm_score` `{output}` and `{max_score}`, for `by_comparative_judge` `{candidates}` (the labelled outputs),
+`{labels}` (`"A, B, C"`), and `{num_candidates}`. Write literal braces as `{{ }}`. If the prompt does not contain the
+JSON key in double quotes (`"score"` or `"ranking"`), the answer-format line is appended for you.
+`by_llm_score(..., score_field="judge_score", explanation_field="judge_why")` adds the judges' mean score and their
+list of explanations to kept rows; `by_comparative_judge(..., rank_field="rank", explanation_field="judge_why")` adds
+the row's rank in its group (1 = best) and the group's judge explanations. Without these fields rows are unchanged.
+
+```python
+best = filter.by_comparative_judge(
+    rows,                       # 4 candidate answers per question
+    group_by="question",
+    model=judge,
+    input_field="question",
+    output_field="answer",
+    criteria="correctness, then clarity",
+    keep=1,
+    num_judges=3,
+    temperature=0.7,            # required with several judges
+)
 ```
 
 #### `pyforger.inspect`

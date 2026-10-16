@@ -589,9 +589,9 @@ class Judge:
     def cache_key(self):
         return ("Judge",)
 
-    def generate(self, prompt, *, n=1, temperature=None, max_tokens=None):
-        Judge.calls += 1
-        return [json.dumps({"score": 4})] * n
+    def generate_batch(self, prompts, *, n=1, temperature=None, max_tokens=None):
+        Judge.calls += len(prompts)
+        return [[json.dumps({"score": 4})] * n for _ in prompts]
 
 
 @op(name="alter.make")

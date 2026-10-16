@@ -685,10 +685,11 @@ class TestOpScope:
             )
 
         judge(rows)
-        assert len(fake.calls) == 3  # one n=3 request per row
+        assert len(fake.calls) == 9  # one n=1 request per row and judge
+        assert len({c for c in fake.calls}) == 3  # three distinct prompts
         fake.reset()
         judge(rows + [{"q": "q3", "a": "x"}])
-        assert len(fake.calls) == 1
+        assert len(fake.calls) == 3  # only the new row's three judges
 
     def test_logs_once_per_op_call(self, fake, caplog):
         """An op with several batches logs its reuse in one INFO line."""
