@@ -255,6 +255,7 @@ def op(
             token = _tracking.enter_op(op_name)
             scope_token = _NO_CACHE_SCOPE.set(True) if _no_cache else None
             call: _tracking.OpCall | None = None
+            start = time.perf_counter()
             try:
                 result, cache_hit, first_arg, duration = _call(
                     args, kwargs, _no_cache, _cache_only
@@ -270,6 +271,9 @@ def op(
                     min_yield=min_yield,
                     max_yield=max_yield,
                 )
+            except Exception as exc:
+                call = _failed_call(op_name, args, exc, token, start)
+                raise
             finally:
                 if scope_token is not None:
                     _NO_CACHE_SCOPE.reset(scope_token)
@@ -464,6 +468,9 @@ def tracked(op_name: str) -> Callable[[Callable[..., T]], Callable[..., T]]:
                     min_yield=None,
                     max_yield=None,
                 )
+            except Exception as exc:
+                call = _failed_call(op_name, args, exc, token, start)
+                raise
             finally:
                 _tracking.exit_op(token, call)
             return result
@@ -471,6 +478,42 @@ def tracked(op_name: str) -> Callable[[Callable[..., T]], Callable[..., T]]:
         return wrapper
 
     return decorate
+
+
+def _failed_call(
+    op_name: str,
+    args: tuple[Any, ...],
+    exc: Exception,
+    token: _tracking.OpToken,
+    start: float,
+) -> _tracking.OpCall | None:
+    """The step-report entry for an op that raised, carrying its usage so far.
+
+    A step that catches the error then still shows what the op spent.
+    """
+    if token.is_step:
+        return None
+    category = _tracking.category_of(op_name)
+    first = args[0] if args else None
+    usage = token.usage_totals()
+    error = f"{type(exc).__name__}: {exc}"
+    if len(error) > 120:
+        error = error[:119] + "…"
+    return _tracking.OpCall(
+        op_name=op_name,
+        category=category,
+        n_in=len(first) if isinstance(first, list) and category != "acquire" else None,
+        n_out=None,
+        yield_ratio=None,
+        cache_hit=False,
+        duration_s=time.perf_counter() - start,
+        prompt_tokens=usage[0],
+        completion_tokens=usage[1],
+        cost_usd=usage[2],
+        token_units=usage[3],
+        error=error,
+        warnings=[f"{op_name} raised {error}"],
+    )
 
 
 def _check_yield_bounds(min_yield: float | None, max_yield: float | None) -> None:

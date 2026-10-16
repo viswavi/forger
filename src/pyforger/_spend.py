@@ -1,8 +1,10 @@
 """The spend ledger: one JSON line per LLM result, written as it is recorded.
 
-``Model`` and ``LocalModel`` add every result's usage through
-``_tracking.add_usage``, which appends one line here right away, so a run that
-is killed or raises keeps the record of what it spent::
+``Model``, ``LocalModel``, and ``dynamic_step`` agents add every result's
+usage through ``_tracking.add_usage``, which appends one line here right away,
+so a run that is killed or raises keeps the record of every result recorded
+before it stopped (a ``Model`` batch without a progress bar is recorded when
+the batch returns)::
 
     {"timestamp": "2026-10-16T18:02:11.204+00:00", "pid": 4121,
      "run_id": "3f9c0a7e1b2d", "pipeline": "main", "step": "write_solutions",

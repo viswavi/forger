@@ -273,8 +273,6 @@ def step(
                 pipeline_rec = _tracking.pipeline_for_step()
                 if pipeline_rec is not None:
                     pipeline_rec.steps.append(rec)
-                    if _tracking.active_pipeline() is None:  # a worker thread
-                        _tracking.credit_pipeline(pipeline_rec, usage)
                 if _reports_enabled(prod):
                     _summaries.add_llm_summaries(rec, rows=rec.sample_shown)
                     print_step(rec)
@@ -399,7 +397,9 @@ def pipeline(
             sent finish, so spend can pass the cap by up to one batch.
     """
     if max_cost_usd is not None and not max_cost_usd >= 0:
-        raise ValueError(f"max_cost_usd must be >= 0, got {max_cost_usd}")
+        raise ValueError(
+            f"max_cost_usd must be a number of dollars >= 0, got {max_cost_usd}"
+        )
 
     def decorate(fn: F) -> F:
         pipeline_name = name or fn.__name__

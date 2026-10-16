@@ -15,9 +15,11 @@ Usage is counted in accumulators: entering a pipeline, step, or op pushes its
 own ``Usage`` onto a context variable, and ``add_usage`` adds to every
 accumulator open in the calling context. Workers started with
 ``copy_context().run`` share their parent's accumulators, so two ops running at
-the same time each count only their own LLM calls. Usage from a thread that
-did not copy the context reaches no step; while a pipeline runs it is kept as
-that pipeline's "unattributed" usage.
+the same time each count only their own LLM calls. A step called from a
+worker thread that did not copy the context joins the only running pipeline's
+accumulator. Other usage from such threads reaches no step or pipeline total;
+while exactly one pipeline runs it is shown as that pipeline's "unattributed"
+usage, and it counts only toward the process total.
 """
 
 from __future__ import annotations
@@ -88,6 +90,8 @@ class OpCall(BaseModel):
     token_units: float = 0.0
     scores: ScoreRecord | None = None
     warnings: list[str] = Field(default_factory=list)
+    # Set when the op raised, e.g. "ValueError: bad JSON"; its usage still counts.
+    error: str | None = None
 
 
 class FieldSummary(BaseModel):
@@ -161,8 +165,10 @@ class StepRecord(BaseModel):
 class PipelineRecord(BaseModel):
     """Everything a ``@pipeline`` call reports: its steps, totals, and warnings.
 
-    The totals are what this run spent, ``unattributed`` included: LLM usage
-    from threads that did not copy the context, which no step could claim.
+    The totals are what this run's pipeline and steps spent. ``unattributed``
+    is LLM usage from threads that did not copy the context, made while this
+    was the only pipeline running; it is not in the totals, since such a
+    thread may not belong to the pipeline.
     """
 
     name: str
@@ -242,9 +248,17 @@ _ACCUMULATORS: ContextVar[tuple[Usage, ...]] = ContextVar(
 )
 
 
-def _open_usage(kind: str, name: str) -> tuple[Usage, Token[tuple[Usage, ...]]]:
+def _open_usage(
+    kind: str, name: str, joined: tuple[Usage, ...] = ()
+) -> tuple[Usage, Token[tuple[Usage, ...]]]:
+    """Push a new accumulator, after ``joined`` (accumulators to add to as well)."""
     usage = Usage(kind, name)
-    return usage, _ACCUMULATORS.set(_ACCUMULATORS.get() + (usage,))
+    return usage, _ACCUMULATORS.set(_ACCUMULATORS.get() + joined + (usage,))
+
+
+def _pipeline_usage() -> Usage | None:
+    """The accumulator of the pipeline this context counts toward, if any."""
+    return next((u for u in _ACCUMULATORS.get() if u.kind == "pipeline"), None)
 
 
 _ACTIVE_STEP: ContextVar[StepRecord | None] = ContextVar(
@@ -301,9 +315,16 @@ def enter_step(rec: StepRecord, check: Callable[[Any], str | None]) -> ScopeToke
     """Make ``rec`` the active step; ops it calls are top level (depth 0) again.
 
     ``check`` validates the step's result; see ``check_step_result``. The
-    step's usage is counted in ``token.usage``.
+    step's usage is counted in ``token.usage``. A step called from a worker
+    thread that did not copy the context joins the only running pipeline, so
+    its usage counts toward that pipeline (and its cap) as it arrives.
     """
-    usage, usage_token = _open_usage("step", rec.name)
+    joined: tuple[Usage, ...] = ()
+    if _ACTIVE_PIPELINE.get() is None and _pipeline_usage() is None:
+        with _RUNNING_LOCK:
+            if len(_RUNNING_PIPELINES) == 1:
+                joined = (_RUNNING_PIPELINES[0].usage,)
+    usage, usage_token = _open_usage("step", rec.name, joined)
     return ScopeToken(
         _ACTIVE_STEP.set(rec),
         _OP_DEPTH.set(0),
@@ -417,7 +438,7 @@ def enter_pipeline(
 def exit_pipeline(token: ScopeToken) -> None:
     """Undo ``enter_pipeline`` and set the record's usage totals.
 
-    The totals are the pipeline's own usage plus its unattributed usage.
+    The totals are the pipeline's own usage; unattributed usage is kept apart.
     """
     rec = _ACTIVE_PIPELINE.get()
     unattributed = Usage()
@@ -435,7 +456,6 @@ def exit_pipeline(token: ScopeToken) -> None:
     if rec is None:
         return
     extra = unattributed.totals()
-    own = token.usage.totals()
     rec.unattributed = UsageTotals(
         prompt_tokens=extra[0],
         completion_tokens=extra[1],
@@ -447,16 +467,21 @@ def exit_pipeline(token: ScopeToken) -> None:
         rec.completion_tokens,
         rec.cost_usd,
         rec.token_units,
-    ) = (own[0] + extra[0], own[1] + extra[1], own[2] + extra[2], own[3] + extra[3])
+    ) = token.usage.totals()
 
 
 def _running_for_context() -> _Running | None:
-    """The pipeline active in this context, else the only one running."""
-    rec = _ACTIVE_PIPELINE.get()
+    """The running pipeline this context counts toward, if any.
+
+    That is the pipeline whose accumulator is open here: the active pipeline,
+    or the one a worker-thread step joined. A thread that did not copy the
+    context and runs no step counts toward none.
+    """
+    usage = _pipeline_usage()
+    if usage is None:
+        return None
     with _RUNNING_LOCK:
-        if rec is not None:
-            return next((r for r in _RUNNING_PIPELINES if r.rec is rec), None)
-        return _RUNNING_PIPELINES[0] if len(_RUNNING_PIPELINES) == 1 else None
+        return next((r for r in _RUNNING_PIPELINES if r.usage is usage), None)
 
 
 def pipeline_for_step() -> PipelineRecord | None:
@@ -470,19 +495,10 @@ def pipeline_for_step() -> PipelineRecord | None:
     if rec is not None:
         return rec
     running = _running_for_context()
-    return running.rec if running is not None else None
-
-
-def credit_pipeline(rec: PipelineRecord, totals: tuple[int, int, float, float]) -> None:
-    """Add a step's usage to ``rec`` when the step ran outside its context.
-
-    A step called from a worker thread that did not copy the context counts
-    its own usage; this adds it to the pipeline it joined.
-    """
-    with _RUNNING_LOCK:
-        running = next((r for r in _RUNNING_PIPELINES if r.rec is rec), None)
     if running is not None:
-        running.usage.add(totals)
+        return running.rec
+    with _RUNNING_LOCK:
+        return _RUNNING_PIPELINES[0].rec if len(_RUNNING_PIPELINES) == 1 else None
 
 
 _OPS_STARTED = [0]
@@ -539,8 +555,10 @@ def current_scores() -> list[ScoreRecord]:
 def exit_op(token: OpToken, call: OpCall | None) -> None:
     """Restore state from ``enter_op`` and hand a top-level call to its owner.
 
-    ``call`` is None when the op raised. Top-level calls (depth 0) go to the
-    active step, or to the active pipeline as a bare op when no step is active.
+    Top-level calls (depth 0) go to the active step, or to the active
+    pipeline as a bare op when no step is active. A call that raised (``error``
+    set) goes only to a step, which may have caught the error; ``call`` is
+    None when there is nothing to report.
     """
     if token.is_step:
         step = _ACTIVE_STEP.get()
@@ -561,7 +579,7 @@ def exit_op(token: OpToken, call: OpCall | None) -> None:
         step.ops.append(call)
         return
     pipeline = _ACTIVE_PIPELINE.get()
-    if pipeline is not None:
+    if pipeline is not None and call.error is None:
         rec = step_from_bare_op(call)
         pipeline.steps.append(rec)
         on_dynamic_step = _ON_DYNAMIC_STEP.get()
@@ -672,9 +690,12 @@ def add_usage(
 
     It is added to every accumulator open in this context (the pipeline, the
     step, and each enclosing op), to the process total, and to the spend
-    ledger. With no step or pipeline in this context (a worker thread that did
-    not copy the context), it is added to each running pipeline's
-    unattributed usage instead.
+    ledger. Usage from a thread with no step or pipeline in its context (one
+    that did not copy the context) is unattributed: when exactly one pipeline
+    is running it shows on that pipeline's unattributed line, but it is not in
+    the pipeline's totals and does not count toward its ``max_cost_usd``
+    (the thread may not be the pipeline's). It always counts toward the
+    process total and ``FORGER_MAX_COST_USD``.
     """
     totals = (
         int(_as_number(prompt_tokens)),
@@ -684,14 +705,13 @@ def add_usage(
     )
     accumulators = _ACCUMULATORS.get()
     counted = _COUNT_USAGE.get()
-    step, pipeline = _ACTIVE_STEP.get(), _ACTIVE_PIPELINE.get()
-    pipeline_name = pipeline.name if pipeline is not None else None
+    step = _ACTIVE_STEP.get()
+    pipeline_usage = _pipeline_usage()
     unattributed: list[Usage] = []
-    if counted and step is None and pipeline is None:
+    if counted and step is None and pipeline_usage is None:
         with _RUNNING_LOCK:
-            unattributed = [r.unattributed for r in _RUNNING_PIPELINES]
             if len(_RUNNING_PIPELINES) == 1:
-                pipeline_name = _RUNNING_PIPELINES[0].rec.name
+                unattributed = [_RUNNING_PIPELINES[0].unattributed]
     with _USAGE_LOCK:
         _PROCESS_USAGE._add(*totals)
         if counted:
@@ -699,7 +719,7 @@ def add_usage(
                 usage._add(*totals)
     op = next((u.name for u in accumulators if u.kind == "op"), None)
     _spend.append(
-        pipeline=pipeline_name,
+        pipeline=pipeline_usage.name if pipeline_usage is not None else None,
         step=step.name if step is not None else None,
         op=op,
         model_id=model_id,
@@ -726,19 +746,23 @@ def _env_cap() -> float | None:
     if not raw:
         return None
     try:
-        return float(raw)
+        cap = float(raw)
     except ValueError:
+        cap = math.nan
+    if not cap >= 0:  # also rejects nan
         raise ValueError(
-            f"FORGER_MAX_COST_USD must be a number of dollars, got {raw!r}"
-        ) from None
+            f"FORGER_MAX_COST_USD must be a number of dollars >= 0, got {raw!r}"
+        )
+    return cap
 
 
 def check_budget() -> None:
     """Raise ``BudgetExceededError`` when a spending cap is reached.
 
-    Models call this before each request batch. The caps are the active
-    pipeline's ``max_cost_usd`` (its spend this run, unattributed usage
-    included) and ``FORGER_MAX_COST_USD`` (all spend in this process).
+    Models call this before each request batch, and ``dynamic_step`` before
+    and during each agent conversation. The caps are ``max_cost_usd`` of the
+    pipeline this context counts toward (its spend this run, unattributed
+    usage excluded) and ``FORGER_MAX_COST_USD`` (all spend in this process).
     Requests already sent finish and are recorded, so spend can pass a cap by
     at most one batch (per thread sending batches).
     """
@@ -753,7 +777,7 @@ def check_budget() -> None:
     running = _running_for_context()
     if running is None or running.rec.max_cost_usd is None:
         return
-    spent = running.usage.totals()[2] + running.unattributed.totals()[2]
+    spent = running.usage.totals()[2]
     if spent >= running.rec.max_cost_usd:
         raise BudgetExceededError(
             f"pipeline {running.rec.name} spent ${spent:.4f}, reaching its "

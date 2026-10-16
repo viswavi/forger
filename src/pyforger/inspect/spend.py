@@ -58,7 +58,8 @@ def spend(
     """Print and return the spend ledger's totals by run, pipeline, and step.
 
     The ledger (see ``pyforger._spend``) holds one line per LLM result, written
-    as it is recorded, so it also covers runs that were killed or raised.
+    as it is recorded, so it also covers what runs that were killed or raised
+    had recorded.
 
     Args:
         path: The ledger file; defaults to ``$FORGER_SPEND_LEDGER``, else

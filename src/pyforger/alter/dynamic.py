@@ -17,6 +17,7 @@ import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 from pyforger import _tracking
 from pyforger.acquire.model import LocalModel, Model
@@ -133,23 +134,60 @@ def agent_llm(model):
     return LLM(**config)
 
 
-def _record_agent_usage(conversation, model_id: str | None = None) -> None:
-    """Add an OpenHands conversation's LLM tokens and cost to Forger's totals.
+class _AgentUsage:
+    """Adds an OpenHands conversation's LLM usage to Forger's totals as it grows.
 
     The agent calls LiteLLM through OpenHands, not ``Model.generate_batch``, so
-    its usage only reaches ``@step`` reports through this hook.
+    its usage only reaches ``@step`` reports, the spend ledger, and the spending
+    caps through this hook. ``on_event`` is an OpenHands callback: after each
+    event it records the usage added since the last record and checks the caps,
+    raising ``BudgetExceededError`` (once) to stop the run when one is reached.
     """
-    try:
-        metrics = conversation.conversation_stats.get_combined_metrics()
-        usage = getattr(metrics, "accumulated_token_usage", None)
-        _tracking.add_usage(
-            getattr(usage, "prompt_tokens", 0) or 0,
-            getattr(usage, "completion_tokens", 0) or 0,
-            getattr(metrics, "accumulated_cost", 0.0) or 0.0,
-            model_id=model_id,
-        )
-    except Exception:  # usage is reporting only; never fail the agent run on it
-        return
+
+    def __init__(self, model_id: str | None) -> None:
+        """Start with nothing recorded, in a copy of the caller's context."""
+        self.model_id = model_id
+        self.conversation: Any = None
+        self.error: _tracking.BudgetExceededError | None = None
+        self._recorded = (0, 0, 0.0)
+        self._context = contextvars.copy_context()
+
+    def record(self, conversation: Any = None) -> None:
+        """Record the conversation's usage since the last call; never raises."""
+        try:
+            conversation = conversation or self.conversation
+            metrics = conversation.conversation_stats.get_combined_metrics()
+            usage = getattr(metrics, "accumulated_token_usage", None)
+            now = (
+                int(getattr(usage, "prompt_tokens", 0) or 0),
+                int(getattr(usage, "completion_tokens", 0) or 0),
+                float(getattr(metrics, "accumulated_cost", 0.0) or 0.0),
+            )
+            delta = tuple(n - r for n, r in zip(now, self._recorded))
+            if any(delta):
+                self._recorded = now
+                _tracking.add_usage(*delta, model_id=self.model_id)
+        except Exception:  # usage is reporting only; never fail the agent on it
+            return
+
+    def on_event(self, event: Any) -> None:
+        """Record usage and stop the agent at a spending cap."""
+        if self.conversation is not None:
+            self._context.run(self._record_and_check)
+
+    def _record_and_check(self) -> None:
+        self.record()
+        if self.error is None:
+            try:
+                _tracking.check_budget()
+            except _tracking.BudgetExceededError as exc:
+                self.error = exc
+                raise
+
+
+def _record_agent_usage(conversation, model_id: str | None = None) -> None:
+    """Add a finished OpenHands conversation's tokens and cost to Forger's totals."""
+    _AgentUsage(model_id).record(conversation)
 
 
 def _generate(goal, item, model, max_iterations, execution_timeout_s):
@@ -172,6 +210,8 @@ def _generate(goal, item, model, max_iterations, execution_timeout_s):
     executor = PythonExecutor(item, execution_timeout_s)
     # Surface bad URLs before constructing an agent or spending LLM calls.
     executor.prepared_input()
+    _tracking.check_budget()  # raises BudgetExceededError at a spending cap
+    agent_usage = _AgentUsage(getattr(model, "_model_id", None))
     session_id = register_executor(executor)
 
     try:
@@ -195,7 +235,9 @@ def _generate(goal, item, model, max_iterations, execution_timeout_s):
                 workspace=workspace,
                 visualizer=None,
                 max_iteration_per_run=max_iterations,
+                callbacks=[agent_usage.on_event],
             )
+            agent_usage.conversation = conversation
             try:
                 conversation.send_message(
                     "Build a reusable Python sub-pipeline for this goal and input. "
@@ -218,14 +260,19 @@ def _generate(goal, item, model, max_iterations, execution_timeout_s):
                 remaining = max_iterations
                 seen_responses = set()
                 while remaining:
+                    _tracking.check_budget()
                     conversation.max_iteration_per_run = remaining
                     try:
                         conversation.run()
-                    except Exception:
+                    except Exception as exc:
                         if not executor.accepted:
+                            if agent_usage.error is not None:  # stopped at a cap
+                                raise agent_usage.error from exc
                             raise
                     if executor.accepted:
                         break
+                    if agent_usage.error is not None:
+                        raise agent_usage.error
                     responses = {
                         event.llm_response_id
                         for event in conversation.state.events
@@ -240,7 +287,7 @@ def _generate(goal, item, model, max_iterations, execution_timeout_s):
                             "Use the python tool with submit=true after testing."
                         )
             finally:
-                _record_agent_usage(conversation, getattr(model, "_model_id", None))
+                agent_usage.record()
                 conversation.close()
     finally:
         unregister_executor(session_id)

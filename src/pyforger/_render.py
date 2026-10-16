@@ -679,6 +679,9 @@ def _show_yield(call: OpCall) -> bool:
 def _check_text(call: OpCall) -> Text:
     """The op table's yield-check cell, verdict first: ``LOW · min 0.60``."""
     text = Text()
+    if call.error is not None:
+        text.append("RAISED", style="bold red")
+        return text
     y = call.yield_ratio
     if y is not None and not math.isfinite(y):
         y = None

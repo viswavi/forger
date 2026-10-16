@@ -97,19 +97,24 @@ the ops of the run that cached it, marked `(cached)`, with that run's warnings.
   still count them); silenced reports make no calls.
 - Threads: ops called from `ThreadPoolExecutor` workers are not itemized in the step report (the step gets a warning
   instead of an error) unless submitted as `pool.submit(contextvars.copy_context().run, fn, arg)`. Steps called from
-  workers still join the pipeline. Each op, step, and pipeline counts only its own LLM calls, also when several run
-  at the same time. LLM calls from workers that did not copy the context reach no step; the pipeline report lists
-  them as one `unattributed` line.
+  workers still join the pipeline, and their spend counts toward it (and its cap) as it arrives. Each op, step, and
+  pipeline counts only its own LLM calls, also when several run at the same time. An op that raised is listed as
+  `RAISED` with what it spent. LLM calls from workers that did not copy the context and run no step belong to no
+  step or pipeline: while exactly one pipeline runs, its report lists them as one `unattributed` line (it may include
+  other threads in the process), kept out of its totals and its `max_cost_usd`.
 - Cost: a cached step costs nothing this run; its report shows what the run that cached it took (`cached (originally
   37.9s · … · $0.50)`), and the pipeline summary separates what was spent this run from `cached (originally $X)`.
-- Spend ledger: every `Model` / `LocalModel` result is appended as it arrives to `$FORGER_SPEND_LEDGER`, else
-  `$FORGER_CACHE/spend.jsonl` (one JSON line: timestamp, pid, run id, pipeline, step, op, model id, tokens, cost), so
-  killed runs keep their record. `FORGER_SPEND_LEDGER=0` turns it off. `pyforger.inspect.spend(since="2026-10-16")`
-  prints and returns the totals by run, pipeline, and step.
-- Spending caps: `@pipeline(max_cost_usd=20)` caps one pipeline run (unattributed calls included), and
-  `FORGER_MAX_COST_USD=40` caps all spend in the process. Once spend reaches a cap, the next model request batch
-  raises `pyforger.BudgetExceededError`. Requests already sent finish and are recorded, so spend can pass a cap by up
-  to one batch (per thread sending batches).
+- Spend ledger: every usage record (`Model`, `LocalModel`, `dynamic_step` agents) is appended and flushed as it is
+  recorded to `$FORGER_SPEND_LEDGER`, else `$FORGER_CACHE/spend.jsonl` (one JSON line: timestamp, pid, run id,
+  pipeline, step, op, model id, tokens, cost), so killed runs keep their record. A `Model` records each request when
+  it completes for a single prompt or with `show_progress=True`; with the default `show_progress=False`, a
+  multi-prompt batch is recorded once it returns. `FORGER_SPEND_LEDGER=0` turns the ledger off.
+  `pyforger.inspect.spend(since="2026-10-16")` prints and returns the totals by run, pipeline, and step.
+- Spending caps: `@pipeline(max_cost_usd=20)` caps one pipeline run, and `FORGER_MAX_COST_USD=40` caps all spend in
+  the process (unattributed calls included). Both must be numbers >= 0. Once spend reaches a cap, the next model
+  request batch raises `pyforger.BudgetExceededError`, as does `dynamic_step` before starting an agent or during its
+  run. Requests already sent finish and are recorded, so spend can pass a cap by up to one batch (or one agent step)
+  per thread sending them.
 
 ### Operation reference
 

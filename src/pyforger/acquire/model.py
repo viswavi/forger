@@ -6,7 +6,9 @@ completions from any supported LLM provider.
 
 from __future__ import annotations
 
+import contextvars
 import warnings
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Union
 
@@ -20,7 +22,9 @@ Prompt = Union[str, list[Message]]
 
 
 def _batch_completion_with_progress(
-    all_messages: list[list[dict[str, str]]], call_kwargs: dict[str, Any]
+    all_messages: list[list[dict[str, str]]],
+    call_kwargs: dict[str, Any],
+    on_response: Callable[[Any], Any] | None = None,
 ) -> list[Any]:
     """Concurrent, progress-tracked replacement for litellm.batch_completion.
 
@@ -28,15 +32,27 @@ def _batch_completion_with_progress(
     in submission order, so the whole call looks frozen until the *slowest*
     early-submitted item finishes even if later ones completed first -- this
     updates a tqdm bar via `as_completed` as each call actually finishes.
+
+    ``on_response`` turns each response into the returned item as soon as it
+    arrives, in the worker thread but in a copy of the caller's context (so
+    usage it records lands in the caller's op and step, even when the caller
+    is interrupted while other requests are still running).
     """
     from tqdm import tqdm
+
+    def request(msgs: list[dict[str, str]]) -> Any:
+        response = litellm.completion(messages=msgs, **call_kwargs)
+        return on_response(response) if on_response is not None else response
+
+    def run_in(context: contextvars.Context, msgs: list[dict[str, str]]) -> Any:
+        return context.run(request, msgs)
 
     results: list[Any] = [None] * len(all_messages)
     model_id = call_kwargs.get("model", "?")
     max_workers = min(100, len(all_messages))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_idx = {
-            executor.submit(litellm.completion, messages=msgs, **call_kwargs): i
+            executor.submit(run_in, contextvars.copy_context(), msgs): i
             for i, msgs in enumerate(all_messages)
         }
         for future in tqdm(
@@ -428,50 +444,55 @@ class Model:
             num_retries=self._num_retries,
             **self._kwargs,
         )
+        # Each response's usage is recorded (and written to the spend ledger)
+        # by _record as soon as it is turned into a result: per request on the
+        # progress path, after the whole batch with litellm.batch_completion.
+        outputs: list[Any]
         if len(all_messages) == 1:
-            responses = [litellm.completion(messages=all_messages[0], **call_kwargs)]
+            response = litellm.completion(messages=all_messages[0], **call_kwargs)
+            outputs = [self._record(response)]
         else:
             use_progress = (
                 self._show_progress if show_progress is None else show_progress
             )
             if use_progress:
-                responses = _batch_completion_with_progress(all_messages, call_kwargs)
-            else:
-                responses = litellm.batch_completion(
-                    messages=all_messages, **call_kwargs
+                outputs = _batch_completion_with_progress(
+                    all_messages, call_kwargs, self._record
                 )
-        results: list[GenerateResult] = []
-        failure: Exception | None = None
-        for response in responses:
-            # batch_completion returns (rather than raises) per-request exceptions.
-            # The other responses were paid for: their usage is recorded before
-            # raising, but a failed batch adds nothing to self.history.
-            if isinstance(response, Exception):
-                failure = failure or response
-                continue
-            completions = [choice.message.content or "" for choice in response.choices]
-            usage: dict[str, Any] = dict(_extract_usage(response))
-            usage["cost_usd"] = _extract_cost(response, self._model_id)
-            reasoning = _extract_reasoning(response, self._model_id)
-            result = GenerateResult(
-                completions,
-                usage=usage,
-                reasoning=reasoning,
-                model_id=self._model_id,
-                raw=response,
-            )
-            results.append(result)
-            _tracking.add_usage(
-                result.usage.get("prompt_tokens", 0) or 0,
-                result.usage.get("completion_tokens", 0) or 0,
-                result.usage.get("cost_usd", 0.0) or 0.0,
-                model_id=self._model_id,
-            )
-        if failure is not None:
-            raise failure
-        self.history.extend(results)
+            else:
+                outputs = [
+                    # batch_completion returns (rather than raises) per-request
+                    # exceptions; the other responses were paid for.
+                    r if isinstance(r, Exception) else self._record(r)
+                    for r in litellm.batch_completion(
+                        messages=all_messages, **call_kwargs
+                    )
+                ]
+        for output in outputs:
+            if isinstance(output, Exception):
+                raise output  # a failed batch adds nothing to self.history
+        self.history.extend(outputs)
+        return outputs
 
-        return results
+    def _record(self, response: Any) -> GenerateResult:
+        """Turn one LiteLLM response into a result and record its usage."""
+        completions = [choice.message.content or "" for choice in response.choices]
+        usage: dict[str, Any] = dict(_extract_usage(response))
+        usage["cost_usd"] = _extract_cost(response, self._model_id)
+        result = GenerateResult(
+            completions,
+            usage=usage,
+            reasoning=_extract_reasoning(response, self._model_id),
+            model_id=self._model_id,
+            raw=response,
+        )
+        _tracking.add_usage(
+            usage.get("prompt_tokens", 0) or 0,
+            usage.get("completion_tokens", 0) or 0,
+            usage.get("cost_usd", 0.0) or 0.0,
+            model_id=self._model_id,
+        )
+        return result
 
 
 # Default cap on generated tokens for a local reasoning model. Reasoning traces
