@@ -240,11 +240,14 @@ class TestByTests:
         assert [r["id"] for r in kept] == ["all", "half", "none"]
 
     def test_new_bound_runs_nothing(self):
-        """The runs are cached apart from min_pass_rate."""
+        """The runs are cached apart from min_pass_rate and other row fields."""
         by_tests(self.ROWS, code_field="code")
         by_tests(self.ROWS, code_field="code", min_pass_rate=0.5)
+        relabeled = [{**row, "id": row["id"] + "!"} for row in self.ROWS]
+        kept = by_tests(relabeled, code_field="code")
+        assert [r["id"] for r in kept] == ["all!"]
         hits = [r.cache_hit for r in trace() if r.op_name == "alter.run_programs"]
-        assert hits == [False, True]
+        assert hits == [False, True, True]
 
     def test_result_field(self):
         """result_field keeps the per-test results on kept rows."""

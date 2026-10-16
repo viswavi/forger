@@ -73,10 +73,18 @@ def by_tests(
     """
     if not 0.0 <= min_pass_rate <= 1.0:
         raise ValueError(f"min_pass_rate must be in [0, 1], got {min_pass_rate}")
+    # Run only the code and tests, so rows that differ elsewhere reuse the
+    # cached runs and the cache does not hold a second copy of every row.
     ran = run_programs(
-        items,
-        code_field=code_field,
-        tests_field=tests_field,
+        [
+            {
+                "code": get_field(item, code_field, "by_tests"),
+                "tests": get_field(item, tests_field, "by_tests"),
+            }
+            for item in items
+        ],
+        code_field="code",
+        tests_field="tests",
         result_field="_by_tests_results",
         extract_code=extract_code,
         checker=checker,
