@@ -40,7 +40,11 @@ def by_length(
     min_len: int = 10,
     max_len: int = 10000,
 ) -> list[dict]:
-    """Keep items whose ``instruction_field`` word count is in [min_len, max_len]."""
+    """Keep items whose ``instruction_field`` word count is in [min_len, max_len].
+
+    Returns:
+        The kept rows, in input order and unchanged.
+    """
     word_counts: list[int] = []
     kept: list[dict] = []
     for item in items:
@@ -70,6 +74,9 @@ def by_invalid_response(
     - One string is a substring of the other and their lengths are within
       a factor of two (avoids false positives for short instructions).
     - The normalized string similarity exceeds the threshold.
+
+    Returns:
+        The kept rows, in input order and unchanged.
     """
 
     def _is_invalid(item: dict) -> bool:
@@ -97,7 +104,11 @@ def by_keyword_blocklist(
     blocklist: list[str] | None = None,
     case_sensitive: bool = False,
 ) -> list[dict]:
-    """Drop items whose ``response_field`` contains any blocklisted phrase."""
+    """Drop items whose ``response_field`` contains any blocklisted phrase.
+
+    Returns:
+        The kept rows, in input order and unchanged.
+    """
     keywords = blocklist if blocklist is not None else DEFAULT_BLOCKLIST
     keep = [
         not _contains_blocked(

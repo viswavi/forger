@@ -36,6 +36,10 @@ def retrieve(
     a single fetch with no query is performed (e.g. random sampling).
     Calls are not cached; inside a ``@step`` they are listed as
     ``acquire.retrieve``.
+
+    Returns:
+        The source's rows for each query in turn, each with a ``query`` field
+        added (``None`` when ``queries`` is None).
     """
     resolved_queries: list[str | None] = (
         list(queries) if queries is not None else [None]
@@ -91,7 +95,12 @@ def retrieve_from_web(
     base_url: str | None = None,
     **kwargs: Any,
 ) -> list[dict]:
-    """Search the web via Brave's LLM Context API. QUERY mode only."""
+    """Search the web via Brave's LLM Context API. QUERY mode only.
+
+    Returns:
+        Rows with ``text``, ``id`` (the page URL), ``title``, ``url``, and
+        ``query``.
+    """
     source_kwargs = {k: v for k, v in kwargs.items() if k not in ("api_key",)}
     source = WebRetrievalSource(
         base_url=base_url,
@@ -110,7 +119,12 @@ def retrieve_from_wiki(
     language: str = "en",
     **kwargs: Any,
 ) -> list[dict]:
-    """Fetch Wikipedia articles. QUERY (full-text) or RANDOM (random article)."""
+    """Fetch Wikipedia articles. QUERY (full-text) or RANDOM (random article).
+
+    Returns:
+        Rows with ``text`` (the intro extract), ``id`` (the page ID),
+        ``title``, ``summary`` (same as ``text``), and ``query``.
+    """
     source = WikiRetrievalSource(language=language, **kwargs)
     return retrieve(source, mode=mode, queries=queries, n=n, seed=seed, **kwargs)
 
@@ -127,7 +141,13 @@ def retrieve_from_hf(
     seed: int | None = None,
     **kwargs: Any,
 ) -> list[dict]:
-    """Load rows from a Hugging Face dataset."""
+    """Load rows from a Hugging Face dataset.
+
+    Returns:
+        Rows with ``row_idx``, ``dataset_id``, the dataset's column values, and
+        ``query``, which overwrites a dataset column of that name (``None`` when
+        ``queries`` is None).
+    """
     source = HFRetrievalSource(
         dataset=dataset,
         config=config,
@@ -146,7 +166,12 @@ def retrieve_from_arxiv(
     seed: int | None = None,
     **kwargs: Any,
 ) -> list[dict]:
-    """Fetch arXiv papers. QUERY (text search) or RANDOM (sample from category)."""
+    """Fetch arXiv papers. QUERY (text search) or RANDOM (sample from category).
+
+    Returns:
+        Rows with ``text`` (title and abstract), ``id`` (the arXiv id),
+        ``title``, ``summary`` (the abstract), and ``query``.
+    """
     source = ArxivRetrievalSource(**kwargs)
     return retrieve(source, mode=mode, queries=queries, n=n, seed=seed, **kwargs)
 

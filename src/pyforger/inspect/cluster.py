@@ -138,6 +138,9 @@ def topic_based_clustering(
     ``op_controls`` are per-call ``@op`` controls (``_no_cache``,
     ``_cache_only``). The fallback is resolved before the cache lookup, so
     a TF-IDF result is never cached under a sentence-transformers key.
+
+    Returns:
+        One topic name per row, aligned with ``items``.
     """
     if (
         embed_fn is None

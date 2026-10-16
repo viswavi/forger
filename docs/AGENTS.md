@@ -158,6 +158,9 @@ with `@op`, so their results are cached on disk and traced. The retrieval functi
 are not internally cached; wrap them with `@op` to memoize their results. Inside a `@step` they are listed as
 `acquire.retrieve`.
 
+For the full call signature of every op (parameter names, defaults, field parameters, caching), see
+[OPS.md](OPS.md), which is generated from the code.
+
 ### Public API summary
 
 | Name | Location | Description |
@@ -170,6 +173,8 @@ are not internally cached; wrap them with `@op` to memoize their results. Inside
 | `pyforger.filter` | `src/pyforger/filter/` | Remove rows by criterion. |
 | `pyforger.inspect` | `src/pyforger/inspect/` | Examine rows without modifying them; returns a report. |
 | `pyforger.utils` | `src/pyforger/utils.py` | `get_field`, `get_formatted_logger`, `canonical`. |
+
+The tables below give one line per op; [OPS.md](OPS.md) lists each op's signature and docstring summary.
 
 #### `pyforger.acquire`
 

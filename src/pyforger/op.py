@@ -185,6 +185,10 @@ def skip_cache_write() -> None:
 
 _STEP_META_SUFFIX = ".step.json"
 
+# Set on every @op / tracked wrapper, e.g. {"name": "filter.by_length", "kind":
+# "op", "cache": True}; scripts/gen_op_docs.py reads it to mark cached ops.
+OP_INFO_ATTR = "__forger_op__"
+
 
 class _RequestScope:
     """The @op call a Model's requests come from, for request-cache keys.
@@ -661,6 +665,7 @@ def op(
 
             return result, cache_hit, (args[0] if args else None), duration
 
+        setattr(wrapper, OP_INFO_ATTR, {"name": op_name, "kind": "op", "cache": cache})
         return wrapper
 
     if _fn is not None:
@@ -744,6 +749,7 @@ def tracked(op_name: str) -> Callable[[Callable[..., T]], Callable[..., T]]:
                 _tracking.exit_op(token, call, rows)
             return result
 
+        setattr(wrapper, OP_INFO_ATTR, {"name": op_name, "kind": "tracked"})
         return wrapper
 
     return decorate

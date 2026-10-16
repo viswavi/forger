@@ -30,7 +30,11 @@ def by_syntax(
     required_keys: list[str] | None = None,
     json_schema: dict[str, Any] | None = None,
 ) -> list[dict]:
-    """Keep items whose ``field`` parses as valid ``lang``."""
+    """Keep items whose ``field`` parses as valid ``lang``.
+
+    Returns:
+        The kept rows, in input order and unchanged.
+    """
     assert (
         lang in _SUPPORTED_LANGS
     ), f"Unsupported lang {lang!r}. Supported: {sorted(_SUPPORTED_LANGS)}"

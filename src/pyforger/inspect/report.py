@@ -15,6 +15,9 @@ def inspect_step(name: str | None = None) -> StepRecord:
     characters per field; a longer value is summarized by its shape, and with
     a report model (``pyforger.steps.set_report_model``) also in one sentence.
 
+    Returns:
+        The step's ``StepRecord``, as printed.
+
     Raises:
         KeyError: No step with that name has run; the message lists known steps.
     """
