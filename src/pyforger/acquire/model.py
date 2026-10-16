@@ -395,9 +395,14 @@ class Model:
             List of GenerateResult, one per prompt. Each GenerateResult
             is a list of n completion strings carrying usage / reasoning
             / model_id / raw as attributes.
+
+        Raises:
+            BudgetExceededError: Spend already reached the running pipeline's
+                ``max_cost_usd`` or ``FORGER_MAX_COST_USD``; nothing is sent.
         """
         if not prompts:
             return []
+        _tracking.check_budget()  # raises BudgetExceededError at a spending cap
 
         temperature = temperature if temperature is not None else self._temperature
         max_tokens = max_tokens if max_tokens is not None else self._max_tokens
@@ -435,13 +440,15 @@ class Model:
                 responses = litellm.batch_completion(
                     messages=all_messages, **call_kwargs
                 )
+        results: list[GenerateResult] = []
+        failure: Exception | None = None
         for response in responses:
             # batch_completion returns (rather than raises) per-request exceptions.
+            # The other responses were paid for: their usage is recorded before
+            # raising, but a failed batch adds nothing to self.history.
             if isinstance(response, Exception):
-                raise response
-
-        results: list[GenerateResult] = []
-        for response in responses:
+                failure = failure or response
+                continue
             completions = [choice.message.content or "" for choice in response.choices]
             usage: dict[str, Any] = dict(_extract_usage(response))
             usage["cost_usd"] = _extract_cost(response, self._model_id)
@@ -454,12 +461,15 @@ class Model:
                 raw=response,
             )
             results.append(result)
-            self.history.append(result)
             _tracking.add_usage(
                 result.usage.get("prompt_tokens", 0) or 0,
                 result.usage.get("completion_tokens", 0) or 0,
                 result.usage.get("cost_usd", 0.0) or 0.0,
+                model_id=self._model_id,
             )
+        if failure is not None:
+            raise failure
+        self.history.extend(results)
 
         return results
 
@@ -652,6 +662,7 @@ class LocalModel(Model):
         """
         if not prompts:
             return []
+        _tracking.check_budget()  # raises BudgetExceededError at a spending cap
 
         vllm = _import_vllm()
 
@@ -706,6 +717,7 @@ class LocalModel(Model):
                 result.usage.get("prompt_tokens", 0) or 0,
                 result.usage.get("completion_tokens", 0) or 0,
                 result.usage.get("cost_usd", 0.0) or 0.0,
+                model_id=self._model_id,
             )
 
         return results

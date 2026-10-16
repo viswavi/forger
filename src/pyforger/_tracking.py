@@ -1,20 +1,23 @@
 """Shared run-time state for ``@op`` calls, ``@step`` reports, and filter scores.
 
-This module imports nothing from the rest of pyforger, so ``op.py``,
-``steps.py``, ``acquire/model.py``, and the filters can all use it without
-circular imports.
+This module imports nothing from the rest of pyforger but ``_spend`` (which
+imports nothing), so ``op.py``, ``steps.py``, ``acquire/model.py``, and the
+filters can all use it without circular imports.
 
-Context variables do not propagate into ``ThreadPoolExecutor`` workers (for
-example, ``alter.dynamic_step`` runs ``dynamic_step_source`` in threads). Ops
+Context variables do not propagate into ``ThreadPoolExecutor`` workers. Ops
 called from such workers see no active step and are not itemized in its report,
 unless the work is submitted as ``pool.submit(contextvars.copy_context().run,
 fn, arg)``. A step whose ops all ran in workers gets a warning instead of the
 "called no Forger operations" error, and a step called from a worker thread
 still joins the pipeline when exactly one pipeline is running.
 
-Token and cost totals are deltas of one process-wide counter, so the LLM usage
-of worker threads lands in the enclosing op. When several ops or steps run at
-the same time in different threads, each one's totals include the others'.
+Usage is counted in accumulators: entering a pipeline, step, or op pushes its
+own ``Usage`` onto a context variable, and ``add_usage`` adds to every
+accumulator open in the calling context. Workers started with
+``copy_context().run`` share their parent's accumulators, so two ops running at
+the same time each count only their own LLM calls. Usage from a thread that
+did not copy the context reaches no step; while a pipeline runs it is kept as
+that pipeline's "unattributed" usage.
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ from __future__ import annotations
 import contextvars
 import json
 import math
+import os
 import threading
 from collections.abc import Callable
 from contextvars import ContextVar, Token
@@ -29,6 +33,8 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+
+from pyforger import _spend
 
 _CATEGORIES = frozenset({"acquire", "alter", "filter", "inspect"})
 
@@ -101,13 +107,34 @@ class FieldSummary(BaseModel):
     llm: str | None = None
 
 
+class UsageTotals(BaseModel):
+    """Tokens and cost of one run, e.g. the run that cached a step."""
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cost_usd: float = 0.0
+    token_units: float = 0.0
+    duration_s: float = 0.0
+
+    def is_zero(self) -> bool:
+        """Return True when nothing was counted."""
+        return not (
+            self.prompt_tokens
+            or self.completion_tokens
+            or self.cost_usd
+            or self.token_units
+        )
+
+
 class StepRecord(BaseModel):
     """Everything a ``@step`` call reports: its ops, totals, warnings, and samples.
 
     ``kind`` is ``"step"`` for a ``@step`` function, ``"dynamic_step"`` for
     ``alter.dynamic_step`` called directly in a pipeline, and ``"bare"`` for any
     other op called in a pipeline outside a step. ``sample_summaries[i]`` maps
-    the position of a long field in ``sample[i]`` to its summary.
+    the position of a long field in ``sample[i]`` to its summary. On a cache
+    hit the totals are this run's (zero) and ``original`` holds the time,
+    tokens, and cost of the earlier run that cached the step.
     """
 
     name: str
@@ -128,10 +155,15 @@ class StepRecord(BaseModel):
     completion_tokens: int = 0
     cost_usd: float = 0.0
     token_units: float = 0.0
+    original: UsageTotals | None = None
 
 
 class PipelineRecord(BaseModel):
-    """Everything a ``@pipeline`` call reports: its steps, totals, and warnings."""
+    """Everything a ``@pipeline`` call reports: its steps, totals, and warnings.
+
+    The totals are what this run spent, ``unattributed`` included: LLM usage
+    from threads that did not copy the context, which no step could claim.
+    """
 
     name: str
     steps: list[StepRecord] = Field(default_factory=list)
@@ -141,6 +173,78 @@ class PipelineRecord(BaseModel):
     completion_tokens: int = 0
     cost_usd: float = 0.0
     token_units: float = 0.0
+    unattributed: UsageTotals = Field(default_factory=UsageTotals)
+    max_cost_usd: float | None = None
+
+    @property
+    def cached_cost_usd(self) -> float:
+        """What the cached steps cost in the runs that cached them."""
+        return sum(
+            s.original.cost_usd for s in self.steps if s.cache_hit and s.original
+        )
+
+
+_USAGE_LOCK = threading.Lock()
+
+
+class Usage:
+    """Running usage totals of one pipeline, step, or op (see ``add_usage``).
+
+    ``kind`` is ``"pipeline"``, ``"step"``, ``"op"``, or ``""`` for other
+    totals; ``name`` is e.g. ``"filter.by_llm_score"``.
+    """
+
+    __slots__ = (
+        "kind",
+        "name",
+        "prompt_tokens",
+        "completion_tokens",
+        "cost_usd",
+        "token_units",
+    )
+
+    def __init__(self, kind: str = "", name: str = "") -> None:
+        """Start at zero."""
+        self.kind = kind
+        self.name = name
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.cost_usd = 0.0
+        self.token_units = 0.0
+
+    def _add(self, prompt: int, completion: int, cost: float, units: float) -> None:
+        # Callers hold _USAGE_LOCK.
+        self.prompt_tokens += prompt
+        self.completion_tokens += completion
+        self.cost_usd += cost
+        self.token_units += units
+
+    def add(self, totals: tuple[int, int, float, float]) -> None:
+        """Add ``(prompt_tokens, completion_tokens, cost_usd, token_units)``."""
+        with _USAGE_LOCK:
+            self._add(*totals)
+
+    def totals(self) -> tuple[int, int, float, float]:
+        """Return ``(prompt_tokens, completion_tokens, cost_usd, token_units)``."""
+        with _USAGE_LOCK:
+            return (
+                self.prompt_tokens,
+                self.completion_tokens,
+                self.cost_usd,
+                self.token_units,
+            )
+
+
+# The accumulators open in this context, outermost first: e.g. (pipeline,
+# step, op, nested op). Copied contexts share the same Usage objects.
+_ACCUMULATORS: ContextVar[tuple[Usage, ...]] = ContextVar(
+    "forger_usage_accumulators", default=()
+)
+
+
+def _open_usage(kind: str, name: str) -> tuple[Usage, Token[tuple[Usage, ...]]]:
+    usage = Usage(kind, name)
+    return usage, _ACCUMULATORS.set(_ACCUMULATORS.get() + (usage,))
 
 
 _ACTIVE_STEP: ContextVar[StepRecord | None] = ContextVar(
@@ -188,21 +292,30 @@ class ScopeToken:
 
     owner_token: Token[Any]
     depth_token: Token[int]
-    hook_token: Token[Any] | None = None
+    hook_token: Token[Any] | None
+    usage: Usage
+    usage_token: Token[tuple[Usage, ...]]
 
 
 def enter_step(rec: StepRecord, check: Callable[[Any], str | None]) -> ScopeToken:
     """Make ``rec`` the active step; ops it calls are top level (depth 0) again.
 
-    ``check`` validates the step's result; see ``check_step_result``.
+    ``check`` validates the step's result; see ``check_step_result``. The
+    step's usage is counted in ``token.usage``.
     """
+    usage, usage_token = _open_usage("step", rec.name)
     return ScopeToken(
-        _ACTIVE_STEP.set(rec), _OP_DEPTH.set(0), _STEP_RESULT_CHECK.set(check)
+        _ACTIVE_STEP.set(rec),
+        _OP_DEPTH.set(0),
+        _STEP_RESULT_CHECK.set(check),
+        usage,
+        usage_token,
     )
 
 
 def exit_step(token: ScopeToken) -> None:
     """Undo ``enter_step``."""
+    _ACCUMULATORS.reset(token.usage_token)
     if token.hook_token is not None:
         _STEP_RESULT_CHECK.reset(token.hook_token)
     _OP_DEPTH.reset(token.depth_token)
@@ -218,12 +331,13 @@ def check_step_result(result: Any) -> str | None:
     return check(result) if check is not None else None
 
 
-def step_meta(rec: StepRecord) -> str:
+def step_meta(rec: StepRecord, original: UsageTotals) -> str:
     """Serialize the ops a step ran, to store next to its cached result.
 
     On a cache hit ``restore_step_meta`` puts them back (marked cached, with no
     time, usage, or scores), so the cached step reports the same ops and yield
-    warnings, and ``strict=True`` still sees them.
+    warnings, and ``strict=True`` still sees them. ``original`` (the step's
+    time, tokens, and cost in this run) becomes the cached step's ``original``.
     """
     ops = [
         call.model_copy(
@@ -239,21 +353,43 @@ def step_meta(rec: StepRecord) -> str:
         ).model_dump(mode="json")
         for call in rec.ops
     ]
-    return json.dumps({"version": 1, "ops": ops})
+    return json.dumps(
+        {"version": 1, "ops": ops, "original": original.model_dump(mode="json")}
+    )
 
 
 def restore_step_meta(text: str) -> None:
-    """Give the active step the ops stored by ``step_meta`` (on a cache hit)."""
+    """Give the active step the ops and usage stored by ``step_meta``.
+
+    Called on a cache hit. Metadata written before usage was stored has no
+    ``original``, so the step shows no earlier cost.
+    """
     step = _ACTIVE_STEP.get()
     if step is None:
         return
     try:
-        step.ops = [OpCall.model_validate(d) for d in json.loads(text)["ops"]]
+        meta = json.loads(text)
+        step.ops = [OpCall.model_validate(d) for d in meta["ops"]]
     except (ValueError, KeyError, TypeError):
         step.ops = []  # unreadable metadata: report the step as fully cached
+        return
+    try:
+        if meta.get("original") is not None:
+            step.original = UsageTotals.model_validate(meta["original"])
+    except ValueError:
+        step.original = None
 
 
-_RUNNING_PIPELINES: list[PipelineRecord] = []
+@dataclass
+class _Running:
+    """A pipeline running in this process, with its usage so far."""
+
+    rec: PipelineRecord
+    usage: Usage
+    unattributed: Usage
+
+
+_RUNNING_PIPELINES: list[_Running] = []
 _RUNNING_LOCK = threading.Lock()
 
 
@@ -263,29 +399,64 @@ def enter_pipeline(
     """Make ``rec`` the active pipeline; ops it calls directly are top level.
 
     ``on_dynamic_step`` is called with the record of each ``alter.dynamic_step``
-    call made directly in the pipeline.
+    call made directly in the pipeline. ``rec.max_cost_usd`` caps its spend
+    (see ``check_budget``).
     """
+    usage, usage_token = _open_usage("pipeline", rec.name)
     with _RUNNING_LOCK:
-        _RUNNING_PIPELINES.append(rec)
+        _RUNNING_PIPELINES.append(_Running(rec, usage, Usage("unattributed")))
     return ScopeToken(
         _ACTIVE_PIPELINE.set(rec),
         _OP_DEPTH.set(0),
         _ON_DYNAMIC_STEP.set(on_dynamic_step),
+        usage,
+        usage_token,
     )
 
 
 def exit_pipeline(token: ScopeToken) -> None:
-    """Undo ``enter_pipeline``."""
+    """Undo ``enter_pipeline`` and set the record's usage totals.
+
+    The totals are the pipeline's own usage plus its unattributed usage.
+    """
     rec = _ACTIVE_PIPELINE.get()
+    unattributed = Usage()
     with _RUNNING_LOCK:
         for i, running in enumerate(_RUNNING_PIPELINES):
-            if running is rec:
+            if running.rec is rec:
+                unattributed = running.unattributed
                 del _RUNNING_PIPELINES[i]
                 break
+    _ACCUMULATORS.reset(token.usage_token)
     if token.hook_token is not None:
         _ON_DYNAMIC_STEP.reset(token.hook_token)
     _OP_DEPTH.reset(token.depth_token)
     _ACTIVE_PIPELINE.reset(token.owner_token)
+    if rec is None:
+        return
+    extra = unattributed.totals()
+    own = token.usage.totals()
+    rec.unattributed = UsageTotals(
+        prompt_tokens=extra[0],
+        completion_tokens=extra[1],
+        cost_usd=extra[2],
+        token_units=extra[3],
+    )
+    (
+        rec.prompt_tokens,
+        rec.completion_tokens,
+        rec.cost_usd,
+        rec.token_units,
+    ) = (own[0] + extra[0], own[1] + extra[1], own[2] + extra[2], own[3] + extra[3])
+
+
+def _running_for_context() -> _Running | None:
+    """The pipeline active in this context, else the only one running."""
+    rec = _ACTIVE_PIPELINE.get()
+    with _RUNNING_LOCK:
+        if rec is not None:
+            return next((r for r in _RUNNING_PIPELINES if r.rec is rec), None)
+        return _RUNNING_PIPELINES[0] if len(_RUNNING_PIPELINES) == 1 else None
 
 
 def pipeline_for_step() -> PipelineRecord | None:
@@ -298,8 +469,20 @@ def pipeline_for_step() -> PipelineRecord | None:
     rec = _ACTIVE_PIPELINE.get()
     if rec is not None:
         return rec
+    running = _running_for_context()
+    return running.rec if running is not None else None
+
+
+def credit_pipeline(rec: PipelineRecord, totals: tuple[int, int, float, float]) -> None:
+    """Add a step's usage to ``rec`` when the step ran outside its context.
+
+    A step called from a worker thread that did not copy the context counts
+    its own usage; this adds it to the pipeline it joined.
+    """
     with _RUNNING_LOCK:
-        return _RUNNING_PIPELINES[0] if len(_RUNNING_PIPELINES) == 1 else None
+        running = next((r for r in _RUNNING_PIPELINES if r.rec is rec), None)
+    if running is not None:
+        running.usage.add(totals)
 
 
 _OPS_STARTED = [0]
@@ -320,6 +503,12 @@ class OpToken:
     depth: int
     depth_token: Token[int] | None = None
     scores_token: Token[list[ScoreRecord] | None] | None = None
+    usage: Usage | None = None
+    usage_token: Token[tuple[Usage, ...]] | None = None
+
+    def usage_totals(self) -> tuple[int, int, float, float]:
+        """The op's own usage so far (zero for a step's cache wrapper)."""
+        return self.usage.totals() if self.usage is not None else (0, 0, 0.0, 0.0)
 
 
 def enter_op(op_name: str) -> OpToken:
@@ -331,11 +520,14 @@ def enter_op(op_name: str) -> OpToken:
         with _OPS_LOCK:
             _OPS_STARTED[0] += 1
     depth = _OP_DEPTH.get()
+    usage, usage_token = _open_usage("op", op_name)
     return OpToken(
         is_step=False,
         depth=depth,
         depth_token=_OP_DEPTH.set(depth + 1),
         scores_token=_ACTIVE_SCORES.set([]),
+        usage=usage,
+        usage_token=usage_token,
     )
 
 
@@ -356,6 +548,8 @@ def exit_op(token: OpToken, call: OpCall | None) -> None:
             step.cache_hit = call.cache_hit
             step.warnings.extend(call.warnings)
         return
+    if token.usage_token is not None:
+        _ACCUMULATORS.reset(token.usage_token)
     if token.scores_token is not None:
         _ACTIVE_SCORES.reset(token.scores_token)
     if token.depth_token is not None:
@@ -434,13 +628,9 @@ def keep_where(items: list[Any], keep: list[bool]) -> list[Any]:
     return [item for item, kept in zip(items, keep) if kept]
 
 
-_USAGE_LOCK = threading.Lock()
-_USAGE = {
-    "prompt_tokens": 0,
-    "completion_tokens": 0,
-    "cost_usd": 0.0,
-    "token_units": 0.0,
-}
+# All LLM usage in this process, report summaries included; the
+# FORGER_MAX_COST_USD cap is checked against it.
+_PROCESS_USAGE = Usage()
 # False inside ``run_uncounted``: LLM calls Forger makes for its own reports
 # (summaries of sample values) stay out of every op, step, and pipeline total.
 _COUNT_USAGE: ContextVar[bool] = ContextVar("forger_count_usage", default=True)
@@ -450,9 +640,9 @@ def run_uncounted(fn: Callable[..., Any], *args: Any) -> Any:
     """Call ``fn(*args)`` outside every step, pipeline, and op; skip its usage.
 
     It runs in a fresh context: its ops join no step or pipeline report, add
-    nothing to ``ops_started``, and its LLM usage is not added to the counter
-    (call it again from each worker thread, since threads do not inherit the
-    context).
+    nothing to ``ops_started``, and its LLM usage is added to no op, step, or
+    pipeline (only to the process total and the spend ledger). Call it again
+    from each worker thread, since threads do not inherit the context.
     """
 
     def run() -> Any:
@@ -475,39 +665,101 @@ def add_usage(
     completion_tokens: Any,
     cost_usd: Any,
     token_units: Any = 0.0,
+    *,
+    model_id: str | None = None,
 ) -> None:
-    """Add one LLM call's usage to the process-wide counter (NaN counts as 0)."""
-    if not _COUNT_USAGE.get():
-        return
+    """Record one LLM result's usage (NaN counts as 0).
+
+    It is added to every accumulator open in this context (the pipeline, the
+    step, and each enclosing op), to the process total, and to the spend
+    ledger. With no step or pipeline in this context (a worker thread that did
+    not copy the context), it is added to each running pipeline's
+    unattributed usage instead.
+    """
+    totals = (
+        int(_as_number(prompt_tokens)),
+        int(_as_number(completion_tokens)),
+        _as_number(cost_usd),
+        _as_number(token_units),
+    )
+    accumulators = _ACCUMULATORS.get()
+    counted = _COUNT_USAGE.get()
+    step, pipeline = _ACTIVE_STEP.get(), _ACTIVE_PIPELINE.get()
+    pipeline_name = pipeline.name if pipeline is not None else None
+    unattributed: list[Usage] = []
+    if counted and step is None and pipeline is None:
+        with _RUNNING_LOCK:
+            unattributed = [r.unattributed for r in _RUNNING_PIPELINES]
+            if len(_RUNNING_PIPELINES) == 1:
+                pipeline_name = _RUNNING_PIPELINES[0].rec.name
     with _USAGE_LOCK:
-        _USAGE["prompt_tokens"] += int(_as_number(prompt_tokens))
-        _USAGE["completion_tokens"] += int(_as_number(completion_tokens))
-        _USAGE["cost_usd"] += _as_number(cost_usd)
-        _USAGE["token_units"] += _as_number(token_units)
+        _PROCESS_USAGE._add(*totals)
+        if counted:
+            for usage in (*accumulators, *unattributed):
+                usage._add(*totals)
+    op = next((u.name for u in accumulators if u.kind == "op"), None)
+    _spend.append(
+        pipeline=pipeline_name,
+        step=step.name if step is not None else None,
+        op=op,
+        model_id=model_id,
+        prompt_tokens=totals[0],
+        completion_tokens=totals[1],
+        cost_usd=totals[2],
+    )
 
 
 def usage_snapshot() -> tuple[int, int, float, float]:
-    """Return ``(prompt_tokens, completion_tokens, cost_usd, token_units)``."""
-    with _USAGE_LOCK:
-        return (
-            int(_USAGE["prompt_tokens"]),
-            int(_USAGE["completion_tokens"]),
-            float(_USAGE["cost_usd"]),
-            float(_USAGE["token_units"]),
+    """Return the process total, report summaries included.
+
+    That is ``(prompt_tokens, completion_tokens, cost_usd, token_units)``.
+    """
+    return _PROCESS_USAGE.totals()
+
+
+class BudgetExceededError(RuntimeError):
+    """Spend reached ``@pipeline(max_cost_usd=...)`` or ``FORGER_MAX_COST_USD``."""
+
+
+def _env_cap() -> float | None:
+    raw = os.environ.get("FORGER_MAX_COST_USD", "").strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        raise ValueError(
+            f"FORGER_MAX_COST_USD must be a number of dollars, got {raw!r}"
+        ) from None
+
+
+def check_budget() -> None:
+    """Raise ``BudgetExceededError`` when a spending cap is reached.
+
+    Models call this before each request batch. The caps are the active
+    pipeline's ``max_cost_usd`` (its spend this run, unattributed usage
+    included) and ``FORGER_MAX_COST_USD`` (all spend in this process).
+    Requests already sent finish and are recorded, so spend can pass a cap by
+    at most one batch (per thread sending batches).
+    """
+    cap = _env_cap()
+    if cap is not None:
+        spent = _PROCESS_USAGE.totals()[2]
+        if spent >= cap:
+            raise BudgetExceededError(
+                f"spent ${spent:.4f} in this process, reaching "
+                f"FORGER_MAX_COST_USD=${cap:g}; no further LLM requests are sent"
+            )
+    running = _running_for_context()
+    if running is None or running.rec.max_cost_usd is None:
+        return
+    spent = running.usage.totals()[2] + running.unattributed.totals()[2]
+    if spent >= running.rec.max_cost_usd:
+        raise BudgetExceededError(
+            f"pipeline {running.rec.name} spent ${spent:.4f}, reaching its "
+            f"max_cost_usd=${running.rec.max_cost_usd:g}; no further LLM requests "
+            "are sent"
         )
-
-
-def usage_since(
-    start: tuple[int, int, float, float],
-) -> tuple[int, int, float, float]:
-    """Return the usage added since ``start`` (a ``usage_snapshot()``)."""
-    now = usage_snapshot()
-    return (
-        now[0] - start[0],
-        now[1] - start[1],
-        max(0.0, now[2] - start[2]),
-        max(0.0, now[3] - start[3]),
-    )
 
 
 _REGISTRY_LOCK = threading.Lock()

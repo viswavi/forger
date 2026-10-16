@@ -46,7 +46,12 @@ from pyforger._render import (
     sample_summaries,
 )
 from pyforger._summaries import set_report_model
-from pyforger._tracking import PipelineRecord, StepRecord
+from pyforger._tracking import (
+    BudgetExceededError,
+    PipelineRecord,
+    StepRecord,
+    UsageTotals,
+)
 from pyforger.op import op
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -251,14 +256,13 @@ def step(
                 if strict and rec.warnings:
                     strict_failed.append(True)
                     raise _strict_error(rec)
-                return _tracking.step_meta(rec)
+                return _tracking.step_meta(rec, _usage_totals(scope.usage, start))
 
-            usage_start = _tracking.usage_snapshot()
             start = time.perf_counter()
 
             def finish() -> None:
                 rec.duration_s = time.perf_counter() - start
-                usage = _tracking.usage_since(usage_start)
+                usage = scope.usage.totals()
                 (
                     rec.prompt_tokens,
                     rec.completion_tokens,
@@ -269,6 +273,8 @@ def step(
                 pipeline_rec = _tracking.pipeline_for_step()
                 if pipeline_rec is not None:
                     pipeline_rec.steps.append(rec)
+                    if _tracking.active_pipeline() is None:  # a worker thread
+                        _tracking.credit_pipeline(pipeline_rec, usage)
                 if _reports_enabled(prod):
                     _summaries.add_llm_summaries(rec, rows=rec.sample_shown)
                     print_step(rec)
@@ -295,6 +301,18 @@ def step(
     if _fn is not None:
         return decorate(_fn)
     return decorate
+
+
+def _usage_totals(usage: _tracking.Usage, start: float) -> UsageTotals:
+    """A step's usage and time so far, stored with its cached result."""
+    prompt, completion, cost, units = usage.totals()
+    return UsageTotals(
+        prompt_tokens=prompt,
+        completion_tokens=completion,
+        cost_usd=cost,
+        token_units=units,
+        duration_s=time.perf_counter() - start,
+    )
 
 
 def _strict_error(rec: StepRecord) -> StepContractError:
@@ -360,6 +378,7 @@ def pipeline(
     name: str | None = None,
     prod: bool = False,
     strict: bool = False,
+    max_cost_usd: float | None = None,
 ) -> Any:
     """Decorate a function that calls ``@step`` functions; print a summary at the end.
 
@@ -375,7 +394,12 @@ def pipeline(
         name: Pipeline name in the report; defaults to the function name.
         prod: Do not print the summary.
         strict: Raise ``PipelineContractError`` when the pipeline has any warning.
+        max_cost_usd: Stop when this run has spent this many dollars: the next
+            model request batch raises ``BudgetExceededError``. Requests already
+            sent finish, so spend can pass the cap by up to one batch.
     """
+    if max_cost_usd is not None and not max_cost_usd >= 0:
+        raise ValueError(f"max_cost_usd must be >= 0, got {max_cost_usd}")
 
     def decorate(fn: F) -> F:
         pipeline_name = name or fn.__name__
@@ -388,8 +412,7 @@ def pipeline(
                     f"pipeline {pipeline_name} was called inside pipeline "
                     f"{outer.name}; pipelines cannot nest"
                 )
-            rec = PipelineRecord(name=pipeline_name)
-            usage_start = _tracking.usage_snapshot()
+            rec = PipelineRecord(name=pipeline_name, max_cost_usd=max_cost_usd)
             start = time.perf_counter()
 
             def on_dynamic_step(step_rec: StepRecord) -> None:
@@ -403,14 +426,6 @@ def pipeline(
             finally:
                 _tracking.exit_pipeline(scope)
             rec.duration_s = time.perf_counter() - start
-            usage = _tracking.usage_since(usage_start)
-            (
-                rec.prompt_tokens,
-                rec.completion_tokens,
-                rec.cost_usd,
-                rec.token_units,
-            ) = usage
-
             _check_pipeline(rec)
             _tracking.store_pipeline(rec)
             if _reports_enabled(prod):
@@ -468,6 +483,7 @@ def _check_pipeline(rec: PipelineRecord) -> None:
 
 
 __all__ = [
+    "BudgetExceededError",
     "PipelineContractError",
     "StepContractError",
     "pipeline",

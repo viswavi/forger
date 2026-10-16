@@ -254,7 +254,6 @@ def op(
                 )
             token = _tracking.enter_op(op_name)
             scope_token = _NO_CACHE_SCOPE.set(True) if _no_cache else None
-            usage_start = _tracking.usage_snapshot()
             call: _tracking.OpCall | None = None
             try:
                 result, cache_hit, first_arg, duration = _call(
@@ -266,7 +265,7 @@ def op(
                     result,
                     cache_hit=cache_hit,
                     duration=duration,
-                    usage=_tracking.usage_since(usage_start),
+                    usage=token.usage_totals(),
                     scores=_tracking.current_scores(),
                     min_yield=min_yield,
                     max_yield=max_yield,
@@ -450,7 +449,6 @@ def tracked(op_name: str) -> Callable[[Callable[..., T]], Callable[..., T]]:
         @wraps(fn)
         def wrapper(*args: Any, **kwargs: Any) -> T:
             token = _tracking.enter_op(op_name)
-            usage_start = _tracking.usage_snapshot()
             start = time.perf_counter()
             call: _tracking.OpCall | None = None
             try:
@@ -461,7 +459,7 @@ def tracked(op_name: str) -> Callable[[Callable[..., T]], Callable[..., T]]:
                     result,
                     cache_hit=False,
                     duration=time.perf_counter() - start,
-                    usage=_tracking.usage_since(usage_start),
+                    usage=token.usage_totals(),
                     scores=_tracking.current_scores(),
                     min_yield=None,
                     max_yield=None,

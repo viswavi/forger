@@ -205,6 +205,20 @@ def _usage_summary(prompt: int, completion: int, units: float, cost: float) -> s
     return " · ".join(parts)
 
 
+def _originally(rec: StepRecord) -> str:
+    """`` (originally 37.9s · 1,204 in / 310 out tokens · $0.50)``, cached steps."""
+    if rec.original is None:
+        return ""
+    o = rec.original
+    parts = [fmt_secs(o.duration_s)]
+    usage = _usage_summary(
+        o.prompt_tokens, o.completion_tokens, o.token_units, o.cost_usd
+    )
+    if usage:
+        parts.append(usage)
+    return f" (originally {' · '.join(parts)})"
+
+
 def _rows_text(n_in: int | None, n_out: int | None, *, generated: str) -> str:
     """``143 → 61 rows (yield 0.43)``, or ``276 rows generated`` without input."""
     if n_in is None:
@@ -1000,7 +1014,7 @@ def step_renderable(
     if usage:
         stats.append(f" · {usage}")
     if rec.cache_hit:
-        stats.append(" · cached", style="dim")
+        stats.append(" · cached" + _originally(rec), style="dim")
     body.append(stats)
     if rec.input_type or rec.output_type:
         arrow = f"{rec.input_type or 'any'} → {rec.output_type or 'any'}"
@@ -1058,11 +1072,21 @@ def pipeline_renderable(rec: PipelineRecord, *, width: int = WIDTH) -> Renderabl
     usage = _usage_summary(
         rec.prompt_tokens, rec.completion_tokens, rec.token_units, rec.cost_usd
     )
-    if usage:
+    cached_cost = rec.cached_cost_usd
+    if cached_cost and math.isfinite(cached_cost):
+        stats.append(f" · {usage or 'nothing'} spent this run")
+        stats.append(f" · cached (originally {fmt_cost(cached_cost)})", style="dim")
+    elif usage:
         stats.append(f" · {usage}")
 
+    def original_cost(s: StepRecord) -> float:
+        return s.original.cost_usd if s.cache_hit and s.original else 0.0
+
     show_units = any(s.token_units and math.isfinite(s.token_units) for s in rec.steps)
-    show_cost = any(s.cost_usd and math.isfinite(s.cost_usd) for s in rec.steps)
+    show_cost = any(
+        (s.cost_usd and math.isfinite(s.cost_usd)) or original_cost(s)
+        for s in rec.steps
+    )
     rows: list[list[Text]] = []
     for s in rec.steps:
         y = s.n_out / s.n_in if s.n_in and s.n_out is not None else None
@@ -1081,7 +1105,9 @@ def pipeline_renderable(rec: PipelineRecord, *, width: int = WIDTH) -> Renderabl
         ]
         if show_units:
             cells.append(Text(fmt_units(s.token_units)))
-        if show_cost:
+        if show_cost and original_cost(s):
+            cells.append(Text(f"({fmt_cost(original_cost(s))})", style="dim"))
+        elif show_cost:
             cells.append(Text(fmt_cost(s.cost_usd)))
         cells.append(flags)
         rows.append(cells)
@@ -1099,6 +1125,22 @@ def pipeline_renderable(rec: PipelineRecord, *, width: int = WIDTH) -> Renderabl
         table = _fit_table(headers, rows, width - 2, left={""})
 
     body: list[RenderableType] = [stats, Text(""), table]
+    extra = rec.unattributed
+    if not extra.is_zero():
+        usage = _usage_summary(
+            extra.prompt_tokens,
+            extra.completion_tokens,
+            extra.token_units,
+            extra.cost_usd,
+        )
+        body.append(Text(""))
+        body.append(
+            Text(
+                f"unattributed: {usage or 'no cost'}, from threads started "
+                "without contextvars.copy_context().run",
+                style="yellow",
+            )
+        )
     step_warnings = [
         line for s in rec.steps for line in _warning_lines(s.warnings, prefix=s.name)
     ]

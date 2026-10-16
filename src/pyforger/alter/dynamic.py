@@ -7,6 +7,7 @@ Python runs without terminal, filesystem, network, or unrestricted Python access
 
 from __future__ import annotations
 
+import contextvars
 import json
 import math
 import os
@@ -132,7 +133,7 @@ def agent_llm(model):
     return LLM(**config)
 
 
-def _record_agent_usage(conversation) -> None:
+def _record_agent_usage(conversation, model_id: str | None = None) -> None:
     """Add an OpenHands conversation's LLM tokens and cost to Forger's totals.
 
     The agent calls LiteLLM through OpenHands, not ``Model.generate_batch``, so
@@ -145,6 +146,7 @@ def _record_agent_usage(conversation) -> None:
             getattr(usage, "prompt_tokens", 0) or 0,
             getattr(usage, "completion_tokens", 0) or 0,
             getattr(metrics, "accumulated_cost", 0.0) or 0.0,
+            model_id=model_id,
         )
     except Exception:  # usage is reporting only; never fail the agent run on it
         return
@@ -238,7 +240,7 @@ def _generate(goal, item, model, max_iterations, execution_timeout_s):
                             "Use the python tool with submit=true after testing."
                         )
             finally:
-                _record_agent_usage(conversation)
+                _record_agent_usage(conversation, getattr(model, "_model_id", None))
                 conversation.close()
     finally:
         unregister_executor(session_id)
@@ -315,7 +317,16 @@ def dynamic_step(
         )
         return _execute(code, item, execution_timeout_s)
 
+    def run_in(context, item):
+        return context.run(run, item)
+
     unique = dict(zip(keys, inputs))
     with ThreadPoolExecutor(max_workers=min(max_parallel, len(unique))) as pool:
-        outputs = dict(zip(unique, pool.map(run, unique.values())))
+        # Each worker runs in a copy of this context, so the agents' usage
+        # counts toward this op and its step.
+        futures = [
+            pool.submit(run_in, contextvars.copy_context(), item)
+            for item in unique.values()
+        ]
+        outputs = dict(zip(unique, (future.result() for future in futures)))
     return [outputs[key].copy() for key in keys]

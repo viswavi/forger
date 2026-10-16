@@ -261,15 +261,18 @@ def test_llm_summaries_stay_out_of_step_and_pipeline_records(monkeypatch):
     assert "report.summarize" in [r.op_name for r in trace()]
 
 
-def test_summaries_do_not_change_the_usage_counter(monkeypatch):
-    """The process-wide counter that steps and ops read does not move."""
+def test_summaries_count_only_toward_the_process_total(monkeypatch):
+    """Summary calls are real spend: in the process total, not in the step's."""
     monkeypatch.setenv("FORGER_STEP_REPORT", "1")
     fake = _FakeSummarizer()
     set_report_model(fake)
     before = _tracking.usage_snapshot()
     _make_step()([{"solution": CODE}])
     assert fake.calls == 1
-    assert _tracking.usage_snapshot() == before
+    after = _tracking.usage_snapshot()
+    assert (after[0] - before[0], after[1] - before[1]) == (1000, 50)
+    rec = list(_tracking.step_records().values())[-1]
+    assert (rec.prompt_tokens, rec.cost_usd) == (0, 0.0)
 
 
 def test_summary_ops_do_not_count_as_started_ops():

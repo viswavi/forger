@@ -93,10 +93,23 @@ the ops of the run that cached it, marked `(cached)`, with that run's warnings.
   `def solve(n): … (312 lines, 9.8k chars, python)`. By default these structural summaries are all you get; they are
   free. For a one-sentence LLM summary of each long value as well, call `pyforger.steps.set_report_model(model)` or
   set `FORGER_REPORT_MODEL=<litellm model id>` (key from `LITELLM_API_KEY`). That costs up to 8 LLM calls per printed
-  report, cached on disk and left out of the step and pipeline totals; silenced reports make no calls.
+  report, cached on disk and left out of the step and pipeline totals (the spend ledger and `FORGER_MAX_COST_USD`
+  still count them); silenced reports make no calls.
 - Threads: ops called from `ThreadPoolExecutor` workers are not itemized in the step report (the step gets a warning
   instead of an error) unless submitted as `pool.submit(contextvars.copy_context().run, fn, arg)`. Steps called from
-  workers still join the pipeline. Token and cost totals of steps running at the same time include each other's.
+  workers still join the pipeline. Each op, step, and pipeline counts only its own LLM calls, also when several run
+  at the same time. LLM calls from workers that did not copy the context reach no step; the pipeline report lists
+  them as one `unattributed` line.
+- Cost: a cached step costs nothing this run; its report shows what the run that cached it took (`cached (originally
+  37.9s · … · $0.50)`), and the pipeline summary separates what was spent this run from `cached (originally $X)`.
+- Spend ledger: every `Model` / `LocalModel` result is appended as it arrives to `$FORGER_SPEND_LEDGER`, else
+  `$FORGER_CACHE/spend.jsonl` (one JSON line: timestamp, pid, run id, pipeline, step, op, model id, tokens, cost), so
+  killed runs keep their record. `FORGER_SPEND_LEDGER=0` turns it off. `pyforger.inspect.spend(since="2026-10-16")`
+  prints and returns the totals by run, pipeline, and step.
+- Spending caps: `@pipeline(max_cost_usd=20)` caps one pipeline run (unattributed calls included), and
+  `FORGER_MAX_COST_USD=40` caps all spend in the process. Once spend reaches a cap, the next model request batch
+  raises `pyforger.BudgetExceededError`. Requests already sent finish and are recorded, so spend can pass a cap by up
+  to one batch (per thread sending batches).
 
 ### Operation reference
 
@@ -229,6 +242,7 @@ producing new rows in the pipeline.
 |---|---|---|
 | `topic_based_clustering` | yes | Interpretable clustering of contents of one field from the input rows. |
 | `inspect_step` | no | Print the full report of the latest run of a `@step` and return its `StepRecord`. |
+| `spend` | no | Print and return the spend ledger's totals by run, pipeline, and step. |
 
 Topic-based clustering uses the ClusterFusion clustering algorithm ([arXiv:2512.04350](https://arxiv.org/abs/2512.04350)),
 a hybrid method in which embeddings guide how rows are partitioned and an LLM summarizes the partitions into
