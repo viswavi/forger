@@ -251,8 +251,11 @@ def test_cached_step_keeps_the_cost_of_the_run_that_cached_it():
     assert (rec.original.prompt_tokens, rec.original.completion_tokens) == (100, 50)
     assert rec.original.cost_usd == pytest.approx(0.25)
     assert rec.original.duration_s > 0
-    assert "cached (originally" in render_step(rec)
+    # The step report is one line; inspect_step's full report has the details.
+    assert "cached · originally" in render_step(rec)
     assert "$0.25" in render_step(rec)
+    assert "cached (originally" in render_step(rec, full=True)
+    assert "100 in / 50 out tokens · $0.25)" in render_step(rec, full=True)
 
     pipe = _tracking.last_pipeline()
     assert pipe.cost_usd == 0.0

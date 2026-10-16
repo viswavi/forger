@@ -667,39 +667,156 @@ def _histogram_renderable(
 # --------------------------------------------------------------------------- #
 
 
-def _show_yield(call: OpCall) -> bool:
-    return (
+def _sum_or_none(values: list[int | None]) -> int | None:
+    return None if any(v is None for v in values) else sum(v or 0 for v in values)
+
+
+@dataclass
+class _OpGroup:
+    """All calls of one op within a step: one row of the op table.
+
+    Counts, time, tokens, and cost are sums over the calls (time over the
+    calls that ran), and the yield is that of the sums: ``alter.x ×5``.
+    """
+
+    calls: list[OpCall]
+
+    @property
+    def op_name(self) -> str:
+        return self.calls[0].op_name
+
+    @property
+    def category(self) -> str:
+        return self.calls[0].category
+
+    @property
+    def label(self) -> str:
+        n = len(self.calls)
+        return _clean(self.op_name) + (f" ×{n}" if n > 1 else "")
+
+    @property
+    def n_in(self) -> int | None:
+        return _sum_or_none([c.n_in for c in self.calls])
+
+    @property
+    def n_out(self) -> int | None:
+        return _sum_or_none([c.n_out for c in self.calls])
+
+    @property
+    def yield_ratio(self) -> float | None:
+        if len(self.calls) == 1:
+            return self.calls[0].yield_ratio
+        n_in, n_out = self.n_in, self.n_out
+        return n_out / n_in if n_in and n_out is not None else None
+
+    @property
+    def n_cached(self) -> int:
+        return sum(1 for c in self.calls if c.cache_hit)
+
+    @property
+    def cache_hit(self) -> bool:
+        return self.n_cached == len(self.calls)
+
+    @property
+    def duration_s(self) -> float:
+        return sum(c.duration_s for c in self.calls if not c.cache_hit)
+
+    def total(self, attr: str) -> Any:
+        return sum(getattr(c, attr) for c in self.calls)
+
+
+def _group_ops(ops: list[OpCall]) -> list[_OpGroup]:
+    """Group a step's calls by op name, in order of each op's first call."""
+    groups: dict[str, _OpGroup] = {}
+    for call in ops:
+        groups.setdefault(call.op_name, _OpGroup([])).calls.append(call)
+    return list(groups.values())
+
+
+def _show_yield(group: _OpGroup) -> bool:
+    return any(
         call.category == "filter"
         or call.min_yield is not None
         or call.max_yield is not None
         or (call.n_in is not None and call.n_out != call.n_in)
+        for call in group.calls
     )
 
 
-def _check_text(call: OpCall) -> Text:
-    """The op table's yield-check cell, verdict first: ``LOW · min 0.60``."""
-    text = Text()
-    if call.error is not None:
-        text.append("RAISED", style="bold red")
-        return text
+def _verdicts(call: OpCall) -> list[tuple[str, str, float]]:
+    """``(kind, status, bound)`` per yield bound of one call, e.g. ``min LOW 0.6``."""
     y = call.yield_ratio
     if y is not None and not math.isfinite(y):
         y = None
-    checks: list[tuple[str, str]] = []
+    out: list[tuple[str, str, float]] = []
     if call.min_yield is not None and math.isfinite(call.min_yield):
         status = "-" if y is None else ("ok" if y >= call.min_yield else "LOW")
         if call.n_in == 0 and call.min_yield > 0:
             status = "LOW"
-        checks.append((status, f"min {call.min_yield:.2f}"))
+        out.append(("min", status, call.min_yield))
     if call.max_yield is not None and math.isfinite(call.max_yield):
         status = "-" if y is None else ("ok" if y <= call.max_yield else "HIGH")
-        checks.append((status, f"max {call.max_yield:.2f}"))
-    for status, bound in checks:
+        out.append(("max", status, call.max_yield))
+    return out
+
+
+def _check_text(group: _OpGroup) -> Text:
+    """The op table's yield-check cell, verdict first: ``LOW · min 0.60``.
+
+    Each call is checked on its own; for repeated calls a miss reads
+    ``LOW 2/5`` (2 of 5 calls). A call that raised marks the row ``RAISED``
+    (``RAISED 1/5`` when other calls of the op returned).
+    """
+    text = Text()
+    n = len(group.calls)
+    raised = sum(1 for c in group.calls if c.error is not None)
+    if raised:
+        text.append(
+            "RAISED" if raised == n else f"RAISED {raised}/{n}", style="bold red"
+        )
+        return text
+    for kind in ("min", "max"):
+        found = [v for c in group.calls for v in _verdicts(c) if v[0] == kind]
+        if not found:
+            continue
+        statuses = [status for _, status, _ in found]
+        bad = "LOW" if kind == "min" else "HIGH"
+        misses = statuses.count(bad)
+        if misses:
+            status = bad if misses == n else f"{bad} {misses}/{n}"
+        else:
+            status = "ok" if "ok" in statuses else "-"
+        lo = min(bound for _, _, bound in found)
+        hi = max(bound for _, _, bound in found)
+        bound = f"{kind} {lo:.2f}" if lo == hi else f"{kind} {lo:.2f}–{hi:.2f}"
         if text:
             text.append("  ")
         text.append(status, style="green" if status == "ok" else "bold red")
         text.append(f" · {bound}")
     return text
+
+
+def _merged_scores(calls: list[OpCall]) -> list[tuple[ScoreRecord, int]]:
+    """One score record per distinct rule, values concatenated over the calls.
+
+    Calls whose scores share a label, keep rule, and thresholds pool into one
+    histogram; returns ``(record, number of calls in it)``, in call order.
+    """
+    merged: dict[tuple[Any, ...], tuple[ScoreRecord, int]] = {}
+    for call in calls:
+        sc = call.scores
+        if sc is None or call.cache_hit:
+            continue
+        key = (sc.label, sc.keep, sc.threshold, sc.lower, sc.upper, sc.pooled)
+        if key in merged:
+            rec, n = merged[key]
+            merged[key] = (
+                rec.model_copy(update={"values": rec.values + sc.values}),
+                n + 1,
+            )
+        else:
+            merged[key] = (sc, 1)
+    return list(merged.values())
 
 
 def _first_column_room(headers: list[str], rows: list[list[Text]], width: int) -> int:
@@ -711,6 +828,21 @@ def _first_column_room(headers: list[str], rows: list[list[Text]], width: int) -
     )
     # SIMPLE_HEAD tables: one space of padding each side plus a separator.
     return width - others - 3 * (len(headers) - 1)
+
+
+def _cut_name(cell: Text, width: int) -> None:
+    """Cut a name cell to ``width`` with …, keeping its count: ``filter.by_l… ×5``."""
+    plain = cell.plain
+    if cell.cell_len <= width:
+        return
+    head, sep, count = plain.rpartition(" ×")
+    suffix = sep + count if sep and count.isdigit() and len(count) + 4 < width else ""
+    if not suffix:
+        cell.truncate(width, overflow="ellipsis")
+        return
+    cut = Text(head, style=cell.style)
+    cut.truncate(width - len(suffix), overflow="ellipsis")
+    cell.plain = cut.plain + suffix
 
 
 def _fit_table(
@@ -734,7 +866,7 @@ def _fit_table(
         if i == 0:
             table.add_column(name, no_wrap=True, width=min(widest, room))
             for c in cells:
-                c.truncate(min(widest, room), overflow="ellipsis")
+                _cut_name(c, min(widest, room))
         elif i == last and squeeze:
             table.add_column(name, overflow="fold", width=max(4, widest - squeeze))
         else:
@@ -783,34 +915,43 @@ def _drop_columns(
     return headers, rows
 
 
-def _op_table(ops: list[OpCall], width: int) -> Table:
+def _op_table(groups: list[_OpGroup], width: int) -> Table:
+    ops = [c for g in groups for c in g.calls]
     show_tokens = width >= _TOKENS_MIN_WIDTH and any(
         c.prompt_tokens or c.completion_tokens for c in ops
     )
     show_units = any(c.token_units and math.isfinite(c.token_units) for c in ops)
     show_cost = any(c.cost_usd and math.isfinite(c.cost_usd) for c in ops)
-    checks = [_check_text(call) for call in ops]
+    checks = [_check_text(g) for g in groups]
     show_check = any(checks)
     show_cached = any(c.cache_hit for c in ops)
 
     rows: list[list[Text]] = []
-    for call, check in zip(ops, checks):
+    for group, check in zip(groups, checks):
         cells = [
-            Text(_clean(call.op_name)),
-            Text(fmt_int(call.n_in)),
-            Text(fmt_int(call.n_out)),
-            Text(fmt_yield(call.yield_ratio) if _show_yield(call) else "-"),
-            Text("-" if call.cache_hit else fmt_secs(call.duration_s)),
+            Text(group.label),
+            Text(fmt_int(group.n_in)),
+            Text(fmt_int(group.n_out)),
+            Text(fmt_yield(group.yield_ratio) if _show_yield(group) else "-"),
+            Text("-" if group.cache_hit else fmt_secs(group.duration_s)),
         ]
         if show_tokens:
-            cells.append(Text(fmt_tokens(call.prompt_tokens)))
-            cells.append(Text(fmt_tokens(call.completion_tokens)))
+            cells.append(Text(fmt_tokens(group.total("prompt_tokens"))))
+            cells.append(Text(fmt_tokens(group.total("completion_tokens"))))
         if show_units:
-            cells.append(Text(fmt_units(call.token_units)))
+            cells.append(Text(fmt_units(group.total("token_units"))))
         if show_cost:
-            cells.append(Text(fmt_cost(call.cost_usd)))
+            cells.append(Text(fmt_cost(group.total("cost_usd"))))
         if show_cached:
-            cells.append(Text("cached" if call.cache_hit else "", style="dim"))
+            cached = group.n_cached
+            note = (
+                ""
+                if not cached
+                else "cached"
+                if group.cache_hit
+                else f"{cached} cached"
+            )
+            cells.append(Text(note, style="dim"))
         if show_check:
             cells.append(check)
         rows.append(cells)
@@ -921,6 +1062,32 @@ def _fmt_value(
     return _cut_value(_value_text(value, full=False)[0], limit, full=False)
 
 
+def _whole_text(value: Any) -> str:
+    """A ``show=`` value in full: strings as is, other values as JSON.
+
+    JSON longer than one line of the report is indented, one item per line.
+    """
+    if isinstance(value, str):
+        return _clean(value.strip("\n"), single_line=False)
+    try:
+        text = json.dumps(value, ensure_ascii=False, default=str)
+        if len(text) > COMPACT_FIELD_CHARS:
+            text = json.dumps(value, ensure_ascii=False, indent=2, default=str)
+    except (TypeError, ValueError):
+        text = repr(value)
+    return _clean(text, single_line=False)
+
+
+def _shown_blocks(rec: StepRecord, row: dict) -> list[RenderableType]:
+    """The row's ``show=`` fields: the name, then the whole value indented."""
+    out: list[RenderableType] = []
+    for k, v in row.items():
+        if k in rec.show:
+            out.append(Text(_clean(k), style="dim"))
+            out.append(Padding(Text(_whole_text(v)), (0, 0, 0, 2)))
+    return out
+
+
 def _samples(rec: StepRecord, full: bool, width: int = WIDTH) -> RenderableType | None:
     if not rec.sample:
         return None
@@ -929,9 +1096,12 @@ def _samples(rec: StepRecord, full: bool, width: int = WIDTH) -> RenderableType 
         return None
     limit = FULL_FIELD_CHARS if full else COMPACT_FIELD_CHARS
     heading = Text(f"sample rows ({len(shown)} of {fmt_int(rec.n_out)})", style="bold")
-    keys = list(dict.fromkeys(k for row in shown for k in row))
+    keys = [
+        k for k in dict.fromkeys(k for row in shown for k in row) if k not in rec.show
+    ]
     fields = list(dict.fromkeys(_clean(k) for k in keys))
     summaries = list(rec.sample_summaries)
+    any_shown = any(k in rec.show for row in shown for k in row)
 
     def value_text(i: int, j: int, value: Any) -> Text:
         summary = summaries[i].get(j) if i < len(summaries) else None
@@ -943,16 +1113,57 @@ def _samples(rec: StepRecord, full: bool, width: int = WIDTH) -> RenderableType 
                 return value_text(i, j, v)
         return Text("")
 
+    # With show= fields each row gets its own table; fixed column widths keep
+    # those tables aligned (when the widest cells fit, else equal shares).
+    widths: list[int | None] = [None] * len(fields)
+    if any_shown:
+        widest = [
+            max(
+                [
+                    len(name),
+                    *(cell(i, row, name).cell_len for i, row in enumerate(shown)),
+                ]
+            )
+            for name in fields
+        ]
+        if sum(widest) + 3 * len(fields) + len(str(len(shown))) <= width:
+            widths = list(widest)
+
+    def table_of(rows: list[tuple[int, dict]], header: bool) -> Table:
+        table = Table(
+            box=box.SIMPLE_HEAD,
+            show_edge=False,
+            pad_edge=False,
+            show_header=header,
+            expand=any_shown and widths[0] is None,
+        )
+        table.add_column(
+            "#",
+            justify="right",
+            style="dim",
+            no_wrap=True,
+            width=len(str(len(shown) - 1)) if any_shown else None,
+        )
+        for name, w in zip(fields, widths):
+            table.add_column(
+                Text(name), overflow="fold", ratio=1 if w is None else None, width=w
+            )
+        for i, row in rows:
+            table.add_row(Text(str(i)), *(cell(i, row, name) for name in fields))
+        return table
+
     # The table view needs one column per key; colliding names (1 and "1")
     # fall back to the block view, which lists every key.
-    if not full and len(fields) <= _MAX_TABLE_FIELDS and len(fields) == len(keys):
-        table = Table(box=box.SIMPLE_HEAD, show_edge=False, pad_edge=False)
-        table.add_column("#", justify="right", style="dim", no_wrap=True)
-        for name in fields:
-            table.add_column(Text(name), overflow="fold", ratio=1)
-        for i, row in enumerate(shown):
-            table.add_row(Text(str(i)), *(cell(i, row, name) for name in fields))
-        return Group(heading, table)
+    if not full and fields and len(fields) <= _MAX_TABLE_FIELDS:
+        if len(fields) == len(keys) and not any_shown:
+            return Group(heading, table_of(list(enumerate(shown)), header=True))
+        if len(fields) == len(keys):
+            # show= fields go under their row, so each row gets its own table.
+            parts: list[RenderableType] = [heading]
+            for i, row in enumerate(shown):
+                parts.append(table_of([(i, row)], header=i == 0))
+                parts.append(Padding(Group(*_shown_blocks(rec, row)), (0, 0, 0, 4)))
+            return Group(*parts)
     # Many fields, or the full view: one block per row, one line per field.
     blocks: list[RenderableType] = [heading]
     for i, row in enumerate(shown):
@@ -961,11 +1172,15 @@ def _samples(rec: StepRecord, full: bool, width: int = WIDTH) -> RenderableType 
         grid.add_column(style="dim", no_wrap=True, max_width=key_width)
         grid.add_column(overflow="fold")
         for j, (k, v) in enumerate(row.items()):
+            if k in rec.show:
+                continue
             key = Text(_clean(k))
             key.truncate(key_width, overflow="ellipsis")
             grid.add_row(key, value_text(i, j, v))
         blocks.append(Text(f"[{i}]", style="dim"))
-        blocks.append(Padding(grid, (0, 0, 0, 2)))
+        parts = [grid] if grid.row_count else []
+        parts.extend(_shown_blocks(rec, row))
+        blocks.append(Padding(Group(*parts), (0, 0, 0, 2)))
     return Group(*blocks)
 
 
@@ -988,10 +1203,73 @@ def _rule(kind: str, name: str) -> Rule:
     return Rule(title, align="left", style="blue" if kind == "step" else "magenta")
 
 
+_MAX_FIELDS_SHOWN = 30  # the fields line lists this many, then "… N more"
+
+
+def _fields_text(rec: StepRecord) -> Text | None:
+    """``fields: topic str · score int|None · twist str?  (+ score; − draft)``.
+
+    ``?`` marks a field some rows lack; ``+`` / ``−`` are fields added or
+    removed relative to the step's input rows.
+    """
+    if not rec.fields:
+        return None
+    parts = [
+        f"{_clean(f.name)} {'|'.join(f.types)}{'?' if f.optional else ''}"
+        for f in rec.fields[:_MAX_FIELDS_SHOWN]
+    ]
+    more = len(rec.fields) - _MAX_FIELDS_SHOWN
+    if more > 0:
+        parts.append(f"… {more} more")
+    text = Text()
+    text.append("fields: ", style="dim")
+    text.append(" · ".join(parts))
+    changes = []
+    if rec.fields_added:
+        changes.append("+ " + ", ".join(_clean(f) for f in rec.fields_added))
+    if rec.fields_removed:
+        changes.append("− " + ", ".join(_clean(f) for f in rec.fields_removed))
+    if changes:
+        text.append(f"  ({'; '.join(changes)})", style="dim")
+    return text
+
+
+def _cached_line(rec: StepRecord) -> RenderableType:
+    """A cached step in one line: ``step x · 5 → 3 rows · cached · originally …``."""
+    title = Text()
+    title.append("step ", style="dim")
+    title.append(_clean(rec.name), style="bold")
+    rows = (
+        f"{fmt_int(rec.n_out)} rows"
+        if rec.n_in is None
+        else f"{fmt_int(rec.n_in)} → {fmt_int(rec.n_out)} rows"
+    )
+    title.append(f" · {rows}")
+    cached = "cached"
+    if rec.original is not None:
+        cached += f" · originally {fmt_secs(rec.original.duration_s)}"
+        cost = rec.original.cost_usd
+        if cost and math.isfinite(cost):
+            cached += f" · {fmt_cost(cost)}"
+    title.append(f" · {cached}", style="dim")
+    n_warn = len(dict.fromkeys(rec.warnings))
+    if n_warn:
+        title.append(
+            f" · ⚠ {n_warn} warning{'s' if n_warn != 1 else ''}", style="yellow"
+        )
+    return Rule(title, align="left", style="blue")
+
+
 def step_renderable(
     rec: StepRecord, *, full: bool = False, width: int = WIDTH
 ) -> RenderableType:
-    """Build the rich renderable for a step report (see ``render_step``)."""
+    """Build the rich renderable for a step report (see ``render_step``).
+
+    A cached step is one line unless ``full``.
+    """
+    if rec.cache_hit and not full:
+        return _cached_line(rec)
+    groups = _group_ops(rec.ops)
     body: list[RenderableType] = []
     doc_lines = [_clean(line) for line in rec.doc.strip().splitlines()]
     if doc_lines:
@@ -1001,7 +1279,7 @@ def step_renderable(
             body.append(Text(""))
 
     one_plain_op = (
-        len(rec.ops) == 1 and not _check_text(rec.ops[0]) and not rec.ops[0].cache_hit
+        len(rec.ops) == 1 and not _check_text(groups[0]) and not rec.ops[0].cache_hit
     )
     stats = Text()
     stats.append(
@@ -1019,6 +1297,9 @@ def step_renderable(
     if rec.cache_hit:
         stats.append(" · cached" + _originally(rec), style="dim")
     body.append(stats)
+    fields = _fields_text(rec)
+    if fields is not None:
+        body.append(fields)
     if rec.input_type or rec.output_type:
         arrow = f"{rec.input_type or 'any'} → {rec.output_type or 'any'}"
         body.append(Text(f"rows validated: {arrow}", style="dim"))
@@ -1026,23 +1307,26 @@ def step_renderable(
 
     if rec.ops and not one_plain_op:
         body.append(Text(""))
-        body.append(_op_table(rec.ops, width - 2))
+        body.append(_op_table(groups, width - 2))
     elif rec.cache_hit and not rec.ops:
         body.append(
             Text("result loaded from the step cache; its ops did not run", style="dim")
         )
-    for call in rec.ops:
-        if call.scores is not None and not call.cache_hit:
+    for group in groups:
+        for scores, n in _merged_scores(group.calls):
+            name = group.op_name + (f" ×{n}" if n > 1 else "")
             body.append(Text(""))
-            body.append(
-                _histogram_renderable(_histogram(call.scores), call.op_name, width - 2)
-            )
-        elif call.cache_hit and call.category == "filter":
+            body.append(_histogram_renderable(_histogram(scores), name, width - 2))
+        if group.n_cached and group.category == "filter":
+            if group.cache_hit:
+                what = "no score histogram for a cached result"
+            else:
+                what = f"{group.n_cached} cached calls are not in the histogram"
             body.append(Text(""))
             body.append(
                 Text(
-                    f"{_clean(call.op_name)}: no score histogram for a cached result; "
-                    "rerun with _no_cache=True to see it",
+                    f"{_clean(group.op_name)}: {what}; rerun with _no_cache=True to "
+                    "see it",
                     style="dim",
                 )
             )
@@ -1057,6 +1341,34 @@ def step_renderable(
 # --------------------------------------------------------------------------- #
 # Pipeline summary
 # --------------------------------------------------------------------------- #
+
+
+_MAX_NOOP_FILTERS = 10  # filter-note lines before "… and N more"
+
+
+def _filter_notes(rec: PipelineRecord) -> list[RenderableType]:
+    """Steps without a filter and filters that removed nothing, as plain notes."""
+    if not rec.no_filter_steps and not rec.noop_filters:
+        return []
+    out: list[RenderableType] = [Text(""), Text("filters", style="bold")]
+    if rec.no_filter_steps:
+        names = ", ".join(_clean(n) for n in rec.no_filter_steps)
+        out.append(Text(f"steps without a filter: {names}"))
+    if rec.noop_filters:
+        out.append(
+            Text(
+                "filters that removed nothing (a check that passed, or one that "
+                "tests nothing):"
+            )
+        )
+        for op_name, step_name, n in rec.noop_filters[:_MAX_NOOP_FILTERS]:
+            out.append(
+                Text(f"  {_clean(op_name)} in {_clean(step_name)} · {fmt_int(n)} rows")
+            )
+        more = len(rec.noop_filters) - _MAX_NOOP_FILTERS
+        if more > 0:
+            out.append(Text(f"  … and {more} more", style="dim"))
+    return out
 
 
 def pipeline_renderable(rec: PipelineRecord, *, width: int = WIDTH) -> RenderableType:
@@ -1144,6 +1456,7 @@ def pipeline_renderable(rec: PipelineRecord, *, width: int = WIDTH) -> Renderabl
                 style="yellow",
             )
         )
+    body.extend(_filter_notes(rec))
     step_warnings = [
         line for s in rec.steps for line in _warning_lines(s.warnings, prefix=s.name)
     ]

@@ -111,6 +111,18 @@ class FieldSummary(BaseModel):
     llm: str | None = None
 
 
+class FieldInfo(BaseModel):
+    """One field of a step's output rows, for the report's ``fields:`` line.
+
+    ``types`` are the value type names seen, in order, ``"None"`` last (e.g.
+    ``["int", "None"]``); ``optional`` is True when some rows lack the field.
+    """
+
+    name: str
+    types: list[str]
+    optional: bool = False
+
+
 class UsageTotals(BaseModel):
     """Tokens and cost of one run, e.g. the run that cached a step."""
 
@@ -139,6 +151,10 @@ class StepRecord(BaseModel):
     the position of a long field in ``sample[i]`` to its summary. On a cache
     hit the totals are this run's (zero) and ``original`` holds the time,
     tokens, and cost of the earlier run that cached the step.
+
+    ``fields`` describes the output rows (None when they are not dicts);
+    ``fields_added`` / ``fields_removed`` compare them with the input rows when
+    those are dicts too. ``show`` names fields whose sample values print in full.
     """
 
     name: str
@@ -152,7 +168,11 @@ class StepRecord(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     sample: list[Any] = Field(default_factory=list)
     sample_summaries: list[dict[int, FieldSummary]] = Field(default_factory=list)
-    sample_shown: int = 3
+    sample_shown: int = 1
+    show: list[str] = Field(default_factory=list)
+    fields: list[FieldInfo] | None = None
+    fields_added: list[str] = Field(default_factory=list)
+    fields_removed: list[str] = Field(default_factory=list)
     input_type: str | None = None
     output_type: str | None = None
     prompt_tokens: int = 0
@@ -169,11 +189,15 @@ class PipelineRecord(BaseModel):
     is LLM usage from threads that did not copy the context, made while this
     was the only pipeline running; it is not in the totals, since such a
     thread may not belong to the pipeline.
+    ``no_filter_steps`` and ``noop_filters`` (``(op, step, rows)``) are notes,
+    not warnings: a filter that removed nothing may be a check that passed.
     """
 
     name: str
     steps: list[StepRecord] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    no_filter_steps: list[str] = Field(default_factory=list)
+    noop_filters: list[tuple[str, str, int]] = Field(default_factory=list)
     duration_s: float = 0.0
     prompt_tokens: int = 0
     completion_tokens: int = 0

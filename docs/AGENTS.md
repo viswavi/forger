@@ -75,20 +75,39 @@ Control flow (`for`, `if`, comprehensions, helper functions) in plain Python can
 
 Structure a pipeline as a `@pyforger.pipeline` function that calls `@pyforger.step` functions. A step is a named
 function from rows to rows built from Forger ops (typically acquire or alter, then filter). Each step is cached like
-an `@op` and, when it returns, prints a report: every op it ran with rows in/out, yield, time, tokens, and cost; a
-histogram of each filter's scores with what other thresholds would have kept; warnings; and a few sample output rows.
-The pipeline prints a summary table of its steps at the end. Read these reports after every run. A cached step lists
-the ops of the run that cached it, marked `(cached)`, with that run's warnings.
+an `@op` and, when it returns, prints a report: the fields of its output rows; every op it ran with rows in/out, yield,
+time, tokens, and cost; a histogram of each filter's scores with what other thresholds would have kept; warnings; and
+one sample output row. The pipeline prints a summary table of its steps at the end. Read these reports after every
+run. A cached step prints one line, `step translate · 42 → 40 rows · cached · originally 0.5s · $0.0034`, with the
+number of its warnings if it has any; `inspect_step(name)` prints its full report, which lists the ops of the run that
+cached it, marked `cached`, with that run's warnings.
+
+- Fields line: `fields: seed_id int · topic str · score int|None · twist str?  (+ score, twist; − draft)`. Each field
+  of the output rows with the types of its values (from all rows, or 5,000 evenly spaced rows of a longer list); `?`
+  marks a field that some rows lack; `+` / `−` are fields added or removed relative to the input rows, when the step's
+  first argument is a list of dicts.
+- Repeated calls of one op in a step share one row, e.g. `alter.generate_from_context ×5`, with summed rows, time,
+  tokens, and cost, and the yield of the sums. Each call is still checked against its own `min_yield` / `max_yield`
+  (`LOW 2/5 · min 0.60` means two of five calls missed). Their filter scores pool into one histogram when the label,
+  keep rule, and thresholds match, and get one histogram per rule otherwise.
 
 - Hard errors (`StepContractError` / `PipelineContractError`): a step returns a non-list, a step calls no Forger ops
   (keep pure-Python helpers as plain functions), a step is called inside another step, a pipeline calls no steps, or
   rows do not match a `list[X]` type hint where `X` is a pydantic model (rows stay dicts).
-- Warnings: a step ends without a filter; an op misses its `min_yield` / `max_yield`; a step's type hints cannot be
-  resolved; a pipeline has only one step; no quality filter, no diversity filter, or no inspect op ran anywhere; an op
-  was called in the pipeline outside a step.
+- Warnings: an op misses its `min_yield` / `max_yield`; a step's type hints cannot be resolved; `show=` names a field
+  no output row has; a pipeline has only one step; no quality filter, no diversity filter, or no inspect op ran
+  anywhere; an op was called in the pipeline outside a step.
+- Filter notes: the pipeline summary lists the steps that ran no filter and the filters that removed nothing (op, step,
+  and rows seen). These are notes, not warnings, and `strict=True` does not raise on them: a generate-only step
+  followed by a filter step is fine, and a filter that removes nothing may be a check that passed or one that tests
+  nothing. Do not add a filter only to quiet them.
 - `strict=True` on `@step` or `@pipeline` turns warnings into errors, also on cached runs; a step that fails strict
   mode is not cached. `prod=True` or the environment variable `FORGER_STEP_REPORT=0` silences the reports.
-  `pyforger.inspect.inspect_step(name)` re-prints the full report of the latest run of a step, with more sample rows.
+  `pyforger.inspect.inspect_step(name)` re-prints the full report of the latest run of a step, with up to 10 sample
+  rows.
+- Sample rows: `@step(sample=3)` shows three output rows instead of one. `@step(show=["statement"])` prints those
+  fields of each sample row in full, line breaks kept, as an indented block under the row (other values as JSON);
+  the other fields stay in the table, cut or summarized.
 - Long sample values are summarized by shape rather than cut, e.g. `[5 items] a.py, b.py, c.py, …` or
   `def solve(n): … (312 lines, 9.8k chars, python)`. By default these structural summaries are all you get; they are
   free. For a one-sentence LLM summary of each long value as well, call `pyforger.steps.set_report_model(model)` or
@@ -102,8 +121,9 @@ the ops of the run that cached it, marked `(cached)`, with that run's warnings.
   `RAISED` with what it spent. LLM calls from workers that did not copy the context and run no step belong to no
   step or pipeline: while exactly one pipeline runs, its report lists them as one `unattributed` line (it may include
   other threads in the process), kept out of its totals and its `max_cost_usd`.
-- Cost: a cached step costs nothing this run; its report shows what the run that cached it took (`cached (originally
-  37.9s · … · $0.50)`), and the pipeline summary separates what was spent this run from `cached (originally $X)`.
+- Cost: a cached step costs nothing this run; its line shows the time and cost of the run that cached it (`cached ·
+  originally 37.9s · $0.50`), and the pipeline summary separates what was spent this run from
+  `cached (originally $X)`.
 - Spend ledger: every usage record (`Model`, `LocalModel`, `dynamic_step` agents) is appended and flushed as it is
   recorded to `$FORGER_SPEND_LEDGER`, else `$FORGER_CACHE/spend.jsonl` (one JSON line: timestamp, pid, run id,
   pipeline, step, op, model id, tokens, cost), so killed runs keep their record. A `Model` records each request when
@@ -369,70 +389,88 @@ from pyforger import acquire, alter, filter, pipeline, step
 
 class Translated(BaseModel):
     text: str
+    spanish: str
 
 @step
 def translate(seeds, model) -> list[Translated]:
     """Translate each seed into Spanish and drop empty or very long results."""
-    rows = alter.translate.to_language(seeds, target_language="Spanish", fields=["text"], model=model)
-    return filter.by_length(rows, instruction_field="text", min_len=3, max_len=200)
+    rows = alter.translate.to_language(
+        seeds, target_language="Spanish", fields=["text"], target_fields=["spanish"], model=model
+    )
+    return filter.by_length(rows, instruction_field="spanish", min_len=3, max_len=200)
 
 @step
 def dedupe(rows: list[Translated]) -> list[Translated]:
     """Drop near-duplicate translations."""
-    return filter.by_rouge_l(rows, field="text", threshold=0.7, min_yield=0.5)
+    return filter.by_rouge_l(rows, field="spanish", threshold=0.7, min_yield=0.5)
 
 @pipeline
 def main(seeds, model):
     return dedupe(translate(seeds, model))
 ```
 
-Each step prints a report when it returns, and the pipeline prints a summary at the end:
+Each step prints a report when it returns, and the pipeline prints a summary at the end (the `dedupe` report is left
+out here):
 
 ```text
-step dedupe ────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  Drop near-duplicate translations.
-  412 → 381 rows (yield 0.92) · 3.1s
-  rows validated: list[Translated] → list[Translated]
+step translate ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Translate each seed into Spanish and drop empty or very long results.
+  42 → 40 rows (yield 0.95) · 0.5s · 5,040 in / 630 out tokens · $0.0034
+  fields: text str · spanish str  (+ spanish)
+  rows validated: any → list[Translated]
 
-  op                   in   out   yield   time   yield check
-  ────────────────────────────────────────────────────────────
-  filter.by_rouge_l   412   381    0.92   3.1s   ok · min 0.50
+  op                            in   out   yield   time   tokens in   tokens out   cost
+  ────────────────────────────────────────────────────────────────────────────────────────
+  alter.translate.to_language   42    42       -   0.5s       5,040          630   $0.0034
+  filter.by_length              42    40    0.95   0.0s           -            -   -
 
-  filter.by_rouge_l · rouge_l · keeps < 0.7: 381 of 412 (0.92)
-       rouge_l  rows
-         0–0.1    12  ████
-       0.1–0.2    45  ███████████████▏
-       0.2–0.3    61  ████████████████████▋
-       0.3–0.4    76  █████████████████████████▋
-       0.4–0.5    83  ████████████████████████████
-       0.5–0.6    58  ███████████████████▋
-    ▶  0.6–0.7    46  ███████████████▌              ◀ current threshold
-       0.7–0.8    21  ███████▏
-       0.8–0.9     8  ██▊
-         0.9–1     2  ▋
-    No what-if columns: each score depends on the rows kept before it. Rerun to compare thresholds.
+  filter.by_length · words · keeps 3 to 200: 40 of 42 (0.95)
+      words  rows                                kept
+          0     1  ██▌                           no
+          1     1  ██▌                           no
+          5     3  ███████▋                      yes
+          6     6  ███████████████▎              yes
+          7     4  ██████████▏                   yes
+          8    11  ████████████████████████████  yes
+          9    10  █████████████████████████▌    yes
+         10     3  ███████▋                      yes
+         11     3  ███████▋                      yes
 
-  sample rows (3 of 381)
-  #   text
-  ──────────────────────────────────────────────────
-  0   ¿Cuál es la capital de Francia?
-  1   Explica por qué el cielo es azul en una frase.
-  2   Escribe un haiku sobre el otoño.
+  sample rows (1 of 40)
+  #   text                                             spanish
+  ────────────────────────────────────────────────────────────────────────────────────────────────
+  0   Explain the capital of France in one sentence.   Explica la capital de Francia en una frase.
 
 pipeline main ──────────────────────────────────────────────────────────────────────────────────────────────────────────
-  2 steps · 500 → 381 rows (yield 0.76) · 41.0s · 61,200 in / 9,840 out tokens · $0.032
+  2 steps · 42 → 27 rows (yield 0.64) · 0.5s · 5,040 in / 630 out tokens · $0.0034
 
-  step         in   out   yield    time     cost
-  ─────────────────────────────────────────────────
-  translate   500   412    0.82   37.9s   $0.032
-  dedupe      412   381    0.92    3.1s        -
+  step        in   out   yield   time      cost
+  ────────────────────────────────────────────────
+  translate   42    40    0.95   0.5s   $0.0034
+  dedupe      40    27    0.68   0.0s         -
 
   pipeline warnings
   ⚠ no quality filter ran (e.g. filter.by_llm_score)
   ⚠ no inspect op ran
 ```
 
-Later, `pyforger.inspect.inspect_step("dedupe")` prints the same report with up to 10 sample rows.
+Run again and both steps come from the cache, one line each, before the same summary:
+
+```text
+step translate · 42 → 40 rows · cached · originally 0.5s · $0.0034 ─────────────────────────────────────────────────────
+
+step dedupe · 40 → 27 rows · cached · originally 0.0s ──────────────────────────────────────────────────────────────────
+```
+
+`pyforger.inspect.inspect_step("translate")` prints the full report of the latest run, with up to 10 sample rows.
+When a filter removes nothing, or a step runs no filter, the summary adds a `filters` section:
+
+```text
+  filters
+  steps without a filter: add_difficulty
+  filters that removed nothing (a check that passed, or one that tests nothing):
+    filter.by_exact_match in seed_topics · 10 rows
+```
 
 An iterative pipeline keeps the outer loop in Python and makes each round a `@step`, so cached rounds are reused
 across runs:

@@ -11,12 +11,14 @@ A step is a function from rows to rows built from Forger ops::
     def main(model):
         return write_solutions(find_problems(model), model)
 
-Each step is cached like an ``@op`` and prints a report when it returns: every
-op it ran with rows in/out, yield, time, tokens, and cost, a histogram of each
-filter's scores, warnings, and a few sample rows. A pipeline prints a summary
-table of its steps. ``@step(prod=True)``, ``@pipeline(prod=True)``, or
-``FORGER_STEP_REPORT=0`` silence the reports; ``strict=True`` turns warnings
-into errors.
+Each step is cached like an ``@op`` and prints a report when it returns: the
+output rows' fields, every op it ran with rows in/out, yield, time, tokens, and
+cost (repeated calls of one op share a row), a histogram of each filter's
+scores, warnings, and a sample row. A cached step prints one line. A pipeline
+prints a summary table of its steps, with notes on steps without a filter and
+filters that removed nothing. ``@step(prod=True)``, ``@pipeline(prod=True)``,
+or ``FORGER_STEP_REPORT=0`` silence the reports; ``strict=True`` turns
+warnings into errors.
 
 Long sample values are summarized by shape (``[5 items] a.py, b.py, …``).
 ``set_report_model(model)`` or ``FORGER_REPORT_MODEL`` adds a one-sentence LLM
@@ -48,6 +50,7 @@ from pyforger._render import (
 from pyforger._summaries import set_report_model
 from pyforger._tracking import (
     BudgetExceededError,
+    FieldInfo,
     PipelineRecord,
     StepRecord,
     UsageTotals,
@@ -69,6 +72,7 @@ _WIDTH = 120  # report lines never exceed this many characters
 _RULE_WIDTH = 100  # header rules are padded to this width
 _NAME_CHARS = 40  # step and op names in report tables are cut to this length
 _NOT_DICTS = "rows are not dicts; schema checks and samples skipped"
+_SCHEMA_ROWS = 5000  # the fields line reads at most this many rows, evenly spaced
 
 
 class StepContractError(RuntimeError):
@@ -155,6 +159,42 @@ def _validate_rows(
             ) from None
 
 
+def _spread(rows: list[Any], limit: int = _SCHEMA_ROWS) -> list[Any]:
+    """All rows, or ``limit`` of them evenly spaced for a huge list."""
+    if len(rows) <= limit:
+        return rows
+    return [rows[i * len(rows) // limit] for i in range(limit)]
+
+
+def _keys(rows: list[dict]) -> list[Any]:
+    """Every key of ``rows``, in order of first appearance."""
+    return list(dict.fromkeys(k for row in _spread(rows) for k in row))
+
+
+def _type_name(value: Any) -> str:
+    return "None" if value is None else type(value).__name__
+
+
+def _field_infos(rows: list[dict]) -> list[FieldInfo]:
+    """Field names of ``rows`` with the value types seen, e.g. ``score int|None``."""
+    scanned = _spread(rows)
+    types: dict[Any, dict[str, None]] = {}
+    present: dict[Any, int] = {}
+    for row in scanned:
+        for key, value in row.items():
+            types.setdefault(key, {})[_type_name(value)] = None
+            present[key] = present.get(key, 0) + 1
+    return [
+        FieldInfo(
+            name=str(key),
+            # None goes last: "int|None", not "None|int".
+            types=sorted(seen, key=lambda t: t == "None"),
+            optional=present[key] < len(scanned),
+        )
+        for key, seen in types.items()
+    ]
+
+
 def _truncate(value: Any, limit: int) -> Any:
     """Shorten strings (also inside lists and dicts) to ``limit`` characters."""
     if isinstance(value, str):
@@ -178,7 +218,8 @@ def step(
     cache: bool = True,
     prod: bool = False,
     strict: bool = False,
-    sample: int = 3,
+    sample: int = 1,
+    show: list[str] | tuple[str, ...] | str = (),
 ) -> Any:
     """Decorate a function from rows to rows built from Forger ops.
 
@@ -189,9 +230,9 @@ def step(
 
     Errors (``StepContractError``): the result is not a list, the step called no
     Forger ops, rows do not match the annotated row model, or the step was called
-    inside another step. Warnings: the last op is not a filter, an op missed its
-    ``min_yield`` / ``max_yield``, the rows are not dicts, or the type hints
-    could not be resolved.
+    inside another step. Warnings: an op missed its ``min_yield`` /
+    ``max_yield``, the rows are not dicts, ``show`` names a field no output row
+    has, or the type hints could not be resolved.
 
     Args:
         _fn: The function, when used as ``@step`` without parentheses.
@@ -200,8 +241,13 @@ def step(
         prod: Do not print the report.
         strict: Raise ``StepContractError`` when the step has any warning; such
             a result is not cached.
-        sample: Number of output rows shown in the report.
+        sample: Number of output rows shown in the report (``inspect_step``
+            shows up to 10).
+        show: Fields of the sample rows to print in full, each as an indented
+            block under its row, e.g. ``show=["statement"]``. Other fields are
+            cut or summarized.
     """
+    shown_fields = [show] if isinstance(show, str) else list(show)
     # The scope that defines the step (where ``step`` is called, both for
     # ``@step`` and ``@step(...)``), for resolving string annotations.
     frame = sys._getframe(1)
@@ -231,16 +277,20 @@ def step(
                 name=step_name,
                 doc=doc,
                 sample_shown=sample,
+                show=shown_fields,
                 input_type=f"list[{in_model.__name__}]" if in_model else None,
                 output_type=f"list[{out_model.__name__}]" if out_model else None,
             )
             if hint_warning:
                 rec.warnings.append(hint_warning)
             rows_in = args[0] if args else kwargs.get(first_param or "")
+            input_keys: list[Any] | None = None
             if isinstance(rows_in, list):
                 rec.n_in = len(rows_in)
                 if in_model is not None:
                     _validate_rows(rows_in, in_model, step_name, "input")
+                if rows_in and all(isinstance(row, dict) for row in rows_in):
+                    input_keys = _keys(rows_in)
 
             checked: list[bool] = []
             strict_failed: list[bool] = []
@@ -251,7 +301,11 @@ def step(
                 # here keeps a result that breaks the contract out of the cache.
                 checked.append(True)
                 _check_step_result(
-                    rec, result, out_model, _tracking.ops_started() - ops_before
+                    rec,
+                    result,
+                    out_model,
+                    _tracking.ops_started() - ops_before,
+                    input_keys,
                 )
                 if strict and rec.warnings:
                     strict_failed.append(True)
@@ -274,7 +328,8 @@ def step(
                 if pipeline_rec is not None:
                     pipeline_rec.steps.append(rec)
                 if _reports_enabled(prod):
-                    _summaries.add_llm_summaries(rec, rows=rec.sample_shown)
+                    if not rec.cache_hit:  # a cached step prints one line
+                        _summaries.add_llm_summaries(rec, rows=rec.sample_shown)
                     print_step(rec)
 
             scope = _tracking.enter_step(rec, check)
@@ -288,7 +343,7 @@ def step(
                 _tracking.exit_step(scope)
 
             if not checked:  # a cache hit
-                _check_step_result(rec, result, out_model, 0)
+                _check_step_result(rec, result, out_model, 0, input_keys)
             finish()
             if strict and rec.warnings:
                 raise _strict_error(rec)
@@ -325,11 +380,13 @@ def _check_step_result(
     result: Any,
     out_model: type[BaseModel] | None,
     ops_started: int,
+    input_keys: list[Any] | None = None,
 ) -> None:
-    """Validate a step's result and fill in its row count, sample, and warnings.
+    """Validate a step's result; fill in its row count, fields, sample, and warnings.
 
     ``ops_started`` is how many ops the process started while the step ran; ops
-    from worker threads count there but not in ``rec.ops``.
+    from worker threads count there but not in ``rec.ops``. ``input_keys`` are
+    the input rows' fields when those rows are dicts.
     """
     if not isinstance(result, list):
         raise StepContractError(
@@ -341,9 +398,27 @@ def _check_step_result(
         _validate_rows(result, out_model, rec.name, "output")
     if all(isinstance(row, dict) for row in result):
         rows = result[:_SAMPLE_ROWS_KEPT]
-        rec.sample = [_truncate(row, _SAMPLE_FIELD_CHARS) for row in rows]
+        shown = set(rec.show)
+        # Fields named in show= are kept whole; they print in full.
+        rec.sample = [
+            {
+                k: v if k in shown else _truncate(v, _SAMPLE_FIELD_CHARS)
+                for k, v in row.items()
+            }
+            for row in rows
+        ]
         # Summaries of long values need the whole value, not the cut sample.
         rec.sample_summaries = [sample_summaries(row) for row in rows]
+        rec.fields = _field_infos(result)
+        output_keys = _keys(result)
+        if input_keys is not None and result:
+            rec.fields_added = [str(k) for k in output_keys if k not in input_keys]
+            rec.fields_removed = [str(k) for k in input_keys if k not in output_keys]
+        missing = [f for f in rec.show if result and f not in output_keys]
+        if missing:
+            rec.warnings.append(
+                f"show= names fields no output row has: {', '.join(missing)}"
+            )
     else:
         rec.warnings.append(_NOT_DICTS)
 
@@ -361,8 +436,6 @@ def _check_step_result(
         )
     for call in rec.ops:
         rec.warnings.extend(call.warnings)
-    if rec.ops and rec.ops[-1].category != "filter":
-        rec.warnings.append("ends without a filter")
 
 
 # --------------------------------------------------------------------------- #
@@ -386,12 +459,15 @@ def pipeline(
     Errors (``PipelineContractError``): no step ran, or the pipeline was called
     inside another pipeline. Warnings: only one step ran; no quality filter, no
     diversity filter, or no inspect op ran anywhere; ops ran outside a step.
+    Notes, which are not warnings and never raise: steps that ran no filter,
+    and filters that removed nothing (a passed check, or one to tighten).
 
     Args:
         _fn: The function, when used as ``@pipeline`` without parentheses.
         name: Pipeline name in the report; defaults to the function name.
         prod: Do not print the summary.
-        strict: Raise ``PipelineContractError`` when the pipeline has any warning.
+        strict: Raise ``PipelineContractError`` when the pipeline has any
+            warning (notes do not count).
         max_cost_usd: Stop when this run has spent this many dollars: the next
             model request batch raises ``BudgetExceededError``. Requests already
             sent finish, so spend can pass the cap by up to one batch.
@@ -473,6 +549,7 @@ def _check_pipeline(rec: PipelineRecord) -> None:
             )
         if not any(n.startswith("inspect.") for n in names):
             rec.warnings.append("no inspect op ran")
+    _filter_notes(rec)
     bare = [s.ops[0].op_name for s in rec.steps if s.kind == "bare"]
     if bare:
         listed = ", ".join(dict.fromkeys(bare))
@@ -480,6 +557,37 @@ def _check_pipeline(rec: PipelineRecord) -> None:
             f"{len(bare)} op call{'s' if len(bare) != 1 else ''} outside a @step: "
             f"{listed}"
         )
+
+
+def _filter_notes(rec: PipelineRecord) -> None:
+    """Note the steps that ran no filter and the filters that removed nothing.
+
+    These are notes, not warnings: a generate-only step followed by a filter
+    step is fine, and a filter that removed nothing may be a check that passed.
+    Steps whose ops are unknown (cached by an older Forger, or run in worker
+    threads without a copied context) are skipped. A step that ran several
+    times counts once; its filter calls are summed per op.
+    """
+    filtered: dict[str, bool] = {}
+    totals: dict[tuple[str, str], list[int]] = {}
+    for s in rec.steps:
+        if not s.ops:
+            continue
+        if s.kind == "step":
+            has_filter = any(c.category == "filter" for c in s.ops)
+            filtered[s.name] = filtered.get(s.name, False) or has_filter
+        for call in s.ops:
+            if call.category != "filter" or call.n_in is None or call.n_out is None:
+                continue
+            seen = totals.setdefault((call.op_name, s.name), [0, 0])
+            seen[0] += call.n_in
+            seen[1] += call.n_out
+    rec.no_filter_steps = [name for name, has in filtered.items() if not has]
+    rec.noop_filters = [
+        (op_name, step_name, n_in)
+        for (op_name, step_name), (n_in, n_out) in totals.items()
+        if n_in and n_out == n_in
+    ]
 
 
 __all__ = [
