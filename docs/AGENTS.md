@@ -208,6 +208,14 @@ clusters = topic_based_clustering(
 # clusters[i] is the topic name of rows[i]
 ```
 
+Embeddings only decide which rows the LLM summarizes together. By default they come from the sentence-transformers
+model `embedding_model` (`pip install "pyforger[clustering]"`, GPU when available). `embedding_model="tfidf"` uses a
+built-in TF-IDF + SVD embedder on the CPU (scikit-learn only); if sentence-transformers cannot be imported, the op
+falls back to it with a warning. To use another backend, pass `embed_fn`: a function that takes the field values as a
+`list[str]` and returns an array-like of shape `(n_rows, dim)`, one vector per string. `embed_fn` overrides
+`embedding_model`. The fallback is resolved before the cache lookup, so its result is cached as `"tfidf"` and is not
+reused once sentence-transformers is installed.
+
 ### Models, prompts, and credentials
 
 #### The `Model` class
