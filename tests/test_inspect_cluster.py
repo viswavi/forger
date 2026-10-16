@@ -318,3 +318,187 @@ def test_warns_on_heavy_reasoning(monkeypatch, effort, warns):
     kwargs = {} if effort is None else {"reasoning_effort": effort}
     _warn_if_heavy_reasoning(Model("gpt-4o", **kwargs), "eval_tree")
     assert bool(calls) == warns
+
+
+def _block_sentence_transformers(monkeypatch):
+    """Make `import sentence_transformers` raise ImportError."""
+    import sys
+
+    monkeypatch.setitem(sys.modules, "sentence_transformers", None)
+
+
+def _install_fake_sentence_transformers(monkeypatch):
+    """Install a fake sentence-transformers whose encoder records its calls."""
+    import sys
+    import types
+
+    calls = []
+
+    class _FakeEncoder:
+        device = types.SimpleNamespace(type="cuda")
+
+        def __init__(self, model_id):
+            calls.append(model_id)
+
+        def encode(self, docs, **kwargs):
+            return _fake_embed(docs)
+
+    fake_st = types.ModuleType("sentence_transformers")
+    fake_st.SentenceTransformer = _FakeEncoder
+    monkeypatch.setitem(sys.modules, "sentence_transformers", fake_st)
+    return calls
+
+
+def _cluster_with(items, model=None, **kwargs):
+    """Cluster without the fake embed_fn, so embedding_model decides."""
+    kwargs.setdefault("num_clusters", 2)
+    return topic_based_clustering(
+        items,
+        field="text",
+        model=model or _FakeClusterModel(),
+        context=CONTEXT,
+        **kwargs,
+    )
+
+
+def test_tfidf_embed_shape_and_normalization():
+    """TF-IDF vectors are SVD-reduced to < n_rows dims and unit length."""
+    from pyforger.inspect.cluster import _tfidf_embed
+
+    docs = COOKING_DOCS + SPACE_DOCS
+    embeddings = _tfidf_embed(docs)
+    assert embeddings.shape == (len(docs), len(docs))
+    np.testing.assert_allclose(np.linalg.norm(embeddings, axis=1), 1.0)
+
+
+def test_tfidf_embed_caps_dimension(monkeypatch):
+    """More documents than the cap (256, lowered here to 4) reduce to the cap."""
+    from pyforger.inspect import cluster
+
+    assert cluster._TFIDF_MAX_DIM == 256
+    monkeypatch.setattr(cluster, "_TFIDF_MAX_DIM", 4)
+    docs = [f"note {i} about topic{i} and item{i * 7}" for i in range(10)]
+    embeddings = cluster._tfidf_embed(docs)
+    assert embeddings.shape == (10, 4)
+    np.testing.assert_allclose(np.linalg.norm(embeddings, axis=1), 1.0)
+
+
+def test_tfidf_embed_is_deterministic():
+    """The same documents and seed give the same vectors."""
+    from pyforger.inspect.cluster import _tfidf_embed
+
+    docs = COOKING_DOCS + SPACE_DOCS
+    np.testing.assert_array_equal(_tfidf_embed(docs), _tfidf_embed(docs))
+    np.testing.assert_array_equal(
+        _tfidf_embed(docs, seed=3), _tfidf_embed(docs, seed=3)
+    )
+
+
+def test_tfidf_embed_separates_topics():
+    """Docs sharing words are closer to each other than to unrelated docs."""
+    from pyforger.inspect.cluster import _tfidf_embed
+
+    docs = [
+        "bake bread with sourdough starter",
+        "bake bread with rye flour",
+        "rocket launch to orbit the moon",
+        "rocket launch to orbit mars",
+    ]
+    vectors = _tfidf_embed(docs)
+    similarity = vectors @ vectors.T
+    assert similarity[0, 1] > similarity[0, 2]
+    assert similarity[2, 3] > similarity[2, 1]
+
+
+@pytest.mark.parametrize(
+    "docs",
+    [
+        ["only one document"],
+        ["two documents", "second one"],
+        ["a", "b", "c"],  # one-character words
+        ["?!", "...", "!!"],  # no word characters: character n-grams
+        ["", "", ""],  # nothing at all: zero vectors
+        ["same", "same"],  # a single feature
+        ["one two", "one two"],  # identical: zero variance
+    ],
+)
+def test_tfidf_embed_tiny_inputs(docs):
+    """Tiny inputs and empty vocabularies give one finite vector per doc."""
+    from pyforger.inspect.cluster import _tfidf_embed
+
+    embeddings = _tfidf_embed(docs)
+    assert embeddings.ndim == 2
+    assert embeddings.shape[0] == len(docs)
+    assert embeddings.shape[1] >= 1
+    assert np.isfinite(embeddings).all()
+    norms = np.linalg.norm(embeddings, axis=1)
+    assert np.all(np.isclose(norms, 1.0) | (norms < 1e-8))
+
+
+def test_clustering_with_tfidf_embedder():
+    """embedding_model="tfidf" clusters with the fake LLM, no embed_fn needed."""
+    docs = COOKING_DOCS + SPACE_DOCS
+    model = _FakeClusterModel()
+    clusters = _cluster_with(_rows(docs), model, embedding_model="tfidf")
+    assert clusters == ["cooking" if _is_cooking(doc) else "space" for doc in docs]
+    assert sorted(model.summarized_records) == sorted(docs)
+
+
+def test_falls_back_to_tfidf_without_sentence_transformers(monkeypatch, caplog):
+    """A missing sentence-transformers falls back to TF-IDF with one warning."""
+    from pyforger.op import trace
+
+    _block_sentence_transformers(monkeypatch)
+    docs = COOKING_DOCS + SPACE_DOCS
+    with caplog.at_level("WARNING", logger="Inspect"):
+        clusters = _cluster_with(_rows(docs))
+    assert clusters == ["cooking" if _is_cooking(doc) else "space" for doc in docs]
+    warnings = [r.message for r in caplog.records if "TF-IDF" in r.message]
+    assert len(warnings) == 1
+    assert "pyforger[clustering]" in warnings[0]
+
+    # The fallback is cached under the TF-IDF key: an explicit "tfidf" call hits it.
+    _cluster_with(_rows(docs), embedding_model="tfidf")
+    first, second = trace()
+    assert (first.cache_hit, second.cache_hit) == (False, True)
+    assert first.input_hash == second.input_hash
+
+
+def test_fallback_result_is_not_reused_for_sentence_transformers(monkeypatch):
+    """Once sentence-transformers is installed, the TF-IDF result is not reused."""
+    from pyforger.op import trace
+
+    docs = COOKING_DOCS + SPACE_DOCS
+    _block_sentence_transformers(monkeypatch)
+    _cluster_with(_rows(docs))
+
+    encoder_calls = _install_fake_sentence_transformers(monkeypatch)
+    _cluster_with(_rows(docs))
+    first, second = trace()
+    assert second.cache_hit is False
+    assert first.input_hash != second.input_hash
+    assert encoder_calls == ["Qwen/Qwen3-Embedding-0.6B"]
+
+
+def test_embed_fn_wins_without_sentence_transformers(monkeypatch, caplog):
+    """An explicit embed_fn is used as-is, with no fallback warning."""
+    _block_sentence_transformers(monkeypatch)
+    embedded = []
+
+    def recording_embed(docs):
+        embedded.append(list(docs))
+        return _fake_embed(docs)
+
+    docs = COOKING_DOCS + SPACE_DOCS
+    with caplog.at_level("WARNING", logger="Inspect"):
+        _cluster_with(_rows(docs), embed_fn=recording_embed)
+    assert embedded == [docs]
+    assert not any("TF-IDF" in r.message for r in caplog.records)
+
+
+def test_cache_only_is_forwarded():
+    """Per-call @op controls pass through to the cached computation."""
+    with pytest.raises(FileNotFoundError):
+        _cluster_with(
+            _rows(COOKING_DOCS + SPACE_DOCS), embedding_model="tfidf", _cache_only=True
+        )

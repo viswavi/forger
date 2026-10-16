@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import threading
 from typing import Any
 from unittest.mock import patch
 
@@ -145,6 +146,26 @@ class TestRetrieve:
         assert isinstance(results, list)
         assert len(results) == 5
         assert all(isinstance(r, dict) for r in results)
+
+    def test_retrieve_from_s2_concurrent_queries_keep_order(self):
+        """With max_workers, queries run at once and rows keep query order."""
+        barrier = threading.Barrier(3, timeout=10)
+
+        def fetch(mode, *, query=None, n=10, seed=None, **kwargs):
+            barrier.wait()  # passes only if all three queries are in flight
+            return [{"text": f"{query} {i}"} for i in range(n)]
+
+        with patch.object(S2RetrievalSource, "fetch", side_effect=fetch):
+            with patch.object(S2RetrievalSource, "_get_client") as get_client:
+                rows = retrieve_from_s2(queries=["a", "b", "c"], n=2, max_workers=3)
+        get_client.assert_called_once()
+        assert [r["text"] for r in rows] == ["a 0", "a 1", "b 0", "b 1", "c 0", "c 1"]
+        assert [r["query"] for r in rows] == ["a", "a", "b", "b", "c", "c"]
+
+    def test_retrieve_from_s2_max_workers_validated(self):
+        """max_workers below 1 is rejected."""
+        with pytest.raises(ValueError, match="max_workers"):
+            retrieve_from_s2(queries=["a"], max_workers=0)
 
 
 class TestMultiQueryRetrieve:

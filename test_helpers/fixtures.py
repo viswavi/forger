@@ -64,6 +64,9 @@ class MockModel(Model):
         max_tokens: int | None = None,
         stop: list[str] | None = None,
         show_progress: bool | None = None,
+        return_exceptions: bool = False,
+        cache_salt: str | None = None,
+        cache_rows: list[Any] | None = None,
     ) -> list[GenerateResult]:
         """Return self.responses[i] for the i-th prompt; require len == n."""
         self._call_count += 1
@@ -114,6 +117,9 @@ class RecordingMockModel(MockModel):
         max_tokens: int | None = None,
         stop: list[str] | None = None,
         show_progress: bool | None = None,
+        return_exceptions: bool = False,
+        cache_salt: str | None = None,
+        cache_rows: list[Any] | None = None,
     ) -> list[GenerateResult]:
         """Append the current prompt batch to recorded_prompts, then delegate."""
         self.recorded_prompts.append(list(prompts))
@@ -124,6 +130,9 @@ class RecordingMockModel(MockModel):
             max_tokens=max_tokens,
             stop=stop,
             show_progress=show_progress,
+            return_exceptions=return_exceptions,
+            cache_salt=cache_salt,
+            cache_rows=cache_rows,
         )
 
 

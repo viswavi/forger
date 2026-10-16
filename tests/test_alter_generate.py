@@ -352,3 +352,108 @@ class TestBatching:
         model = MockModel(responses=["ok"] * 5)
         generate_from_context(items, "p: {text}", model, batch_size=2)
         assert model._call_count == 3  # ceil(5/2) = 3
+
+
+# ---------------------------------------------------------------------------
+# merge / output_field
+# ---------------------------------------------------------------------------
+
+
+class TestMerge:
+    """merge=True returns the input rows with each output attached."""
+
+    def test_merge_one_sample(self):
+        """Each output row is {**item, **parsed}; no sample_idx for one sample."""
+        model = MockModel(responses=['{"answer": "4"}', '{"answer": "9"}'])
+        rows = generate_from_context(
+            [{"q": "2+2"}, {"q": "3*3"}],
+            "Solve {q}",
+            model,
+            output_schema={"answer": str},
+            merge=True,
+        )
+        assert rows == [{"q": "2+2", "answer": "4"}, {"q": "3*3", "answer": "9"}]
+
+    def test_merge_several_samples(self):
+        """With samples_per_item > 1, each sample is a row with its sample_idx."""
+        model = MockModel(responses=[["x0", "x1"], ["y0", "y1"]])
+        rows = generate_from_context(
+            [{"q": "a"}, {"q": "b"}], "{q}", model, samples_per_item=2, merge=True
+        )
+        assert rows == [
+            {"q": "a", "text": "x0", "sample_idx": 0},
+            {"q": "a", "text": "x1", "sample_idx": 1},
+            {"q": "b", "text": "y0", "sample_idx": 0},
+            {"q": "b", "text": "y1", "sample_idx": 1},
+        ]
+
+    def test_output_field_nests_output(self):
+        """output_field keeps the input's keys and nests the output under it."""
+        model = MockModel(responses=["world"], reasoning=["thought"])
+        rows = generate_from_context(
+            [{"text": "hello"}], "{text}", model, merge=True, output_field="reply"
+        )
+        assert rows == [
+            {"text": "hello", "reply": {"text": "world", "thinking_trace": "thought"}}
+        ]
+
+    def test_key_clash_output_wins_and_warns_once(self, caplog):
+        """Clashing keys take the output's value; one warning names them."""
+        model = MockModel(responses=["new a", "new b"])
+        rows = generate_from_context(
+            [{"text": "a"}, {"text": "b"}], "{text}", model, merge=True
+        )
+        assert rows == [{"text": "new a"}, {"text": "new b"}]
+        clash = [r.getMessage() for r in caplog.records if "replace" in r.msg]
+        assert clash == [
+            "alter.generate_from_context: merge=True replaces the input's "
+            "['text']; pass another output_field= (or rename the input keys) to "
+            "keep both"
+        ]
+
+    def test_output_field_clash_warns(self, caplog):
+        """An output_field that already is an input key is replaced with a warning."""
+        model = MockModel(responses=["model answer"])
+        rows = generate_from_context(
+            [{"problem": "1+1", "solution": "gold"}],
+            "{problem}",
+            model,
+            merge=True,
+            output_field="solution",
+        )
+        assert rows == [{"problem": "1+1", "solution": {"text": "model answer"}}]
+        assert "replaces the input's ['solution']" in caplog.text
+
+    def test_sample_idx_clash_warns(self, caplog):
+        """A sample_idx from an earlier merge is replaced with a warning."""
+        model = MockModel(responses=[["x0", "x1"]])
+        rows = generate_from_context(
+            [{"q": "a", "sample_idx": 3}],
+            "{q}",
+            model,
+            samples_per_item=2,
+            merge=True,
+            output_field="out",
+        )
+        assert [row["sample_idx"] for row in rows] == [0, 1]
+        assert "replaces the input's ['sample_idx']" in caplog.text
+
+    def test_merge_drops_parse_failures(self):
+        """Slots that failed to parse are left out of the merged rows."""
+        model = MockModel(responses=['{"k": "v"}', "not json"])
+        rows = generate_from_context(
+            [{"q": 1}, {"q": 2}],
+            "{q}",
+            model,
+            output_schema={"k": str},
+            max_retries=0,
+            merge=True,
+        )
+        assert rows == [{"q": 1, "k": "v"}]
+
+    def test_output_field_needs_merge(self):
+        """output_field without merge=True raises."""
+        with pytest.raises(ValueError, match="merge=True"):
+            generate_from_context(
+                [], "p", MockModel(responses=["ok"]), output_field="out"
+            )

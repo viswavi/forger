@@ -1,37 +1,267 @@
-# Composing a pipeline
+# Pipelines and steps
 
-A single-pass pipeline:
+## Steps and step reports
+
+Structure a pipeline as a `@pyforger.pipeline` function that calls `@pyforger.step` functions. A step is a named
+function from rows to rows built from Forger ops (typically acquire or alter, then filter); it may also take several
+lists of rows and return a dict of named row lists (see [Several inputs and output
+streams](#several-inputs-and-output-streams)). Each step is cached like
+an `@op` and, when it returns, prints a report: the fields of its output rows; every op it ran with rows in/out, yield,
+time, tokens, and cost; a histogram of each filter's scores with what other thresholds would have kept; warnings; and
+one sample output row. The pipeline prints a summary table of its steps at the end. Read these reports after every
+run. A cached step prints one line, `step translate · 42 → 40 rows · cached · originally 0.5s · $0.0034`, with the
+number of its warnings if it has any; `inspect_step(name)` prints its full report, which lists the ops of the run that
+cached it, marked `cached`, with that run's warnings.
+
+- Fields line: `fields: seed_id int · topic str · score int|None · twist str?  (+ score, twist; − draft)`. Each field
+  of the output rows with the types of its values (from all rows, or 5,000 evenly spaced rows of a longer list); `?`
+  marks a field that some rows lack; `+` / `−` are fields added or removed relative to the input rows, when the step's
+  rows arguments are lists of dicts.
+- Chunks of one op in a step share one row, e.g. `alter.generate_from_context ×5`, with summed rows, time, tokens,
+  and cost, and the yield of the sums. Each call is still checked against its own `min_yield` / `max_yield`
+  (`LOW 2/5 · min 0.60` means two of five calls missed, `RAISED 1/5` that one raised). Their filter scores pool into
+  one histogram when the label, keep rule, and thresholds match, and get one histogram per rule otherwise. A call
+  whose input rows are an earlier call's output rows (the same row objects, also through other ops) gets its own
+  row: two `by_llm_score` rubric judges in a row read `10 → 8` and `8 → 4`, not one summed row.
+- `(python)` rows: when rows change between two ops with no op to account for it (e.g. `[r for r in rows if ...]`
+  between `generate_from_context` and `by_exact_match`), the op table shows a dim row such as
+  `(python)  356 → 330  0.93` between them, or before the first op / after the last one. They are inferred: by row
+  identity when the next op got some of the same dicts, else from row counts (marked `inferred`) when Python rebuilt
+  them all (`{**r, ...}`) and each op row's calls are contiguous. Merged, split, or ambiguous rows (several list
+  arguments, interleaved chunks, rebuilt rows sent to two ops) show nothing. The pipeline table shows one between two
+  steps when the second got some of the first's rows, by identity only, and per stream when the first returned a dict
+  (`(python) train  5  3  0.60`). They are information, never warnings. To see why rows went, write the check as
+  `filter.by_predicate`: it gets its own row and a kept/dropped bar.
+
+- Hard errors (`StepContractError` / `PipelineContractError`): a step returns neither a list nor a dict of row lists,
+  a step calls no Forger ops (keep pure-Python helpers as plain functions), a step is called inside another step, a
+  pipeline calls no steps, or rows do not match a `list[X]` type hint where `X` is a pydantic model (rows stay dicts).
+- Warnings: an op misses its `min_yield` / `max_yield`; a step's type hints cannot be resolved; `show=` names a field
+  no output row has; a pipeline has only one step; no quality filter, no diversity filter, or no inspect op ran
+  anywhere; an op was called in the pipeline outside a step.
+- Filter notes: the pipeline summary lists the steps that ran no filter and the filters that removed nothing (op, step,
+  and rows seen). These are notes, not warnings, and `strict=True` does not raise on them: a generate-only step
+  followed by a filter step is fine, and a filter that removes nothing may be a check that passed or one that tests
+  nothing. Do not add a filter only to quiet them.
+- `strict=True` on `@step` or `@pipeline` turns warnings into errors, also on cached runs; a step that fails strict
+  mode is not cached. `prod=True` or the environment variable `FORGER_STEP_REPORT=0` silences the reports.
+  `pyforger.inspect.inspect_step(name)` re-prints the full report of the latest run of a step, with up to 10 sample
+  rows.
+- Sample rows: `@step(sample=3)` shows three output rows (of each stream) instead of one. `@step(show=["statement"])`
+  prints those fields of each sample row in full, line breaks kept, as an indented block under the row (other values
+  as JSON); the other fields stay in the table, cut or summarized.
+- Long sample values are summarized by shape rather than cut, e.g. `[5 items] a.py, b.py, c.py, …` or
+  `def solve(n): … (312 lines, 9.8k chars, python)`. By default these structural summaries are all you get; they are
+  free. For a one-sentence LLM summary of each long value as well, call `pyforger.steps.set_report_model(model)` or
+  set `FORGER_REPORT_MODEL=<litellm model id>` (key from `LITELLM_API_KEY`). That costs up to 8 LLM calls per printed
+  report, cached on disk and left out of the step and pipeline totals (the spend ledger and `FORGER_MAX_COST_USD`
+  still count them); silenced reports make no calls.
+- Threads: ops called from `ThreadPoolExecutor` workers are not itemized in the step report (the step gets a warning
+  instead of an error) unless submitted as `pool.submit(contextvars.copy_context().run, fn, arg)`. Steps called from
+  workers still join the pipeline, and their spend counts toward it (and its cap) as it arrives. Each op, step, and
+  pipeline counts only its own LLM calls, also when several run at the same time. An op that raised is listed as
+  `RAISED` with what it spent. LLM calls from workers that did not copy the context and run no step belong to no
+  step or pipeline: while exactly one pipeline runs, its report lists them as one `unattributed` line (it may include
+  other threads in the process), kept out of its totals and its `max_cost_usd`.
+- Cost: a cached step costs nothing this run; its line shows the time and cost of the run that cached it (`cached ·
+  originally 37.9s · $0.50`), and the pipeline summary separates what was spent this run from
+  `cached (originally $X)`.
+- Spend ledger: every usage record (`Model`, `TinkerModel`, `LocalModel`, `dynamic_step` agents) is appended and
+  flushed as it is recorded to `$FORGER_SPEND_LEDGER`, else `$FORGER_CACHE/spend.jsonl` (one JSON line: timestamp,
+  pid, run id, pipeline, step, op, model id, tokens, cost, token units), so killed runs keep their record. `Model`
+  and `TinkerModel` record each request as it finishes, also when the batch later raises; `LocalModel` records a
+  batch when it returns. `FORGER_SPEND_LEDGER=0` turns the ledger off.
+  `pyforger.inspect.spend(since="2026-10-16")` prints and returns the totals by run, pipeline, and step.
+- Token units: for models with fixed token-unit weights (DeepSeek-V4-Flash, GLM-5.3; see the Cost section of
+  [AGENTS.md](../AGENTS.md)), each response's units reach its op, step, and pipeline as it arrives, and the reports
+  add a `units` column. Other models (including `TinkerModel` and `LocalModel` students) add no units; their ledger
+  lines have `"token_units": null`. A request-cache hit or a cached step adds none.
+- Spending caps: `@pipeline(max_cost_usd=20)` caps one pipeline run in dollars and `@pipeline(max_token_units=2e6)`
+  in token units; `FORGER_MAX_COST_USD=40` and `FORGER_MAX_TOKEN_UNITS=5e6` cap all spend in the process
+  (unattributed calls included). All must be numbers >= 0. Gateway models without LiteLLM pricing add $0, so cap
+  them in units. Once spend reaches a cap, the next model request raises `pyforger.BudgetExceededError`: `Model` and
+  `TinkerModel` check before each request (after it gets a concurrency slot), `LocalModel` before each batch, and
+  `dynamic_step` before starting an agent and during its run. Requests already in flight finish and are recorded, so
+  spend can pass a cap by what they cost (or by one agent step). These caps are separate from the shared quotas,
+  which also apply: the token-unit quota (`FORGER_TOKEN_USAGE_FILE` / `FORGER_TOKEN_UNIT_LIMIT`, which raises
+  `TokenUnitQuotaExceeded`) and `TinkerModel`'s dollar ledger (`FORGER_TINKER_USAGE_FILE`, which raises
+  `TinkerBudgetExceeded`). The caps count this process's spend; the quotas count every process sharing the file.
+
+## Composing a pipeline
+
+A single-pass pipeline with two steps:
 
 ```python
-import pyforger
-from pyforger import acquire, alter, filter, op
+from pydantic import BaseModel
+from pyforger import acquire, alter, filter, pipeline, step
 
-@op
-def build_dataset(seeds, model):
+class Translated(BaseModel):
+    text: str
+    spanish: str
+
+@step
+def translate(seeds, model) -> list[Translated]:
+    """Translate each seed into Spanish and drop empty or very long results."""
     rows = alter.translate.to_language(
-        seeds, target_language="Spanish", fields=["text"], model=model,
+        seeds, target_language="Spanish", fields=["text"], target_fields=["spanish"], model=model
     )
-    rows = filter.by_length(rows, instruction_field="text", min_len=3, max_len=200)
-    rows = filter.by_rouge_l(rows, field="text", threshold=0.7)
-    return rows
+    return filter.by_length(rows, instruction_field="spanish", min_len=3, max_len=200)
 
+@step
+def dedupe(rows: list[Translated]) -> list[Translated]:
+    """Drop near-duplicate translations."""
+    return filter.by_rouge_l(rows, field="spanish", threshold=0.7, min_yield=0.5)
+
+@pipeline
 def main(seeds, model):
-    return pyforger.run(build_dataset, seeds, model)
+    return dedupe(translate(seeds, model))
 ```
 
-An iterative pipeline keeps the outer loop in Python and decorates each round's helper with `@op` so that cached
-rounds are reused across runs:
+Each step prints a report when it returns, and the pipeline prints a summary at the end (the `dedupe` report is left
+out here):
+
+```text
+step translate ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Translate each seed into Spanish and drop empty or very long results.
+  42 → 40 rows (yield 0.95) · 0.5s · 5,040 in / 630 out tokens · $0.0034
+  fields: text str · spanish str  (+ spanish)
+  rows validated: any → list[Translated]
+
+  op                            in   out   yield   time   tokens in   tokens out   cost
+  ────────────────────────────────────────────────────────────────────────────────────────
+  alter.translate.to_language   42    42       -   0.5s       5,040          630   $0.0034
+  filter.by_length              42    40    0.95   0.0s           -            -   -
+
+  filter.by_length · words · keeps 3 to 200: 40 of 42 (0.95)
+      words  rows                                kept
+          0     1  ██▌                           no
+          1     1  ██▌                           no
+          5     3  ███████▋                      yes
+          6     6  ███████████████▎              yes
+          7     4  ██████████▏                   yes
+          8    11  ████████████████████████████  yes
+          9    10  █████████████████████████▌    yes
+         10     3  ███████▋                      yes
+         11     3  ███████▋                      yes
+
+  sample rows (1 of 40)
+  #   text                                             spanish
+  ────────────────────────────────────────────────────────────────────────────────────────────────
+  0   Explain the capital of France in one sentence.   Explica la capital de Francia en una frase.
+
+pipeline main ──────────────────────────────────────────────────────────────────────────────────────────────────────────
+  2 steps · 42 → 27 rows (yield 0.64) · 0.5s · 5,040 in / 630 out tokens · $0.0034
+
+  step        in   out   yield   time      cost
+  ────────────────────────────────────────────────
+  translate   42    40    0.95   0.5s   $0.0034
+  dedupe      40    27    0.68   0.0s         -
+
+  pipeline warnings
+  ⚠ no quality filter ran (e.g. filter.by_llm_score)
+  ⚠ no inspect op ran
+```
+
+Run again and both steps come from the cache, one line each, before the same summary:
+
+```text
+step translate · 42 → 40 rows · cached · originally 0.5s · $0.0034 ─────────────────────────────────────────────────────
+
+step dedupe · 40 → 27 rows · cached · originally 0.0s ──────────────────────────────────────────────────────────────────
+```
+
+`pyforger.inspect.inspect_step("translate")` prints the full report of the latest run, with up to 10 sample rows.
+When a filter removes nothing, or a step runs no filter, the summary adds a `filters` section:
+
+```text
+  filters
+  steps without a filter: add_difficulty
+  filters that removed nothing (a check that passed, or one that tests nothing):
+    filter.by_exact_match in seed_topics · 10 rows
+```
+
+### Several inputs and output streams
+
+A step may take several lists of rows and return a dict of named row lists (streams); a later step takes one stream.
+The rows arguments are the first argument when it is a list, and any other argument that is a non-empty list of dicts
+or is annotated `list[dict]` / `list[X]`. Models, numbers, strings, and other lists (e.g. topic names after the first
+argument) are not counted. The pipeline may return anything; its summary counts a returned list or dict of lists and
+otherwise shows only the input (`10 rows in`).
+
+```python
+class Assembled(TypedDict):  # optional; dict[str, list[X]] checks every stream against X
+    train: list[TrainRow]
+    refusals: list[RefusalRow]
+
+@step
+def assemble(solvable, refusals) -> Assembled:
+    """Label solved problems for training and keep refusals as their own set."""
+    train = label_kind(solvable, "solve")
+    refused = label_kind(refusals, "refuse")
+    return {
+        "train": filter.by_length(train, instruction_field="solution", min_len=2),
+        "refusals": filter.by_exact_match(refused, field="problem"),
+    }
+
+@pipeline
+def coding(writer, solver, judge_model):
+    tried = attempt(write_problems(TOPICS, writer), solver)  # {"solvable": [...], "refusals": [...]}
+    out = assemble(judge(tried["solvable"], judge_model), tried["refusals"])
+    train = [r for r in out["train"] if "heap" not in r["problem"]]
+    return {"train": format_train(train), "refusals": out["refusals"]}
+```
+
+The step report counts each input and stream, with a fields line and sample rows per stream (`sample=` and `show=`
+apply to each); the yield uses the sums. The pipeline table keeps the sums in a step's row, with its inputs (`+`) and
+streams (`→`) on dim rows below:
+
+```text
+step assemble ──────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Label solved problems for training and keep refusals as their own set.
+  solvable 4 + refusals 3 → train 4 · refusals 3 (yield 1.00) · 0.0s
+  train fields: problem str · solution str · refusal str · kind str  (+ kind)
+  refusals fields: problem str · solution str · refusal str · kind str  (+ kind)
+  rows validated: any → train list[TrainRow] · refusals list[RefusalRow]
+
+pipeline coding ────────────────────────────────────────────────────────────────────────────────────────────────────────
+  5 steps · 10 → train 3 · refusals 3 (yield 0.60) · 0.0s · 12,100 in / 4,284 out tokens · $0.052
+
+  step             in   out   yield   time      cost
+  ─────────────────────────────────────────────────────
+  write_problems   10    10    1.00   0.0s    $0.018
+  attempt          10    10    1.00   0.0s    $0.031
+    → solvable            7
+    → refusals            3
+  judge             7     4    0.57   0.0s   $0.0028
+  assemble          7     7    1.00   0.0s         -
+    + solvable      4
+    + refusals      3
+    → train               4
+    → refusals            3
+  (python) train    4     3    0.75
+  format_train      3     3    1.00   0.0s         -
+```
+
+A cached step reads `step assemble · solvable 4 + refusals 3 → train 4 · refusals 3 · cached · originally 0.0s`.
+With a `TypedDict` return hint each stream is validated like `list[X]` and must be one the `TypedDict` names; errors
+name the stream and row (`output stream 'refusals' row 1 does not match RefusalRow: ...`). A `list[X]` hint on any
+rows parameter validates that input (`input refusals row 0 ...`). A dict with a value that is not a list is an error.
+
+An iterative pipeline keeps the outer loop in Python and makes each round a `@step`, so cached rounds are reused
+across runs:
 
 ```python
 import random
 
-@op
+@step
 def one_round(rows, model):
+    """Sample new rows from in-context examples and keep the diverse ones."""
     in_context_examples = random.sample(rows, min(len(rows), 5))
     prompt = ...  # construct a prompt using the in-context examples
     new = acquire.sample_from_LLM(prompt=prompt, model=model, n=64)
     return rows + filter.by_rouge_l(new, field="text", threshold=0.7)
 
+@pipeline
 def run_pipeline(seeds, model, rounds=5):
     rows = seeds
     for _ in range(rounds):

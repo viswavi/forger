@@ -822,7 +822,9 @@ class S2RetrievalSource(RetrievalSource):
 
     # Default query when QUERY mode is called with empty query
     _DEFAULT_QUERY = "machine learning"
-    # Relevance search returns at most 1000 results; 100 per request
+    # Relevance search returns at most 1000 results; at most 100 per request.
+    # A request asks for no more than it needs (e.g. 4 for n=4): a full page of
+    # 100 papers with abstracts takes seconds longer to return.
     _PAGE_LIMIT = 100
     _RELEVANCE_CAP = 1000
     _RANDOM_POOL_MAX_BULK = 10_000
@@ -918,10 +920,10 @@ class S2RetrievalSource(RetrievalSource):
         """Return items from Semantic Scholar by mode (QUERY or RANDOM).
 
         QUERY: When query is empty, uses default "machine learning". Paginates
-        (100 per request) up to n or 1000. RANDOM: Builds pool via relevance
-        search (paginated, up to 1000) or bulk when requested pool size (n*10)
-        exceeds 1000; bulk pool is capped at 10,000. Then samples n with seed.
-        Effective max for QUERY: 1000.
+        (min(n, 100) per request) up to n or 1000. RANDOM: Builds pool via
+        relevance search (paginated, up to 1000) or bulk when requested pool
+        size (n*10) exceeds 1000; bulk pool is capped at 10,000. Then samples n
+        with seed. Effective max for QUERY: 1000.
 
         Returns:
             List of dicts; each has "text", "id", "title", "summary".
@@ -936,8 +938,10 @@ class S2RetrievalSource(RetrievalSource):
                     f"of {self._RELEVANCE_CAP}. Use RANDOM mode for larger "
                     f"result sets."
                 )
+            if n <= 0:
+                return []
             q = query or self._DEFAULT_QUERY
-            results = client.search_paper(q, limit=self._PAGE_LIMIT)
+            results = client.search_paper(q, limit=min(n, self._PAGE_LIMIT))
             accumulated = self._collect_paginated(results, n)
             return [self._result_to_item(p) for p in accumulated]
 
@@ -967,7 +971,9 @@ class S2RetrievalSource(RetrievalSource):
                     accumulated = new_items
                 pool = accumulated[:pool_size]
             else:
-                results = client.search_paper(query_str, limit=self._PAGE_LIMIT)
+                results = client.search_paper(
+                    query_str, limit=max(1, min(pool_size, self._PAGE_LIMIT))
+                )
                 pool = self._collect_paginated(results, pool_size)
             rng = random.Random(seed)
             sample_size = min(n, len(pool))

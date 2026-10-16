@@ -13,7 +13,7 @@ Generate or retrieve new rows.
 | `retrieve_from_wiki` | yes | Wikipedia backend (QUERY or RANDOM). |
 | `retrieve_from_hf` | yes | Hugging Face datasets backend. |
 | `retrieve_from_arxiv` | yes | arXiv backend. |
-| `retrieve_from_s2` | yes | Semantic Scholar backend. |
+| `retrieve_from_s2` | yes | Semantic Scholar backend; `max_workers` runs queries concurrently. |
 | `RetrievalSource`, `RetrieveMode` |   | Abstract base class and mode enum (`QUERY`, `RANDOM`). |
 | `WebRetrievalSource`, `WikiRetrievalSource`, `HFRetrievalSource`, ... |   | Per-backend source classes. |
 | `ArxivRetrievalSource`, `S2RetrievalSource` |   |Per-backend source classes. |
@@ -27,11 +27,14 @@ validation, making this a superior choice to calling `Model` directly. Any reaso
 contained in the output dict under a `thinking_trace` key. Inline traces are not extracted: `LocalModel` and
 `TinkerModel` leave `<think>` blocks in the completion text and supply `None` for that metadata; use `split_reasoning`
 to separate them out.
+A round whose request fails at the provider with a transient error counts as a failed round (see `max_retries`); if
+failures leave fewer than `n` samples, it returns the shorter list with a warning and is not cached. Other errors raise.
 
 `TinkerModel` samples a base model (e.g. `"Qwen/Qwen3-8B"`) or a trained `tinker://...` sampler checkpoint remotely on
 Tinker. Use it whenever you need a student model's own outputs: STaR traces, pass@k difficulty checks, or sanity
 checks of a checkpoint. It works with every op that takes a `Model` (`sample_from_LLM`, `generate_from_context`,
-`self_taught_reasoner`, `filter.by_llm_score`, ...). Prompts are rendered with the model's chat template and stop at its
+`self_taught_reasoner`, `filter.by_llm_score`, `filter.by_pass_at_k`, ...); see [models.md](models.md#tinkermodel) for
+its request cache, errors, and spend accounting. Prompts are rendered with the model's chat template and stop at its
 eos tokens, as a vLLM chat server would; defaults are Qwen3's thinking-mode settings (`temperature=0.6`, `top_p=0.95`,
 `top_k=20`), and `enable_thinking=False` turns thinking off. The `n` samples of one prompt are a single request, so
 they share one prefill: the prompt is billed once and its other `n - 1` copies at the cheaper cached rate. Prompts run
@@ -66,6 +69,12 @@ pages = retrieve_from_web(["interval scheduling greedy proof", "monotonic stack 
 # pages[i] has "text" (extracted page content), "title", "url", and "query".
 articles = retrieve_from_wiki("Segment tree", n=2)
 ```
+
+`n` is per query, so three queries with `n=5` return up to 15 rows. A Semantic Scholar query asks the API for only `n`
+results. `retrieve_from_s2` runs one query at a time by default, because an API key is usually limited to 1 request
+per second and keyless requests share a throttled pool; a rate-limited request is retried after 5 to 60 seconds, so
+workers beyond the limit are slower, not faster. With a higher limit, e.g.
+`retrieve_from_s2(queries=queries, n=4, max_workers=3)` runs three queries at a time and keeps rows in query order.
 
 `generate_custom_rubric` is the recommended entry point for humans and agents.
 It first generates textual criteria, then converts deterministic requirements

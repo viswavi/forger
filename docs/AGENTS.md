@@ -68,7 +68,9 @@ Unknown model weights or missing usage produce `NaN` token units, including in t
 cumulative total. Local GPU inference has zero API cost and is exempt from quotas;
 models outside the fixed list still report `NaN` units. `TinkerModel` reports Tinker
 dollars in `cost_usd` and is charged to a separate dollar ledger, not to token units
-(see `acquire.md`).
+(see `acquire.md`). Step and pipeline reports and the spend ledger show units next to dollars, and
+`@pipeline(max_token_units=...)` / `FORGER_MAX_TOKEN_UNITS` cap a run or process in units
+(see [`docs/agents/pipelines.md`](agents/pipelines.md)).
 INFO logs show both totals after the first call and every million units (raw tokens
 when weights are unknown). Dollar costs use provider metadata or LiteLLM pricing;
 unavailable prices warn and contribute zero to `total_cost`.
@@ -90,25 +92,37 @@ A pipeline is a Python function. It calls operations from `pyforger.acquire`, `p
 and `pyforger.inspect`. Each operation takes a `list[dict]` (or generation parameters). Acquire, alter, and filter
 operations generally return a `list[dict]`; rubric generation returns one rubric per input.
 `acquire.generate_custom_rubric_criteria` maps
-`list[str]` to `list[list[tuple[str, float]]]`. Inspect operations return a report about the rows without modifying rows.
+`list[str]` to `list[list[tuple[str, float]]]`. Inspect operations return a report about the rows without modifying
+rows.
 Control flow (`for`, `if`, comprehensions, helper functions) in plain Python can be used
+
+Structure a pipeline as a `@pyforger.pipeline` function that calls `@pyforger.step` functions. A step is a named
+function from rows to rows built from Forger ops (typically acquire or alter, then filter); it may also take several
+lists of rows and return a dict of named row lists. Each step is cached like an `@op` and, when it returns, prints a
+report; the pipeline prints a summary table of its steps at the end. Read these reports after every run. See
+[`docs/agents/pipelines.md`](agents/pipelines.md) for the reports, warnings, spend ledger, and spending caps.
 
 ### Operation reference
 
 All operations are plain functions. Operations that perform LLM calls or expensive in-process work (`sample_from_LLM`,
 `generate_custom_rubric_criteria`,
-every `alter.*` op, every `filter.*` op, every `inspect.*` op) are decorated internally with `@op`, so their results
-are cached on disk and traced. The retrieval functions (`retrieve`, `retrieve_from_*`) are also internally cached
-and traced by default. Pass `_no_cache=True` to skip cache reads and writes for an invocation, or
-`_cache_only=True` to read an existing result without fetching (a miss raises `FileNotFoundError`).
+every `alter.*` op, every `filter.*` op but the cheap `by_predicate`, every `inspect.*` op) are decorated internally
+with `@op`, so their results are cached on disk and traced. The retrieval functions (`retrieve`, `retrieve_from_*`)
+are also internally cached and traced by default. Pass `_no_cache=True` to skip cache reads and writes for an
+invocation, or `_cache_only=True` to read an existing result without fetching (a miss raises `FileNotFoundError`).
 This includes RANDOM mode, even without a seed: use `_no_cache=True` for a fresh sample.
 Direct calls to source `.fetch()` methods remain uncached.
+
+For the full call signature of every op (parameter names, defaults, field parameters, caching), see
+[OPS.md](OPS.md), which is generated from the code.
 
 ### Public API summary
 
 | Name | Location | Description |
 |---|---|---|
 | `pyforger.op` | `src/pyforger/op.py` | Decorator for caching operations. |
+| `pyforger.step` | `src/pyforger/steps.py` | Decorator for a named, cached, reported group of ops (rows to rows). |
+| `pyforger.pipeline` | `src/pyforger/steps.py` | Decorator for a function that calls steps; prints a summary table. |
 | `pyforger.acquire` | `src/pyforger/acquire/` | Generate or retrieve rows. |
 | `pyforger.alter` | `src/pyforger/alter/` | Transform rows without removing items. |
 | `pyforger.filter` | `src/pyforger/filter/` | Remove rows by criterion. |
@@ -119,12 +133,18 @@ Direct calls to source `.fetch()` methods remain uncached.
 
 The detailed reference is split by topic under `docs/agents/`; read the file for the operations you use:
 
+- [`docs/OPS.md`](OPS.md): Every op's signature and docstring summary, generated from the code.
 - [`docs/agents/acquire.md`](agents/acquire.md): Generation with `sample_from_LLM`, `TinkerModel` student sampling,
   retrieval, rubric generation.
-- [`docs/agents/alter.md`](agents/alter.md): Row transforms: `generate_from_context`, translation, code execution, STaR.
-- [`docs/agents/filter.md`](agents/filter.md): Quality and diversity filters, including the LLM judge.
-- [`docs/agents/inspect.md`](agents/inspect.md): Reports on rows: `topic_based_clustering` and `eval_tree`.
-- [`docs/agents/models.md`](agents/models.md): The `Model` class, gateway credentials, reasoning effort, prompt types.
-- [`docs/agents/caching.md`](agents/caching.md): How `@op` caching and tracing work.
-- [`docs/agents/pipelines.md`](agents/pipelines.md): Composing pipelines and common data-generation patterns.
+- [`docs/agents/alter.md`](agents/alter.md): Row transforms: `generate_from_context`, translation, code execution,
+  running programs against tests, STaR.
+- [`docs/agents/filter.md`](agents/filter.md): Quality and diversity filters, including the LLM judge, `by_predicate`,
+  `by_tests`, the difficulty filters, and `by_topic_frequency`.
+- [`docs/agents/inspect.md`](agents/inspect.md): Reports on rows: `topic_based_clustering`, `eval_tree`,
+  `inspect_step`, and `spend`.
+- [`docs/agents/models.md`](agents/models.md): The `Model` class, gateway credentials, concurrency, `n` fan-out,
+  reasoning effort, prompt types.
+- [`docs/agents/caching.md`](agents/caching.md): How `@op` caching, the request cache, and tracing work.
+- [`docs/agents/pipelines.md`](agents/pipelines.md): `@step` / `@pipeline`, step reports, spend ledger and caps,
+  composing pipelines, and common data-generation patterns.
 - [`docs/agents/dynamic_step.md`](agents/dynamic_step.md): Input-specific sub-pipelines with `dynamic_step`.

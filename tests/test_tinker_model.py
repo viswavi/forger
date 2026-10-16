@@ -580,7 +580,11 @@ class TestBudget:
         with pytest.raises(TinkerBudgetExceeded):
             model.generate_batch(["x", "x", "x"])
         assert len(world.calls) == 1
-        assert len(model.history) == 1
+        # history gets only returned results; the finished request is charged.
+        assert model.history == []
+        assert model.total_cost == pytest.approx(
+            json.loads(path.read_text())["cost_usd"]
+        )
         assert json.loads(path.read_text())["calls"] == 1
 
     def test_concurrent_requests_cannot_jointly_overshoot(
@@ -733,13 +737,14 @@ class TestConcurrencyAndRetries:
         assert len(world.calls) == 2
 
     def test_other_errors_are_not_retried(self, world):
-        """A bad request fails at once; finished prompts are still recorded."""
+        """A bad request fails at once; finished prompts are still charged."""
         world.failures = [world.tinker.BadRequestError("bad")]
         model = TinkerModel(QWEN, max_concurrent=1)
         with pytest.raises(world.tinker.BadRequestError):
             model.generate_batch(["a", "b"])
         assert len(world.calls) == 2
-        assert len(model.history) == 1
+        assert model.history == []
+        assert model.total_usage["prompt_tokens"] == len(expected_prompt("b"))
 
 
 class TestOps:
@@ -786,7 +791,7 @@ class TestOps:
         assert [c.num_samples for c in world.calls] == [2]
 
     def test_by_llm_score(self, world):
-        """by_llm_score sends num_judges samples in one request per row."""
+        """by_llm_score sends num_judges n=1 requests per row."""
         world.respond = lambda call: ['{"score": 5}'] * call.num_samples
         kept = by_llm_score(
             [{"q": "a", "r": "b"}],
@@ -796,7 +801,7 @@ class TestOps:
             num_judges=3,
         )
         assert kept == [{"q": "a", "r": "b"}]
-        assert [c.num_samples for c in world.calls] == [3]
+        assert [c.num_samples for c in world.calls] == [1, 1, 1]
 
 
 class TestLedger:
@@ -836,3 +841,134 @@ class TestLedger:
         path.write_text(json.dumps(state))
         with pytest.raises(ValueError, match="Invalid"):
             ledger.check()
+
+
+class TestModelContract:
+    """TinkerModel follows Model's request cache, error, and accounting contract."""
+
+    def test_request_cache_samples_only_what_is_missing(self, world):
+        """More samples, or a new row, ask Tinker only for the new samples."""
+
+        @op(name="test.tinker_ask", samples_arg="n")
+        def ask(rows, model, n=2):
+            prompts = [row["q"] for row in rows]
+            results = model.generate_batch(prompts, n=n, cache_rows=rows)
+            return [list(r) for r in results]
+
+        rows = [{"q": "a"}, {"q": "b"}]
+        first = ask(rows, TinkerModel(QWEN))
+        assert sorted(c.num_samples for c in world.calls) == [2, 2]
+        world.calls.clear()
+        more = ask(rows, TinkerModel(QWEN), n=3)
+        assert [r[:2] for r in more] == first
+        assert sorted(c.num_samples for c in world.calls) == [1, 1]
+        world.calls.clear()
+        ask(rows + [{"q": "c"}], TinkerModel(QWEN), n=3)
+        assert [(world.text_of(c), c.num_samples) for c in world.calls] == [
+            (expected_prompt("c"), 3)
+        ]
+
+    def test_fully_cached_call_opens_no_client(self, world):
+        """When every sample is cached, no Tinker client or tokenizer is created."""
+
+        @op(name="test.tinker_ask_rows")
+        def ask(rows, model):
+            results = model.generate_batch([r["q"] for r in rows], cache_rows=rows)
+            return [list(r) for r in results]
+
+        ask([{"q": "a"}, {"q": "b"}], TinkerModel(QWEN))
+        services, calls = len(world.services), len(world.calls)
+        # Other rows miss the op cache, but row b's sample is in the request cache.
+        assert ask([{"q": "b"}], TinkerModel(QWEN)) == [["<think>t0</think>a0"]]
+        assert (len(world.services), len(world.calls)) == (services, calls)
+
+    def test_return_exceptions_keeps_finished_prompts(self, world):
+        """A failed request fills its prompt's slot; the others keep their samples."""
+        world.failures = [world.tinker.BadRequestError("bad")]
+        model = TinkerModel(QWEN, max_concurrent=1)
+        results = model.generate_batch(["a", "b"], return_exceptions=True)
+        assert isinstance(results[0], world.tinker.BadRequestError)
+        assert results[1] == ["<think>t0</think>a0"]
+        assert model.history == [results[1]]
+
+    def test_step_report_and_ledger_show_tinker_spend(self, world, monkeypatch):
+        """Tinker spend reaches the step's cost and the spend ledger as it happens."""
+        from pyforger import _spend, _tracking, pipeline, step
+        from pyforger.filter import by_length
+
+        monkeypatch.setenv("FORGER_STEP_REPORT", "0")
+        model = TinkerModel(QWEN)
+
+        @step
+        def write(rows, model):
+            out = generate_from_context(rows, "Say {q}.", model)
+            return by_length(out, instruction_field="text", min_len=0)
+
+        @step
+        def keep(rows):
+            return by_length(rows, instruction_field="text", min_len=0)
+
+        @pipeline
+        def main(rows, model):
+            return keep(write(rows, model))
+
+        main([{"q": "a"}, {"q": "b"}], model)
+        rec = _tracking.step_records()["write"]
+        assert rec.cost_usd > 0
+        assert rec.cost_usd == pytest.approx(model.total_cost)
+        path = _spend.ledger_path()
+        records = [r for r in _spend.read(path) if r["model_id"] == QWEN]
+        assert len(records) == 2
+        assert sum(r["cost_usd"] for r in records) == pytest.approx(model.total_cost)
+        assert all(r["token_units"] is None for r in records)  # Qwen has no weights
+
+    def test_pipeline_cap_stops_tinker_requests(self, world, monkeypatch):
+        """max_cost_usd stops queued Tinker requests once spend reaches it."""
+        from pyforger import BudgetExceededError, pipeline, step
+
+        monkeypatch.setenv("FORGER_STEP_REPORT", "0")
+        model = TinkerModel(QWEN, max_concurrent=1)
+
+        @step
+        def write(rows, model):
+            return generate_from_context(rows, "Say {q}.", model)
+
+        @pipeline(max_cost_usd=1e-9)
+        def main(rows, model):
+            return write(rows, model)
+
+        with pytest.raises(BudgetExceededError, match="max_cost_usd"):
+            main([{"q": str(i)} for i in range(5)], model)
+        assert len(world.calls) == 1  # the requests queued behind it never left
+
+    def test_transient_tinker_error_is_a_none_slot(self, world):
+        """generate_from_context: a lost connection after retries is None, not fatal."""
+        error_type = type("APIConnectionError", (FakeError,), {"__module__": "tinker"})
+        world.tinker.APIConnectionError = error_type
+        world.failures = [error_type("down")]
+        rows = generate_from_context(
+            [{"q": "a"}, {"q": "b"}],
+            "Say {q}.",
+            TinkerModel(QWEN, num_retries=0, max_concurrent=1),
+            max_retries=0,
+        )
+        assert rows.count(None) == 1
+
+    def test_by_pass_at_k_evaluates_a_tinker_student(self, world):
+        """The student's k samples are one Tinker request per row (one prefill)."""
+        from pyforger.filter import by_pass_at_k
+
+        world.respond = lambda call: [
+            "<think>add</think>4" if j % 2 == 0 else "<think>guess</think>5"
+            for j in range(call.num_samples)
+        ]
+        kept = by_pass_at_k(
+            [{"problem": "2+2", "answer": "4"}],
+            model=TinkerModel(QWEN),
+            input_field="problem",
+            ground_truth_field="answer",
+            k=4,
+            outcomes_field="grades",
+        )
+        assert kept[0]["grades"] == {"model": [True, False, True, False]}
+        assert [c.num_samples for c in world.calls] == [4]

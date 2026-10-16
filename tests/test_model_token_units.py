@@ -166,16 +166,13 @@ def test_partial_batch_failure_charges_all_successes(monkeypatch, progress):
         return response()
 
     monkeypatch.setattr("pyforger.acquire.model.litellm.completion", completion)
-    monkeypatch.setattr(
-        "pyforger.acquire.model.litellm.batch_completion",
-        lambda **kwargs: [response(), error, response()],
-    )
     model = Model(DEEPSEEK, show_progress=progress)
     with pytest.raises(RuntimeError, match="one call failed"):
         model.generate_batch(["good", "bad", "also good"])
     assert model.total_token_units == 140
     assert model.total_cost == 0.02
-    assert len(model.history) == 2
+    # history holds only results of calls that return; the totals keep the spend.
+    assert model.history == []
 
 
 def test_parse_failure_still_charges_response(complete):
@@ -370,3 +367,94 @@ def test_local_generation_is_free_even_with_budget(monkeypatch, tmp_path):
     assert math.isnan(model.total_token_units)
     assert model.total_cost == 0
     assert not (tmp_path / "usage.json").exists()
+
+
+def test_pipeline_token_unit_cap_stops_queued_requests(complete, monkeypatch):
+    """max_token_units stops the batch at the cap; finished requests stay charged."""
+    from pyforger import BudgetExceededError, pipeline, step
+    from pyforger.alter import generate_from_context
+
+    monkeypatch.setenv("FORGER_STEP_REPORT", "0")
+    model = Model(DEEPSEEK, max_concurrency=1)  # 70 units per request
+
+    @step
+    def write(rows, model):
+        return generate_from_context(rows, "Say {q}.", model)
+
+    @pipeline(max_token_units=100)
+    def main(rows, model):
+        return write(rows, model)
+
+    with pytest.raises(BudgetExceededError, match="max_token_units=100"):
+        main([{"q": str(i)} for i in range(5)], model)
+    assert complete.call_count == 2  # 70, then 140 >= 100: the rest never left
+    assert model.total_token_units == 140
+
+
+def test_process_token_unit_cap(complete, monkeypatch):
+    """FORGER_MAX_TOKEN_UNITS caps all units spent in the process."""
+    from pyforger import BudgetExceededError, _tracking
+
+    model = Model(DEEPSEEK)
+    spent = _tracking.usage_snapshot()[3]
+    monkeypatch.setenv("FORGER_MAX_TOKEN_UNITS", str(spent + 70))
+    model.generate("Hello")
+    with pytest.raises(BudgetExceededError, match="FORGER_MAX_TOKEN_UNITS"):
+        model.generate("Again")
+    monkeypatch.setenv("FORGER_MAX_TOKEN_UNITS", "lots")
+    with pytest.raises(ValueError, match="FORGER_MAX_TOKEN_UNITS must be a number"):
+        model.generate("Again")
+
+
+def test_pipeline_rejects_negative_token_unit_cap():
+    """max_token_units must be a number >= 0."""
+    from pyforger import pipeline
+
+    with pytest.raises(ValueError, match="max_token_units"):
+        pipeline(max_token_units=-1)
+
+
+def test_units_reach_step_report_and_spend_ledger(complete, monkeypatch, tmp_path):
+    """Each response's token units reach its step and one ledger line each."""
+    from pyforger import _spend, _tracking, pipeline, step
+    from pyforger.alter import generate_from_context
+    from pyforger.inspect import spend
+
+    monkeypatch.setenv("FORGER_STEP_REPORT", "0")
+    monkeypatch.setenv("FORGER_SPEND_LEDGER", str(tmp_path / "spend.jsonl"))
+
+    @step
+    def write(rows, model):
+        return generate_from_context(rows, "Say {q}.", model)
+
+    @step
+    def again(rows, model):
+        return generate_from_context(rows, "Again {text}.", model)
+
+    @pipeline
+    def main(rows, model):
+        return again(write(rows, model), model)
+
+    main([{"q": "a"}, {"q": "b"}], Model(GLM))
+    assert _tracking.step_records()["write"].token_units == 580
+    assert _tracking.last_pipeline().token_units == 1160
+    records = _spend.read(tmp_path / "spend.jsonl")
+    assert [r["token_units"] for r in records] == [290.0] * 4
+    assert spend(tmp_path / "spend.jsonl").token_units == 1160
+
+
+def test_agent_usage_gets_token_units(monkeypatch):
+    """dynamic_step's agent usage is weighted like Model usage."""
+    from pyforger.alter import dynamic
+
+    seen = []
+    monkeypatch.setattr(
+        dynamic._tracking, "add_usage", lambda *a, **k: seen.append((a, k))
+    )
+    usage = SimpleNamespace(prompt_tokens=10, completion_tokens=20)
+    metrics = SimpleNamespace(accumulated_token_usage=usage, accumulated_cost=0.5)
+    conversation = SimpleNamespace(
+        conversation_stats=SimpleNamespace(get_combined_metrics=lambda: metrics)
+    )
+    dynamic._record_agent_usage(conversation, DEEPSEEK)
+    assert seen == [((10, 20, 0.5, 70.0), {"model_id": DEEPSEEK})]

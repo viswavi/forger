@@ -8,6 +8,8 @@ producing new rows in the pipeline.
 |---|---|---|
 | `topic_based_clustering` | yes | Interpretable clustering of contents of one field from the input rows. |
 | `eval_tree` | yes | Hierarchical capability tree and statistical weakness profile for scored outputs. |
+| `inspect_step` | no | Print the full report of the latest run of a `@step` and return its `StepRecord`. |
+| `spend` | no | Print and return the spend ledger's totals by run, pipeline, and step. |
 
 Topic-based clustering uses the ClusterFusion clustering algorithm ([arXiv:2512.04350](https://arxiv.org/abs/2512.04350)),
 a hybrid method in which embeddings guide how rows are partitioned and an LLM summarizes the partitions into
@@ -26,6 +28,16 @@ clusters = topic_based_clustering(
 )
 # clusters[i] is the topic name of rows[i]
 ```
+
+`filter.by_topic_frequency` runs this clustering (cached) to downsample over-represented topics.
+
+Embeddings only decide which rows the LLM summarizes together. By default they come from the sentence-transformers
+model `embedding_model` (`pip install "pyforger[clustering]"`, GPU when available). `embedding_model="tfidf"` uses a
+built-in TF-IDF + SVD embedder on the CPU (scikit-learn only); if sentence-transformers cannot be imported, the op
+falls back to it with a warning. To use another backend, pass `embed_fn`: a function that takes the field values as a
+`list[str]` and returns an array-like of shape `(n_rows, dim)`, one vector per string. `embed_fn` overrides
+`embedding_model`. The fallback is resolved before the cache lookup, so its result is cached as `"tfidf"` and is not
+reused once sentence-transformers is installed.
 
 EvalTree ([paper](https://arxiv.org/abs/2503.08893)) annotates each problem with a required capability,
 embeds those annotations, recursively groups them using K-means and cosine silhouette scores, and describes

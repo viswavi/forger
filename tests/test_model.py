@@ -14,6 +14,7 @@ from pyforger.acquire.model import (
     _VALUE_CONSTRAINTS,
     GenerateResult,
     Model,
+    _batch_completion_with_progress,
     _extract_cost,
     _extract_reasoning,
     _extract_usage,
@@ -61,6 +62,21 @@ def make_litellm_response(
     else:
         response._hidden_params = {}
     return response
+
+
+def by_content(responses: dict):
+    """Fake completion answering each request by its first message's content.
+
+    An exception value is raised for that request, e.g. {"Q2": RuntimeError()}.
+    """
+
+    def fake_completion(messages, **kwargs):
+        response = responses[messages[0]["content"]]
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    return fake_completion
 
 
 class TestConstructor:
@@ -152,7 +168,7 @@ class TestToMessages:
 
 
 class TestGenerateBatch:
-    """generate_batch calls litellm.batch_completion for parallel execution."""
+    """generate_batch sends one litellm.completion per prompt, concurrently."""
 
     @patch("pyforger.acquire.model.litellm")
     def test_single_prompt_n1(self, mock_litellm):
@@ -175,10 +191,9 @@ class TestGenerateBatch:
     @patch("pyforger.acquire.model.litellm")
     def test_multiple_prompts(self, mock_litellm):
         """Multiple prompts each get their own response list."""
-        mock_litellm.batch_completion.return_value = [
-            make_litellm_response(["r1"]),
-            make_litellm_response(["r2"]),
-        ]
+        mock_litellm.completion.side_effect = by_content(
+            {"Q1": make_litellm_response(["r1"]), "Q2": make_litellm_response(["r2"])}
+        )
         model = Model("gpt-4o", api_key="sk-test")
         result = model.generate_batch(["Q1", "Q2"], n=1)
         assert result == [["r1"], ["r2"]]
@@ -197,7 +212,7 @@ class TestGenerateBatch:
     @patch("pyforger.acquire.model.litellm")
     def test_forwards_parameters(self, mock_litellm):
         """Model parameters are forwarded to litellm.completion."""
-        mock_litellm.completion.return_value = make_litellm_response(["ok"])
+        mock_litellm.completion.return_value = make_litellm_response(["ok", "ok"])
         model = Model(
             "gpt-4o",
             api_key="sk-test",
@@ -299,7 +314,7 @@ class TestGenerate:
     @patch("pyforger.acquire.model.litellm")
     def test_delegates_to_generate_batch(self, mock_litellm):
         """Generate forwards all parameters to litellm.completion."""
-        mock_litellm.completion.return_value = make_litellm_response(["ok"])
+        mock_litellm.completion.return_value = make_litellm_response(["ok", "ok"])
         model = Model("gpt-4o", api_key="sk-test")
         model.generate("Hi", n=2, temperature=0.3, max_tokens=50)
         call_args = mock_litellm.completion.call_args
@@ -372,7 +387,7 @@ class TestErrorHandling:
             "max_tokens",
             "stop",
         ]
-        mock_litellm.batch_completion.side_effect = RuntimeError("API error on batch")
+        mock_litellm.completion.side_effect = RuntimeError("API error on batch")
         model = Model("gpt-4o", api_key="sk-test")
         with pytest.raises(RuntimeError, match="API error on batch"):
             model.generate_batch(["Q1", "Q2"])
@@ -382,19 +397,20 @@ class TestErrorHandling:
     def test_batch_request_exception_is_raised(self, mock_litellm):
         """An exception returned for one batch request is raised as-is."""
         error = ValueError("context window exceeded: 200000 > 128000 tokens")
-        mock_litellm.batch_completion.return_value = [
-            make_litellm_response(["r1"]),
-            error,
-        ]
+        mock_litellm.completion.side_effect = by_content(
+            {"Q1": make_litellm_response(["r1"]), "Q2": error}
+        )
         model = Model("gpt-4o", api_key="sk-test")
         with pytest.raises(ValueError) as excinfo:
             model.generate_batch(["Q1", "Q2"])
         assert excinfo.value is error
-        assert model.history == [["r1"]]
+        # history gets only returned results, but Q1's spend still counts.
+        assert model.history == []
+        assert model.total_cost == pytest.approx(0.001)
 
 
 class TestShowProgress:
-    """show_progress=True runs calls in a thread pool instead of batch_completion."""
+    """Calls run in a thread pool; show_progress picks bar, log line, or off."""
 
     @patch("pyforger.acquire.model.litellm")
     def test_out_of_order_completions_keep_prompt_order(self, mock_litellm):
@@ -413,7 +429,6 @@ class TestShowProgress:
         model = Model("gpt-4o", api_key="sk-test")
         result = model.generate_batch(["Q1", "Q2"], show_progress=True)
         assert result == [["r-Q1"], ["r-Q2"]]
-        mock_litellm.batch_completion.assert_not_called()
 
     @patch("pyforger.acquire.model.litellm")
     def test_worker_exception_is_raised(self, mock_litellm):
@@ -433,17 +448,20 @@ class TestShowProgress:
 
     @patch("pyforger.acquire.model.litellm")
     def test_per_call_override_beats_instance_setting(self, mock_litellm):
-        """show_progress=False on the call falls back to batch_completion."""
-        mock_litellm.batch_completion.return_value = [
-            make_litellm_response(["r1"]),
-            make_litellm_response(["r2"]),
-        ]
+        """show_progress=False on the call turns progress off."""
+        mock_litellm.completion.side_effect = by_content(
+            {"Q1": make_litellm_response(["r1"]), "Q2": make_litellm_response(["r2"])}
+        )
         model = Model("gpt-4o", api_key="sk-test", show_progress=True)
-        assert model.generate_batch(["Q1", "Q2"], show_progress=False) == [
-            ["r1"],
-            ["r2"],
-        ]
-        mock_litellm.batch_completion.assert_called_once()
+        with patch(
+            "pyforger.acquire.model._batch_completion_with_progress",
+            wraps=_batch_completion_with_progress,
+        ) as send:
+            assert model.generate_batch(["Q1", "Q2"], show_progress=False) == [
+                ["r1"],
+                ["r2"],
+            ]
+        assert send.call_args.kwargs["progress"] == "off"
 
     @patch("pyforger.acquire.model.litellm")
     def test_instance_setting_used_when_call_omits_it(self, mock_litellm):
@@ -453,7 +471,6 @@ class TestShowProgress:
         )
         model = Model("gpt-4o", api_key="sk-test", show_progress=True)
         assert model.generate_batch(["Q1", "Q2"]) == [["r-Q1"], ["r-Q2"]]
-        mock_litellm.batch_completion.assert_not_called()
 
 
 class TestEdgeCases:
@@ -472,7 +489,7 @@ class TestEdgeCases:
         result = model.generate_batch([])
         assert result == []
         assert model.history == []
-        mock_litellm.batch_completion.assert_not_called()
+        mock_litellm.completion.assert_not_called()
 
     @patch("pyforger.acquire.model.litellm")
     def test_empty_prompt_list_skips_validation(self, mock_litellm):
@@ -628,14 +645,14 @@ class TestFamily:
 class TestValueConstraints:
     """_VALUE_CONSTRAINTS table contents."""
 
-    def test_o_series_require_temp_1_n_1(self):
-        """O series require temp 1 n 1."""
+    def test_o_series_require_temp_1(self):
+        """O series require temp 1; n > 1 fans out instead of raising."""
         for key in ("o1", "o3", "o4", "gpt-5"):
-            assert _VALUE_CONSTRAINTS[key] == {"temperature": 1.0, "n": 1}
+            assert _VALUE_CONSTRAINTS[key] == {"temperature": 1.0}
 
-    def test_gemini_3_requires_temp_1_n_1(self):
-        """Gemini 3 requires temp 1 n 1."""
-        assert _VALUE_CONSTRAINTS["gemini-3"] == {"temperature": 1.0, "n": 1}
+    def test_gemini_3_requires_temp_1(self):
+        """Gemini 3 requires temp 1; n > 1 fans out instead of raising."""
+        assert _VALUE_CONSTRAINTS["gemini-3"] == {"temperature": 1.0}
 
     def test_no_constraint_for_gpt_4o(self):
         """No constraint for gpt 4o."""
@@ -662,16 +679,15 @@ class TestValidateParams:
             _validate_params("openai/o1", temperature=0.5, n=1)
 
     @patch("pyforger.acquire.model.litellm")
-    def test_value_constraint_violation_n(self, mock_litellm):
-        """Value constraint violation n."""
+    def test_n_is_not_constrained(self, mock_litellm):
+        """No n constraint: generate_batch fans n > 1 out instead of raising."""
         mock_litellm.get_supported_openai_params.return_value = [
             "temperature",
             "n",
             "max_tokens",
             "stop",
         ]
-        with pytest.raises(ValueError, match="requires n=1"):
-            _validate_params("gemini/gemini-3.5-flash", temperature=1.0, n=2)
+        _validate_params("gemini/gemini-3.5-flash", temperature=1.0, n=2)
 
     @patch("pyforger.acquire.model.litellm")
     def test_value_constraint_satisfied_passes(self, mock_litellm):
@@ -1059,10 +1075,9 @@ class TestGenerateBatchReturnType:
             "max_tokens",
             "stop",
         ]
-        mock_litellm.batch_completion.return_value = [
-            make_litellm_response(["r1"]),
-            make_litellm_response(["r2"]),
-        ]
+        mock_litellm.completion.side_effect = by_content(
+            {"q1": make_litellm_response(["r1"]), "q2": make_litellm_response(["r2"])}
+        )
         model = Model("gpt-4o", api_key="sk-test")
         results = model.generate_batch(["q1", "q2"])
         assert len(results) == 2
@@ -1135,11 +1150,13 @@ class TestGenerateBatchReturnType:
             "max_tokens",
             "stop",
         ]
-        mock_litellm.batch_completion.return_value = [
-            make_litellm_response(["r1"]),
-            make_litellm_response(["r2"]),
-        ]
-        mock_litellm.completion.return_value = make_litellm_response(["r3"])
+        mock_litellm.completion.side_effect = by_content(
+            {
+                "q1": make_litellm_response(["r1"]),
+                "q2": make_litellm_response(["r2"]),
+                "q3": make_litellm_response(["r3"]),
+            }
+        )
         model = Model("gpt-4o", api_key="sk-test")
         model.generate_batch(["q1", "q2"])
         model.generate_batch(["q3"])
@@ -1246,17 +1263,27 @@ class TestPerCallValidation:
             model.generate("Hi", temperature=0.5)
 
     @patch("pyforger.acquire.model.litellm")
-    def test_per_call_n_violates_constraint(self, mock_litellm):
-        """Per call n violates constraint."""
+    def test_per_call_n_fans_out(self, mock_litellm):
+        """Per call n > 1 on gemini-3 fans out instead of raising."""
         mock_litellm.get_supported_openai_params.return_value = [
             "temperature",
             "n",
             "max_tokens",
             "stop",
         ]
-        model = Model("gemini/gemini-3.5-flash", api_key="sk-test", temperature=1.0)
-        with pytest.raises(ValueError, match="requires n=1"):
-            model.generate("Hi", n=3)
+        mock_litellm.completion.side_effect = [
+            make_litellm_response([f"r{i}"]) for i in range(3)
+        ]
+        # One request in flight at a time, so they are answered in order.
+        model = Model(
+            "gemini/gemini-3.5-flash",
+            api_key="sk-test",
+            temperature=1.0,
+            max_concurrency=1,
+        )
+        assert model.generate("Hi", n=3) == ["r0", "r1", "r2"]
+        assert mock_litellm.completion.call_count == 3
+        assert mock_litellm.completion.call_args.kwargs["n"] == 1
 
     @patch("pyforger.acquire.model.litellm")
     def test_per_call_unconstrained_passes(self, mock_litellm):
@@ -1267,7 +1294,7 @@ class TestPerCallValidation:
             "max_tokens",
             "stop",
         ]
-        mock_litellm.completion.return_value = make_litellm_response(["ok"])
+        mock_litellm.completion.return_value = make_litellm_response(["ok", "ok"])
         model = Model("gpt-4o", api_key="sk-test")
         model.generate("Hi", temperature=0.2, n=2)  # no raise
 
@@ -1302,10 +1329,16 @@ class TestUsageOnResult:
             "max_tokens",
             "stop",
         ]
-        mock_litellm.batch_completion.return_value = [
-            make_litellm_response(["r1"], prompt_tokens=10, completion_tokens=20),
-            make_litellm_response(["r2"], prompt_tokens=30, completion_tokens=40),
-        ]
+        mock_litellm.completion.side_effect = by_content(
+            {
+                "Q1": make_litellm_response(
+                    ["r1"], prompt_tokens=10, completion_tokens=20
+                ),
+                "Q2": make_litellm_response(
+                    ["r2"], prompt_tokens=30, completion_tokens=40
+                ),
+            }
+        )
         model = Model("gpt-4o", api_key="sk-test")
         model.generate_batch(["Q1", "Q2"])
         assert model.total_usage["prompt_tokens"] == 40

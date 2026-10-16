@@ -10,21 +10,28 @@ without pyforger.
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import logging
 import threading
 import time
 import warnings
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections.abc import Callable, Iterable
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any
 
+from pyforger import _tracking
+from pyforger.acquire import _request_cache
 from pyforger.acquire.model import (
     _DEFAULT_LOCAL_MAX_TOKENS,
     GenerateResult,
     Model,
     Prompt,
+    _log_progress,
+    _progress_mode,
     _to_messages,
 )
+from pyforger.op import _NO_CACHE_SCOPE, _REQUEST_SCOPE, _hash
 from pyforger.tinker_usage import (
     TINKER_PRICES_PER_MILLION,
     TinkerUsageLedger,
@@ -124,7 +131,8 @@ class TinkerModel(Model):
         max_concurrent: int | None = None,
         prices: dict[str, float] | None = None,
         budget: Any = None,
-        show_progress: bool = False,
+        show_progress: bool | None = None,
+        request_cache: bool = True,
     ) -> None:
         """Create a Tinker-backed model (clients are created lazily).
 
@@ -153,7 +161,12 @@ class TinkerModel(Model):
             budget: Optional extra ledger with ``check(estimate_usd)`` and
                 ``record(tokens, session_id)``, e.g. PostDataBench's
                 ``TinkerBudget``. Charged in addition to the environment ledger.
-            show_progress: When True, multi-prompt calls show a tqdm bar.
+            show_progress: Progress for a call with several prompts: a tqdm bar
+                when stderr is a terminal, otherwise a log line every 30
+                seconds. None (default) shows it unless FORGER_PROGRESS=0.
+            request_cache: Keep each sample on disk and reuse it when the same
+                op call asks again (see generate_batch); False, or
+                FORGER_REQUEST_CACHE=0, turns it off. Not part of cache_key().
         """
         super().__init__(
             model_id,
@@ -161,6 +174,7 @@ class TinkerModel(Model):
             max_tokens=max_tokens,
             num_retries=num_retries,
             show_progress=show_progress,
+            request_cache=request_cache,
         )
         if not model_id:
             raise ValueError("model_id must name a base model or a tinker:// path")
@@ -217,6 +231,14 @@ class TinkerModel(Model):
             self._template_kwargs(),
             self._seed,
         )
+
+    def request_scope_key(self) -> tuple:
+        """This model as an op argument in request-cache scopes.
+
+        The sampling configuration of cache_key(); a ``tinker://`` checkpoint
+        path names its weights, so another checkpoint never reuses samples.
+        """
+        return self.cache_key()
 
     def _check_params(self, **params: Any) -> None:
         """No-op: Tinker model ids are not in LiteLLM's parameter registry."""
@@ -329,7 +351,11 @@ class TinkerModel(Model):
         params: Any,
         max_tokens: int,
     ) -> tuple[Any, dict[str, int]]:
-        """One request for n samples: check budgets, sample, charge billed tokens."""
+        """One request for n samples: check budgets, sample, charge billed tokens.
+
+        Runs in a worker thread with the caller's context, so the charge reaches
+        the caller's step report and spend ledger as soon as the request ends.
+        """
         estimate = sample_tokens(len(prompt), n, 0, [max_tokens] * n)
         slots = _sample_slots(self._max_concurrent)
         for attempt in range(self._num_retries + 1):
@@ -338,6 +364,7 @@ class TinkerModel(Model):
                 # queued request nor a retry may start past the limit. The
                 # worst case stays reserved on the ledger until it is charged.
                 with slots, self._budgeted(runtime, estimate):
+                    _tracking.check_budget()  # max_cost_usd, FORGER_MAX_COST_USD
                     response = runtime.sampler.sample(
                         prompt=runtime.types.ModelInput.from_ints(prompt),
                         num_samples=n,
@@ -350,6 +377,11 @@ class TinkerModel(Model):
                         [len(sequence.tokens) for sequence in response.sequences],
                     )
                     self._charge(runtime, billed)
+                    self._account(
+                        len(prompt),
+                        sum(len(seq.tokens) for seq in response.sequences),
+                        self._cost(runtime, billed),
+                    )
             except runtime.transient as exc:
                 if attempt == self._num_retries:
                     raise
@@ -366,6 +398,17 @@ class TinkerModel(Model):
             return response, billed
         raise AssertionError("unreachable")
 
+    def _account(
+        self, prompt_tokens: int, completion_tokens: int, cost_usd: float
+    ) -> None:
+        """Add one request to the instance totals, step report, and spend ledger."""
+        units = self._calculate_token_units(prompt_tokens, completion_tokens)
+        usage = {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens}
+        self._add_totals(usage, cost_usd, units)
+        _tracking.add_usage(
+            prompt_tokens, completion_tokens, cost_usd, units, model_id=self._model_id
+        )
+
     def _cost(self, runtime: _Runtime, billed: dict[str, int]) -> float:
         if runtime.rates is None:
             if runtime.base_model not in _PRICE_WARNING_SEEN:
@@ -379,6 +422,21 @@ class TinkerModel(Model):
             return 0.0
         return tinker_cost_usd(billed, runtime.rates)
 
+    def _request_params(
+        self, temperature: float, max_tokens: int, stop: list[str]
+    ) -> dict[str, Any]:
+        """What the request cache keys a completion on, besides its messages."""
+        return {
+            "model": self._model_id,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "top_p": self._top_p,
+            "top_k": self._top_k,
+            "seed": self._seed,
+            "stop": stop,
+            "chat_template_kwargs": self._template_kwargs(),
+        }
+
     def generate_batch(
         self,
         prompts: list[Prompt],
@@ -388,8 +446,19 @@ class TinkerModel(Model):
         max_tokens: int | None = None,
         stop: list[str] | None = None,
         show_progress: bool | None = None,
+        return_exceptions: bool = False,
+        cache_salt: str | None = None,
+        cache_rows: list[Any] | None = None,
     ) -> list[GenerateResult]:
         """Generate `n` completions per prompt, one Tinker request per prompt.
+
+        Request cache (as for `Model.generate_batch`, unless off): inside an
+        @op, each sample is stored under a key of the op call, the prompt's
+        row (`cache_rows`), the messages, the checkpoint (`model_id`), the
+        sampling settings and chat-template kwargs, and `cache_salt`, plus a
+        slot index. A rerun reuses cached samples and asks Tinker only for the
+        missing ones, still in one request per prompt (one prefill). When every
+        sample is cached, no Tinker client is opened.
 
         Args:
             prompts: List of prompts (string or OpenAI-format message list).
@@ -399,25 +468,43 @@ class TinkerModel(Model):
                 instance default; clamped to the context left after the prompt.
             stop: Optional stop strings, in addition to the model's eos tokens.
                 Completions end before the first stop string.
-            show_progress: Per-call override of the instance's show_progress.
+            show_progress: Per-call override of the instance's show_progress
+                (a bar in a terminal, else a log line every 30 seconds).
+            return_exceptions: When True, a prompt whose request failed (after
+                retries, or a budget refusal) gets the exception in its slot,
+                and the other prompts keep their results. When False (default),
+                the first failure in prompt order is raised.
+            cache_salt: Part of the request-cache key (see `Model`).
+            cache_rows: The row each prompt was built from (see `Model`).
 
         Returns:
             List of GenerateResult, one per prompt, in input order. Completions
             hold the decoded text, including any ``<think>...</think>`` block;
             `reasoning` is ``None`` per choice. `usage` has prompt, completion
             and cached prompt tokens, Tinker's billed token kinds, `cost_usd`,
-            and each sample's stop reason ("stop" or "length").
+            each sample's stop reason ("stop" or "length"), and
+            ``cached_completions`` when the request cache supplied some.
 
         Raises:
             TinkerBudgetExceeded: A request would cross a configured dollar
-                limit. Results finished before it are still recorded in
-                `history` and charged to the ledger.
+                limit (the Tinker ledger or `budget`).
+            BudgetExceededError: Spend reached ``max_cost_usd`` or
+                ``FORGER_MAX_COST_USD``; checked before the batch and each
+                request.
+
+            Requests finished before a failure are charged to the ledgers, the
+            instance totals, and the step report; `history` gets the results
+            only when the call returns.
         """
         if not prompts:
             return []
         if n < 1:
             raise ValueError("n must be positive")
-        runtime = self._ensure_runtime()
+        if cache_rows is not None and len(cache_rows) != len(prompts):
+            raise ValueError(
+                f"cache_rows has {len(cache_rows)} entries for {len(prompts)} prompts"
+            )
+        _tracking.check_budget()  # raises BudgetExceededError at a spending cap
         temperature = temperature if temperature is not None else self._temperature
         if max_tokens is None:
             max_tokens = (
@@ -426,105 +513,223 @@ class TinkerModel(Model):
                 else _DEFAULT_LOCAL_MAX_TOKENS
             )
         stop_strings = list(stop or [])
-        # SamplingParams takes either token ids or strings, not both.
-        stop_param: list[Any] = (
-            [runtime.tokenizer.decode([i]) for i in runtime.stop_ids] + stop_strings
-            if stop_strings
-            else list(runtime.stop_ids)
-        )
-        # Render in this thread: HF tokenizers are not reliably thread-safe.
-        rendered = [self._render(runtime, prompt) for prompt in prompts]
+
+        # Request cache: look up every prompt's slots before opening a client.
+        conversations = [_to_messages(prompt) for prompt in prompts]
+        params = self._request_params(temperature, max_tokens, stop_strings)
+        scope = _REQUEST_SCOPE.get()
+        caching = scope is not None and _request_cache.enabled(self._request_cache)
+        keys: list[str | None] = [None] * len(prompts)
+        slot_ranges: list[range] = [range(n)] * len(prompts)
+        hits: list[dict[int, dict[str, Any]]] = [{} for _ in prompts]
+        if caching:
+            assert scope is not None  # mypy hint
+            read = not _NO_CACHE_SCOPE.get()
+            for i, messages in enumerate(conversations):
+                row = None if cache_rows is None else cache_rows[i]
+                row_key = _hash(row)[0] if row is not None else scope.rows_key
+                key = _request_cache.request_key(
+                    scope.key, row_key, messages, params, cache_salt
+                )
+                first = scope.take_slots(key, n)
+                keys[i], slot_ranges[i] = key, range(first, first + n)
+                if read:
+                    for slot in slot_ranges[i]:
+                        entry = _request_cache.read_slot(key, slot)
+                        if entry is not None:
+                            hits[i][slot] = entry
+            scope.count(sum(len(h) for h in hits), n * len(prompts))
+        missing = [
+            [s for s in slot_ranges[i] if s not in hits[i]] for i in range(len(prompts))
+        ]
 
         responses: list[Any] = [None] * len(prompts)
         errors: dict[int, Exception] = {}
         jobs: dict[int, tuple[list[int], int, Any]] = {}
-        for i, prompt in enumerate(rendered):
-            # Keep prompt + completion inside the context window (vLLM rejects it).
-            limit = min(max_tokens, runtime.max_context - len(prompt))
-            if limit < 1:
-                errors[i] = ValueError(
-                    f"Prompt {i} has {len(prompt)} tokens; the context window "
-                    f"is {runtime.max_context}"
-                )
-                continue
-            params = runtime.types.SamplingParams(
-                max_tokens=limit,
-                temperature=temperature,
-                top_p=self._top_p,
-                top_k=self._top_k,
-                stop=stop_param,
-                seed=self._seed,
+        runtime: _Runtime | None = None
+        if any(missing):
+            runtime = self._ensure_runtime()
+            # SamplingParams takes either token ids or strings, not both.
+            stop_param: list[Any] = (
+                [runtime.tokenizer.decode([i]) for i in runtime.stop_ids] + stop_strings
+                if stop_strings
+                else list(runtime.stop_ids)
             )
-            jobs[i] = (prompt, limit, params)
+            for i, prompt in enumerate(prompts):
+                if not missing[i]:
+                    continue
+                # Render in this thread: HF tokenizers are not reliably thread-safe.
+                rendered = self._render(runtime, prompt)
+                # Keep prompt + completion inside the context window.
+                limit = min(max_tokens, runtime.max_context - len(rendered))
+                if limit < 1:
+                    errors[i] = ValueError(
+                        f"Prompt {i} has {len(rendered)} tokens; the context "
+                        f"window is {runtime.max_context}"
+                    )
+                    continue
+                sampling = runtime.types.SamplingParams(
+                    max_tokens=limit,
+                    temperature=temperature,
+                    top_p=self._top_p,
+                    top_k=self._top_k,
+                    stop=stop_param,
+                    seed=self._seed,
+                )
+                jobs[i] = (rendered, limit, sampling)
 
-        from tqdm import tqdm
+        def run(i: int) -> tuple[Any, dict[str, int]]:
+            """Sample prompt i's missing slots; cache them as soon as they arrive."""
+            assert runtime is not None  # mypy hint
+            rendered, limit, sampling = jobs[i]
+            outcome = self._sample(runtime, rendered, len(missing[i]), sampling, limit)
+            key = keys[i]
+            if key is not None:
+                try:
+                    for slot, sequence in zip(missing[i], outcome[0].sequences):
+                        text = self._decode(runtime, sequence, stop_strings)
+                        if text:
+                            _request_cache.write_slot(
+                                key,
+                                slot,
+                                {
+                                    "text": text,
+                                    "reasoning": None,
+                                    "finish_reason": sequence.stop_reason,
+                                },
+                            )
+                except Exception as exc:  # a full disk must not fail the request
+                    logger.warning("request cache write failed: %s", exc)
+            return outcome
 
-        use_progress = self._show_progress if show_progress is None else show_progress
+        progress = _progress_mode(
+            self._show_progress if show_progress is None else show_progress
+        )
         if jobs:
-            with ThreadPoolExecutor(
+            executor = ThreadPoolExecutor(
                 max_workers=min(self._max_concurrent, len(jobs))
-            ) as executor:
-                futures = {
-                    executor.submit(self._sample, runtime, prompt, n, params, limit): i
-                    for i, (prompt, limit, params) in jobs.items()
-                }
-                for future in tqdm(
-                    as_completed(futures),
-                    total=len(futures),
-                    desc=f"Tinker samples ({self._model_id})",
-                    leave=False,
-                    disable=not (use_progress and len(futures) > 1),
-                ):
+            )
+            try:
+                # One context copy per request, so the worker's add_usage and
+                # check_budget see the caller's op / step / pipeline.
+                futures: dict[Future, int] = {}
+                for i in jobs:
+                    in_context: Callable[..., Any] = contextvars.copy_context().run
+                    futures[executor.submit(in_context, run, i)] = i
+                finished: Iterable[Future] = as_completed(futures)
+                desc = f"Tinker samples ({self._model_id})"
+                if len(futures) > 1 and progress == "bar":
+                    from tqdm import tqdm
+
+                    finished = tqdm(
+                        finished, total=len(futures), desc=desc, leave=False
+                    )
+                elif len(futures) > 1 and progress == "log":
+                    finished = _log_progress(finished, len(futures), desc)
+                for future in finished:
                     i = futures[future]
                     try:
                         responses[i] = future.result()
                     except Exception as exc:
                         errors[i] = exc
+            except BaseException:
+                # Ctrl-C (or any error here): send no queued request; requests in
+                # flight finish in the background and are still charged.
+                executor.shutdown(wait=False, cancel_futures=True)
+                raise
+            executor.shutdown()
 
-        results: list[GenerateResult] = []
-        for i, outcome in enumerate(responses):
-            if outcome is None:
+        results: list[Any] = []
+        for i in range(len(prompts)):
+            if i in errors and not hits[i]:
+                results.append(errors[i])
                 continue
-            response, billed = outcome
-            prompt, limit, _ = jobs[i]
-            completions = [
-                _cut_at_stop(
-                    runtime.tokenizer.decode(sequence.tokens, skip_special_tokens=True),
+            results.append(
+                self._merge(
+                    runtime,
+                    slot_ranges[i],
+                    hits[i],
+                    missing[i],
+                    responses[i],
+                    jobs.get(i),
+                    max_tokens,
                     stop_strings,
                 )
-                for sequence in response.sequences
-            ]
-            completion_tokens = sum(len(seq.tokens) for seq in response.sequences)
-            usage: dict[str, Any] = {
-                "prompt_tokens": len(prompt),
-                "completion_tokens": completion_tokens,
-                # Thinking is inline in the text, so it is not counted apart.
-                "reasoning_tokens": 0,
-                "cached_prompt_tokens": min(
-                    getattr(response, "prompt_cache_hit_tokens", 0) or 0, len(prompt)
-                ),
-                "billed_tokens": billed,
-                "cost_usd": self._cost(runtime, billed),
-                "stop_reasons": [seq.stop_reason for seq in response.sequences],
-                "max_tokens_clamped": limit < max_tokens,
-            }
-            usage["token_units"] = self._calculate_token_units(
-                len(prompt), completion_tokens
             )
-            # raw is dropped: responses hold per-token arrays, which would pin
-            # memory in self.history over a long sampling run.
-            result = GenerateResult(
-                completions,
-                usage=usage,
-                reasoning=[None] * len(completions),
-                model_id=self._model_id,
-                raw=None,
-            )
-            self._record_result(result)
-            results.append(result)
-        if errors:
+        if errors and not return_exceptions:
             raise errors[min(errors)]
+        self._record(
+            [r for r in results if isinstance(r, GenerateResult)], add_usage=False
+        )
         return results
+
+    def _decode(self, runtime: _Runtime, sequence: Any, stop: list[str]) -> str:
+        return _cut_at_stop(
+            runtime.tokenizer.decode(sequence.tokens, skip_special_tokens=True), stop
+        )
+
+    def _merge(
+        self,
+        runtime: _Runtime | None,
+        slots: range,
+        hits: dict[int, dict[str, Any]],
+        missing: list[int],
+        outcome: tuple[Any, dict[str, int]] | None,
+        job: tuple[list[int], int, Any] | None,
+        max_tokens: int,
+        stop: list[str],
+    ) -> GenerateResult:
+        """One prompt's GenerateResult: cached and sampled completions in slot order.
+
+        Usage counts the fresh request only; a cached sample costs nothing.
+        """
+        by_slot = {
+            slot: (entry["text"], entry.get("finish_reason"))
+            for slot, entry in hits.items()
+        }
+        usage: dict[str, Any] = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            # Thinking is inline in the text, so it is not counted apart.
+            "reasoning_tokens": 0,
+            "cached_prompt_tokens": 0,
+            "billed_tokens": {kind: 0 for kind in _RATE_KINDS},
+            "cost_usd": 0.0,
+        }
+        clamped = False
+        if outcome is not None and job is not None and runtime is not None:
+            response, billed = outcome
+            rendered, limit, _ = job
+            for slot, sequence in zip(missing, response.sequences):
+                by_slot[slot] = (
+                    self._decode(runtime, sequence, stop),
+                    sequence.stop_reason,
+                )
+            usage["prompt_tokens"] = len(rendered)
+            usage["completion_tokens"] = sum(len(s.tokens) for s in response.sequences)
+            usage["cached_prompt_tokens"] = min(
+                getattr(response, "prompt_cache_hit_tokens", 0) or 0, len(rendered)
+            )
+            usage["billed_tokens"] = billed
+            usage["cost_usd"] = self._cost(runtime, billed)
+            clamped = limit < max_tokens
+        ordered = [by_slot[slot] for slot in slots if slot in by_slot]
+        usage["stop_reasons"] = [reason for _, reason in ordered]
+        usage["max_tokens_clamped"] = clamped
+        usage["token_units"] = self._calculate_token_units(
+            usage["prompt_tokens"], usage["completion_tokens"]
+        )
+        if hits:
+            usage["cached_completions"] = len(hits)
+        # raw is dropped: responses hold per-token arrays, which would pin
+        # memory in self.history over a long sampling run.
+        return GenerateResult(
+            [text for text, _ in ordered],
+            usage=usage,
+            reasoning=[None] * len(ordered),
+            model_id=self._model_id,
+            raw=None,
+        )
 
 
 def _cut_at_stop(text: str, stop: list[str]) -> str:

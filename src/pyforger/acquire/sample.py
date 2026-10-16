@@ -8,8 +8,15 @@ from __future__ import annotations
 from collections.abc import Generator
 from typing import Any
 
-from pyforger.acquire._model_utils import _build_prompt, _parse_output, _reasoning_for
-from pyforger.acquire.model import Model, Prompt
+from pyforger.acquire._model_utils import (
+    _accepts_kwarg,
+    _build_prompt,
+    _is_transient,
+    _parse_output,
+    _reasoning_for,
+    _report_provider_failures,
+)
+from pyforger.acquire.model import Model, Prompt, _cache_kwargs
 from pyforger.op import op
 from pyforger.utils import get_formatted_logger
 
@@ -23,28 +30,74 @@ def _generation_loop(
     output_schema: dict[str, Any] | None,
     temperature: float,
     max_retries: int,
-    batch_size: int,
+    batch_size: int | None,
+    errors: list[str] | None = None,
 ) -> Generator[dict[str, Any], None, None]:
-    """Yield accepted samples until ``n`` collected or retries exhausted."""
+    """Yield accepted samples until ``n`` collected or retries exhausted.
+
+    A round whose request fails at the provider with a transient error (e.g. a
+    504) accepts nothing and counts toward ``max_retries``; its error type name
+    is appended to ``errors``. Other errors (a bad key, a 400) raise.
+    """
+    # Only Model.generate_batch can hand back an error instead of raising it;
+    # duck-typed fakes and models with their own generate keep calling generate.
+    generate = getattr(model, "generate", None)
+    catch = getattr(generate, "__func__", None) is Model.generate and (
+        _accepts_kwarg(getattr(model, "generate_batch", None), "return_exceptions")
+    )
     accepted: list[dict[str, Any]] = []
     consecutive_failed_rounds = 0
+    round_index = 0
 
     while len(accepted) < n and consecutive_failed_rounds < max_retries:
         remaining = n - len(accepted)
-        current_batch_size = min(batch_size, remaining)
+        current_batch_size = (
+            remaining if batch_size is None else min(batch_size, remaining)
+        )
         full_prompt = _build_prompt(prompt, output_schema)
 
-        raw_responses = model.generate(
-            full_prompt, n=current_batch_size, temperature=temperature
-        )
+        # Each round re-asks the same prompt, so it salts the request cache to
+        # get new completions instead of the earlier rounds' (e.g. "round 1").
+        raw_responses: Any
+        if catch:
+            raw_responses = model.generate_batch(
+                [full_prompt],
+                n=current_batch_size,
+                temperature=temperature,
+                return_exceptions=True,
+                **_cache_kwargs(
+                    model.generate_batch,
+                    cache_salt=f"round {round_index}" if round_index else None,
+                ),
+            )[0]
+        else:
+            raw_responses = model.generate(
+                full_prompt,
+                n=current_batch_size,
+                temperature=temperature,
+                **_cache_kwargs(
+                    model.generate,
+                    cache_salt=f"round {round_index}" if round_index else None,
+                ),
+            )
+        round_index += 1
 
-        short_response = len(raw_responses) < current_batch_size
-        if short_response:
+        if isinstance(raw_responses, BaseException):
+            if not _is_transient(raw_responses):
+                raise raw_responses
+            logger.warning("sample_from_LLM request failed: %s", raw_responses)
+            if errors is not None:
+                errors.append(type(raw_responses).__name__)
+            raw_responses = []
+        elif len(raw_responses) < current_batch_size:
             logger.warning(
                 "generate returned %d responses for %d requested",
                 len(raw_responses),
                 current_batch_size,
             )
+            if catch and errors is not None:
+                # Some of the round's requests failed (n fan-out or n > 16).
+                errors.append("missing completions")
 
         round_accepts = 0
         for raw_text, reasoning_text in zip(
@@ -71,7 +124,7 @@ def _generation_loop(
             consecutive_failed_rounds = 0
 
 
-@op(name="acquire.sample_from_LLM")
+@op(name="acquire.sample_from_LLM", samples_arg="n")
 def sample_from_LLM(
     prompt: Prompt,
     model: Model,
@@ -79,7 +132,7 @@ def sample_from_LLM(
     output_schema: dict[str, Any] | None = None,
     temperature: float = 1.0,
     max_retries: int = 3,
-    batch_size: int = 10,
+    batch_size: int | None = None,
     name: str = "sample_from_LLM",
 ) -> list[dict]:
     """Generate from `model` until `n` samples are generated.
@@ -90,8 +143,13 @@ def sample_from_LLM(
         n: Target number of accepted samples.
         output_schema: Optional dict of expected keys; triggers JSON parse + validation.
         temperature: Sampling temperature.
-        max_retries: Consecutive zero-acceptance rounds before stopping.
-        batch_size: Number of responses to generate at a time.
+        max_retries: Consecutive zero-acceptance rounds before stopping. A round
+            whose request fails at the provider (e.g. a 504) counts as one; when
+            failures leave fewer than ``n`` samples, the shorter list is
+            returned and not cached.
+        batch_size: Number of responses to request per round (one
+            ``model.generate`` call with ``n=batch_size``). None (default) requests
+            all that are still missing at once.
         name: A string used to distinguish cache keys for otherwise identical calls.
 
     Returns:
@@ -106,13 +164,17 @@ def sample_from_LLM(
         Because this is decorated with `@op`, outputs are memoized on disk by argument
         hash. Therefore, repeat calls with a non-zero temperature will still produce
         the same samples if all other arguments are the same. If this is not desired,
-        force fresh generation by passing `_no_cache=True` or varying `name`.
+        force fresh generation by passing `_no_cache=True` or varying `name`. The
+        model's request cache follows the same rule: a call that differs in any
+        argument but `n` draws new samples, and raising `n` keeps the samples
+        already drawn and requests only the extra ones.
     """
-    if batch_size <= 0:
+    if batch_size is not None and batch_size <= 0:
         raise ValueError("batch_size must be positive")
     if n <= 0:
         raise ValueError("n must be positive")
-    return list(
+    errors: list[str] = []
+    samples = list(
         _generation_loop(
             prompt=prompt,
             model=model,
@@ -121,5 +183,15 @@ def sample_from_LLM(
             temperature=temperature,
             max_retries=max_retries,
             batch_size=batch_size,
+            errors=errors,
         )
     )
+    # Short because requests failed: not cached, so a rerun asks again (the
+    # request cache replays the completions that arrived).
+    if errors and len(samples) < n:
+        _report_provider_failures(
+            f"acquire.sample_from_LLM: {len(samples)} of {n} samples; "
+            f"{len(errors)} request(s) failed",
+            errors,
+        )
+    return samples

@@ -34,6 +34,18 @@ command to run the tests:
 pytest
 ```
 
+## Op Reference
+
+`docs/OPS.md` lists the signature of every public op and is generated from the code.
+After adding an op or changing an op's signature or docstring, regenerate it:
+
+```bash
+python scripts/gen_op_docs.py
+```
+
+`tests/test_op_docs.py` fails until `docs/OPS.md` is up to date. A new exported class that
+users construct and pass to ops goes in `ENTRY_POINT_CLASSES` in the script.
+
 ## Making a Release
 
 If you have admin privileges for the repository,

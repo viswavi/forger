@@ -5,6 +5,7 @@ similarity, or n-gram overlap against the kept pool.
 """
 from __future__ import annotations
 
+from pyforger import _tracking
 from pyforger.op import op
 from pyforger.utils import get_field
 
@@ -16,14 +17,23 @@ def by_exact_match(
     field: str,
     max_count: int = 1,
 ) -> list[dict]:
-    """Keep up to ``max_count`` occurrences of each unique ``field`` value."""
+    """Keep up to ``max_count`` occurrences of each unique ``field`` value.
+
+    Returns:
+        The kept rows, in input order and unchanged.
+    """
     counts: dict[str, int] = {}
+    occurrences: list[int] = []
     result: list[dict] = []
     for item in items:
         val = get_field(item, field, "by_exact_match")
         counts[val] = counts.get(val, 0) + 1
+        occurrences.append(counts[val])
         if counts[val] <= max_count:
             result.append(item)
+    _tracking.record_scores(
+        "occurrence", occurrences, keep="le", threshold=float(max_count)
+    )
     return result
 
 
@@ -34,7 +44,11 @@ def by_rouge_l(
     field: str,
     threshold: float = 0.7,
 ) -> list[dict]:
-    """Drop items whose ROUGE-L F1 against any kept item exceeds threshold."""
+    """Drop items whose ROUGE-L F1 against any kept item exceeds threshold.
+
+    Returns:
+        The kept rows, in input order and unchanged.
+    """
     try:
         from rouge_score import rouge_scorer
     except ImportError:
@@ -45,15 +59,22 @@ def by_rouge_l(
     scorer = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=False)
     kept: list[dict] = []
     kept_texts: list[str] = []
+    max_scores: list[float] = []
     for item in items:
         text = get_field(item, field, "by_rouge_l")
-        is_dup = any(
-            scorer.score(other, text)["rougeL"].fmeasure >= threshold
-            for other in kept_texts
+        # Max similarity to the kept pool; 0.0 for the first item.
+        max_score = max(
+            (scorer.score(other, text)["rougeL"].fmeasure for other in kept_texts),
+            default=0.0,
         )
-        if not is_dup:
+        max_scores.append(max_score)
+        # The first item is always kept, even with threshold <= 0.
+        if not kept_texts or max_score < threshold:
             kept.append(item)
             kept_texts.append(text)
+    _tracking.record_scores(
+        "rouge_l", max_scores, keep="lt", threshold=threshold, pooled=True
+    )
     return kept
 
 
@@ -65,18 +86,28 @@ def by_n_gram_overlap(
     threshold: float = 0.7,
     n: int = 2,
 ) -> list[dict]:
-    """Drop items whose word n-gram overlap with the kept pool exceeds threshold."""
+    """Drop items whose word n-gram overlap with the kept pool exceeds threshold.
+
+    Returns:
+        The kept rows, in input order and unchanged.
+    """
     pool: set[tuple[str, ...]] = set()
     kept: list[dict] = []
+    overlaps: list[float | None] = []
     for item in items:
         item_ngrams = _word_ngrams(get_field(item, field, "by_n_gram_overlap"), n)
         if not item_ngrams:
+            overlaps.append(None)
             continue
         overlap = sum(1 for ng in item_ngrams if ng in pool) / len(item_ngrams)
+        overlaps.append(overlap)
         if overlap >= threshold:
             continue
         kept.append(item)
         pool.update(item_ngrams)
+    _tracking.record_scores(
+        "overlap", overlaps, keep="lt", threshold=threshold, pooled=True
+    )
     return kept
 
 

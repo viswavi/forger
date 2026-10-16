@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from difflib import SequenceMatcher
 
+from pyforger import _tracking
 from pyforger.op import op
 from pyforger.utils import get_field
 
@@ -39,14 +40,22 @@ def by_length(
     min_len: int = 10,
     max_len: int = 10000,
 ) -> list[dict]:
-    """Keep items whose ``instruction_field`` word count is in [min_len, max_len]."""
-    return [
-        item
-        for item in items
-        if min_len
-        <= len(get_field(item, instruction_field, "by_length").split())
-        <= max_len
-    ]
+    """Keep items whose ``instruction_field`` word count is in [min_len, max_len].
+
+    Returns:
+        The kept rows, in input order and unchanged.
+    """
+    word_counts: list[int] = []
+    kept: list[dict] = []
+    for item in items:
+        words = len(get_field(item, instruction_field, "by_length").split())
+        word_counts.append(words)
+        if min_len <= words <= max_len:
+            kept.append(item)
+    _tracking.record_scores(
+        "words", word_counts, keep="between", lower=min_len, upper=max_len
+    )
+    return kept
 
 
 @op(name="filter.by_invalid_response")
@@ -65,6 +74,9 @@ def by_invalid_response(
     - One string is a substring of the other and their lengths are within
       a factor of two (avoids false positives for short instructions).
     - The normalized string similarity exceeds the threshold.
+
+    Returns:
+        The kept rows, in input order and unchanged.
     """
 
     def _is_invalid(item: dict) -> bool:
@@ -81,7 +93,7 @@ def by_invalid_response(
         ratio = SequenceMatcher(None, instruction, response).ratio()
         return ratio >= similarity_threshold
 
-    return [item for item in items if not _is_invalid(item)]
+    return _tracking.keep_where(items, [not _is_invalid(item) for item in items])
 
 
 @op(name="filter.by_keyword_blocklist")
@@ -92,17 +104,21 @@ def by_keyword_blocklist(
     blocklist: list[str] | None = None,
     case_sensitive: bool = False,
 ) -> list[dict]:
-    """Drop items whose ``response_field`` contains any blocklisted phrase."""
+    """Drop items whose ``response_field`` contains any blocklisted phrase.
+
+    Returns:
+        The kept rows, in input order and unchanged.
+    """
     keywords = blocklist if blocklist is not None else DEFAULT_BLOCKLIST
-    return [
-        item
-        for item in items
-        if not _contains_blocked(
+    keep = [
+        not _contains_blocked(
             get_field(item, response_field, "by_keyword_blocklist"),
             keywords,
             case_sensitive,
         )
+        for item in items
     ]
+    return _tracking.keep_where(items, keep)
 
 
 def _contains_blocked(text: str, blocklist: list[str], case_sensitive: bool) -> bool:
