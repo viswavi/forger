@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import dis
+import functools
+import inspect
 import logging
 import pickle
+import types
 from typing import Any
 
 
@@ -55,12 +59,42 @@ def get_field(item: dict, field: str, caller: str) -> Any:
 
 _CODE_T = type((lambda: None).__code__)
 
+# Python 3.14+ flags code whose co_consts[0] is its docstring.
+_CO_HAS_DOCSTRING = getattr(inspect, "CO_HAS_DOCSTRING", None)
+# Their co_consts[0] is an ordinary constant, e.g. "pre" in ("pre" + s for s in x).
+_NO_DOCSTRING_NAMES = ("<genexpr>", "<listcomp>", "<setcomp>", "<dictcomp>")
+
+
+def _has_docstring(code: Any) -> bool:
+    """True when ``code.co_consts[0]`` is the function's docstring.
+
+    In 3.12 and 3.13 the compiler puts a function's docstring, or None when it
+    has none, first in co_consts, so ``def f(): return "x"`` has consts
+    ``(None, "x")``. Class bodies (no CO_OPTIMIZED) and generator expressions
+    do not reserve that slot.
+    """
+    if not code.co_consts:
+        return False
+    if _CO_HAS_DOCSTRING is not None:
+        return bool(code.co_flags & _CO_HAS_DOCSTRING)
+    return (
+        bool(code.co_flags & inspect.CO_OPTIMIZED)
+        and code.co_name not in _NO_DOCSTRING_NAMES
+        and isinstance(code.co_consts[0], str)
+    )
+
 
 def _code_key(code: Any) -> list[Any]:
-    """Behavior-only key for a code object (to avoid repeating code execution)."""
+    """Behavior-only key for a code object (to avoid repeating code execution).
+
+    Docstrings are left out (keyed as None, like a function without one), so
+    fixing a typo in a step's description keeps its cache.
+    """
     consts = [
         _code_key(c) if isinstance(c, _CODE_T) else canonical(c) for c in code.co_consts
     ]
+    if _has_docstring(code):
+        consts[0] = None
     return [
         code.co_code,
         consts,
@@ -69,6 +103,146 @@ def _code_key(code: Any) -> list[Any]:
         list(code.co_freevars),
         code.co_argcount,
     ]
+
+
+# LOAD_NAME and LOAD_FROM_DICT_OR_GLOBALS read globals from class bodies.
+_GLOBAL_LOADS = frozenset({"LOAD_GLOBAL", "LOAD_NAME", "LOAD_FROM_DICT_OR_GLOBALS"})
+
+
+@functools.lru_cache(maxsize=4096)
+def global_names(code: Any) -> tuple[str, ...]:
+    """Sorted names that a code object and the code nested in it load as globals.
+
+    Nested code covers lambdas, comprehensions, and inner functions. Only
+    global loads count: ``r.split()`` does not read a global named ``split``.
+    """
+    names = {
+        ins.argval for ins in dis.get_instructions(code) if ins.opname in _GLOBAL_LOADS
+    }
+    for const in code.co_consts:
+        if isinstance(const, _CODE_T):
+            names.update(global_names(const))
+    return tuple(sorted(names))
+
+
+@functools.lru_cache(maxsize=4096)
+def code_names(code: Any) -> frozenset[str]:
+    """All of ``co_names`` (globals and attributes) in code and its nested code."""
+    names = set(code.co_names)
+    for const in code.co_consts:
+        if isinstance(const, _CODE_T):
+            names.update(code_names(const))
+    return frozenset(names)
+
+
+_PLAIN_SCALARS = (type(None), bool, int, float, complex, str, bytes)
+
+
+def is_plain_data(obj: Any, _seen: set[int] | None = None) -> bool:
+    """True for None, bool, numbers, str, bytes, and containers of those.
+
+    E.g. ``"Answer briefly."``, ``{"easy": [1, 2]}``, ``frozenset({"a"})``; not
+    a logger, a model, or a list holding a function. A cyclic list is not plain.
+    """
+    if isinstance(obj, _PLAIN_SCALARS):
+        return True
+    if not isinstance(obj, (list, tuple, set, frozenset, dict)):
+        return False
+    seen = set() if _seen is None else _seen
+    if id(obj) in seen:
+        return False
+    seen.add(id(obj))
+    items = [*obj.keys(), *obj.values()] if isinstance(obj, dict) else obj
+    plain = all(is_plain_data(x, seen) for x in items)
+    seen.discard(id(obj))
+    return plain
+
+
+def has_cache_key(obj: Any) -> bool:
+    """True for an instance with a ``cache_key()`` method, e.g. a ``Model``."""
+    return not isinstance(obj, (type, types.ModuleType)) and callable(
+        getattr(obj, "cache_key", None)
+    )
+
+
+def keyed_globals(fn: Any) -> dict[str, Any]:
+    """The module globals ``fn``'s code reads that go into its cache key, by name.
+
+    These are plain data (``PROMPT = "..."``) and objects with ``cache_key()``
+    (``MODEL = Model(...)``). Dunder names (``__name__``, ``__file__``) are
+    skipped: they differ between ``python pipeline.py`` and ``import pipeline``
+    without changing behavior.
+    """
+    code = getattr(fn, "__code__", None)
+    g = getattr(fn, "__globals__", None)
+    if code is None or not isinstance(g, dict):
+        return {}
+    return {
+        n: g[n]
+        for n in global_names(code)
+        if n in g
+        and not (n.startswith("__") and n.endswith("__"))
+        and (is_plain_data(g[n]) or has_cache_key(g[n]))
+    }
+
+
+def function_key(fn: Any) -> list[Any]:
+    """Key a Python function by qualname, code, and closure values, not globals.
+
+    No ``__module__``: a step run as ``__main__`` and the same step imported
+    from pipeline.py share keys. ``canonical`` adds ``keyed_globals(fn)``, so
+    two same-named functions reading different PROMPT strings still differ.
+    """
+    closure = getattr(fn, "__closure__", None) or ()
+    return [
+        "__callable__",
+        getattr(fn, "__qualname__", repr(fn)),
+        _code_key(fn.__code__),
+        [canonical(cell.cell_contents) for cell in closure],
+    ]
+
+
+_WARNED_INSTANCE_TYPES: set[str] = set()
+
+
+def _callable_instance_key(obj: Any) -> list[Any]:
+    """Key an object with ``__call__`` by its type, ``__call__`` code, and state.
+
+    E.g. ``AtLeast(3)`` and ``AtLeast(7)`` differ by ``{"t": 3}`` vs ``{"t": 7}``.
+    State that is not plain data is pickled, with a warning once per type.
+    """
+    cls = type(obj)
+    call = getattr(cls, "__call__", None)
+    state = getattr(obj, "__dict__", None)
+    if is_plain_data(state):
+        state_key = canonical(state)
+    else:
+        name = f"{cls.__module__}.{cls.__qualname__}"
+        if name not in _WARNED_INSTANCE_TYPES:
+            _WARNED_INSTANCE_TYPES.add(name)
+            logging.getLogger("forger.op").warning(
+                "@op keys callable %s by pickling its state, which is not plain "
+                "data; add a cache_key() method to it for a stable key.",
+                name,
+            )
+        state_key = _pickle_key(obj)
+    return [
+        "__instance__",
+        cls.__qualname__,
+        canonical(call) if getattr(call, "__code__", None) is not None else None,
+        state_key,
+    ]
+
+
+def _pickle_key(obj: Any) -> bytes:
+    """Pickle obj for its key, or raise a TypeError that suggests cache_key()."""
+    try:
+        return pickle.dumps(obj, protocol=4)
+    except Exception as e:
+        raise TypeError(
+            f"@op cannot derive a stable cache key for {type(obj).__name__}: "
+            f"{e}. Add a cache_key() method to this type."
+        ) from e
 
 
 def canonical(obj: Any) -> Any:
@@ -96,20 +270,19 @@ def canonical(obj: Any) -> Any:
     if hasattr(obj, "cache_key") and callable(obj.cache_key):
         return ["__cache_key__", canonical(obj.cache_key())]
     if callable(obj):
-        ident = (
-            f"{getattr(obj, '__module__', '?')}."
-            f"{getattr(obj, '__qualname__', repr(obj))}"
-        )
-        code = getattr(obj, "__code__", None)
-        if code is not None:
-            closure = getattr(obj, "__closure__", None) or ()
-            closure_vals = [canonical(cell.cell_contents) for cell in closure]
-            return ["__callable__", ident, _code_key(code), closure_vals]
-        return ["__callable__", ident]
-    try:
-        return pickle.dumps(obj, protocol=4)
-    except Exception as e:
-        raise TypeError(
-            f"@op cannot derive a stable cache key for {type(obj).__name__}: "
-            f"{e}. Add a cache_key() method to this type."
-        ) from e
+        if getattr(obj, "__code__", None) is not None:
+            return [*function_key(obj), canonical(keyed_globals(obj))]
+        if isinstance(obj, functools.partial):
+            # E.g. partial(at_least, t=5): same function and arguments, same key.
+            return [
+                "__partial__",
+                canonical(obj.func),
+                canonical(obj.args),
+                canonical(obj.keywords),
+            ]
+        qualname = getattr(obj, "__qualname__", None)
+        if isinstance(qualname, str):
+            # Builtins have no code to tell them apart, e.g. math.sqrt, cmath.sqrt.
+            return ["__callable__", f"{getattr(obj, '__module__', '?')}.{qualname}"]
+        return _callable_instance_key(obj)
+    return _pickle_key(obj)

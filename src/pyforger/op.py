@@ -21,7 +21,6 @@ import inspect
 import io
 import os
 import pickle
-import shutil
 import threading
 import time
 import types
@@ -35,11 +34,23 @@ from typing import Any, TypeVar
 from pydantic import BaseModel
 
 from pyforger import _tracking
-from pyforger.utils import canonical, get_formatted_logger
+from pyforger.utils import (
+    canonical,
+    code_names,
+    function_key,
+    get_formatted_logger,
+    global_names,
+    keyed_globals,
+)
 
 logger = get_formatted_logger("forger.op")
 
 T = TypeVar("T")
+
+# Part of every cache key. Bump it when what goes into keys changes, so entries
+# written under the old layout are never read as hits. 2: plain-data globals
+# are hashed by value; functions no longer carry their __module__ or docstrings.
+_CACHE_KEY_VERSION = 2
 
 
 def _cache_dir() -> Path:
@@ -112,11 +123,6 @@ def _hash(obj: Any) -> tuple[str, int]:
     pickler.dump(canonical(obj))
     payload = buf.getvalue()
     return hashlib.sha256(payload).hexdigest(), len(payload)
-
-
-def _legacy_hash(obj: Any) -> str:
-    """Return the cache key older Forger versions used (memoized pickle)."""
-    return hashlib.sha256(pickle.dumps(canonical(obj), protocol=4)).hexdigest()
 
 
 # True while an op called with ``_no_cache=True`` runs, so the ops it calls
@@ -253,31 +259,52 @@ def _maybe_warn_hash_cost(op_name: str, duration: float, size: int) -> None:
     )
 
 
+# Globals of these types need no warning: loggers and typing objects (e.g. a
+# TypeVar) do not change what an op returns.
+_STABLE_TYPE_MODULES = ("logging", "typing", "typing_extensions")
+# Keyed by name and code, like today: modules, functions, methods, and classes.
+_NAMED_GLOBAL_TYPES = (
+    types.ModuleType,
+    types.FunctionType,
+    types.BuiltinFunctionType,
+    types.MethodType,
+    type,
+)
+
+
 def _warn_unstable_refs(fn: Callable[..., Any], op_name: str) -> None:
-    """Warn if fn reads module globals, env vars, or closes over enclosing scope."""
+    """Warn if fn reads globals the cache key misses, env vars, or closure variables.
+
+    We look for referents that can quietly change without changing the cache
+    key, which leads to stale cached results. Plain-data globals (e.g. a prompt
+    string or a config dict) and objects with ``cache_key()`` (e.g. a ``Model``)
+    are hashed by value, and modules, functions, and classes by name, so they do
+    not warn; a client, or a callable object without ``cache_key()``, does.
+    Globals read in nested lambdas, comprehensions, and inner functions count.
+    """
     code = fn.__code__
-    names = set(code.co_names)
     g = fn.__globals__
-    # We look for referents that can quietly change without affecting the op's cache
-    # key. This will lead to stale cache results and cause problems. We check for:
-    # 1) Module globals that are not modules or callables (e.g. configuration dicts).
-    # 2) Environment variables (detected by usage of os.environ or os.getenv).
-    # 3) Closure variables
-    data_globals = sorted(
+    keyed = keyed_globals(fn)
+    unhashed_globals = sorted(
         n
-        for n in names
-        if n in g and not isinstance(g[n], types.ModuleType) and not callable(g[n])
+        for n in global_names(code)
+        if n in g
+        and n not in keyed
+        and not (n.startswith("__") and n.endswith("__"))
+        and not isinstance(g[n], _NAMED_GLOBAL_TYPES)
+        and type(g[n]).__module__.split(".")[0] not in _STABLE_TYPE_MODULES
     )
-    env_used = bool({"environ", "getenv"} & names)
+    # Environment variables, e.g. os.environ["KEY"] or os.getenv("KEY").
+    env_used = bool({"environ", "getenv"} & code_names(code))
     # We look for closure variables, e.g. `config["multiplier"]`` in
     # def new_op(x):
     #     return x * config["multiplier"]
     closure_vars = sorted(code.co_freevars) if fn.__closure__ else []
-    if not (data_globals or env_used or closure_vars):
+    if not (unhashed_globals or env_used or closure_vars):
         return
     parts = []
-    if data_globals:
-        parts.append(f"reads globals {data_globals}")
+    if unhashed_globals:
+        parts.append(f"reads globals {unhashed_globals}")
     if env_used:
         parts.append("reads os.environ/os.getenv")
     if closure_vars:
@@ -343,7 +370,8 @@ def op(
         op_name = name or f"{fn.__module__}.{fn.__qualname__}"
         # Sanitize op_name to be a safe directory name
         safe_op_name = "".join(c if c.isalnum() or c in "._-" else "_" for c in op_name)
-        body_key = canonical(fn)
+        # Code and closure are fixed here; plain-data globals are read per call.
+        body_key = function_key(fn)
         if cache:
             _warn_unstable_refs(fn, op_name)
 
@@ -424,7 +452,9 @@ def op(
                     normalized = {"args": list(args), "kwargs": dict(kwargs)}
             else:
                 normalized = {"args": list(args), "kwargs": dict(kwargs)}
-            key = [op_name, body_key, normalized]
+            # E.g. a PROMPT constant edited since the last run changes the key.
+            globals_key = keyed_globals(fn)
+            key = [_CACHE_KEY_VERSION, op_name, body_key, globals_key, normalized]
             t0 = time.perf_counter()
             input_hash, hash_size = _hash(key)
             _maybe_warn_hash_cost(op_name, time.perf_counter() - t0, hash_size)
@@ -441,9 +471,6 @@ def op(
             cache_hit = False
             is_step = op_name.startswith(_tracking.STEP_OP_PREFIX)
             meta_path = cache_path.with_name(input_hash + _STEP_META_SUFFIX)
-
-            if use_cache and not cache_path.exists():
-                _adopt_legacy_entry(cache_root / safe_op_name, key, cache_path)
 
             if use_cache and cache_path.exists():
                 try:
@@ -550,30 +577,6 @@ def _atomic_write(path: Path, data: bytes) -> None:
     tmp_path = path.parent / f"{path.name}.tmp.{os.getpid()}.{threading.get_ident()}"
     tmp_path.write_bytes(data)
     os.replace(tmp_path, path)
-
-
-def _adopt_legacy_entry(op_dir: Path, key: Any, cache_path: Path) -> None:
-    """Copy a result cached under the old cache key to ``cache_path``, if any.
-
-    Caches written before keys were hashed without the pickle memo are found
-    under their old key once and copied to the new one, so they stay valid.
-    """
-    if not op_dir.is_dir():
-        return
-    try:
-        legacy = op_dir / f"{_legacy_hash(key)}.pkl"
-        if not legacy.exists() or (
-            hasattr(os, "getuid") and legacy.stat().st_uid != os.getuid()
-        ):
-            return
-        for suffix in (_STEP_META_SUFFIX, ".pkl"):
-            src = legacy.with_name(legacy.stem + suffix)
-            if src.exists():
-                tmp = cache_path.with_name(f"{cache_path.name}.legacy.{os.getpid()}")
-                shutil.copyfile(src, tmp)
-                os.replace(tmp, cache_path.with_name(cache_path.stem + suffix))
-    except Exception as exc:  # the old entry is only a shortcut; never fail on it
-        logger.debug("legacy cache lookup failed in %s: %s", op_dir, exc)
 
 
 def tracked(op_name: str) -> Callable[[Callable[..., T]], Callable[..., T]]:
