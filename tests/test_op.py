@@ -422,6 +422,131 @@ def test_builtins_keep_their_module_in_the_key() -> None:
     assert canonical(math.sqrt) != canonical(cmath.sqrt)
 
 
+class _Keyed:
+    """A global like ``MODEL = Model(...)``: not plain data, but has cache_key()."""
+
+    def __init__(self, model_id: str) -> None:
+        self.model_id = model_id
+        self._lock = threading.Lock()  # unpicklable, so only cache_key() can key it
+
+    def cache_key(self) -> tuple:
+        return ("Keyed", self.model_id)
+
+
+def test_globals_with_cache_key_are_in_the_key(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Swapping a global model for another changes the key, with no warning."""
+    from pyforger.acquire.model import Model
+
+    source = "def f(rows):\n    return [f'{r} via {MODEL.model_id}' for r in rows]"
+    with caplog.at_level(logging.WARNING, logger="forger.op"):
+        fn, namespace = _module_fn(source, MODEL=_Keyed("gpt-4o"))
+        which_model = op(fn, name="test.which_model")
+    assert not any("test.which_model" in r.message for r in caplog.records)
+    assert which_model(["q1"]) == ["q1 via gpt-4o"]
+    namespace["MODEL"] = _Keyed("gpt-4o-mini")
+    assert which_model(["q1"]) == ["q1 via gpt-4o-mini"]
+    namespace["MODEL"] = _Keyed("gpt-4o")
+    which_model(["q1"])
+    assert trace()[-1].cache_hit
+
+    a, _ = _module_fn(source, MODEL=Model("gpt-4o", show_progress=False))
+    b, _ = _module_fn(source, MODEL=Model("gpt-4o-mini", show_progress=False))
+    assert canonical(a) != canonical(b)
+
+
+def test_forger_objects_without_cache_key_still_warn(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Only loggers and typing objects are exempt, not every pyforger object."""
+    record = CallRecord(
+        op_name="x", input_hash="h", output_hash=None, cache_hit=False, duration_s=0
+    )
+    with caplog.at_level(logging.WARNING, logger="forger.op"):
+        fn, _ = _module_fn("def f(rows):\n    return [RECORD] + rows", RECORD=record)
+        op(fn, name="test.forger_global")
+    assert any(
+        "test.forger_global" in r.message and "RECORD" in r.message
+        for r in caplog.records
+    )
+
+
+class _AtLeast:
+    """A callable object whose state, not its address, should be keyed."""
+
+    def __init__(self, t: int) -> None:
+        self.t = t
+
+    def __call__(self, x: int) -> bool:
+        return x >= self.t
+
+
+def _at_least(x: int, t: int) -> bool:
+    return x >= t
+
+
+def test_callable_objects_and_partials_are_keyed_by_state() -> None:
+    """AtLeast(3) and AtLeast(7) differ; equal partials share a key across runs."""
+    import functools
+
+    @op(name="test.keep")
+    def keep(rows, pred):
+        return [r for r in rows if pred(r)]
+
+    rows = list(range(10))
+    assert keep(rows, _AtLeast(3)) == [3, 4, 5, 6, 7, 8, 9]
+    assert keep(rows, _AtLeast(7)) == [7, 8, 9]
+    keep(rows, _AtLeast(7))
+    assert trace()[-1].cache_hit
+
+    five = functools.partial(_at_least, t=5)
+    assert canonical(five) == canonical(functools.partial(_at_least, t=5))
+    assert canonical(five) != canonical(functools.partial(_at_least, t=9))
+    for key in (canonical(_AtLeast(3)), canonical(five)):
+        assert " at 0x" not in repr(key)  # no memory address
+
+
+class _Holds:
+    """A callable object holding another object, so its state is not plain data."""
+
+    def __init__(self, inner: object) -> None:
+        self.inner = inner
+
+    def __call__(self, x: int) -> int:
+        return x
+
+
+def test_callable_objects_with_unplain_state_warn(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Non-plain state is pickled with a warning; unpicklable state needs cache_key."""
+    with caplog.at_level(logging.WARNING, logger="forger.op"):
+        assert canonical(_Holds(_AtLeast(1))) != canonical(_Holds(_AtLeast(2)))
+    assert any(
+        "_Holds" in r.message and "cache_key" in r.message for r in caplog.records
+    )
+    with pytest.raises(TypeError, match="cache_key"):
+        canonical(_Holds(threading.Lock()))
+
+
+def test_attribute_names_are_not_read_as_globals() -> None:
+    """``r.split()`` does not make a global named ``split`` part of the key."""
+    from pyforger.utils import keyed_globals
+
+    fn, namespace = _module_fn(
+        "def f(rows):\n    return [r for r in rows if r['text'].split()]",
+        split="train",
+    )
+    before = canonical(fn)
+    namespace["split"] = "test"
+    assert keyed_globals(fn) == {}
+    assert canonical(fn) == before
+
+    reads, _ = _module_fn("def f(rows):\n    return [split] + rows", split="train")
+    assert keyed_globals(reads) == {"split": "train"}
+
+
 def test_importing_pyforger_logs_no_unstable_ref_warnings() -> None:
     """Library ops read only data, loggers, and helpers, so import is quiet."""
     script = (

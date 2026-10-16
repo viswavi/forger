@@ -36,10 +36,11 @@ from pydantic import BaseModel
 from pyforger import _tracking
 from pyforger.utils import (
     canonical,
+    code_names,
     function_key,
     get_formatted_logger,
     global_names,
-    plain_globals,
+    keyed_globals,
 )
 
 logger = get_formatted_logger("forger.op")
@@ -147,9 +148,17 @@ def _maybe_warn_hash_cost(op_name: str, duration: float, size: int) -> None:
     )
 
 
-# Globals of these types need no warning: loggers, typing objects (e.g. a
-# TypeVar), and Forger's own objects do not change what an op returns.
-_STABLE_TYPE_MODULES = ("logging", "typing", "typing_extensions", "pyforger")
+# Globals of these types need no warning: loggers and typing objects (e.g. a
+# TypeVar) do not change what an op returns.
+_STABLE_TYPE_MODULES = ("logging", "typing", "typing_extensions")
+# Keyed by name and code, like today: modules, functions, methods, and classes.
+_NAMED_GLOBAL_TYPES = (
+    types.ModuleType,
+    types.FunctionType,
+    types.BuiltinFunctionType,
+    types.MethodType,
+    type,
+)
 
 
 def _warn_unstable_refs(fn: Callable[..., Any], op_name: str) -> None:
@@ -157,26 +166,25 @@ def _warn_unstable_refs(fn: Callable[..., Any], op_name: str) -> None:
 
     We look for referents that can quietly change without changing the cache
     key, which leads to stale cached results. Plain-data globals (e.g. a prompt
-    string or a config dict) are hashed by value, and modules, functions, and
-    classes by name, so they do not warn; a model instance or client does.
+    string or a config dict) and objects with ``cache_key()`` (e.g. a ``Model``)
+    are hashed by value, and modules, functions, and classes by name, so they do
+    not warn; a client, or a callable object without ``cache_key()``, does.
     Globals read in nested lambdas, comprehensions, and inner functions count.
     """
     code = fn.__code__
-    names = set(global_names(code))
     g = fn.__globals__
-    plain = plain_globals(fn)
+    keyed = keyed_globals(fn)
     unhashed_globals = sorted(
         n
-        for n in names
+        for n in global_names(code)
         if n in g
-        and n not in plain
+        and n not in keyed
         and not (n.startswith("__") and n.endswith("__"))
-        and not isinstance(g[n], types.ModuleType)
-        and not callable(g[n])
+        and not isinstance(g[n], _NAMED_GLOBAL_TYPES)
         and type(g[n]).__module__.split(".")[0] not in _STABLE_TYPE_MODULES
     )
-    # Environment variables (detected by usage of os.environ or os.getenv).
-    env_used = bool({"environ", "getenv"} & names)
+    # Environment variables, e.g. os.environ["KEY"] or os.getenv("KEY").
+    env_used = bool({"environ", "getenv"} & code_names(code))
     # We look for closure variables, e.g. `config["multiplier"]`` in
     # def new_op(x):
     #     return x * config["multiplier"]
@@ -322,7 +330,7 @@ def op(
             else:
                 normalized = {"args": list(args), "kwargs": dict(kwargs)}
             # E.g. a PROMPT constant edited since the last run changes the key.
-            globals_key = plain_globals(fn)
+            globals_key = keyed_globals(fn)
             key = [_CACHE_KEY_VERSION, op_name, body_key, globals_key, normalized]
             t0 = time.perf_counter()
             input_hash, hash_size = _hash(key)

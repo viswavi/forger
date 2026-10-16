@@ -298,19 +298,26 @@ def debug_step(rows):
 ```
 
 **Cache key.** SHA-256 of: the op name, the function's qualified name and compiled body (bytecode, constants, names,
-varnames, freevars, argcount, applied recursively to nested code objects), the captured closure values, the values of
-the plain-data module globals it reads, and the call arguments. Plain data is `None`, `bool`, numbers, `str`, `bytes`,
-and tuples, lists, dicts, and sets of those, read anywhere in the body, including lambdas, comprehensions, and inner
-functions. Editing a `PROMPT = "..."` constant or a config dict therefore invalidates the steps that read it. Globals
-are read at each call; closure values are fixed when the function is decorated. The module name is not part of the
-key, so a step run as `python pipeline.py` (`__main__`) and the same step imported from `pipeline` share cache entries.
-Docstrings (of the function and of functions nested in it) are not part of the key either, so editing a step's
-description keeps its cache.
+varnames, freevars, argcount, applied recursively to nested code objects), the captured closure values, the module
+globals it reads that are plain data or define `cache_key()`, and the call arguments. Plain data is `None`, `bool`,
+numbers, `str`, `bytes`, and tuples, lists, dicts, and sets of those. A global counts when the body loads it by name,
+including in lambdas, comprehensions, and inner functions (`r.split()` does not read a global `split`). Editing a
+`PROMPT = "..."` constant or a config dict, or pointing `MODEL = Model(...)` at another model, therefore invalidates
+the steps that read it. Globals are read at each call; closure values are fixed when the function is decorated. The
+module name is not part of the key, so a step run as `python pipeline.py` (`__main__`) and the same step imported from
+`pipeline` share cache entries. Docstrings (of the function and of functions nested in it) are not part of the key
+either, so editing a step's description keeps its cache; a function that reads its own `__doc__` as a prompt
+therefore gets stale results after a docstring edit (put the prompt in a constant instead).
+
+Callable arguments are keyed by value too: a `functools.partial` by its function, args, and keywords, and an object
+with `__call__` by `cache_key()` if it has one, else by its type, `__call__` code, and attributes (pickled, with a
+warning, when they are not plain data).
 
 Not in the key: the bodies of helper functions and classes the op calls (only their names), files read from disk,
-environment variables, other objects held in globals (e.g. a model or client, or an object mutated at runtime), and
-closure values changed after decoration. `@op` logs a warning at decoration for such a global or for `os.environ`.
-When one of these changes, pass `_no_cache=True`. Upgrading to this key layout makes existing cache entries miss once.
+environment variables, other objects held in globals (e.g. a client, a retrieval source, or an object mutated at
+runtime), and closure values changed after decoration. `@op` logs a warning at decoration for such a global (loggers
+and typing objects excepted) or for `os.environ`. When one of these changes, pass `_no_cache=True`. Upgrading to this
+key layout makes existing cache entries miss once.
 
 **Cache location.** `$FORGER_CACHE` if set, otherwise `~/.cache/forger`. The variable is read at call time, so tests
 can redirect it.
