@@ -513,31 +513,6 @@ Keep rows the strong model answers correctly and the weak model does not.
 
 **Returns:** The kept rows, in input order.
 
-### `filter.by_comparative_judge`
-
-Disk-cached (`@op`).
-
-```python
-by_comparative_judge(
-    items: list[dict],
-    *,
-    group_by: str,
-    model: Model,
-    input_field: str,
-    output_field: str,
-    criteria: str = "overall quality, relevance, and correctness",
-    keep: int = 1,
-    num_judges: int = 1,
-    prompt_template: JudgePromptTemplate | None = None,
-    seed: int = 0,
-    temperature: float = 0.0,
-    rank_field: str | None = None,
-    explanation_field: str | None = None,
-) -> list[dict]
-```
-
-Keep the `keep` best rows of each group, as ranked side by side by a judge.
-
 ### `filter.by_exact_agreement`
 
 Disk-cached (`@op`).
@@ -662,11 +637,13 @@ by_llm_score(
     model: Model,
     input_field: str,
     output_field: str,
-    score_threshold: int = 3,
+    score_threshold: int = 4,
     max_score: int = 5,
     num_judges: int = 1,
     agreement_threshold: float = 1.0,
     criteria: str = "overall quality, relevance, and correctness",
+    rubric: dict[int, str] | None = None,
+    group_by: str | None = None,
     temperature: float = 0.0,
     prompt_template: JudgePromptTemplate | None = None,
     score_field: str | None = None,
@@ -676,7 +653,8 @@ by_llm_score(
 
 Keep items where `num_judges` LLM judges sufficiently agree on quality.
 
-**Returns:** The kept rows, in input order; unchanged unless `score_field` / `explanation_field` are set.
+**Returns:** The kept rows, in input order. With `score_field` set, each carries the mean of its judges' parsed scores;
+with `explanation_field` set, the list of their feedback. Otherwise rows are unchanged.
 
 ### `filter.by_n_gram_overlap`
 

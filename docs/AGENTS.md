@@ -345,8 +345,7 @@ Remove rows by criterion. If a filter empties the list, downstream operations re
 | `by_length` | Filter by word count within a given field. |
 | `by_invalid_response` | Drop empty, identical, or near-identical responses to the instruction. |
 | `by_keyword_blocklist` | Drop responses with certain keywords; default blocklist targets common refusal phrases. |
-| `by_llm_score` | LLM-as-judge with optional multi-judge consensus. |
-| `by_comparative_judge` | LLM judge ranks the candidates for one input side by side; keeps the top `keep` per group. |
+| `by_llm_score` | LLM judge scoring on a rubric, feedback before score; multi-judge consensus, `group_by` candidates. |
 | `by_judged_difficulty` | LLM judge rates each task's difficulty from 1 to 5; keeps rows within a range. |
 | `by_syntax` | Validate JSON, YAML, Python, or XML, optionally against required keys or a JSON schema. |
 | `by_predicate` | Keep rows where `fn(row)` is truthy: a plain Python check that shows in the step report. Not cached. |
@@ -384,49 +383,75 @@ rows = filter.by_predicate(rows, lambda r: len(r["papers"]) >= 3, label="has ≥
 
 ##### LLM judges
 
-Both judges send all their calls (rows × `num_judges`) in one `model.generate_batch` call, one `n=1` request each,
-so they run concurrently. Judge answers are read leniently: only the text after a closed `</think>` block (an
-unclosed `<think>` is unparseable), then the last JSON object with the expected key, also inside code fences or
-prose, else the last `"score": <number>` (or `"ranking": [...]`) pattern. Scores keep fractions (`4.9` stays `4.9`,
-so it fails `score_threshold=5`), and a string score gives its leading number (`"4/5"` is 4). Ranking entries may
-carry words after the label (`"A (best)"`, `"Candidate B:"`); an entry that names no shown label voids that judge's
-ranking. Unparseable answers count as no vote.
+`by_llm_score` rates each row on 1 to `max_score`. Absolute judges tend to score nearly everything at the top of the
+scale. Two things in the default prompt counter that, following Prometheus
+([Kim et al., 2024](https://arxiv.org/abs/2310.08491)): a rubric that describes every score level, not just the
+endpoints, and feedback written before the score, like chain of thought. The judge checks the output against each part
+of `criteria` and lists every mistake, quoting the part it concerns and naming the highest score the rubric allows with
+it (or, if it finds none, says what it checked); the score is at most the lowest of those caps, as
+`{"feedback": "...", "score": 3}`. The prompt fences the input and output in `<input>` / `<output>` tags and says that
+length or detail the criteria do not ask for counts for nothing. The feedback costs more output tokens per judge call.
+Still check the step report's histogram; if it is piled up at the top, the threshold is not separating anything
+(tighten `criteria` or the rubric). The criteria matter as much as the prompt: a criterion most outputs meet easily
+("the scenario is realistic") still scores nearly everything 5, and one worded too literally ("same voice" for a
+rewrite that must drop sarcasm) marks down good outputs, so read a few rows' feedback before trusting a threshold.
+With several samples per input, `group_by` separates candidates best.
 
-- **Absolute (`by_llm_score`)** rates each row alone on 1 to `max_score`. Absolute judges tend to score nearly
-  everything at the top of the scale, so check the step report's histogram; if it is piled up at the top, the
-  threshold is not separating anything. Use it for a pass/fail floor (refusals, wrong format, off-topic).
-- **Comparative (`by_comparative_judge`)** ranks the candidates for the same input against each other, which
-  discriminates far better. Use it whenever there are several candidates per input (e.g. `n=4` samples per prompt,
-  grouped by `group_by="prompt"`). The judge sees the input once and the candidates labelled A, B, C, ..., answers
-  `{"ranking": ["C", "A", "B"], "explanation": "..."}`, and the top `keep` per group survive. Candidates are
-  shuffled per group (seeded by `seed`) and judge `j` sees that order rotated by `j`, so each candidate takes each
-  position equally often; `num_judges > 1` needs `temperature > 0`, as for `by_llm_score`. Rankings combine by Borda
-  count; ties go to the earlier row. Every group of two or more rows is judged, whatever `keep` is, so changing
-  `keep` makes no new judge calls; a single row is kept without a call. The report histogram shows each row's rank
-  in its group.
-
-`prompt_template` replaces either judge's prompt: a format string or a callable taking a dict. The placeholders are
-the row's fields (for the comparative judge, the group's first row) plus `{input}`, `{criteria}`, and for
-`by_llm_score` `{output}` and `{max_score}`, for `by_comparative_judge` `{candidates}` (the labelled outputs),
-`{labels}` (`"A, B, C"`), and `{num_candidates}`. Write literal braces as `{{ }}`. If the prompt does not contain the
-JSON key in double quotes (`"score"` or `"ranking"`), the answer-format line is appended for you.
-`by_llm_score(..., score_field="judge_score", explanation_field="judge_why")` adds the judges' mean score and their
-list of explanations to kept rows; `by_comparative_judge(..., rank_field="rank", explanation_field="judge_why")` adds
-the row's rank in its group (1 = best) and the group's judge explanations. Without these fields rows are unchanged.
+The default rubric, `pyforger.filter.judge.DEFAULT_RUBRIC`, describes the five levels of the default `max_score=5` by
+how serious the output's mistakes are (1: fails the task; 3: a mistake makes part of it wrong, misleading, or
+incomplete; 4: nothing wrong or misleading, only minor shortcomings; 5: nothing a careful expert would change). The
+default `score_threshold=4` keeps levels 4 and 5; 3 also keeps outputs a reviewer would have to fix. `rubric={1: "...",
+..., N: "..."}` replaces it and must describe exactly the levels 1 to `max_score`; any other `max_score` needs one (and
+a `score_threshold` when it is below 4).
 
 ```python
-best = filter.by_comparative_judge(
-    rows,                       # 4 candidate answers per question
-    group_by="question",
+kept = filter.by_llm_score(
+    rows,
     model=judge,
     input_field="question",
     output_field="answer",
-    criteria="correctness, then clarity",
-    keep=1,
-    num_judges=3,
-    temperature=0.7,            # required with several judges
+    criteria="the final answer is correct and every step is justified",
+    rubric={
+        1: "Wrong final answer.",
+        2: "Right answer, but a step is wrong or missing.",
+        3: "Right answer, every step correct, but some steps are asserted without justification.",
+        4: "Right answer, every step correct and justified.",
+    },
+    max_score=4,
+    score_threshold=4,
+    explanation_field="judge_feedback",
 )
 ```
+
+`group_by="question"` judges the rows that share a value together, e.g. `n=4` samples per prompt: one prompt shows the
+input once and the candidates in `<candidate label="A">` tags, and the judge gives feedback and a score per candidate
+on the same rubric (`{"candidates": [{"label": "A", "feedback": "...", "score": 4}, ...]}`). Seeing the alternatives
+helps the judge notice what a candidate gets wrong; each candidate's feedback is asked to stand on its own, without
+naming the others, since labels are shuffled. Each candidate is still kept by `score_threshold` and
+`agreement_threshold`, so a group can keep all its rows or none; the result is the kept rows in input order, as
+without `group_by`. Candidates are shuffled per group and judge `j` sees that order rotated by `j`, so each candidate
+takes each position equally often. With the default prompt a group of one row gets the single-output prompt; with a
+`prompt_template` it gets the group prompt with one candidate. A candidate the judge leaves out or scores unparseably
+is no vote for that candidate only.
+
+All judge calls (prompts × `num_judges`) go out in one `model.generate_batch` call, one `n=1` request each, so they
+run concurrently; `num_judges > 1` needs `temperature > 0`. Judge answers are read leniently: only the text after a
+closed `</think>` block (an unclosed `<think>` is unparseable), then the last JSON object with the expected key, also
+inside code fences or prose (raw newlines in strings allowed), else the last `"score": <number>` pattern (per entry
+for a group, in any key order). Scores keep
+fractions (`4.9` stays `4.9`, so it fails `score_threshold=5`), and a string score gives its leading number (`"4/5"`
+is 4). Unparseable answers count as no vote.
+
+`prompt_template` replaces the prompt: a format string or a callable taking a dict. The placeholders are the row's
+fields (for a group, its first row's) plus `{input}`, `{output}`, `{criteria}`, `{max_score}`, and `{rubric}` (the
+rendered levels); with `group_by` every prompt, one-row groups included, also gets `{candidates}` (the tagged outputs,
+also as `{output}`), `{labels}` (`"A, B, C"`), and `{num_candidates}`. Write literal braces as `{{ }}`. If the prompt
+does not contain the JSON key in double quotes (`"score"`, or `"candidates"` for a group), the feedback-then-score
+answer instruction is appended for you; it mentions the rubric only if the prompt shows `{rubric}`. With `group_by`, a
+template whose own answer format has `"score"` but not `"candidates"` raises `ValueError`. The feedback is read from
+`"feedback"`, or `"explanation"` for older templates.
+`score_field="judge_score"` adds the judges' mean score to kept rows and `explanation_field="judge_feedback"` the list
+of their feedback. Without these fields rows are unchanged.
 
 ##### Difficulty filters
 

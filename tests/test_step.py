@@ -81,7 +81,7 @@ class _StableJudge:
 
     def _generate(self, prompt, n):
         self.call_count += 1
-        output = prompt.split("Output: ")[1].split("\n")[0]
+        output = prompt.split("<output>\n")[1].split("\n")[0]
         if output == "garbled":
             return ["not json"] * n
         return [json.dumps({"score": min(5, len(output))})] * n
