@@ -267,18 +267,38 @@ def _entry(name: str, qualified: str, obj: Any) -> str:
     return "\n\n".join(parts) + "\n"
 
 
+def _op_info(obj: Any) -> dict[str, Any] | None:
+    """Return the ``@op`` / tracked info of ``obj`` or of the one op it wraps.
+
+    A plain function that calls exactly one op from its module's globals takes
+    that op's info, e.g. ``retrieve_from_web`` calling ``retrieve``, or a public
+    ``topic_based_clustering`` calling a cached ``_topic_based_clustering``.
+    """
+    info = getattr(obj, OP_INFO_ATTR, None)
+    if info is not None or not inspect.isfunction(obj):
+        return info
+    called = {
+        getattr(obj.__globals__[name], OP_INFO_ATTR)["name"]: getattr(
+            obj.__globals__[name], OP_INFO_ATTR
+        )
+        for name in obj.__code__.co_names
+        if hasattr(obj.__globals__.get(name), OP_INFO_ATTR)
+    }
+    return next(iter(called.values())) if len(called) == 1 else None
+
+
 def _status(obj: Any, qualified: str) -> str:
     """Describe caching, e.g. "Disk-cached (`@op`)." or "Not cached."."""
     if inspect.isclass(obj):
         return "Class: construct it and pass it to ops."
-    info = getattr(obj, OP_INFO_ATTR, None)
+    info = _op_info(obj)
     if info is None:
         return "Not cached: a plain function."
     named = "" if info["name"] == qualified else f" named `{info['name']}`"
     if info["kind"] == "tracked":
         return (
-            f"Not cached (wrap it with `@op` to memoize); listed in step reports"
-            f"{named or ' under its name'}."
+            "Not cached (wrap it with `@op` to memoize); listed in step reports as "
+            f"`{info['name']}`."
         )
     if info["cache"]:
         return f"Disk-cached (`@op`{named})."

@@ -78,7 +78,7 @@ Split a reasoning-model completion into (thinking, answer).
 
 ### `acquire.retrieve`
 
-Not cached (wrap it with `@op` to memoize); listed in step reports under its name.
+Not cached (wrap it with `@op` to memoize); listed in step reports as `acquire.retrieve`.
 
 ```python
 retrieve(
@@ -98,7 +98,7 @@ Call source.fetch() once per query and concatenate results.
 
 ### `acquire.retrieve_from_web`
 
-Not cached: a plain function.
+Not cached (wrap it with `@op` to memoize); listed in step reports as `acquire.retrieve`.
 
 ```python
 retrieve_from_web(
@@ -118,7 +118,7 @@ Search the web via Brave's LLM Context API. QUERY mode only.
 
 ### `acquire.retrieve_from_wiki`
 
-Not cached: a plain function.
+Not cached (wrap it with `@op` to memoize); listed in step reports as `acquire.retrieve`.
 
 ```python
 retrieve_from_wiki(
@@ -138,7 +138,7 @@ Fetch Wikipedia articles. QUERY (full-text) or RANDOM (random article).
 
 ### `acquire.retrieve_from_hf`
 
-Not cached: a plain function.
+Not cached (wrap it with `@op` to memoize); listed in step reports as `acquire.retrieve`.
 
 ```python
 retrieve_from_hf(
@@ -157,11 +157,12 @@ retrieve_from_hf(
 
 Load rows from a Hugging Face dataset.
 
-**Returns:** Rows with `row_idx`, `dataset_id`, the dataset's column values, and `query`.
+**Returns:** Rows with `row_idx`, `dataset_id`, the dataset's column values, and `query`, which overwrites a dataset
+column of that name (`None` when `queries` is None).
 
 ### `acquire.retrieve_from_arxiv`
 
-Not cached: a plain function.
+Not cached (wrap it with `@op` to memoize); listed in step reports as `acquire.retrieve`.
 
 ```python
 retrieve_from_arxiv(
@@ -180,7 +181,7 @@ Fetch arXiv papers. QUERY (text search) or RANDOM (sample from category).
 
 ### `acquire.retrieve_from_s2`
 
-Not cached: a plain function.
+Not cached (wrap it with `@op` to memoize); listed in step reports as `acquire.retrieve`.
 
 ```python
 retrieve_from_s2(
@@ -564,7 +565,7 @@ by_llm_score(
 
 Keep items where `num_judges` LLM judges sufficiently agree on quality.
 
-**Returns:** The kept rows, in input order and unchanged. Judge scores are not added to the rows.
+**Returns:** The kept rows, in input order and unchanged by default.
 
 ### `filter.by_n_gram_overlap`
 

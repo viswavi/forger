@@ -111,7 +111,8 @@ def retrieve_from_hf(
 
     Returns:
         Rows with ``row_idx``, ``dataset_id``, the dataset's column values, and
-        ``query``.
+        ``query``, which overwrites a dataset column of that name (``None`` when
+        ``queries`` is None).
     """
     source = HFRetrievalSource(
         dataset=dataset,

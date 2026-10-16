@@ -88,6 +88,41 @@ def test_long_signature_wraps_one_parameter_per_line():
     ]
 
 
+@tracked("acquire.fake_fetch")
+def _fake_fetch(query):
+    """Do nothing."""
+    return []
+
+
+def _wraps_filter(items, **op_controls):
+    """Call one cached op, e.g. a public wrapper around a private @op."""
+    return _fake_filter(items, field="text", **op_controls)
+
+
+def _wraps_fetch(query):
+    """Call one tracked function."""
+    return _fake_fetch(query)
+
+
+def _calls_two_ops(items):
+    """Call two different ops; no single op to report."""
+    return _fake_filter(_fake_fetch(items), field="text")
+
+
+def test_status_follows_a_wrapper_to_the_op_it_calls():
+    """A plain function calling exactly one op is labelled like that op."""
+    assert gen_op_docs._status(_wraps_filter, "filter.by_fake") == (
+        "Disk-cached (`@op`)."
+    )
+    assert gen_op_docs._status(_wraps_fetch, "acquire.fetch_from_x") == (
+        "Not cached (wrap it with `@op` to memoize); listed in step reports as "
+        "`acquire.fake_fetch`."
+    )
+    assert gen_op_docs._status(_calls_two_ops, "alter.two") == (
+        "Not cached: a plain function."
+    )
+
+
 def test_status_reports_caching():
     """Cached ops, uncached ops, tracked functions, and plain functions differ."""
 
