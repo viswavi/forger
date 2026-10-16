@@ -86,10 +86,12 @@ cached it, marked `cached`, with that run's warnings.
   of the output rows with the types of its values (from all rows, or 5,000 evenly spaced rows of a longer list); `?`
   marks a field that some rows lack; `+` / `−` are fields added or removed relative to the input rows, when the step's
   first argument is a list of dicts.
-- Repeated calls of one op in a step share one row, e.g. `alter.generate_from_context ×5`, with summed rows, time,
-  tokens, and cost, and the yield of the sums. Each call is still checked against its own `min_yield` / `max_yield`
-  (`LOW 2/5 · min 0.60` means two of five calls missed). Their filter scores pool into one histogram when the label,
-  keep rule, and thresholds match, and get one histogram per rule otherwise.
+- Chunks of one op in a step share one row, e.g. `alter.generate_from_context ×5`, with summed rows, time, tokens,
+  and cost, and the yield of the sums. Each call is still checked against its own `min_yield` / `max_yield`
+  (`LOW 2/5 · min 0.60` means two of five calls missed, `RAISED 1/5` that one raised). Their filter scores pool into
+  one histogram when the label, keep rule, and thresholds match, and get one histogram per rule otherwise. A call
+  whose input rows are an earlier call's output rows (the same row objects, also through other ops) gets its own
+  row: two `by_llm_score` rubric judges in a row read `10 → 8` and `8 → 4`, not one summed row.
 
 - Hard errors (`StepContractError` / `PipelineContractError`): a step returns a non-list, a step calls no Forger ops
   (keep pure-Python helpers as plain functions), a step is called inside another step, a pipeline calls no steps, or

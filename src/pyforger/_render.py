@@ -726,11 +726,24 @@ class _OpGroup:
 
 
 def _group_ops(ops: list[OpCall]) -> list[_OpGroup]:
-    """Group a step's calls by op name, in order of each op's first call."""
-    groups: dict[str, _OpGroup] = {}
-    for call in ops:
-        groups.setdefault(call.op_name, _OpGroup([])).calls.append(call)
-    return list(groups.values())
+    """Group chunks of one op into a row, in order of each row's first call.
+
+    A call joins the latest row of its op unless its input rows came from that
+    row's output (``OpCall.after``): two judges in a row, or a refine pass over
+    generated rows, get a row each, with their own counts and histograms.
+    """
+    groups: list[_OpGroup] = []
+    latest: dict[str, tuple[_OpGroup, set[int]]] = {}
+    for i, call in enumerate(ops):
+        found = latest.get(call.op_name)
+        if found is not None and not found[1] & set(call.after):
+            found[0].calls.append(call)
+            found[1].add(i)
+            continue
+        group = _OpGroup([call])
+        groups.append(group)
+        latest[call.op_name] = (group, {i})
+    return groups
 
 
 def _show_yield(group: _OpGroup) -> bool:

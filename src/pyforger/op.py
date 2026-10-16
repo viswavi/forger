@@ -255,11 +255,13 @@ def op(
             token = _tracking.enter_op(op_name)
             scope_token = _NO_CACHE_SCOPE.set(True) if _no_cache else None
             call: _tracking.OpCall | None = None
+            rows: tuple[Any, Any] = (args[0] if args else None, None)
             start = time.perf_counter()
             try:
                 result, cache_hit, first_arg, duration = _call(
                     args, kwargs, _no_cache, _cache_only
                 )
+                rows = (first_arg, result)
                 call = _op_call(
                     op_name,
                     first_arg,
@@ -277,7 +279,7 @@ def op(
             finally:
                 if scope_token is not None:
                     _NO_CACHE_SCOPE.reset(scope_token)
-                _tracking.exit_op(token, call)
+                _tracking.exit_op(token, call, rows)
             return result
 
         def _call(
@@ -455,8 +457,10 @@ def tracked(op_name: str) -> Callable[[Callable[..., T]], Callable[..., T]]:
             token = _tracking.enter_op(op_name)
             start = time.perf_counter()
             call: _tracking.OpCall | None = None
+            rows: tuple[Any, Any] = (args[0] if args else None, None)
             try:
                 result = fn(*args, **kwargs)
+                rows = (rows[0], result)
                 call = _op_call(
                     op_name,
                     args[0] if args else None,
@@ -472,7 +476,7 @@ def tracked(op_name: str) -> Callable[[Callable[..., T]], Callable[..., T]]:
                 call = _failed_call(op_name, args, exc, token, start)
                 raise
             finally:
-                _tracking.exit_op(token, call)
+                _tracking.exit_op(token, call, rows)
             return result
 
         return wrapper

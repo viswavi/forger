@@ -92,6 +92,10 @@ class OpCall(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     # Set when the op raised, e.g. "ValueError: bad JSON"; its usage still counts.
     error: str | None = None
+    # Positions in the step's ``ops`` of the earlier calls whose output rows this
+    # call's input rows are (directly, or through other ops), by row identity.
+    # The report sums chunks of one op into a row, but not a call fed by them.
+    after: list[int] = Field(default_factory=list)
 
 
 class FieldSummary(BaseModel):
@@ -333,6 +337,55 @@ class ScopeToken:
     hook_token: Token[Any] | None
     usage: Usage
     usage_token: Token[tuple[Usage, ...]]
+    lineage_token: Token[_Lineage | None] | None = None
+
+
+def _traceable(row: Any) -> bool:
+    """True when ``id(row)`` names one row: not a str, number, tuple, or None."""
+    return not isinstance(row, (str, bytes, int, float, bool, tuple, type(None)))
+
+
+class _Lineage:
+    """Which earlier top-level calls of one step each call's input rows came from.
+
+    It keeps the row lists it has seen until the step returns, so their
+    ``id()``s stay unique. Rows copied in plain Python (``{**row}``) start a
+    new lineage.
+    """
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.outputs: list[set[int]] = []  # per call: ids of its output rows
+        self.after: list[set[int]] = []  # per call: the calls it came from
+        self.kept: list[Any] = []
+
+    def add(self, step: StepRecord, call: OpCall, rows_in: Any, rows_out: Any) -> None:
+        """Set ``call.after`` and append the call to ``step.ops``."""
+        ids_in = (
+            {id(r) for r in rows_in if _traceable(r)}
+            if isinstance(rows_in, list)
+            else set()
+        )
+        ids_out = (
+            {id(r) for r in rows_out if _traceable(r)}
+            if isinstance(rows_out, list)
+            else set()
+        )
+        with self.lock:
+            parents = {j for j, out in enumerate(self.outputs) if out & ids_in}
+            after = set(parents)
+            for j in parents:
+                after |= self.after[j]
+            call.after = sorted(after)
+            self.outputs.append(ids_out)
+            self.after.append(after)
+            self.kept.append((rows_in, rows_out))
+            step.ops.append(call)
+
+
+_STEP_LINEAGE: ContextVar[_Lineage | None] = ContextVar(
+    "forger_step_lineage", default=None
+)
 
 
 def enter_step(rec: StepRecord, check: Callable[[Any], str | None]) -> ScopeToken:
@@ -355,11 +408,14 @@ def enter_step(rec: StepRecord, check: Callable[[Any], str | None]) -> ScopeToke
         _STEP_RESULT_CHECK.set(check),
         usage,
         usage_token,
+        _STEP_LINEAGE.set(_Lineage()),
     )
 
 
 def exit_step(token: ScopeToken) -> None:
     """Undo ``enter_step``."""
+    if token.lineage_token is not None:
+        _STEP_LINEAGE.reset(token.lineage_token)
     _ACCUMULATORS.reset(token.usage_token)
     if token.hook_token is not None:
         _STEP_RESULT_CHECK.reset(token.hook_token)
@@ -576,13 +632,16 @@ def current_scores() -> list[ScoreRecord]:
     return list(_ACTIVE_SCORES.get() or [])
 
 
-def exit_op(token: OpToken, call: OpCall | None) -> None:
+def exit_op(
+    token: OpToken, call: OpCall | None, rows: tuple[Any, Any] = (None, None)
+) -> None:
     """Restore state from ``enter_op`` and hand a top-level call to its owner.
 
     Top-level calls (depth 0) go to the active step, or to the active
     pipeline as a bare op when no step is active. A call that raised (``error``
     set) goes only to a step, which may have caught the error; ``call`` is
-    None when there is nothing to report.
+    None when there is nothing to report. ``rows`` is the op's
+    ``(first argument, result)``, which tells chunks from chained calls.
     """
     if token.is_step:
         step = _ACTIVE_STEP.get()
@@ -600,7 +659,11 @@ def exit_op(token: OpToken, call: OpCall | None) -> None:
         return
     step = _ACTIVE_STEP.get()
     if step is not None:
-        step.ops.append(call)
+        lineage = _STEP_LINEAGE.get()
+        if lineage is not None:
+            lineage.add(step, call, *rows)
+        else:
+            step.ops.append(call)
         return
     pipeline = _ACTIVE_PIPELINE.get()
     if pipeline is not None and call.error is None:

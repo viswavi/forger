@@ -1738,3 +1738,90 @@ def test_show_warns_about_unknown_fields():
     assert _tracking.step_records()["typo"].warnings == [
         "show= names fields no output row has: nope"
     ]
+
+
+def test_chained_calls_of_one_op_keep_their_own_rows():
+    """Two passes in a row (5 → 3 → 1) are two rows with their own histograms."""
+
+    @step
+    def rubric(rows):
+        rows = filter.by_length(rows, instruction_field="text", min_len=2)
+        return filter.by_length(rows, instruction_field="text", min_len=3)
+
+    rubric(_rows(*TEXTS))
+    rec = _tracking.step_records()["rubric"]
+    assert [c.after for c in rec.ops] == [[], [0]]
+    text = render_step(rec)
+    assert "×2" not in text
+    assert re.search(r"filter\.by_length\s+5\s+3\s+0\.60", text)
+    assert re.search(r"filter\.by_length\s+3\s+1\s+0\.33", text)
+    assert "keeps 2 to 10k: 3 of 5" in text and "keeps 3 to 10k: 1 of 3" in text
+
+
+def test_chain_through_another_op_gets_its_own_row():
+    """A refine pass over generated rows (through a filter) is its own row."""
+
+    @step
+    def refine(rows):
+        drafts = _upper(rows)
+        kept = _length_filter(drafts)
+        return _upper(kept[:1]) + _upper(kept[1:])
+
+    refine(_rows(*TEXTS))
+    rec = _tracking.step_records()["refine"]
+    assert [(c.op_name, c.after) for c in rec.ops] == [
+        ("alter.test_upper", []),
+        ("filter.by_length", [0]),
+        ("alter.test_upper", [0, 1]),
+        ("alter.test_upper", [0, 1]),
+    ]
+    text = render_step(rec)
+    rows = [line.split()[:4] for line in text.splitlines() if "test_upper" in line]
+    assert rows == [
+        ["alter.test_upper", "5", "5", "-"],
+        ["alter.test_upper", "×2", "3", "3"],
+    ]
+    # filter.by_length sits between the two upper rows, in call order.
+    assert text.index("filter.by_length") < text.index("alter.test_upper ×2")
+
+
+def test_two_filters_on_the_same_rows_are_not_summed():
+    """Filtering the same rows twice is a chain, not two chunks."""
+
+    @step
+    def twice(rows):
+        a = _length_filter(rows)
+        b = _length_filter(rows)
+        return [r for r in a if r in b]
+
+    twice(_rows(*TEXTS))
+    rec = _tracking.step_records()["twice"]
+    assert rec.ops[1].after == [0]
+    assert render_step(rec).count("filter.by_length   ") >= 2
+
+
+def test_raised_call_marks_its_collapsed_row():
+    """A chunk that raised marks the row RAISED k/n; its cost is in the row."""
+
+    @op(name="alter.test_flaky")
+    def flaky(rows):
+        _tracking.add_usage(10, 5, 0.5)
+        if rows and rows[0]["text"] == "six":
+            raise ValueError("bad JSON")
+        return list(rows)
+
+    @step
+    def chunks(rows):
+        out = []
+        for start in range(0, len(rows), 2):
+            try:
+                out += flaky(rows[start : start + 2])
+            except ValueError:
+                pass
+        return _length_filter(out)
+
+    chunks(_rows(*TEXTS))
+    rec = _tracking.step_records()["chunks"]
+    text = render_step(rec)
+    assert re.search(r"alter\.test_flaky ×3 .*\$1\.50 .*RAISED 1/3", text), text
+    assert "alter.test_flaky raised ValueError: bad JSON" in text
