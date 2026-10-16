@@ -28,6 +28,6 @@ def inspect_step(name: str | None = None) -> StepRecord:
     else:
         raise KeyError(f"no step named {name!r}; known steps: {', '.join(records)}")
     if _reports_enabled(prod=False):
-        _summaries.add_llm_summaries(rec, rows=len(rec.sample))
+        _summaries.add_llm_summaries(rec, rows=None)
     print_step(rec, full=True)
     return rec

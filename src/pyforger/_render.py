@@ -38,6 +38,7 @@ from pyforger._tracking import (
     OpCall,
     PipelineRecord,
     PythonGap,
+    RowStream,
     ScoreRecord,
     StepRecord,
 )
@@ -222,12 +223,33 @@ def _originally(rec: StepRecord) -> str:
     return f" (originally {' · '.join(parts)})"
 
 
-def _rows_text(n_in: int | None, n_out: int | None, *, generated: str) -> str:
-    """``143 → 61 rows (yield 0.43)``, or ``276 rows generated`` without input."""
-    if n_in is None:
-        return f"{fmt_int(n_out)} rows {generated}"
-    text = f"{fmt_int(n_in)} → {fmt_int(n_out)} rows"
-    if n_in and n_out is not None:
+def _rows_text(
+    n_in: int | None,
+    n_out: int | None,
+    *,
+    generated: str,
+    inputs: list[RowStream] | None = None,
+    streams: list[RowStream] | None = None,
+    with_yield: bool = True,
+) -> str:
+    """``143 → 61 rows (yield 0.43)``, or ``276 rows generated`` without input.
+
+    Several inputs show by name, ``solvable 111 + refusals 42 → 153 rows``, and
+    output streams too, ``153 → train 111 · refusals 42``; the yield is that of
+    the sums.
+    """
+    if streams:
+        out = " · ".join(f"{_clean(s.name)} {fmt_int(s.n_rows)}" for s in streams)
+    else:
+        out = f"{fmt_int(n_out)} rows"
+    if inputs:
+        text = " + ".join(f"{_clean(s.name)} {fmt_int(s.n_rows)}" for s in inputs)
+        text += f" → {out}"
+    elif n_in is None:
+        return f"{out} {generated}"
+    else:
+        text = f"{fmt_int(n_in)} → {out}"
+    if with_yield and n_in and n_out is not None:
         text += f" (yield {n_out / n_in:.2f})"
     return text
 
@@ -913,7 +935,11 @@ def _lines_view(headers: list[str], rows: list[list[Text]]) -> RenderableType:
         parts: list[Text] = []
         values = dict(zip(headers, cells))
         if "in" in values and "out" in values:
-            parts.append(Text(f"{values['in'].plain} → {values['out'].plain}"))
+            n_in, n_out = values["in"].plain, values["out"].plain
+            if n_in and n_out:
+                parts.append(Text(f"{n_in} → {n_out}"))
+            elif n_in or n_out:
+                parts.append(Text(n_in or n_out))
         for name, cell in zip(headers[1:], cells[1:]):
             if name in ("in", "out") or not cell.plain or cell.plain == "-":
                 continue
@@ -938,9 +964,12 @@ def _drop_columns(
 
 
 def _gap_cells(gap: PythonGap, n_cells: int) -> list[Text]:
-    """A dim ``(python)  356 → 330  0.93`` row; other columns stay blank."""
+    """A dim ``(python)  356 → 330  0.93`` row; other columns stay blank.
+
+    Rows taken from one stream of a step read ``(python) train``.
+    """
     cells = [
-        Text("(python)"),
+        Text("(python)" + (f" {_clean(gap.stream)}" if gap.stream else "")),
         Text(fmt_int(gap.n_in)),
         Text(fmt_int(gap.n_out)),
         Text(fmt_yield(gap.yield_ratio)),
@@ -1137,19 +1166,30 @@ def _shown_blocks(rec: StepRecord, row: dict) -> list[RenderableType]:
     return out
 
 
-def _samples(rec: StepRecord, full: bool, width: int = WIDTH) -> RenderableType | None:
-    if not rec.sample:
+def _samples(
+    rec: StepRecord,
+    sample: list[Any],
+    sample_summaries: list[dict[int, FieldSummary]],
+    n_rows: int | None,
+    full: bool,
+    width: int = WIDTH,
+    *,
+    stream: str | None = None,
+) -> RenderableType | None:
+    """Sample rows of the step's output, or of one output ``stream``."""
+    if not sample:
         return None
-    shown = rec.sample if full else rec.sample[: max(0, rec.sample_shown)]
+    shown = sample if full else sample[: max(0, rec.sample_shown)]
     if not shown:
         return None
     limit = FULL_FIELD_CHARS if full else COMPACT_FIELD_CHARS
-    heading = Text(f"sample rows ({len(shown)} of {fmt_int(rec.n_out)})", style="bold")
+    title = "sample rows" if stream is None else f"{_clean(stream)} sample rows"
+    heading = Text(f"{title} ({len(shown)} of {fmt_int(n_rows)})", style="bold")
     keys = [
         k for k in dict.fromkeys(k for row in shown for k in row) if k not in rec.show
     ]
     fields = list(dict.fromkeys(_clean(k) for k in keys))
-    summaries = list(rec.sample_summaries)
+    summaries = list(sample_summaries)
     any_shown = any(k in rec.show for row in shown for k in row)
 
     def value_text(i: int, j: int, value: Any) -> Text:
@@ -1255,11 +1295,12 @@ def _rule(kind: str, name: str) -> Rule:
 _MAX_FIELDS_SHOWN = 30  # the fields line lists this many, then "… N more"
 
 
-def _fields_text(rec: StepRecord) -> Text | None:
+def _fields_text(rec: StepRecord | RowStream, label: str = "") -> Text | None:
     """``fields: topic str · score int|None · twist str?  (+ score; − draft)``.
 
     ``?`` marks a field some rows lack; ``+`` / ``−`` are fields added or
-    removed relative to the step's input rows.
+    removed relative to the step's input rows. ``label`` names an output
+    stream: ``train fields: ...``.
     """
     if not rec.fields:
         return None
@@ -1271,6 +1312,8 @@ def _fields_text(rec: StepRecord) -> Text | None:
     if more > 0:
         parts.append(f"… {more} more")
     text = Text()
+    if label:
+        text.append(f"{_clean(label)} ", style="bold")
     text.append("fields: ", style="dim")
     text.append(" · ".join(parts))
     changes = []
@@ -1288,12 +1331,15 @@ def _cached_line(rec: StepRecord) -> RenderableType:
     title = Text()
     title.append("step ", style="dim")
     title.append(_clean(rec.name), style="bold")
-    rows = (
-        f"{fmt_int(rec.n_out)} rows"
-        if rec.n_in is None
-        else f"{fmt_int(rec.n_in)} → {fmt_int(rec.n_out)} rows"
+    rows = _rows_text(
+        rec.n_in,
+        rec.n_out,
+        generated="",
+        inputs=rec.inputs,
+        streams=rec.streams,
+        with_yield=False,
     )
-    title.append(f" · {rows}")
+    title.append(f" · {rows.strip()}")
     cached = "cached"
     if rec.original is not None:
         cached += f" · originally {fmt_secs(rec.original.duration_s)}"
@@ -1335,7 +1381,13 @@ def step_renderable(
     )
     stats = Text()
     stats.append(
-        _rows_text(rec.n_in, rec.n_out, generated="generated"),
+        _rows_text(
+            rec.n_in,
+            rec.n_out,
+            generated="generated",
+            inputs=rec.inputs,
+            streams=rec.streams,
+        ),
         style="bold red" if rec.warnings else "bold",
     )
     if one_plain_op:
@@ -1352,6 +1404,10 @@ def step_renderable(
     fields = _fields_text(rec)
     if fields is not None:
         body.append(fields)
+    for stream in rec.streams or []:
+        fields = _fields_text(stream, label=stream.name)
+        if fields is not None:
+            body.append(fields)
     if rec.input_type or rec.output_type:
         arrow = f"{rec.input_type or 'any'} → {rec.output_type or 'any'}"
         body.append(Text(f"rows validated: {arrow}", style="dim"))
@@ -1383,10 +1439,19 @@ def step_renderable(
                 )
             )
 
-    samples = _samples(rec, full, width - 2)
-    if samples is not None:
-        body.append(Text(""))
-        body.append(samples)
+    blocks: list[
+        tuple[str | None, list[Any], list[dict[int, FieldSummary]], int | None]
+    ] = [(None, rec.sample, rec.sample_summaries, rec.n_out)]
+    blocks += [
+        (s.name, s.sample, s.sample_summaries, s.n_rows) for s in rec.streams or []
+    ]
+    for stream_name, sample, summaries, n_rows in blocks:
+        samples = _samples(
+            rec, sample, summaries, n_rows, full, width - 2, stream=stream_name
+        )
+        if samples is not None:
+            body.append(Text(""))
+            body.append(samples)
     return Group(_rule("step", rec.name), Padding(Group(*body), (0, 0, 0, 2)))
 
 
@@ -1423,18 +1488,51 @@ def _filter_notes(rec: PipelineRecord) -> list[RenderableType]:
     return out
 
 
+def _pipeline_rows_text(rec: PipelineRecord) -> str:
+    """``10 → 5 rows (yield 0.50)``: the first step's input to what was returned.
+
+    A returned dict of row lists shows each stream; a return value without a
+    row count (a tuple, None) shows only the input, ``10 rows in``.
+    """
+    first = rec.steps[0].n_in if rec.steps else None
+    if rec.returned is None:  # an older record: the last step's output
+        last = rec.steps[-1].n_out if rec.steps else None
+        return _rows_text(first, last, generated="out")
+    if rec.returned == "other":
+        return f"{fmt_int(first)} rows in" if first is not None else ""
+    streams = rec.out_streams if rec.returned == "streams" else None
+    return _rows_text(first, rec.n_out, generated="out", streams=streams)
+
+
+def _stream_cells(s: StepRecord, n_cells: int) -> list[list[Text]]:
+    """Dim rows under a step for its inputs (``+ solvable  111``) and streams.
+
+    Input counts go in the ``in`` column, output streams (``→ train``) in the
+    ``out`` column, so the step's own row keeps the sums.
+    """
+    out: list[list[Text]] = []
+    for part in s.inputs:
+        cells = [Text(f"  + {_clean(part.name)}"), Text(fmt_int(part.n_rows))]
+        out.append(cells + [Text("") for _ in range(n_cells - 2)])
+    for part in s.streams or []:
+        cells = [Text(f"  → {_clean(part.name)}"), Text(""), Text(fmt_int(part.n_rows))]
+        out.append(cells + [Text("") for _ in range(n_cells - 3)])
+    for cells in out:
+        for cell in cells:
+            cell.stylize("dim")
+    return out
+
+
 def pipeline_renderable(rec: PipelineRecord, *, width: int = WIDTH) -> RenderableType:
     """Build the rich renderable for a pipeline summary (see ``render_pipeline``)."""
     n_steps = sum(1 for s in rec.steps if s.kind != "bare")
-    first = rec.steps[0].n_in if rec.steps else None
-    last = rec.steps[-1].n_out if rec.steps else None
     any_warnings = rec.warnings or any(s.warnings for s in rec.steps)
     stats = Text()
-    stats.append(f"{n_steps} step{'s' if n_steps != 1 else ''} · ")
-    stats.append(
-        _rows_text(first, last, generated="out"),
-        style="bold red" if any_warnings else "bold",
-    )
+    stats.append(f"{n_steps} step{'s' if n_steps != 1 else ''}")
+    rows_text = _pipeline_rows_text(rec)
+    if rows_text:
+        stats.append(" · ")
+        stats.append(rows_text, style="bold red" if any_warnings else "bold")
     stats.append(f" · {fmt_secs(rec.duration_s)}")
     usage = _usage_summary(
         rec.prompt_tokens, rec.completion_tokens, rec.token_units, rec.cost_usd
@@ -1455,11 +1553,11 @@ def pipeline_renderable(rec: PipelineRecord, *, width: int = WIDTH) -> Renderabl
         for s in rec.steps
     )
     n_cells = 6 + show_units + show_cost
-    gaps = {g.position: g for g in rec.python_gaps}
-    rows: list[list[Text]] = []
+    table_rows: list[list[Text]] = []
     for i, s in enumerate(rec.steps):
-        if i in gaps:
-            rows.append(_gap_cells(gaps[i], n_cells))
+        table_rows.extend(
+            _gap_cells(g, n_cells) for g in rec.python_gaps if g.position == i
+        )
         y = s.n_out / s.n_in if s.n_in and s.n_out is not None else None
         n_warn = len(dict.fromkeys(s.warnings))
         flags = Text()
@@ -1481,7 +1579,9 @@ def pipeline_renderable(rec: PipelineRecord, *, width: int = WIDTH) -> Renderabl
         elif show_cost:
             cells.append(Text(fmt_cost(s.cost_usd)))
         cells.append(flags)
-        rows.append(cells)
+        table_rows.append(cells)
+        table_rows.extend(_stream_cells(s, n_cells))
+    rows = table_rows
     headers = ["step", "in", "out", "yield", "time"]
     if show_units:
         headers.append("units")

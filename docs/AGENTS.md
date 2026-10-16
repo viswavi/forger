@@ -17,6 +17,7 @@ reference describes the execution model, the public API, and the conventions the
 - [Models, prompts, and credentials](#models-prompts-and-credentials)
 - [Caching and tracing with `@op`](#caching-and-tracing-with-op)
 - [Composing a pipeline](#composing-a-pipeline)
+  - [Several inputs and output streams](#several-inputs-and-output-streams)
 
 ## Basic strategy for using Forger
 
@@ -74,7 +75,9 @@ operations return a `list[dict]`; inspect operations instead return a report abo
 Control flow (`for`, `if`, comprehensions, helper functions) in plain Python can be used
 
 Structure a pipeline as a `@pyforger.pipeline` function that calls `@pyforger.step` functions. A step is a named
-function from rows to rows built from Forger ops (typically acquire or alter, then filter). Each step is cached like
+function from rows to rows built from Forger ops (typically acquire or alter, then filter); it may also take several
+lists of rows and return a dict of named row lists (see [Several inputs and output
+streams](#several-inputs-and-output-streams)). Each step is cached like
 an `@op` and, when it returns, prints a report: the fields of its output rows; every op it ran with rows in/out, yield,
 time, tokens, and cost; a histogram of each filter's scores with what other thresholds would have kept; warnings; and
 one sample output row. The pipeline prints a summary table of its steps at the end. Read these reports after every
@@ -85,7 +88,7 @@ cached it, marked `cached`, with that run's warnings.
 - Fields line: `fields: seed_id int · topic str · score int|None · twist str?  (+ score, twist; − draft)`. Each field
   of the output rows with the types of its values (from all rows, or 5,000 evenly spaced rows of a longer list); `?`
   marks a field that some rows lack; `+` / `−` are fields added or removed relative to the input rows, when the step's
-  first argument is a list of dicts.
+  rows arguments are lists of dicts.
 - Chunks of one op in a step share one row, e.g. `alter.generate_from_context ×5`, with summed rows, time, tokens,
   and cost, and the yield of the sums. Each call is still checked against its own `min_yield` / `max_yield`
   (`LOW 2/5 · min 0.60` means two of five calls missed, `RAISED 1/5` that one raised). Their filter scores pool into
@@ -98,12 +101,13 @@ cached it, marked `cached`, with that run's warnings.
   identity when the next op got some of the same dicts, else from row counts (marked `inferred`) when Python rebuilt
   them all (`{**r, ...}`) and each op row's calls are contiguous. Merged, split, or ambiguous rows (several list
   arguments, interleaved chunks, rebuilt rows sent to two ops) show nothing. The pipeline table shows one between two
-  steps when the second got some of the first's rows, by identity only. They are information, never warnings. To see
-  why rows went, write the check as `filter.by_predicate`: it gets its own row and a kept/dropped bar.
+  steps when the second got some of the first's rows, by identity only, and per stream when the first returned a dict
+  (`(python) train  5  3  0.60`). They are information, never warnings. To see why rows went, write the check as
+  `filter.by_predicate`: it gets its own row and a kept/dropped bar.
 
-- Hard errors (`StepContractError` / `PipelineContractError`): a step returns a non-list, a step calls no Forger ops
-  (keep pure-Python helpers as plain functions), a step is called inside another step, a pipeline calls no steps, or
-  rows do not match a `list[X]` type hint where `X` is a pydantic model (rows stay dicts).
+- Hard errors (`StepContractError` / `PipelineContractError`): a step returns neither a list nor a dict of row lists,
+  a step calls no Forger ops (keep pure-Python helpers as plain functions), a step is called inside another step, a
+  pipeline calls no steps, or rows do not match a `list[X]` type hint where `X` is a pydantic model (rows stay dicts).
 - Warnings: an op misses its `min_yield` / `max_yield`; a step's type hints cannot be resolved; `show=` names a field
   no output row has; a pipeline has only one step; no quality filter, no diversity filter, or no inspect op ran
   anywhere; an op was called in the pipeline outside a step.
@@ -115,9 +119,9 @@ cached it, marked `cached`, with that run's warnings.
   mode is not cached. `prod=True` or the environment variable `FORGER_STEP_REPORT=0` silences the reports.
   `pyforger.inspect.inspect_step(name)` re-prints the full report of the latest run of a step, with up to 10 sample
   rows.
-- Sample rows: `@step(sample=3)` shows three output rows instead of one. `@step(show=["statement"])` prints those
-  fields of each sample row in full, line breaks kept, as an indented block under the row (other values as JSON);
-  the other fields stay in the table, cut or summarized.
+- Sample rows: `@step(sample=3)` shows three output rows (of each stream) instead of one. `@step(show=["statement"])`
+  prints those fields of each sample row in full, line breaks kept, as an indented block under the row (other values
+  as JSON); the other fields stay in the table, cut or summarized.
 - Long sample values are summarized by shape rather than cut, e.g. `[5 items] a.py, b.py, c.py, …` or
   `def solve(n): … (312 lines, 9.8k chars, python)`. By default these structural summaries are all you get; they are
   free. For a one-sentence LLM summary of each long value as well, call `pyforger.steps.set_report_model(model)` or
@@ -492,6 +496,73 @@ When a filter removes nothing, or a step runs no filter, the summary adds a `fil
   filters that removed nothing (a check that passed, or one that tests nothing):
     filter.by_exact_match in seed_topics · 10 rows
 ```
+
+#### Several inputs and output streams
+
+A step may take several lists of rows and return a dict of named row lists (streams); a later step takes one stream.
+The rows arguments are the first argument when it is a list, and any other argument that is a non-empty list of dicts
+or is annotated `list[dict]` / `list[X]`. Models, numbers, strings, and other lists (e.g. topic names after the first
+argument) are not counted. The pipeline may return anything; its summary counts a returned list or dict of lists and
+otherwise shows only the input (`10 rows in`).
+
+```python
+class Assembled(TypedDict):  # optional; dict[str, list[X]] checks every stream against X
+    train: list[TrainRow]
+    refusals: list[RefusalRow]
+
+@step
+def assemble(solvable, refusals) -> Assembled:
+    """Label solved problems for training and keep refusals as their own set."""
+    train = label_kind(solvable, "solve")
+    refused = label_kind(refusals, "refuse")
+    return {
+        "train": filter.by_length(train, instruction_field="solution", min_len=2),
+        "refusals": filter.by_exact_match(refused, field="problem"),
+    }
+
+@pipeline
+def coding(writer, solver, judge_model):
+    tried = attempt(write_problems(TOPICS, writer), solver)  # {"solvable": [...], "refusals": [...]}
+    out = assemble(judge(tried["solvable"], judge_model), tried["refusals"])
+    train = [r for r in out["train"] if "heap" not in r["problem"]]
+    return {"train": format_train(train), "refusals": out["refusals"]}
+```
+
+The step report counts each input and stream, with a fields line and sample rows per stream (`sample=` and `show=`
+apply to each); the yield uses the sums. The pipeline table keeps the sums in a step's row, with its inputs (`+`) and
+streams (`→`) on dim rows below:
+
+```text
+step assemble ──────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Label solved problems for training and keep refusals as their own set.
+  solvable 4 + refusals 3 → train 4 · refusals 3 (yield 1.00) · 0.0s
+  train fields: problem str · solution str · refusal str · kind str  (+ kind)
+  refusals fields: problem str · solution str · refusal str · kind str  (+ kind)
+  rows validated: any → train list[TrainRow] · refusals list[RefusalRow]
+
+pipeline coding ────────────────────────────────────────────────────────────────────────────────────────────────────────
+  5 steps · 10 → train 3 · refusals 3 (yield 0.60) · 0.0s · 12,100 in / 4,284 out tokens · $0.052
+
+  step             in   out   yield   time      cost
+  ─────────────────────────────────────────────────────
+  write_problems   10    10    1.00   0.0s    $0.018
+  attempt          10    10    1.00   0.0s    $0.031
+    → solvable            7
+    → refusals            3
+  judge             7     4    0.57   0.0s   $0.0028
+  assemble          7     7    1.00   0.0s         -
+    + solvable      4
+    + refusals      3
+    → train               4
+    → refusals            3
+  (python) train    4     3    0.75
+  format_train      3     3    1.00   0.0s         -
+```
+
+A cached step reads `step assemble · solvable 4 + refusals 3 → train 4 · refusals 3 · cached · originally 0.0s`.
+With a `TypedDict` return hint each stream is validated like `list[X]` and must be one the `TypedDict` names; errors
+name the stream and row (`output stream 'refusals' row 1 does not match RefusalRow: ...`). A `list[X]` hint on any
+rows parameter validates that input (`input refusals row 0 ...`). A dict with a value that is not a list is an error.
 
 An iterative pipeline keeps the outer loop in Python and makes each round a `@step`, so cached rounds are reused
 across runs:

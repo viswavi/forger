@@ -128,6 +128,26 @@ class FieldInfo(BaseModel):
     optional: bool = False
 
 
+class RowStream(BaseModel):
+    """One named list of rows: a step's input argument or one of its outputs.
+
+    A step called as ``assemble(solvable, refusals)`` has two inputs, each with
+    only ``name`` and ``n_rows`` set. A step that returns
+    ``{"train": kept, "refusals": refused}`` has two output streams, each with
+    its own fields, sample rows, and row type (``list[Train]`` when its type
+    hint names one).
+    """
+
+    name: str
+    n_rows: int
+    fields: list[FieldInfo] | None = None
+    fields_added: list[str] = Field(default_factory=list)
+    fields_removed: list[str] = Field(default_factory=list)
+    sample: list[Any] = Field(default_factory=list)
+    sample_summaries: list[dict[int, FieldSummary]] = Field(default_factory=list)
+    row_type: str | None = None
+
+
 class UsageTotals(BaseModel):
     """Tokens and cost of one run, e.g. the run that cached a step."""
 
@@ -162,6 +182,11 @@ class StepRecord(BaseModel):
     those are dicts too. ``show`` names fields whose sample values print in full.
     ``python_gaps`` are rows that changed in plain Python between ops (see
     ``pyforger._rowflow``); a cached step keeps those of the run that cached it.
+
+    ``n_in`` sums every rows argument; ``inputs`` names them when there are
+    several (``solvable 111 + refusals 42``). A step that returned a dict of
+    named row lists has ``streams`` (one per list, with its own fields and
+    sample rows), ``n_out`` their sum, and no top-level ``sample``/``fields``.
     """
 
     name: str
@@ -169,6 +194,8 @@ class StepRecord(BaseModel):
     kind: Literal["step", "dynamic_step", "bare"] = "step"
     n_in: int | None = None
     n_out: int | None = None
+    inputs: list[RowStream] = Field(default_factory=list)
+    streams: list[RowStream] | None = None
     duration_s: float = 0.0
     cache_hit: bool = False
     ops: list[OpCall] = Field(default_factory=list)
@@ -201,9 +228,18 @@ class PipelineRecord(BaseModel):
     not warnings: a filter that removed nothing may be a check that passed.
     ``python_gaps`` are rows dropped in plain Python between two steps, found
     by row identity (see ``pyforger._rowflow``).
+
+    ``returned`` says what the pipeline returned: ``"rows"`` (a list of
+    ``n_out`` rows), ``"streams"`` (a dict of row lists, in ``out_streams``,
+    ``n_out`` their sum), ``"other"`` (anything else, e.g. a tuple or None:
+    no final row count), or None for a record made before this was kept (the
+    last step's output counts).
     """
 
     name: str
+    returned: Literal["rows", "streams", "other"] | None = None
+    n_out: int | None = None
+    out_streams: list[RowStream] = Field(default_factory=list)
     steps: list[StepRecord] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     no_filter_steps: list[str] = Field(default_factory=list)
@@ -568,12 +604,13 @@ def _flow_of(rec: PipelineRecord) -> PipelineFlow | None:
 
 
 def step_starting(
-    rec: PipelineRecord, rows_in: list[Any] | None, arg_lists: list[list[Any]]
+    rec: PipelineRecord, rows_in: list[list[Any]], arg_lists: list[list[Any]]
 ) -> Any:
     """A step of ``rec`` starts with these rows; pass the result to ``join_pipeline``.
 
-    ``rows_in`` is the step's row list (None unless it has exactly one list
-    argument), compared by identity with the previous step's output.
+    ``rows_in`` are the step's rows arguments, each compared by identity with
+    the previous step's output (each stream of it, when it returned a dict).
+    ``arg_lists`` are all its list arguments.
     """
     flow = _flow_of(rec)
     return flow.start(rows_in, arg_lists) if flow is not None else None
@@ -694,7 +731,8 @@ def exit_op(
         stream = (
             rows_in if isinstance(rows_in, list) and call.n_in is not None else None
         )
-        started = step_starting(pipeline, stream, [stream] if stream else [])
+        lists = [stream] if stream is not None else []
+        started = step_starting(pipeline, lists, lists)
         join_pipeline(pipeline, rec, started, rows_out)
         on_dynamic_step = _ON_DYNAMIC_STEP.get()
         if rec.kind == "dynamic_step" and on_dynamic_step is not None:

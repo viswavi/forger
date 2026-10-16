@@ -418,9 +418,10 @@ def _summarize_one(model: Any, prompt: str) -> str:
         return ""
 
 
-def add_llm_summaries(rec: StepRecord, rows: int) -> None:
+def add_llm_summaries(rec: StepRecord, rows: int | None) -> None:
     """Fill in ``llm`` for long values in the first ``rows`` sample rows.
 
+    ``rows`` counts per output stream; None means every stored sample row.
     Does nothing without a report model. Values summarized before (in this
     record) are skipped; a failed summary is left empty and not retried.
     """
@@ -429,7 +430,15 @@ def add_llm_summaries(rec: StepRecord, rows: int) -> None:
         if model is None:
             return
         jobs: list[tuple[FieldSummary, str]] = []
-        for row, fields in zip(rec.sample[: max(0, rows)], rec.sample_summaries):
+        samples = [(rec.sample, rec.sample_summaries)] + [
+            (s.sample, s.sample_summaries) for s in rec.streams or []
+        ]
+        pairs = [
+            pair
+            for sample, summaries in samples
+            for pair in zip(sample[: None if rows is None else max(0, rows)], summaries)
+        ]
+        for row, fields in pairs:
             keys = list(row) if isinstance(row, dict) else []
             for j, summary in sorted(fields.items()):
                 if summary.llm is not None or not summary.source or j >= len(keys):

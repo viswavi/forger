@@ -11,6 +11,11 @@ A step is a function from rows to rows built from Forger ops::
     def main(model):
         return write_solutions(find_problems(model), model)
 
+A step may take several lists of rows (``assemble(solvable, refusals)``; the
+report counts ``solvable 111 + refusals 42``) and may return a dict of named
+row lists (``{"train": kept, "refusals": refused}``), each reported as its own
+stream. A later step takes one stream: ``format_train(out["train"])``.
+
 Each step is cached like an ``@op`` and prints a report when it returns: the
 output rows' fields, every op it ran with rows in/out, yield, time, tokens, and
 cost (repeated calls of one op share a row), a histogram of each filter's
@@ -35,6 +40,7 @@ import sys
 import time
 import typing
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from functools import wraps
 from typing import Any, TypeVar
 
@@ -55,6 +61,7 @@ from pyforger._tracking import (
     BudgetExceededError,
     FieldInfo,
     PipelineRecord,
+    RowStream,
     StepRecord,
     UsageTotals,
 )
@@ -107,30 +114,111 @@ def _row_model(hint: Any) -> type[BaseModel] | None:
     return None
 
 
-def _row_models(
+def _is_rows_hint(hint: Any) -> bool:
+    """``list[dict]``, ``list[dict[str, Any]]``, or ``list[X]`` with ``X`` a model."""
+    if _row_model(hint) is not None:
+        return True
+    args = typing.get_args(hint) if typing.get_origin(hint) is list else ()
+    return len(args) == 1 and (args[0] is dict or typing.get_origin(args[0]) is dict)
+
+
+def _type_label(model: type[BaseModel] | None) -> str:
+    return f"list[{model.__name__}]" if model is not None else "any"
+
+
+@dataclass
+class _OutHint:
+    """What a step's return annotation says about its rows.
+
+    ``list[X]``: one list of ``X`` rows (``streams`` is None).
+    ``dict[str, list[X]]``: any streams, each of ``X`` rows (``every``).
+    A ``TypedDict`` of ``list[X]`` values: those streams (``streams``, value
+    None for a stream without a row model), ``required`` among them.
+    """
+
+    model: type[BaseModel] | None = None
+    every: type[BaseModel] | None = None
+    streams: dict[str, type[BaseModel] | None] | None = None
+    required: frozenset[str] = frozenset()
+    name: str = ""
+
+    @property
+    def wants_dict(self) -> bool:
+        return self.every is not None or self.streams is not None
+
+    def stream_model(self, stream: str) -> type[BaseModel] | None:
+        if self.streams is not None:
+            return self.streams.get(stream)
+        return self.every
+
+    def label(self) -> str:
+        if self.model is not None:
+            return _type_label(self.model)
+        if self.every is not None:
+            return f"dict[str, {_type_label(self.every)}]"
+        return " · ".join(
+            f"{k} {_type_label(m)}" for k, m in (self.streams or {}).items()
+        )
+
+
+def _out_hint(hint: Any, localns: dict[str, Any] | None) -> _OutHint | None:
+    """Read a return annotation: ``list[X]``, ``dict[str, list[X]]``, or a TypedDict."""
+    model = _row_model(hint)
+    if model is not None:
+        return _OutHint(model=model)
+    if typing.get_origin(hint) is dict:
+        args = typing.get_args(hint)
+        every = _row_model(args[1]) if len(args) == 2 else None
+        return _OutHint(every=every) if every is not None else None
+    if typing.is_typeddict(hint):
+        fields = typing.get_type_hints(hint, localns=localns)
+        return _OutHint(
+            streams={k: _row_model(v) for k, v in fields.items()},
+            required=frozenset(getattr(hint, "__required_keys__", fields)),
+            name=hint.__name__,
+        )
+    return None
+
+
+@dataclass
+class _Hints:
+    """Row types from a step's annotations (see ``_step_hints``)."""
+
+    params: dict[str, Any] = field(default_factory=dict)  # name -> resolved hint
+    out: _OutHint | None = None
+    warning: str | None = None
+
+    def model(self, param: str) -> type[BaseModel] | None:
+        return _row_model(self.params.get(param))
+
+
+def _step_hints(
     fn: Callable[..., Any], localns: dict[str, Any] | None = None
-) -> tuple[type[BaseModel] | None, type[BaseModel] | None, str | None]:
-    """Row models for ``fn``'s first parameter and return value, if any.
+) -> _Hints:
+    """Row types of ``fn``'s parameters and return value, from its annotations.
 
     ``localns`` holds the names of the scope that defined ``fn``, so string
-    annotations naming a class defined in a function body still resolve. The
-    third item is a warning when the annotations could not be resolved.
+    annotations naming a class defined in a function body still resolve. A
+    hint that cannot be resolved gives a warning instead.
     """
     params = list(inspect.signature(fn).parameters)
     try:
         hints = typing.get_type_hints(fn, localns=localns)
+        out = _out_hint(hints.get("return"), localns)
     except Exception as exc:
         annotations = getattr(fn, "__annotations__", {}) or {}
-        if not ({"return", *params[:1]} & set(annotations)):
-            return None, None, None
-        return (
-            None,
-            None,
-            "type hints could not be resolved "
-            f"({type(exc).__name__}: {exc}); schema checks skipped",
+        # Warn only when a hint could name rows: the return value, the first
+        # parameter, or any list/dict hint (not ``model: "Model"``).
+        if not (
+            {"return", *params[:1]} & set(annotations)
+            or any("list" in str(a) or "dict" in str(a) for a in annotations.values())
+        ):
+            return _Hints()
+        return _Hints(
+            warning="type hints could not be resolved "
+            f"({type(exc).__name__}: {exc}); schema checks skipped"
         )
-    first = hints.get(params[0]) if params else None
-    return _row_model(first), _row_model(hints.get("return")), None
+    return _Hints({k: v for k, v in hints.items() if k in params}, out)
 
 
 def _pydantic_message(exc: ValidationError) -> str:
@@ -228,12 +316,22 @@ def step(
     """Decorate a function from rows to rows built from Forger ops.
 
     The step is cached like an ``@op`` (under the op name ``step.<name>``) and
-    prints a report when it returns. If the first parameter or the return value
-    is annotated ``list[X]`` with ``X`` a pydantic model, every row must be a dict
-    that validates against ``X`` (rows stay dicts).
+    prints a report when it returns. Its input is every argument that holds
+    rows (see ``_row_arguments``): with several, the report shows each count,
+    e.g. ``solvable 111 + refusals 42 → 153 rows``, and the yield uses the sum.
+    It returns a list of rows or a dict of named row lists (streams), e.g.
+    ``{"train": kept, "refusals": refused}``; each stream gets its own count,
+    fields line, and sample rows.
 
-    Errors (``StepContractError``): the result is not a list, the step called no
-    Forger ops, rows do not match the annotated row model, or the step was called
+    If a parameter or the return value is annotated ``list[X]`` with ``X`` a
+    pydantic model, every row must be a dict that validates against ``X``
+    (rows stay dicts). For streams, annotate ``dict[str, list[X]]`` (every
+    stream holds ``X`` rows) or a ``TypedDict`` whose values are ``list[X]``
+    (those streams, each with its own row model).
+
+    Errors (``StepContractError``): the result is neither a list nor a dict of
+    lists, the step called no Forger ops, rows do not match the annotated row
+    model (or the streams those a ``TypedDict`` names), or the step was called
     inside another step. Warnings: an op missed its ``min_yield`` /
     ``max_yield``, the rows are not dicts, ``show`` names a field no output row
     has, or the type hints could not be resolved.
@@ -245,8 +343,8 @@ def step(
         prod: Do not print the report.
         strict: Raise ``StepContractError`` when the step has any warning; such
             a result is not cached.
-        sample: Number of output rows shown in the report (``inspect_step``
-            shows up to 10).
+        sample: Number of output rows shown in the report, per stream
+            (``inspect_step`` shows up to 10).
         show: Fields of the sample rows to print in full, each as an indented
             block under its row, e.g. ``show=["statement"]``. Other fields are
             cut or summarized.
@@ -261,10 +359,9 @@ def step(
     def decorate(fn: F) -> F:
         step_name = name or fn.__name__
         cached = op(fn, name=f"{_tracking.STEP_OP_PREFIX}{step_name}", cache=cache)
-        params = list(inspect.signature(fn).parameters)
-        first_param = params[0] if params else None
+        signature = inspect.signature(fn)
         doc = inspect.getdoc(fn) or ""
-        hints: list[Any] = []  # resolved on the first call, when names exist
+        hints: list[_Hints] = []  # resolved on the first call, when names exist
 
         @wraps(fn)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -274,37 +371,64 @@ def step(
                     f"step {step_name} was called inside step {outer.name}; steps "
                     "cannot nest, so call both from the @pipeline"
                 )
-            if not hints or hints[0][2] is not None:
-                hints[:] = [_row_models(fn, localns)]
-            in_model, out_model, hint_warning = hints[0]
+            if not hints or hints[0].warning is not None:
+                hints[:] = [_step_hints(fn, localns)]
+            hint = hints[0]
+            row_args = _row_arguments(signature, hint, args, kwargs)
+            several = len(row_args) > 1
+            models = [(label, hint.model(param)) for label, param, _ in row_args]
+            if several:
+                input_type = (
+                    " + ".join(f"{label} {_type_label(m)}" for label, m in models)
+                    if any(m for _, m in models)
+                    else None
+                )
+            else:
+                first = models[0][1] if models else None
+                params = list(signature.parameters)
+                first = first or (hint.model(params[0]) if params else None)
+                input_type = _type_label(first) if first else None
             rec = StepRecord(
                 name=step_name,
                 doc=doc,
                 sample_shown=sample,
                 show=shown_fields,
-                input_type=f"list[{in_model.__name__}]" if in_model else None,
-                output_type=f"list[{out_model.__name__}]" if out_model else None,
+                input_type=input_type,
+                output_type=hint.out.label() if hint.out else None,
             )
-            if hint_warning:
-                rec.warnings.append(hint_warning)
-            rows_in = args[0] if args else kwargs.get(first_param or "")
+            if hint.warning:
+                rec.warnings.append(hint.warning)
+            if row_args:
+                rec.n_in = sum(len(rows) for _, _, rows in row_args)
+            if several:
+                rec.inputs = [
+                    RowStream(name=label, n_rows=len(rows))
+                    for label, _, rows in row_args
+                ]
+            for (label, _, rows), (_, model) in zip(row_args, models):
+                if model is not None:
+                    which = f"input {label}" if several else "input"
+                    _validate_rows(rows, model, step_name, which)
+            filled = [rows for _, _, rows in row_args if rows]
             input_keys: list[Any] | None = None
-            if isinstance(rows_in, list):
-                rec.n_in = len(rows_in)
-                if in_model is not None:
-                    _validate_rows(rows_in, in_model, step_name, "input")
-                if rows_in and all(isinstance(row, dict) for row in rows_in):
-                    input_keys = _keys(rows_in)
+            if filled and all(isinstance(r, dict) for rows in filled for r in rows):
+                input_keys = _keys([r for rows in filled for r in rows])
 
-            # (python) rows compare the rows of one stream; with several list
-            # arguments the step's input is unclear, so it has none.
+            # (python) rows inside the step compare the rows of one stream; with
+            # several list arguments the step's input is unclear, so it has none.
             arg_lists = [a for a in (*args, *kwargs.values()) if isinstance(a, list)]
-            one_list = len(arg_lists) == 1 and arg_lists[0] is rows_in
-            stream = rows_in if one_list else None
+            one_list = (
+                len(row_args) == 1
+                and len(arg_lists) == 1
+                and arg_lists[0] is row_args[0][2]
+            )
+            stream = row_args[0][2] if one_list else None
             flow = StepFlow(stream, arg_lists)
             pipeline_rec = _tracking.pipeline_for_step()
             started = (
-                _tracking.step_starting(pipeline_rec, stream, arg_lists)
+                _tracking.step_starting(
+                    pipeline_rec, [rows for _, _, rows in row_args], arg_lists
+                )
                 if pipeline_rec is not None
                 else None
             )
@@ -319,10 +443,12 @@ def step(
                 checked.append(True)
                 if isinstance(result, list):
                     rec.python_gaps = flow.gaps(result)
+                elif _is_streams(result):  # every stream's rows, as one return
+                    rec.python_gaps = flow.gaps([r for v in result.values() for r in v])
                 _check_step_result(
                     rec,
                     result,
-                    out_model,
+                    hint.out,
                     _tracking.ops_started() - ops_before,
                     input_keys,
                 )
@@ -362,7 +488,7 @@ def step(
                 flow.close()  # let go of the rows the step's ops saw
 
             if not checked:  # a cache hit
-                _check_step_result(rec, result, out_model, 0, input_keys)
+                _check_step_result(rec, result, hint.out, 0, input_keys)
             finish(result)
             if strict and rec.warnings:
                 raise _strict_error(rec)
@@ -394,52 +520,185 @@ def _strict_error(rec: StepRecord) -> StepContractError:
     )
 
 
+def _row_arguments(
+    signature: inspect.Signature, hints: _Hints, args: tuple, kwargs: dict
+) -> list[tuple[str, str, list[Any]]]:
+    """The step's arguments that hold rows, as ``(label, parameter, rows)``.
+
+    The first argument counts when it is a list (also a list of seed topic
+    names, as a step's input always has). Any other argument counts when it
+    is a non-empty list of dicts, or a list annotated ``list[dict]`` or
+    ``list[X]``. Models, numbers, strings, and other lists (topic names
+    after the first argument, a list of judges) do not count. ``*rows``
+    arguments are labelled ``rows[0]``, ``rows[1]``, ...
+    """
+    # Per-call controls of the step's @op wrapper, not the function's own.
+    reserved = ("_no_cache", "_cache_only", "min_yield", "max_yield")
+    own = {k: v for k, v in kwargs.items() if k not in reserved}
+    try:
+        bound = signature.bind(*args, **own)
+    except TypeError:
+        return []  # the call itself raises
+    out: list[tuple[str, str, list[Any]]] = []
+    for i, (param, value) in enumerate(bound.arguments.items()):
+        kind = signature.parameters[param].kind
+        if kind is inspect.Parameter.VAR_POSITIONAL:
+            items = [(f"{param}[{j}]", v) for j, v in enumerate(value)]
+        elif kind is inspect.Parameter.VAR_KEYWORD:
+            items = [(str(k), v) for k, v in value.items()]
+        else:
+            items = [(param, value)]
+        hinted = _is_rows_hint(hints.params.get(param))
+        for j, (label, v) in enumerate(items):
+            if not isinstance(v, list):
+                continue
+            dicts = bool(v) and all(isinstance(row, dict) for row in v)
+            if (i == 0 and j == 0) or hinted or dicts:
+                out.append((label, param, v))
+    return out
+
+
+def _is_streams(result: Any) -> bool:
+    """True for a dict of named row lists: ``{"train": [...], "refusals": [...]}``."""
+    return isinstance(result, dict) and all(
+        isinstance(k, str) and isinstance(v, list) for k, v in result.items()
+    )
+
+
+def _not_streams(name: str, result: dict) -> StepContractError:
+    key, value = next(
+        (k, v)
+        for k, v in result.items()
+        if not (isinstance(k, str) and isinstance(v, list))
+    )
+    what = (
+        f"key {key!r} is not a string"
+        if not isinstance(key, str)
+        else f"value {key!r} is {type(value).__name__}, not a list"
+    )
+    return StepContractError(
+        f"step {name} returned dict whose {what}; a step returns rows or a dict "
+        "of named row lists"
+    )
+
+
+def _describe(
+    rows: list[Any], show: list[str], input_keys: list[Any] | None, into: Any
+) -> list[Any] | None:
+    """Fill ``into``'s sample and fields from dict ``rows``; return their keys.
+
+    ``into`` is the step record (one list of rows) or one ``RowStream``.
+    Returns None, filling nothing, when the rows are not all dicts.
+    """
+    if not all(isinstance(row, dict) for row in rows):
+        return None
+    kept = rows[:_SAMPLE_ROWS_KEPT]
+    shown = set(show)
+    # Fields named in show= are kept whole; they print in full.
+    into.sample = [
+        {
+            k: v if k in shown else _truncate(v, _SAMPLE_FIELD_CHARS)
+            for k, v in row.items()
+        }
+        for row in kept
+    ]
+    # Summaries of long values need the whole value, not the cut sample.
+    into.sample_summaries = [sample_summaries(row) for row in kept]
+    into.fields = _field_infos(rows)
+    keys = _keys(rows)
+    if input_keys is not None and rows:
+        into.fields_added = [str(k) for k in keys if k not in input_keys]
+        into.fields_removed = [str(k) for k in input_keys if k not in keys]
+    return keys
+
+
+def _check_streams(rec: StepRecord, result: dict, out: _OutHint | None) -> None:
+    """Check the stream names against the return hint, when it names streams."""
+    if out is not None and out.model is not None:
+        raise StepContractError(
+            f"step {rec.name} returned dict but its return annotation is "
+            f"{out.label()}; annotate dict[str, list[X]] or a TypedDict of streams"
+        )
+    if out is None or out.streams is None:
+        return
+    missing = [k for k in out.streams if k in out.required and k not in result]
+    extra = [k for k in result if k not in out.streams]
+    if missing or extra:
+        parts = []
+        if missing:
+            parts.append(f"no stream {', '.join(map(repr, missing))}")
+        if extra:
+            parts.append(f"stream {', '.join(map(repr, extra))} not in {out.name}")
+        raise StepContractError(
+            f"step {rec.name} returned {' and '.join(parts)} (streams of "
+            f"{out.name}: {', '.join(out.streams)})"
+        )
+
+
 def _check_step_result(
     rec: StepRecord,
     result: Any,
-    out_model: type[BaseModel] | None,
+    out: _OutHint | None,
     ops_started: int,
     input_keys: list[Any] | None = None,
 ) -> None:
-    """Validate a step's result; fill in its row count, fields, sample, and warnings.
+    """Validate a step's result; fill in its row counts, fields, samples, and warnings.
 
+    The result is a list of rows or a dict of named row lists (streams).
     ``ops_started`` is how many ops the process started while the step ran; ops
     from worker threads count there but not in ``rec.ops``. ``input_keys`` are
     the input rows' fields when those rows are dicts.
     """
-    if not isinstance(result, list):
-        raise StepContractError(
-            f"step {rec.name} returned {type(result).__name__}; a step must return "
-            "a list of rows"
-        )
-    rec.n_out = len(result)
-    if out_model is not None:
-        _validate_rows(result, out_model, rec.name, "output")
-    if all(isinstance(row, dict) for row in result):
-        rows = result[:_SAMPLE_ROWS_KEPT]
-        shown = set(rec.show)
-        # Fields named in show= are kept whole; they print in full.
-        rec.sample = [
-            {
-                k: v if k in shown else _truncate(v, _SAMPLE_FIELD_CHARS)
-                for k, v in row.items()
-            }
-            for row in rows
-        ]
-        # Summaries of long values need the whole value, not the cut sample.
-        rec.sample_summaries = [sample_summaries(row) for row in rows]
-        rec.fields = _field_infos(result)
-        output_keys = _keys(result)
-        if input_keys is not None and result:
-            rec.fields_added = [str(k) for k in output_keys if k not in input_keys]
-            rec.fields_removed = [str(k) for k in input_keys if k not in output_keys]
-        missing = [f for f in rec.show if result and f not in output_keys]
-        if missing:
+    output_keys: list[Any] = []
+    if isinstance(result, list):
+        if out is not None and out.wants_dict:
+            raise StepContractError(
+                f"step {rec.name} returned a list but its return annotation is "
+                f"{out.name or out.label()}; return a dict of named row lists"
+            )
+        rec.n_out = len(result)
+        if out is not None and out.model is not None:
+            _validate_rows(result, out.model, rec.name, "output")
+        keys = _describe(result, rec.show, input_keys, rec)
+        if keys is None:
+            rec.warnings.append(_NOT_DICTS)
+        output_keys = keys or []
+    elif isinstance(result, dict):
+        if not _is_streams(result):
+            raise _not_streams(rec.name, result)
+        _check_streams(rec, result, out)
+        rec.n_out = sum(len(rows) for rows in result.values())
+        rec.streams = []
+        not_dicts = []
+        for name, rows in result.items():
+            model = out.stream_model(name) if out is not None else None
+            if model is not None:
+                _validate_rows(rows, model, rec.name, f"output stream {name!r}")
+            stream = RowStream(
+                name=name,
+                n_rows=len(rows),
+                row_type=_type_label(model) if model is not None else None,
+            )
+            keys = _describe(rows, rec.show, input_keys, stream)
+            if keys is None:
+                not_dicts.append(name)
+            output_keys += [k for k in keys or [] if k not in output_keys]
+            rec.streams.append(stream)
+        if not_dicts:
             rec.warnings.append(
-                f"show= names fields no output row has: {', '.join(missing)}"
+                f"rows of {', '.join(not_dicts)} are not dicts; schema checks and "
+                "samples skipped"
             )
     else:
-        rec.warnings.append(_NOT_DICTS)
+        raise StepContractError(
+            f"step {rec.name} returned {type(result).__name__}; a step returns rows "
+            "or a dict of named row lists"
+        )
+    missing = [f for f in rec.show if output_keys and f not in output_keys]
+    if missing:
+        rec.warnings.append(
+            f"show= names fields no output row has: {', '.join(missing)}"
+        )
 
     if not rec.cache_hit and not rec.ops:
         if ops_started > 0:
@@ -473,7 +732,10 @@ def pipeline(
     """Decorate a function that calls ``@step`` functions; print a summary at the end.
 
     ``alter.dynamic_step`` called directly in the pipeline counts as a step; any
-    other op called outside a step is listed as a bare op with a warning.
+    other op called outside a step is listed as a bare op with a warning. The
+    pipeline may return anything; the summary's final row count is that of a
+    returned list, or of a dict of row lists (with each stream), and is left out
+    for anything else (a tuple, None).
 
     Errors (``PipelineContractError``): no step ran, or the pipeline was called
     inside another pipeline. Warnings: only one step ran; no quality filter, no
@@ -519,6 +781,7 @@ def pipeline(
             try:
                 result = fn(*args, **kwargs)
                 _tracking.close_pipeline_flow(rec, result)
+                _count_returned(rec, result)
             finally:
                 _tracking.exit_pipeline(scope)
             rec.duration_s = time.perf_counter() - start
@@ -538,6 +801,22 @@ def pipeline(
     if _fn is not None:
         return decorate(_fn)
     return decorate
+
+
+def _count_returned(rec: PipelineRecord, result: Any) -> None:
+    """The pipeline's final row count: a list, or a dict of row lists summed.
+
+    Anything else (a tuple, None, a path) has no row count; the summary leaves
+    it out.
+    """
+    if isinstance(result, list):
+        rec.returned, rec.n_out = "rows", len(result)
+    elif isinstance(result, dict) and result and _is_streams(result):
+        rec.returned = "streams"
+        rec.out_streams = [RowStream(name=k, n_rows=len(v)) for k, v in result.items()]
+        rec.n_out = sum(s.n_rows for s in rec.out_streams)
+    else:
+        rec.returned = "other"
 
 
 def _check_pipeline(rec: PipelineRecord) -> None:

@@ -18,9 +18,10 @@ questions, from the same record:
 Anything else stays silent: rows merged from two sources, rows split between
 two ops (also rebuilt ones), steps called with several lists, ops whose input
 is not a list, and chunks of rebuilt rows. Between steps, only identity
-counts. Past ``MAX_HELD_ROWS`` held rows a step stops tracking: later calls
-share report rows by op name, and the step shows no (python) rows. Nothing
-here imports the rest of pyforger.
+counts, per stream when a step returned a dict of row lists. Past
+``MAX_HELD_ROWS`` held rows a step stops tracking: later calls share report
+rows by op name, and the step shows no (python) rows. Nothing here imports
+the rest of pyforger.
 """
 
 from __future__ import annotations
@@ -44,9 +45,11 @@ class PythonGap(BaseModel):
     the report row whose output went in (None: the step's input), and
     ``before_call`` that of the row that took the rows (None: the step's
     return value); ``after`` / ``before`` are their op names. In a pipeline,
-    ``position`` is the index in ``steps`` of the step that took the rows, and
-    ``after`` / ``before`` are step names. ``inferred`` is True when the rows
-    were rebuilt and only counts compare.
+    ``position`` is the index in ``steps`` of the step that took the rows,
+    ``after`` / ``before`` are step names, and ``stream`` names the output
+    stream of ``after`` the rows came from when it returned a dict of row
+    lists. ``inferred`` is True when the rows were rebuilt and only counts
+    compare.
     """
 
     after: str | None = None
@@ -54,6 +57,7 @@ class PythonGap(BaseModel):
     after_call: int | None = None
     before_call: int | None = None
     position: int | None = None
+    stream: str | None = None
     n_in: int
     n_out: int
     inferred: bool = False
@@ -344,55 +348,98 @@ class _Candidate:
     missing: set[int]
 
 
+def _streams(rows_out: Any) -> dict[str | None, list[Any]] | None:
+    """A step's output by stream: ``{None: rows}``, or a dict of row lists as is."""
+    if isinstance(rows_out, list):
+        return {None: list(rows_out)}
+    if isinstance(rows_out, dict) and all(
+        isinstance(v, list) for v in rows_out.values()
+    ):
+        return {str(k): list(v) for k, v in rows_out.items()}
+    return None
+
+
 class PipelineFlow:
     """Identity gaps between consecutive steps of one pipeline run.
 
     The output of the latest step is held until the next step starts (then it
-    is compared and let go). A drop is kept only when no later step, and not
-    the pipeline's return value, takes the rows that went missing.
+    is compared and let go). A step that returned a dict of row lists is held
+    per stream, so ``check(out["train"])`` compares with the ``train`` stream
+    only. A drop is kept only when no later step, and not the pipeline's
+    return value, takes the rows that went missing.
     """
 
     def __init__(self) -> None:
         """Start with no previous step."""
         self._lock = threading.Lock()
-        self._prev: list[Any] | None = None
+        self._prev: dict[str | None, list[Any]] | None = None
         self._prev_index = -1
         self._prev_name: str | None = None
         self._candidates: list[_Candidate] = []
 
     def start(
-        self, rows_in: list[Any] | None, arg_lists: list[list[Any]]
-    ) -> _Candidate | None:
-        """A step starts: compare its rows with the previous step's output."""
-        arg_ids = {id(r) for rows in arg_lists for r in rows if traceable(r)}
+        self, rows_in: list[list[Any]], arg_lists: list[list[Any]]
+    ) -> list[_Candidate]:
+        """A step starts: compare its rows arguments with the previous step's output.
+
+        For each stream of that output, the step's rows arguments drawn wholly
+        from it (``out["train"]``, or ``solved[:4]`` and ``solved[4:]``) are
+        joined; fewer rows than the stream had is a gap. A stream whose rows
+        also went into another argument (merged with other rows) is skipped.
+        """
+        arg_ids = [_ids(rows) for rows in arg_lists]
+        all_ids = set().union(*arg_ids)
+        found: list[_Candidate] = []
         with self._lock:
-            self._candidates = [c for c in self._candidates if not c.missing & arg_ids]
+            self._candidates = [c for c in self._candidates if not c.missing & all_ids]
             prev, self._prev = self._prev, None
-            if prev is None or not rows_in or len(rows_in) >= len(prev):
-                return None
-            if not all(traceable(r) for r in rows_in):
-                return None
-            prev_ids = _ids(prev)
-            ids = {id(r) for r in rows_in}
-            if not ids <= prev_ids:
-                return None
-            candidate = _Candidate(
-                PythonGap(after=self._prev_name, n_in=len(prev), n_out=len(rows_in)),
-                self._prev_index,
-                prev_ids - ids,
-            )
-            self._candidates.append(candidate)
-            return candidate
+            if prev is None:
+                return found
+            for stream, rows in prev.items():
+                prev_ids = _ids(rows)
+                taken = [
+                    r
+                    for r in rows_in
+                    if r and all(traceable(x) for x in r) and _ids(r) <= prev_ids
+                ]
+                if not taken:
+                    continue
+                merged = any(
+                    ids & prev_ids
+                    for rows_arg, ids in zip(arg_lists, arg_ids)
+                    if not any(rows_arg is t for t in taken)
+                )
+                taken_ids = set().union(*(_ids(r) for r in taken))
+                n_out = sum(len(r) for r in taken)
+                if merged or n_out >= len(rows):
+                    continue
+                candidate = _Candidate(
+                    PythonGap(
+                        after=self._prev_name,
+                        stream=stream,
+                        n_in=len(rows),
+                        n_out=n_out,
+                    ),
+                    self._prev_index,
+                    prev_ids - taken_ids,
+                )
+                self._candidates.append(candidate)
+                found.append(candidate)
+        return found
 
     def finish(
-        self, candidate: _Candidate | None, position: int, name: str, rows_out: Any
+        self,
+        candidates: list[_Candidate] | None,
+        position: int,
+        name: str,
+        rows_out: Any,
     ) -> None:
         """A step joined the pipeline at ``position``; hold its output rows."""
         with self._lock:
-            if candidate is not None:
+            for candidate in candidates or []:
                 candidate.gap.position = position
                 candidate.gap.before = name
-            self._prev = list(rows_out) if isinstance(rows_out, list) else None
+            self._prev = _streams(rows_out)
             self._prev_index, self._prev_name = position, name
 
     def close(self, result: Any) -> list[PythonGap]:
