@@ -225,7 +225,10 @@ it (or, if it finds none, says what it checked); the score is at most the lowest
 `{"feedback": "...", "score": 3}`. The prompt fences the input and output in `<input>` / `<output>` tags and says that
 length or detail the criteria do not ask for counts for nothing. The feedback costs more output tokens per judge call.
 Still check the step report's histogram; if it is piled up at the top, the threshold is not separating anything
-(tighten `criteria` or the rubric).
+(tighten `criteria` or the rubric). The criteria matter as much as the prompt: a criterion most outputs meet easily
+("the scenario is realistic") still scores nearly everything 5, and one worded too literally ("same voice" for a
+rewrite that must drop sarcasm) marks down good outputs, so read a few rows' feedback before trusting a threshold.
+With several samples per input, `group_by` separates candidates best.
 
 The default rubric, `pyforger.filter.judge.DEFAULT_RUBRIC`, describes the five levels of the default `max_score=5` by
 how serious the output's mistakes are (1: fails the task; 3: a mistake makes part of it wrong, misleading, or
