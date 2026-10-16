@@ -440,3 +440,123 @@ class TestOneBatchByDefault:
         assert len(items) == 30
         assert generate.call_count == 1
         assert generate.call_args.kwargs["n"] == 30
+
+
+class Numbered:
+    """Fake completion: the i-th completion for prompt "P" across requests is "P#i".
+
+    Records each request's n. Request k for "P" raises when "P@k" is in `fail`.
+    """
+
+    def __init__(self, fail=()):
+        """Start every prompt's numbering at 0."""
+        self.fail = set(fail)
+        self.lock = threading.Lock()
+        self.next: dict[str, int] = {}
+        self.requests: dict[str, int] = {}
+        self.ns: list[int] = []
+
+    def __call__(self, messages, n=1, **kwargs):
+        """Fake litellm.completion."""
+        text = messages[-1]["content"]
+        with self.lock:
+            self.ns.append(n)
+            k = self.requests.get(text, 0)
+            self.requests[text] = k + 1
+            start = self.next.get(text, 0)
+            self.next[text] = start + n
+        if f"{text}@{k}" in self.fail:
+            raise RuntimeError(f"504 for {text}@{k}")
+        response = make_response(text)
+        response.choices = [
+            SimpleNamespace(
+                message=SimpleNamespace(content=f"{text}#{i}", reasoning_content=None)
+            )
+            for i in range(start, start + n)
+        ]
+        return response
+
+
+class TestLargeN:
+    """n above _MAX_N_PER_REQUEST is split into concurrent requests."""
+
+    @pytest.mark.parametrize(
+        "n, sizes",
+        [
+            (1, [1]),
+            (16, [16]),
+            (17, [9, 8]),
+            (40, [14, 13, 13]),
+            (100, [15] * 2 + [14] * 5),
+        ],
+    )
+    def test_request_sizes(self, n, sizes):
+        """Near-equal parts of at most 16 that add up to n."""
+        assert model_module._request_sizes(n, fan_out=False) == sizes
+
+    def test_n_40_is_three_requests_in_order(self, mock_litellm):
+        """n=40 on gpt-4o sends n=14, 13, 13; completions keep their order."""
+        fake = Numbered()
+        mock_litellm.completion.side_effect = fake
+        model = Model("gpt-4o", max_concurrency=1)
+        result = model.generate("Q", n=40)
+        assert result == [f"Q#{i}" for i in range(40)]
+        assert fake.ns == [14, 13, 13]
+        assert result.usage["prompt_tokens"] == 30  # 3 requests x 10
+        assert len(model.history) == 1
+
+    def test_several_prompts_keep_prompt_order(self, mock_litellm):
+        """Two prompts with n=20 get two requests each, merged per prompt."""
+        fake = Numbered()
+        mock_litellm.completion.side_effect = fake
+        results = Model("gpt-4o", show_progress=False).generate_batch(["A", "B"], n=20)
+        assert [sorted(r, key=lambda c: int(c.split("#")[1])) for r in results] == [
+            [f"A#{i}" for i in range(20)],
+            [f"B#{i}" for i in range(20)],
+        ]
+        assert sorted(fake.ns) == [10, 10, 10, 10]
+
+    def test_failed_part_is_partial_with_return_exceptions(self, mock_litellm):
+        """One of three parts fails: the prompt keeps the 27 that arrived."""
+        mock_litellm.completion.side_effect = Numbered(fail={"Q@0"})
+        model = Model("gpt-4o", max_concurrency=1)
+        [result] = model.generate_batch(["Q"], n=40, return_exceptions=True)
+        assert result == [f"Q#{i}" for i in range(14, 40)]
+
+    def test_sample_from_llm_n_100(self, mock_litellm):
+        """sample_from_LLM n=100: one generate call, no request above n=16."""
+        fake = Numbered()
+        mock_litellm.completion.side_effect = fake
+        model = Model("gpt-4o", show_progress=False)
+        with patch.object(model, "generate", wraps=model.generate) as generate:
+            items = sample_from_LLM("Generate", model, n=100)
+        assert len(items) == 100
+        assert generate.call_count == 1
+        assert max(fake.ns) <= 16 and sum(fake.ns) == 100
+
+    def test_self_taught_reasoner_large_n(self, mock_litellm):
+        """n=32 per item: requests of 16; every completion becomes a candidate."""
+        fake = Numbered()
+        mock_litellm.completion.side_effect = fake
+        items = [{"q": "1+1", "final_answer": "1"}, {"q": "2+2", "final_answer": "2"}]
+        kept = self_taught_reasoner(
+            items, "{q}", Model("gpt-4o", show_progress=False), n=32
+        )
+        # "1+1#1" extracts 1 and "2+2#2" extracts 2: one match per item.
+        assert [row["response"] for row in kept] == ["1+1#1", "2+2#2"]
+        assert sorted(fake.ns) == [16] * 4
+
+    def test_generate_from_context_large_samples_per_item(self, mock_litellm):
+        """samples_per_item=20: requests of 10, 20 outputs per item in order."""
+        fake = Numbered()
+        mock_litellm.completion.side_effect = fake
+        out = generate_from_context(
+            [{"t": "A"}, {"t": "B"}],
+            "{t}",
+            Model("gpt-4o", max_concurrency=1),
+            samples_per_item=20,
+        )
+        assert [row["text"] for row in out] == [f"A#{i}" for i in range(20)] + [
+            f"B#{i}" for i in range(20)
+        ]
+        assert fake.ns == [10, 10, 10, 10]

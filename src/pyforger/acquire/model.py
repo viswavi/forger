@@ -26,6 +26,9 @@ Prompt = Union[str, list[Message]]
 
 # Threads per generate_batch call when the Model sets no max_concurrency.
 _DEFAULT_MAX_WORKERS = 100
+# Most completions asked of one request. A larger n is split into concurrent
+# requests, e.g. n=40 on gpt-4o sends n=14, 13 and 13.
+_MAX_N_PER_REQUEST = 16
 # Without a terminal (stderr redirected to a log file), progress is a plain log
 # line at most this often instead of a redrawn bar.
 _PROGRESS_LOG_INTERVAL_S = 30.0
@@ -72,27 +75,42 @@ def _make_semaphore(max_concurrency: int | None) -> threading.BoundedSemaphore |
     return threading.BoundedSemaphore(max_concurrency)
 
 
+def _request_sizes(n: int, fan_out: bool) -> list[int]:
+    """Per-request n values for one prompt, e.g. 40 -> [14, 13, 13].
+
+    Fan-out models get n ones; others get near-equal parts of at most
+    _MAX_N_PER_REQUEST.
+    """
+    if fan_out:
+        return [1] * n
+    parts = -(-n // _MAX_N_PER_REQUEST)
+    return [n // parts + (1 if i < n % parts else 0) for i in range(parts)]
+
+
 def _complete(
     messages: list[Message],
+    n: int,
     call_kwargs: dict[str, Any],
     semaphore: threading.BoundedSemaphore | None,
 ) -> Any:
     """One litellm.completion call, holding a `max_concurrency` slot if any."""
     if semaphore is None:
-        return litellm.completion(messages=messages, **call_kwargs)
+        return litellm.completion(messages=messages, n=n, **call_kwargs)
     with semaphore:
-        return litellm.completion(messages=messages, **call_kwargs)
+        return litellm.completion(messages=messages, n=n, **call_kwargs)
 
 
 def _batch_completion_with_progress(
-    all_messages: list[list[dict[str, str]]],
+    requests: list[tuple[list[Message], int]],
     call_kwargs: dict[str, Any],
     *,
     semaphore: threading.BoundedSemaphore | None = None,
     max_workers: int = _DEFAULT_MAX_WORKERS,
     progress: str = "bar",
 ) -> list[Any]:
-    """Send every request concurrently; return responses or exceptions in order.
+    """Send (messages, n) requests concurrently; return responses or errors.
+
+    Results are in request order.
 
     A replacement for `litellm.batch_completion`, which retrieves
     `future.result()` in submission order, so the whole call looks frozen until
@@ -101,13 +119,13 @@ def _batch_completion_with_progress(
     a log line every 30s (`"log"`), or nothing (`"off"`). Each request holds a
     slot of `semaphore` (the Model's `max_concurrency`) while in flight.
     """
-    results: list[Any] = [None] * len(all_messages)
-    total = len(all_messages)
+    results: list[Any] = [None] * len(requests)
+    total = len(requests)
     desc = f"LLM calls ({call_kwargs.get('model', '?')})"
     with ThreadPoolExecutor(max_workers=min(max_workers, total)) as executor:
         future_to_idx = {
-            executor.submit(_complete, msgs, call_kwargs, semaphore): i
-            for i, msgs in enumerate(all_messages)
+            executor.submit(_complete, msgs, n, call_kwargs, semaphore): i
+            for i, (msgs, n) in enumerate(requests)
         }
         finished: Iterable[Future] = as_completed(future_to_idx)
         if progress == "bar":
@@ -562,7 +580,8 @@ class Model:
         Models that do not support n > 1 (Claude, Grok, Gemini, o1/o3/o4,
         gpt-5, or any whose LiteLLM supported params lack "n") get n separate
         concurrent n=1 requests per prompt, merged into one GenerateResult
-        with summed usage and cost. Other models get one request with n.
+        with summed usage and cost. Other models get one request with n, or
+        several when n > 16 (n=40 sends n=14, 13, 13), merged the same way.
         All requests are sent at once, up to the Model's max_concurrency.
 
         Args:
@@ -577,8 +596,9 @@ class Model:
             return_exceptions: When True, a request that still fails after
                 retries (e.g. a gateway 504) does not discard the others: a
                 prompt whose requests all failed gets the exception in its
-                slot, and a prompt with only some failed fan-out copies gets
-                the completions that arrived (fewer than n, not checked).
+                slot, and a prompt with only some failed requests (fan-out
+                copies or n > 16 parts) gets the completions that arrived
+                (fewer than n, not checked).
                 When False (default), the first failure is raised.
 
         Returns:
@@ -606,17 +626,18 @@ class Model:
         )
 
         # Models that ignore or reject n > 1 get n concurrent n=1 requests per
-        # prompt, e.g. prompts [A, B] with n=2 send [A, A, B, B].
+        # prompt, e.g. prompts [A, B] with n=2 send [A, A, B, B]. Others get
+        # requests of at most _MAX_N_PER_REQUEST, e.g. n=40 sends n=14, 13, 13.
         fan_out = n != 1 and _fans_out_n(self._model_id)
-        copies = n if fan_out else 1
-        all_messages = [
-            [dict(message) for message in messages] if fan_out else messages
+        sizes = _request_sizes(n, fan_out)
+        copies = len(sizes)
+        requests = [
+            ([dict(m) for m in messages] if copies > 1 else messages, size)
             for messages in map(_to_messages, prompts)
-            for _ in range(copies)
+            for size in sizes
         ]
         call_kwargs = dict(
             model=self._model_id,
-            n=1 if fan_out else n,
             temperature=temperature,
             max_tokens=max_tokens,
             stop=stop,
@@ -625,16 +646,17 @@ class Model:
             **self._kwargs,
         )
         responses: list[Any]
-        if len(all_messages) == 1:
+        if len(requests) == 1:
+            messages, size = requests[0]
             try:
-                responses = [_complete(all_messages[0], call_kwargs, self._semaphore)]
+                responses = [_complete(messages, size, call_kwargs, self._semaphore)]
             except Exception as exc:
                 if not return_exceptions:
                     raise
                 responses = [exc]
         else:
             responses = _batch_completion_with_progress(
-                all_messages,
+                requests,
                 call_kwargs,
                 semaphore=self._semaphore,
                 max_workers=self._max_concurrency or _DEFAULT_MAX_WORKERS,

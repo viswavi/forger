@@ -287,8 +287,9 @@ Use `Model(..., reasoning_effort="low")` where supported by the model/provider.
 `model.generate_batch(prompts, n=k)` returns exactly `k` completions per prompt. Claude, Grok, Gemini, o1/o3/o4, and
 gpt-5 models (also behind `litellm_proxy/`, `openrouter/`, or provider prefixes), and models whose LiteLLM supported
 params lack `n`, get `k` concurrent `n=1` requests per prompt, merged into one `GenerateResult` with summed usage and
-cost (`raw` is then the list of responses). Other models get one request with `n=k`; if the provider returns a
-different count, it raises a `ValueError` (add the model to `_NO_N_BRANDS` / `_NO_N_PREFIXES` in `model.py`).
+cost (`raw` is then the list of responses). Other models get one request with `n=k`, or for `k > 16` concurrent
+requests of at most 16, merged the same way (`n=40` sends 14, 13, 13); if the provider returns a different count, it
+raises a `ValueError` (add the model to `_NO_N_BRANDS` / `_NO_N_PREFIXES` in `model.py`).
 
 #### Prompt types
 
