@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 import pickle
 from typing import Any
@@ -71,6 +72,79 @@ def _code_key(code: Any) -> list[Any]:
     ]
 
 
+@functools.lru_cache(maxsize=4096)
+def global_names(code: Any) -> tuple[str, ...]:
+    """Sorted names that a code object and the code nested in it may read as globals.
+
+    Nested code covers lambdas, comprehensions, and inner functions.
+    ``co_names`` also holds attribute names (``x.split`` adds ``split``), so
+    callers look each name up in the function's globals and skip misses.
+    """
+    names = set(code.co_names)
+    for const in code.co_consts:
+        if isinstance(const, _CODE_T):
+            names.update(global_names(const))
+    return tuple(sorted(names))
+
+
+_PLAIN_SCALARS = (type(None), bool, int, float, complex, str, bytes)
+
+
+def is_plain_data(obj: Any, _seen: set[int] | None = None) -> bool:
+    """True for None, bool, numbers, str, bytes, and containers of those.
+
+    E.g. ``"Answer briefly."``, ``{"easy": [1, 2]}``, ``frozenset({"a"})``; not
+    a logger, a model, or a list holding a function. A cyclic list is not plain.
+    """
+    if isinstance(obj, _PLAIN_SCALARS):
+        return True
+    if not isinstance(obj, (list, tuple, set, frozenset, dict)):
+        return False
+    seen = set() if _seen is None else _seen
+    if id(obj) in seen:
+        return False
+    seen.add(id(obj))
+    items = [*obj.keys(), *obj.values()] if isinstance(obj, dict) else obj
+    plain = all(is_plain_data(x, seen) for x in items)
+    seen.discard(id(obj))
+    return plain
+
+
+def plain_globals(fn: Any) -> dict[str, Any]:
+    """The plain-data module globals ``fn``'s code reads, by name.
+
+    Dunder names (``__name__``, ``__file__``) are skipped: they differ between
+    ``python pipeline.py`` and ``import pipeline`` without changing behavior.
+    """
+    code = getattr(fn, "__code__", None)
+    g = getattr(fn, "__globals__", None)
+    if code is None or not isinstance(g, dict):
+        return {}
+    return {
+        n: g[n]
+        for n in global_names(code)
+        if n in g
+        and not (n.startswith("__") and n.endswith("__"))
+        and is_plain_data(g[n])
+    }
+
+
+def function_key(fn: Any) -> list[Any]:
+    """Key a Python function by qualname, code, and closure values, not globals.
+
+    No ``__module__``: a step run as ``__main__`` and the same step imported
+    from pipeline.py share keys. ``canonical`` adds ``plain_globals(fn)``, so
+    two same-named functions reading different PROMPT strings still differ.
+    """
+    closure = getattr(fn, "__closure__", None) or ()
+    return [
+        "__callable__",
+        getattr(fn, "__qualname__", repr(fn)),
+        _code_key(fn.__code__),
+        [canonical(cell.cell_contents) for cell in closure],
+    ]
+
+
 def canonical(obj: Any) -> Any:
     """Convert obj to a stable, picklable structure for hashing.
 
@@ -96,16 +170,11 @@ def canonical(obj: Any) -> Any:
     if hasattr(obj, "cache_key") and callable(obj.cache_key):
         return ["__cache_key__", canonical(obj.cache_key())]
     if callable(obj):
-        ident = (
-            f"{getattr(obj, '__module__', '?')}."
-            f"{getattr(obj, '__qualname__', repr(obj))}"
-        )
-        code = getattr(obj, "__code__", None)
-        if code is not None:
-            closure = getattr(obj, "__closure__", None) or ()
-            closure_vals = [canonical(cell.cell_contents) for cell in closure]
-            return ["__callable__", ident, _code_key(code), closure_vals]
-        return ["__callable__", ident]
+        if getattr(obj, "__code__", None) is not None:
+            return [*function_key(obj), canonical(plain_globals(obj))]
+        # Builtins have no code to tell them apart, e.g. math.sqrt and cmath.sqrt.
+        qualname = getattr(obj, "__qualname__", repr(obj))
+        return ["__callable__", f"{getattr(obj, '__module__', '?')}.{qualname}"]
     try:
         return pickle.dumps(obj, protocol=4)
     except Exception as e:

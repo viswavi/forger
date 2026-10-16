@@ -297,10 +297,18 @@ def debug_step(rows):
     ...
 ```
 
-**Cache key.** SHA-256 of: the op name, a canonical representation of the function's compiled body (bytecode,
-constants, names, varnames, freevars, argcount, applied recursively to nested code objects), the captured closure
-values, and the call arguments. Editing the decorated function's body invalidates that function's cache; editing an
-unrelated helper does not.
+**Cache key.** SHA-256 of: the op name, the function's qualified name and compiled body (bytecode, constants, names,
+varnames, freevars, argcount, applied recursively to nested code objects), the captured closure values, the values of
+the plain-data module globals it reads, and the call arguments. Plain data is `None`, `bool`, numbers, `str`, `bytes`,
+and tuples, lists, dicts, and sets of those, read anywhere in the body, including lambdas, comprehensions, and inner
+functions. Editing a `PROMPT = "..."` constant or a config dict therefore invalidates the steps that read it. Globals
+are read at each call; closure values are fixed when the function is decorated. The module name is not part of the
+key, so a step run as `python pipeline.py` (`__main__`) and the same step imported from `pipeline` share cache entries.
+
+Not in the key: the bodies of helper functions and classes the op calls (only their names), files read from disk,
+environment variables, other objects held in globals (e.g. a model or client, or an object mutated at runtime), and
+closure values changed after decoration. `@op` logs a warning at decoration for such a global or for `os.environ`.
+When one of these changes, pass `_no_cache=True`. Upgrading to this key layout makes existing cache entries miss once.
 
 **Cache location.** `$FORGER_CACHE` if set, otherwise `~/.cache/forger`. The variable is read at call time, so tests
 can redirect it.
