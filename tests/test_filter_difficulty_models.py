@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import copy
+import threading
+import time
 from typing import Any
 
 import pytest
@@ -10,13 +12,14 @@ from pydantic import StrictBool, TypeAdapter
 from pyforger import _tracking
 from pyforger._render import render_scores
 from pyforger.acquire.model import GenerateResult, Model
-from pyforger.filter import by_comparative_difficulty, by_pass_at_k
+from pyforger.filter import by_comparative_difficulty, by_pass_at_k, program_verifier
 from pyforger.filter.model_difficulty import answer_segment
+from pyforger.op import op
 from pyforger.steps import pipeline, step
 
-# A copy of filter.by_success_rate's input contract, rate math, and selection
-# rule, so these tests fail if the outcomes we write stop being re-selectable by
-# it or our decisions drift from its decisions.
+# An independent copy of the outcomes contract, rate math, and selection rule,
+# so these tests fail if the outcomes we write stop being re-selectable by
+# pass rate or our decisions drift from that rule.
 _OUTCOMES = TypeAdapter(dict[str, list[StrictBool | None]])
 
 
@@ -156,7 +159,7 @@ class TestComparative:
         assert "keeps 1 to 1: 1 of 5" in render_scores(scores)
 
     def test_outcomes_field(self):
-        """Kept rows carry weak/strong grades in by_success_rate's format."""
+        """Kept rows carry weak/strong grades as {group: [grade]}."""
         assert _comparative() == [ROWS[0]]
         kept = _comparative(outcomes_field="evaluations")
         assert kept == [{**ROWS[0], "evaluations": {"weak": [False], "strong": [True]}}]
@@ -413,16 +416,17 @@ class TestPassAtK:
             outcomes_field="evaluations",
         )
         assert kept[0]["evaluations"] == {"model": [True, None, False]}
-        assert seen == [("yes", "t"), ("skip", "t"), ("no", "t")]
+        # Verifiers run concurrently, so only the set of calls is fixed.
+        assert sorted(seen) == [("no", "t"), ("skip", "t"), ("yes", "t")]
 
     def test_verifier_must_return_bool(self):
-        """A non-boolean grade is rejected, as by_success_rate would."""
+        """A non-boolean grade is rejected."""
         model = ScriptedModel("m", {"t": ["1"]})
         with pytest.raises(TypeError):
             _pass_at_k([{"task": "t", "answer": "1"}], model, metric=lambda p, r: 1)
 
     def test_outcomes_field_matches_success_rate(self):
-        """Kept rows' outcomes give by_success_rate the same rate and decision."""
+        """Kept rows' outcomes give the same rate and decision when re-selected."""
         model = ScriptedModel("m", self.SCRIPT)
         kept = _pass_at_k(self.ROWS, model, outcomes_field="evaluations")
         assert [r["evaluations"] for r in kept] == [
@@ -441,7 +445,7 @@ class TestPassAtK:
         [(0.1, 0.9, None), (0.0, 1.0, None), (0.5, 1.0, 2), (0.0, 0.0, 3), (1, 1, 1)],
     )
     def test_same_decisions_as_success_rate(self, min_rate, max_rate, min_valid):
-        """by_success_rate on the stored grades keeps exactly the same rows."""
+        """Re-selecting on the stored grades keeps exactly the same rows."""
         script = {
             **self.SCRIPT,
             "t5": ["5", "", "0", "5"],  # 2/3, one excluded
@@ -631,3 +635,183 @@ def test_comparative_validation(kwargs):
 def test_answer_segment(text, expected):
     """The default prediction is the stripped text after a closed <think> block."""
     assert answer_segment(text) == expected
+
+
+class _ConcurrencyProbe:
+    """Verifier recording the most calls running at once (exact match grades).
+
+    With ``barrier_parties``, each call waits until that many are running.
+    """
+
+    def __init__(self, barrier_parties: int | None = None) -> None:
+        self.barrier = (
+            threading.Barrier(barrier_parties, timeout=10) if barrier_parties else None
+        )
+        self.lock = threading.Lock()
+        self.active = self.peak = 0
+
+    def cache_key(self) -> tuple:
+        """A fresh key per probe, so every test grades anew."""
+        return ("probe", id(self))
+
+    def __call__(self, prediction: str, row: dict) -> bool:
+        with self.lock:
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+        if self.barrier is not None:
+            self.barrier.wait()
+        else:
+            time.sleep(0.01)
+        with self.lock:
+            self.active -= 1
+        return prediction == row["answer"]
+
+
+class TestCompletionsAndVerifiers:
+    """completions_field, optional ground truth, and concurrent verifiers."""
+
+    SCRIPT = TestPassAtK.SCRIPT
+    ROWS = TestPassAtK.ROWS
+
+    def test_pass_at_k_completions_align_with_outcomes(self):
+        """Kept rows carry the k raw completions in the order of their grades."""
+        model = ScriptedModel("m", {"t": ["<think>a</think>1", "", "0", "1"]})
+        rows = [{"task": "t", "answer": "1"}]
+        kept = _pass_at_k(
+            rows,
+            model,
+            min_valid=3,
+            outcomes_field="ev",
+            completions_field="samples",
+        )
+        assert kept[0]["ev"] == {"model": [True, None, False, True]}
+        assert kept[0]["samples"] == {"model": ["<think>a</think>1", None, "0", "1"]}
+        assert "samples" not in rows[0]
+
+    def test_completions_field_reuses_cached_samples(self):
+        """Asking for completions later makes no new model call."""
+        model = ScriptedModel("m", self.SCRIPT)
+        plain = _pass_at_k(self.ROWS, model)
+        with_samples = _pass_at_k(self.ROWS, model, completions_field="samples")
+        assert [r["task"] for r in with_samples] == [r["task"] for r in plain]
+        assert with_samples[0]["samples"] == {"model": ["2", "0", "0", "0"]}
+        assert len(model.calls) == 1
+
+    def test_comparative_completions(self):
+        """by_comparative_difficulty keeps each model's completion per group."""
+        kept = _comparative(completions_field="answers")
+        assert kept == [{**ROWS[0], "answers": {"weak": ["9"], "strong": ["1"]}}]
+
+    def test_ground_truth_optional_with_verifier(self):
+        """A verifier reads the row itself; no ground_truth_field is needed."""
+        model = ScriptedModel("m", {"t": ["yes", "no"]})
+        kept = by_pass_at_k(
+            [{"task": "t"}],
+            model=model,
+            input_field="task",
+            k=2,
+            metric=lambda prediction, row: prediction == "yes",
+            outcomes_field="ev",
+        )
+        assert kept[0]["ev"] == {"model": [True, False]}
+
+    @pytest.mark.parametrize("metric", ["exact_match", "rouge_l"])
+    def test_ground_truth_required_for_reference_metrics(self, metric):
+        """exact_match and rouge_l raise without ground_truth_field, before sampling."""
+        model = ScriptedModel("m", {"t": ["1"]})
+        with pytest.raises(ValueError, match="ground_truth_field is required"):
+            by_pass_at_k(
+                [{"task": "t"}], model=model, input_field="task", metric=metric
+            )
+        weak, strong = ScriptedModel("weak", WEAK), ScriptedModel("strong", STRONG)
+        with pytest.raises(ValueError, match="ground_truth_field is required"):
+            by_comparative_difficulty(
+                ROWS, weak_model=weak, strong_model=strong, input_field="task"
+            )
+        assert model.calls == weak.calls == strong.calls == []
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [{"verifier_workers": 0}, {"outcomes_field": "x", "completions_field": "x"}],
+    )
+    def test_validation(self, kwargs):
+        """Bad worker counts or clashing fields raise before any model call."""
+        model = ScriptedModel("m", {})
+        with pytest.raises(ValueError):
+            _pass_at_k([{"task": "t", "answer": "1"}], model, **kwargs)
+        assert model.calls == []
+
+    def test_verifiers_run_concurrently(self):
+        """Four verifier calls wait on each other, so they must run at once."""
+        model = ScriptedModel("m", self.SCRIPT)
+        verify = _ConcurrencyProbe(barrier_parties=4)
+        kept = _pass_at_k(self.ROWS, model, k=1, metric=verify, max_rate=1.0)
+        assert [r["task"] for r in kept] == ["t1", "t2", "t4"]
+        assert verify.peak == 4
+
+    def test_verifier_workers_one_is_serial(self):
+        """verifier_workers=1 never runs two verifier calls at once."""
+        model = ScriptedModel("m", self.SCRIPT)
+        verify = _ConcurrencyProbe()
+        _pass_at_k(self.ROWS, model, metric=verify, verifier_workers=1, max_rate=1.0)
+        assert verify.peak == 1
+
+    def test_verifier_error_propagates(self):
+        """An exception in one verifier call fails the filter."""
+
+        def verify(prediction, row):
+            if prediction == "0":
+                raise RuntimeError("runner crashed")
+            return True
+
+        with pytest.raises(RuntimeError, match="runner crashed"):
+            _pass_at_k(self.ROWS, ScriptedModel("m", self.SCRIPT), metric=verify)
+
+    def test_verifier_runs_in_callers_context(self, monkeypatch):
+        """An op a verifier calls folds into the filter's row of the step report."""
+        monkeypatch.setenv("FORGER_STEP_REPORT", "0")
+        calls: list[str] = []
+
+        @op(name="custom.check")
+        def check(prediction: str) -> bool:
+            calls.append(prediction)
+            return prediction == "1"
+
+        model = ScriptedModel("m", self.SCRIPT)
+
+        @step
+        def hard(rows):
+            return _pass_at_k(rows, model, k=1, metric=lambda p, r: check(p))
+
+        hard(self.ROWS)
+        assert sorted(calls) == ["0", "1", "2", "4"]
+        names = [o.op_name for o in _tracking.step_records()["hard"].ops]
+        assert names == ["filter.by_pass_at_k"]
+
+    def test_program_verifier_runs_programs(self):
+        """program_verifier grades sampled programs by running the row's tests."""
+        right = "```python\na, b = map(int, input().split())\nprint(a + b)\n```"
+        wrong = "```python\nprint(0)\n```"
+        model = ScriptedModel(
+            "m", {"add": [f"<think>easy</think>{right}", wrong, "no code here"]}
+        )
+        rows = [
+            {
+                "task": "add",
+                "tests": [
+                    {"input": "1 2\n", "output": "3"},
+                    {"input": "5 5\n", "output": "10\n"},
+                ],
+            }
+        ]
+        kept = by_pass_at_k(
+            rows,
+            model=model,
+            input_field="task",
+            k=3,
+            metric=program_verifier("tests", timeout_s=20),
+            outcomes_field="ev",
+            completions_field="samples",
+        )
+        assert kept[0]["ev"] == {"model": [True, False, False]}
+        assert kept[0]["samples"]["model"][0].endswith(right)
