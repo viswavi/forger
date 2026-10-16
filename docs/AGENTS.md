@@ -262,9 +262,13 @@ model = Model(
 ```
 
 `max_concurrency` caps how many requests this `Model` has in flight at once, across every op, `generate_batch` call,
-and thread that uses it (each `n` fan-out copy counts). Ops send all their prompts at once, so set it to what your
-provider's rate limit allows; you should never need to write your own thread pool around ops. `None` (default) allows
-up to 100 requests per `generate_batch` call. It is not part of the cache key, so changing it keeps cached results.
+and thread that uses it (each `n` fan-out copy counts). `generate_from_context`, `sample_from_LLM`,
+`self_taught_reasoner`, `translate.*`, and `topic_based_clustering` send all their prompts in one `generate_batch` call,
+so set it to what your provider's rate limit allows; you should never need to write your own thread pool around ops.
+`None` (default) allows up to 100 requests per `generate_batch` call. It is not part of the cache key, so changing it
+keeps cached results. Ctrl-C (or any error in the calling thread) cancels the requests not yet sent; those in flight
+finish. Each request's tokens and cost reach the step report as soon as it finishes, also when the call later raises
+or is interrupted; `model.history` gets the merged results only when the call returns.
 
 `generate_from_context`, `sample_from_LLM`, and `self_taught_reasoner` take `batch_size=None` (default): all prompts
 (or, for `sample_from_LLM`, all `n` samples) in one `generate_batch` call. An int splits them into calls of that size,
@@ -288,8 +292,11 @@ Use `Model(..., reasoning_effort="low")` where supported by the model/provider.
 gpt-5 models (also behind `litellm_proxy/`, `openrouter/`, or provider prefixes), and models whose LiteLLM supported
 params lack `n`, get `k` concurrent `n=1` requests per prompt, merged into one `GenerateResult` with summed usage and
 cost (`raw` is then the list of responses). Other models get one request with `n=k`, or for `k > 16` concurrent
-requests of at most 16, merged the same way (`n=40` sends 14, 13, 13); if the provider returns a different count, it
-raises a `ValueError` (add the model to `_NO_N_BRANDS` / `_NO_N_PREFIXES` in `model.py`).
+requests of at most 16, merged the same way (`n=40` sends 14, 13, 13). If such a model returns fewer completions
+(e.g. a gateway alias that ignores `n`), it logs one warning naming the model, sends only the missing completions as
+concurrent `n=1` requests, and fans out that model id for the rest of the process. It never pads: if the `n=1`
+requests come back short too, or a response has more than `n`, it raises a `ValueError` (add the model to
+`_NO_N_BRANDS` / `_NO_N_PREFIXES` in `model.py`).
 
 #### Prompt types
 

@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 
+import pyforger.acquire.model as model_module
 from pyforger.acquire.model import LocalModel, Model, _fans_out_n
 
 FAN_OUT_IDS = [
@@ -183,8 +184,8 @@ class TestFanOut:
         assert result.raw == responses
         assert result.model_id == "gemini/gemini-2.5-pro"
 
-    def test_history_and_step_usage_recorded_once_per_prompt(self, mock_litellm):
-        """History gets one merged result per prompt; add_usage sees the sums."""
+    def test_history_per_prompt_step_usage_per_request(self, mock_litellm):
+        """History gets one merged result per prompt; add_usage sees each request."""
         mock_litellm.completion.side_effect = [
             make_response(["a0"], prompt_tokens=5, completion_tokens=1, cost=0.25),
             make_response(["a1"], prompt_tokens=5, completion_tokens=2, cost=0.25),
@@ -196,7 +197,12 @@ class TestFanOut:
             results = model.generate_batch(["A", "B"], n=2)
         assert model.history == results
         assert len(model.history) == 2
-        assert add_usage.call_args_list == [call(10, 3, 0.5), call(14, 7, 1.0)]
+        assert add_usage.call_args_list == [
+            call(5, 1, 0.25),
+            call(5, 2, 0.25),
+            call(7, 3, 0.5),
+            call(7, 4, 0.5),
+        ]
         assert model.total_usage == {
             "prompt_tokens": 24,
             "completion_tokens": 10,
@@ -260,27 +266,82 @@ class TestSingleRequest:
         assert mock_litellm.completion.call_count == 1
         assert mock_litellm.completion.call_args.kwargs["n"] == 3
 
-    def test_fewer_choices_raise(self, mock_litellm):
-        """A provider that ignores n raises a ValueError naming the model."""
-        mock_litellm.completion.return_value = make_response(["only one"])
+
+def ignores_n(empty_n1=False):
+    """Fake completion that returns one choice whatever n is ("Q#0", "Q#1", ...).
+
+    With empty_n1, n=1 requests return no choice at all.
+    """
+    seen: dict[str, int] = {}
+    lock = threading.Lock()
+
+    def fake_completion(messages, n=1, **kwargs):
+        text = messages[0]["content"]
+        if empty_n1 and n == 1:
+            return make_response([], cost=0.25)
+        with lock:
+            k = seen.get(text, 0)
+            seen[text] = k + 1
+        return make_response([f"{text}#{k}"], cost=0.25)
+
+    return fake_completion
+
+
+class TestShortN:
+    """A model that should support n but returns fewer is refilled with n=1."""
+
+    def test_missing_completions_sent_as_n1(self, mock_litellm, caplog):
+        """n=4 gets 1 choice: one warning, 3 n=1 requests, usage summed."""
+        mock_litellm.completion.side_effect = ignores_n()
+        model = Model("litellm_proxy/my-alias", max_concurrency=1)
+        with caplog.at_level("WARNING", logger="pyforger.acquire.model"):
+            result = model.generate("Q", n=4)
+        assert result == ["Q#0", "Q#1", "Q#2", "Q#3"]
+        sent_n = [c.kwargs["n"] for c in mock_litellm.completion.call_args_list]
+        assert sent_n == [4, 1, 1, 1]
+        assert result.usage["prompt_tokens"] == 40
+        assert result.usage["cost_usd"] == pytest.approx(1.0)
+        assert model.history == [result]
+        warnings = [r.getMessage() for r in caplog.records]
+        assert len(warnings) == 1 and "litellm_proxy/my-alias" in warnings[0]
+        assert "litellm_proxy/my-alias" in model_module._LEARNED_NO_N
+
+    def test_later_calls_fan_out_from_the_start(self, mock_litellm, caplog):
+        """After the first short response, n=3 is three n=1 requests, no warning."""
+        mock_litellm.completion.side_effect = ignores_n()
+        model = Model("litellm_proxy/my-alias", max_concurrency=1)
+        model.generate("Q", n=2)
+        mock_litellm.completion.reset_mock()
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="pyforger.acquire.model"):
+            assert model.generate("R", n=3) == ["R#0", "R#1", "R#2"]
+        sent_n = [c.kwargs["n"] for c in mock_litellm.completion.call_args_list]
+        assert sent_n == [1, 1, 1]
+        assert caplog.records == []
+        assert _fans_out_n("litellm_proxy/my-alias")
+
+    def test_only_short_prompts_are_refilled(self, mock_litellm):
+        """Q1 got its 2 choices, Q2 got 1: one n=1 request, for Q2."""
+        mock_litellm.completion.side_effect = [
+            make_response(["a", "b"]),
+            make_response(["c"]),
+            make_response(["d"]),
+        ]
+        model = Model("gpt-4o", max_concurrency=1)
+        assert model.generate_batch(["Q1", "Q2"], n=2) == [["a", "b"], ["c", "d"]]
+        assert sent_contents(mock_litellm) == ["Q1", "Q2", "Q2"]
+
+    def test_short_n1_requests_raise(self, mock_litellm):
+        """If the n=1 requests come back short too, it raises; never pads."""
+        mock_litellm.completion.side_effect = ignores_n(empty_n1=True)
         model = Model("litellm_proxy/my-alias")
         with pytest.raises(ValueError) as excinfo:
             model.generate("Q", n=4)
         message = str(excinfo.value)
-        assert "litellm_proxy/my-alias" in message
-        assert "returned 1 completions" in message
+        assert "litellm_proxy/my-alias returned 1 completions" in message
         assert "n=4" in message
-        assert "may not support n > 1" in message
+        assert "separate n=1 requests" in message
         assert len(model.history) == 1  # the spend is still recorded
-
-    def test_mismatch_in_any_prompt_of_a_batch_raises(self, mock_litellm):
-        """Every prompt's response is checked, not only the first."""
-        mock_litellm.completion.side_effect = [
-            make_response(["a", "b"]),
-            make_response(["c"]),
-        ]
-        with pytest.raises(ValueError, match="for prompt 1"):
-            Model("gpt-4o", max_concurrency=1).generate_batch(["Q1", "Q2"], n=2)
 
 
 class TestNEqualsOne:

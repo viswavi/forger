@@ -266,8 +266,15 @@ class TestReturnExceptions:
         assert results[1] == ["B", "B"]
 
     def test_wrong_count_on_a_successful_prompt_still_raises(self, mock_litellm):
-        """A provider ignoring n is a config error, raised even with the flag."""
-        mock_litellm.completion.return_value = make_response("only one")
+        """Short even after the n=1 refill: a ValueError, even with the flag."""
+
+        def fake_completion(messages, n=1, **kwargs):
+            response = make_response("only one")
+            if n == 1:
+                response.choices = []
+            return response
+
+        mock_litellm.completion.side_effect = fake_completion
         with pytest.raises(ValueError, match="returned 1 completions"):
             Model("gpt-4o").generate_batch(["Q"], n=2, return_exceptions=True)
 
@@ -277,6 +284,17 @@ class TestReturnExceptions:
         model = Model("gpt-4o", show_progress=False)
         with pytest.raises(RuntimeError, match="504 for Q2"):
             model.generate_batch(["Q1", "Q2"])
+        assert model.history == []
+
+    def test_raised_batch_still_records_finished_usage(self, mock_litellm):
+        """Q2 fails without the flag: Q1's and Q3's spend reach add_usage."""
+        mock_litellm.completion.side_effect = InFlight(delay=0, fail={"Q2"})
+        model = Model("gpt-4o", show_progress=False)
+        with patch("pyforger.acquire.model._tracking.add_usage") as add_usage:
+            with pytest.raises(RuntimeError, match="504 for Q2"):
+                model.generate_batch(["Q1", "Q2", "Q3"])
+        assert add_usage.call_count == 2
+        assert all(c.args[:2] == (10, 20) for c in add_usage.call_args_list)
         assert model.history == []
 
     def test_local_model_engine_error_fills_every_slot(self, monkeypatch):
@@ -560,3 +578,33 @@ class TestLargeN:
             f"B#{i}" for i in range(20)
         ]
         assert fake.ns == [10, 10, 10, 10]
+
+
+class TestInterrupt:
+    """Ctrl-C (or any error in the caller) cancels the requests not yet sent."""
+
+    @pytest.mark.parametrize("error", [KeyboardInterrupt, RuntimeError])
+    def test_queued_requests_are_cancelled(self, mock_litellm, monkeypatch, error):
+        """Interrupted after 4 of 50: the queue is dropped, in-flight ones finish."""
+        fake = InFlight(delay=0.05)
+        mock_litellm.completion.side_effect = fake
+
+        def interrupt_after_four(futures, total, desc):
+            for i, future in enumerate(futures):
+                if i == 4:
+                    raise error("interrupted")
+                yield future
+
+        monkeypatch.setattr(model_module, "_log_progress", interrupt_after_four)
+        model = Model("gpt-4o", max_concurrency=2, show_progress=True)
+        start = time.monotonic()
+        with patch("pyforger.acquire.model._tracking.add_usage") as add_usage:
+            with pytest.raises(error):
+                model.generate_batch([f"Q{i}" for i in range(50)])
+            assert time.monotonic() - start < 1.0  # 50 x 0.05s / 2 would be 1.25s
+            time.sleep(0.3)  # let the requests in flight finish
+        assert fake.calls <= 8
+        assert fake.current == 0
+        # Every request that finished was recorded, also those after the interrupt.
+        assert add_usage.call_count == fake.calls
+        assert model.history == []

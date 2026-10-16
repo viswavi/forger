@@ -33,7 +33,7 @@ _MAX_N_PER_REQUEST = 16
 # line at most this often instead of a redrawn bar.
 _PROGRESS_LOG_INTERVAL_S = 30.0
 
-_progress_logger = get_formatted_logger(__name__)
+_logger = get_formatted_logger(__name__)
 
 
 def _progress_mode(show_progress: bool | None) -> str:
@@ -61,9 +61,7 @@ def _log_progress(futures: Iterable[Future], total: int, desc: str) -> Iterator[
         done += 1
         now = time.monotonic()
         if now - last >= _PROGRESS_LOG_INTERVAL_S or (done == total and last > start):
-            _progress_logger.info(
-                "%s: %d/%d done, %.0fs", desc, done, total, now - start
-            )
+            _logger.info("%s: %d/%d done, %.0fs", desc, done, total, now - start)
             last = now
         yield future
 
@@ -87,17 +85,35 @@ def _request_sizes(n: int, fan_out: bool) -> list[int]:
     return [n // parts + (1 if i < n % parts else 0) for i in range(parts)]
 
 
+def _add_response_usage(response: Any, model_id: str) -> None:
+    """Add one response's tokens and cost to the step report as it arrives."""
+    usage = _extract_usage(response)
+    _tracking.add_usage(
+        usage["prompt_tokens"],
+        usage["completion_tokens"],
+        _extract_cost(response, model_id),
+    )
+
+
 def _complete(
     messages: list[Message],
     n: int,
     call_kwargs: dict[str, Any],
     semaphore: threading.BoundedSemaphore | None,
 ) -> Any:
-    """One litellm.completion call, holding a `max_concurrency` slot if any."""
+    """One litellm.completion call, holding a `max_concurrency` slot if any.
+
+    The response's usage is recorded here, in the worker, before the caller
+    sees it: a batch that later raises or is interrupted keeps every
+    finished request in the step report.
+    """
     if semaphore is None:
-        return litellm.completion(messages=messages, n=n, **call_kwargs)
-    with semaphore:
-        return litellm.completion(messages=messages, n=n, **call_kwargs)
+        response = litellm.completion(messages=messages, n=n, **call_kwargs)
+    else:
+        with semaphore:
+            response = litellm.completion(messages=messages, n=n, **call_kwargs)
+    _add_response_usage(response, call_kwargs.get("model", "?"))
+    return response
 
 
 def _batch_completion_with_progress(
@@ -122,7 +138,8 @@ def _batch_completion_with_progress(
     results: list[Any] = [None] * len(requests)
     total = len(requests)
     desc = f"LLM calls ({call_kwargs.get('model', '?')})"
-    with ThreadPoolExecutor(max_workers=min(max_workers, total)) as executor:
+    executor = ThreadPoolExecutor(max_workers=min(max_workers, total))
+    try:
         future_to_idx = {
             executor.submit(_complete, msgs, n, call_kwargs, semaphore): i
             for i, (msgs, n) in enumerate(requests)
@@ -140,6 +157,12 @@ def _batch_completion_with_progress(
                 results[idx] = future.result()
             except Exception as exc:
                 results[idx] = exc
+    except BaseException:
+        # Ctrl-C (or any error here): send no queued request; requests already
+        # in flight finish in the background and still record their usage.
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise
+    executor.shutdown()
     return results
 
 
@@ -209,6 +232,25 @@ _PROVIDER_PREFIXES = ("openai/", "anthropic/", "gemini/", "xai/", "deepseek/")
 _NO_N_BRANDS = ("claude", "grok", "gemini")
 _NO_N_PREFIXES = ("o1", "o3", "o4", "gpt-5")
 _NO_N_PROVIDERS = ("anthropic", "xai", "gemini")
+# Model ids that returned fewer than n completions for one n request in this
+# process (e.g. a gateway alias that ignores n). They fan out from then on.
+_LEARNED_NO_N: set[str] = set()
+_LEARNED_NO_N_LOCK = threading.Lock()
+
+
+def _learn_no_n(model_id: str, n: int, got: int) -> None:
+    """Fan out `model_id` from now on; warn the first time."""
+    with _LEARNED_NO_N_LOCK:
+        if model_id in _LEARNED_NO_N:
+            return
+        _LEARNED_NO_N.add(model_id)
+    _logger.warning(
+        "%s returned %d completions for n=%d; sending the missing ones as n=1 "
+        "requests, and fanning out n for this model from now on.",
+        model_id,
+        got,
+        n,
+    )
 
 
 def _family(model_id: str) -> str:
@@ -232,6 +274,8 @@ def _fans_out_n(model_id: str) -> bool:
     "litellm_proxy/xai/grok-4", or any model whose LiteLLM supported-params
     list is known and lacks "n".
     """
+    if model_id in _LEARNED_NO_N:
+        return True
     *providers, name = _family(model_id).lower().split("/")
     if any(p in _NO_N_PROVIDERS for p in providers):
         return True
@@ -631,9 +675,10 @@ class Model:
         fan_out = n != 1 and _fans_out_n(self._model_id)
         sizes = _request_sizes(n, fan_out)
         copies = len(sizes)
+        prompt_messages = [_to_messages(prompt) for prompt in prompts]
         requests = [
             ([dict(m) for m in messages] if copies > 1 else messages, size)
-            for messages in map(_to_messages, prompts)
+            for messages in prompt_messages
             for size in sizes
         ]
         call_kwargs = dict(
@@ -645,6 +690,69 @@ class Model:
             num_retries=self._num_retries,
             **self._kwargs,
         )
+        progress = _progress_mode(
+            self._show_progress if show_progress is None else show_progress
+        )
+        responses = self._send(requests, call_kwargs, progress, return_exceptions)
+        groups = [responses[i : i + copies] for i in range(0, len(responses), copies)]
+
+        # A model that should support n but returned fewer completions (e.g. a
+        # gateway alias that ignores n): send the missing ones as n=1 requests.
+        refilled = False
+        if n != 1 and not fan_out:
+            short = {
+                i: n - got
+                for i, group in enumerate(groups)
+                if not any(isinstance(r, Exception) for r in group)
+                and (got := sum(len(r.choices) for r in group)) < n
+            }
+            if short:
+                first = next(iter(short))
+                _learn_no_n(self._model_id, n, n - short[first])
+                refill = [
+                    ([dict(m) for m in prompt_messages[i]], 1)
+                    for i, missing in short.items()
+                    for _ in range(missing)
+                ]
+                extra = iter(
+                    self._send(refill, call_kwargs, progress, return_exceptions)
+                )
+                for i, missing in short.items():
+                    groups[i] = groups[i] + [next(extra) for _ in range(missing)]
+                refilled = True
+
+        results: list[Any] = []
+        partial: set[int] = set()
+        for group in groups:
+            finished = [r for r in group if not isinstance(r, Exception)]
+            if not finished:
+                results.append(group[0])
+                continue
+            if len(finished) < len(group):
+                partial.add(len(results))
+            results.append(_merge_responses(finished, self._model_id))
+        # Usage already reached the step report per response (see _complete).
+        self._record(
+            [r for r in results if isinstance(r, GenerateResult)], add_usage=False
+        )
+        if n != 1:
+            _check_completion_count(
+                self._model_id,
+                n,
+                results,
+                fanned_out=fan_out or refilled,
+                skip=partial,
+            )
+        return results
+
+    def _send(
+        self,
+        requests: list[tuple[list[Message], int]],
+        call_kwargs: dict[str, Any],
+        progress: str,
+        return_exceptions: bool,
+    ) -> list[Any]:
+        """Send (messages, n) requests; raise the first failure unless asked not to."""
         responses: list[Any]
         if len(requests) == 1:
             messages, size = requests[0]
@@ -660,42 +768,24 @@ class Model:
                 call_kwargs,
                 semaphore=self._semaphore,
                 max_workers=self._max_concurrency or _DEFAULT_MAX_WORKERS,
-                progress=_progress_mode(
-                    self._show_progress if show_progress is None else show_progress
-                ),
+                progress=progress,
             )
         if not return_exceptions:
             for response in responses:
                 if isinstance(response, Exception):
                     raise response
+        return responses
 
-        results: list[Any] = []
-        partial: set[int] = set()
-        for i in range(0, len(responses), copies):
-            group = responses[i : i + copies]
-            finished = [r for r in group if not isinstance(r, Exception)]
-            if not finished:
-                results.append(group[0])
-                continue
-            if len(finished) < len(group):
-                partial.add(len(results))
-            results.append(_merge_responses(finished, self._model_id))
-        self._record([r for r in results if isinstance(r, GenerateResult)])
-        if n != 1:
-            _check_completion_count(
-                self._model_id, n, results, fanned_out=fan_out, skip=partial
-            )
-        return results
-
-    def _record(self, results: list[GenerateResult]) -> None:
-        """Add each result to history and its usage to the step report, once."""
+    def _record(self, results: list[GenerateResult], *, add_usage: bool = True) -> None:
+        """Add each result to history and, with add_usage, to the step report."""
         for result in results:
             self.history.append(result)
-            _tracking.add_usage(
-                result.usage.get("prompt_tokens", 0) or 0,
-                result.usage.get("completion_tokens", 0) or 0,
-                result.usage.get("cost_usd", 0.0) or 0.0,
-            )
+            if add_usage:
+                _tracking.add_usage(
+                    result.usage.get("prompt_tokens", 0) or 0,
+                    result.usage.get("completion_tokens", 0) or 0,
+                    result.usage.get("cost_usd", 0.0) or 0.0,
+                )
 
 
 # Default cap on generated tokens for a local reasoning model. Reasoning traces

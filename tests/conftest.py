@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import pytest
 
+from pyforger.acquire import model as _model
 from pyforger.op import clear_trace
 
 
@@ -22,3 +23,11 @@ def _isolate_op_cache(tmp_path, monkeypatch):
     monkeypatch.setenv("FORGER_CACHE", str(tmp_path))
     clear_trace()
     yield
+
+
+@pytest.fixture(autouse=True)
+def _forget_learned_no_n():
+    """Forget models that generate_batch learned to fan out in an earlier test."""
+    _model._LEARNED_NO_N.clear()
+    yield
+    _model._LEARNED_NO_N.clear()
