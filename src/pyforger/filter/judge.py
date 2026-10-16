@@ -76,7 +76,8 @@ def by_llm_score(
     ``score_threshold`` (compared with ``agreement_threshold``).
 
     Returns:
-        The kept rows, in input order and unchanged by default.
+        The kept rows, in input order; unchanged unless ``score_field`` /
+        ``explanation_field`` are set.
     """
     if num_judges < 1:
         raise ValueError("num_judges must be at least 1")

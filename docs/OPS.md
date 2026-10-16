@@ -33,7 +33,9 @@ Model(
     temperature: float = 0.7,
     max_tokens: int | None = None,
     num_retries: int = 2,
-    show_progress: bool = False,
+    show_progress: bool | None = None,
+    max_concurrency: int | None = None,
+    request_cache: bool = True,
     **kwargs: Any,
 )
 ```
@@ -190,13 +192,12 @@ retrieve_from_s2(
     queries: list[str] | None = None,
     n: int = 10,
     seed: int | None = None,
+    max_workers: int = 1,
     **kwargs: Any,
 ) -> list[dict]
 ```
 
 Fetch papers from Semantic Scholar.
-
-**Returns:** Rows with `text` (title and abstract), `id` (the paper id), `title`, `summary` (the abstract), and `query`.
 
 ### `acquire.sample_from_LLM`
 
@@ -210,7 +211,7 @@ sample_from_LLM(
     output_schema: dict[str, Any] | None = None,
     temperature: float = 0.7,
     max_retries: int = 3,
-    batch_size: int = 10,
+    batch_size: int | None = None,
     name: str = "sample_from_LLM",
 ) -> list[dict]
 ```
@@ -360,18 +361,49 @@ generate_from_context(
     output_schema: dict[str, Any] | None = None,
     temperature: float = 0.7,
     max_retries: int = 3,
-    batch_size: int = 10,
-) -> list[dict | None]
+    batch_size: int | None = None,
+    merge: bool = False,
+    output_field: str | None = None,
+) -> list[dict | None] | list[dict]
 ```
 
 Generate LLM outputs conditioned on upstream input items.
 
-**Returns:** List of length `len(items) * samples_per_item` in input order, grouped by item (item `i`'s samples occupy
-slots `i * samples_per_item` to `(i + 1) * samples_per_item`). Each slot holds the parsed output dict, or `None` if the
-prompt failed to parse after `max_retries`. When the model returns a reasoning trace separately in
+**Returns:** By default, a list of length `len(items) * samples_per_item` in input order, grouped by item (item `i`'s
+samples occupy slots `i * samples_per_item` to `(i + 1) * samples_per_item`). Each slot holds the parsed output dict, or
+`None` if the prompt failed to parse or failed at the provider after `max_retries`; when any slot failed at the
+provider, the result is not cached, so a rerun asks again (the request cache replays the completions that arrived). With
+`merge=True`, the merged rows of the slots that succeeded. When the model returns a reasoning trace separately in
 `GenerateResult.reasoning`, it is included under the `thinking_trace` key. Inline `<think>` traces (e.g. from
 `LocalModel`, which supplies `None` for that metadata) are not extracted; use `split_reasoning` to separate them out as
 needed.
+
+### `alter.run_programs`
+
+Disk-cached (`@op`).
+
+```python
+run_programs(
+    items: list[dict],
+    *,
+    code_field: str,
+    tests_field: str = "tests",
+    result_field: str = "test_results",
+    extract_code: Callable[[str], str | None] | None = None,
+    checker: Checker = outputs_match,
+    timeout_s: float = 10.0,
+    memory_mb: int | None = 2048,
+    max_output_mb: int = 64,
+    max_chars: int | None = 10_000,
+    command: list[str] | None = None,
+    suffix: str = ".py",
+    max_workers: int | None = None,
+) -> list[dict]
+```
+
+Run each row's stdin/stdout program on each of its tests.
+
+**Returns:** New rows (inputs are not mutated), in input order.
 
 ### `alter.self_taught_reasoner`
 
@@ -395,7 +427,7 @@ self_taught_reasoner(
     split_thinking: bool = True,
     temperature: float = 0.7,
     max_tokens: int | None = None,
-    batch_size: int = 10,
+    batch_size: int | None = None,
 ) -> list[dict]
 ```
 
@@ -451,6 +483,60 @@ is None).
 ## `pyforger.filter`
 
 Filter operations for Forger.
+
+### `filter.by_comparative_difficulty`
+
+Disk-cached (`@op`).
+
+```python
+by_comparative_difficulty(
+    items: list[dict],
+    *,
+    weak_model: Model,
+    strong_model: Model,
+    input_field: str,
+    ground_truth_field: str | None = None,
+    metric: Metric = "exact_match",
+    rouge_l_threshold: float = 0.7,
+    extract_answer: Callable[[str], str | None] = answer_segment,
+    prompt_template: PromptTemplate | None = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    batch_size: int = 10,
+    outcomes_field: str | None = None,
+    completions_field: str | None = None,
+    verifier_workers: int = 8,
+) -> list[dict]
+```
+
+Keep rows the strong model answers correctly and the weak model does not.
+
+**Returns:** The kept rows, in input order.
+
+### `filter.by_comparative_judge`
+
+Disk-cached (`@op`).
+
+```python
+by_comparative_judge(
+    items: list[dict],
+    *,
+    group_by: str,
+    model: Model,
+    input_field: str,
+    output_field: str,
+    criteria: str = "overall quality, relevance, and correctness",
+    keep: int = 1,
+    num_judges: int = 1,
+    prompt_template: JudgePromptTemplate | None = None,
+    seed: int = 0,
+    temperature: float = 0.0,
+    rank_field: str | None = None,
+    explanation_field: str | None = None,
+) -> list[dict]
+```
+
+Keep the `keep` best rows of each group, as ranked side by side by a judge.
 
 ### `filter.by_exact_agreement`
 
@@ -513,6 +599,28 @@ Filter items with invalid responses (copies of instruction or empty).
 
 **Returns:** The kept rows, in input order and unchanged.
 
+### `filter.by_judged_difficulty`
+
+Disk-cached (`@op`).
+
+```python
+by_judged_difficulty(
+    items: list[dict],
+    *,
+    model: Model,
+    task_field: str,
+    min_difficulty: float = 3,
+    max_difficulty: float = 5,
+    num_judges: int = 1,
+    temperature: float = 0.0,
+    minimum_difficulty_criterion: str = DEFAULT_MINIMUM_DIFFICULTY_CRITERION,
+    medium_difficulty_criterion: str = DEFAULT_MEDIUM_DIFFICULTY_CRITERION,
+    maximum_difficulty_criterion: str = DEFAULT_MAXIMUM_DIFFICULTY_CRITERION,
+) -> list[dict]
+```
+
+Keep items whose judged difficulty is in [min_difficulty, max_difficulty].
+
 ### `filter.by_keyword_blocklist`
 
 Disk-cached (`@op`).
@@ -560,12 +668,15 @@ by_llm_score(
     agreement_threshold: float = 1.0,
     criteria: str = "overall quality, relevance, and correctness",
     temperature: float = 0.0,
+    prompt_template: JudgePromptTemplate | None = None,
+    score_field: str | None = None,
+    explanation_field: str | None = None,
 ) -> list[dict]
 ```
 
 Keep items where `num_judges` LLM judges sufficiently agree on quality.
 
-**Returns:** The kept rows, in input order and unchanged by default.
+**Returns:** The kept rows, in input order; unchanged unless `score_field` / `explanation_field` are set.
 
 ### `filter.by_n_gram_overlap`
 
@@ -578,6 +689,48 @@ by_n_gram_overlap(items: list[dict], *, field: str, threshold: float = 0.7, n: i
 Drop items whose word n-gram overlap with the kept pool exceeds threshold.
 
 **Returns:** The kept rows, in input order and unchanged.
+
+### `filter.by_pass_at_k`
+
+Disk-cached (`@op`).
+
+```python
+by_pass_at_k(
+    items: list[dict],
+    *,
+    model: Model,
+    input_field: str,
+    ground_truth_field: str | None = None,
+    k: int = 4,
+    min_rate: float = 0.1,
+    max_rate: float = 0.9,
+    min_valid: int | None = None,
+    metric: Metric = "exact_match",
+    rouge_l_threshold: float = 0.7,
+    extract_answer: Callable[[str], str | None] = answer_segment,
+    prompt_template: PromptTemplate | None = None,
+    temperature: float = 1.0,
+    max_tokens: int | None = None,
+    batch_size: int = 10,
+    outcomes_field: str | None = None,
+    completions_field: str | None = None,
+    verifier_workers: int = 8,
+) -> list[dict]
+```
+
+Keep rows whose pass rate over `k` samples is within the bounds.
+
+**Returns:** The kept rows, in input order.
+
+### `filter.by_predicate`
+
+Not cached (wrap it with `@op` to memoize); listed in step reports as `filter.by_predicate`.
+
+```python
+by_predicate(items: list[Any], fn: Callable[[Any], Any], *, label: str | None = None) -> list[Any]
+```
+
+Keep rows where `fn(row)` is truthy.
 
 ### `filter.by_rouge_l`
 
@@ -630,9 +783,82 @@ Keep items whose `field` parses as valid `lang`.
 
 **Returns:** The kept rows, in input order and unchanged.
 
+### `filter.by_tests`
+
+Disk-cached (`@op`).
+
+```python
+by_tests(
+    items: list[dict],
+    *,
+    code_field: str,
+    tests_field: str = "tests",
+    min_pass_rate: float = 1.0,
+    result_field: str | None = None,
+    extract_code: Callable[[str], str | None] | None = None,
+    checker: Checker = outputs_match,
+    timeout_s: float = 10.0,
+    memory_mb: int | None = 2048,
+    command: list[str] | None = None,
+    suffix: str = ".py",
+    max_workers: int | None = None,
+) -> list[dict]
+```
+
+Keep rows whose program passes at least `min_pass_rate` of its tests.
+
+**Returns:** The kept rows, in input order.
+
+### `filter.by_topic_frequency`
+
+Disk-cached (`@op`).
+
+```python
+by_topic_frequency(
+    items: list[dict],
+    *,
+    field: str,
+    model: Model,
+    context: str,
+    num_clusters: int = 20,
+    min_frequency: float = 0.0,
+    max_frequency: float | None = None,
+    topic_field: str | None = None,
+    embed_fn: Callable[[list[str]], Any] | None = None,
+    seed: int = 0,
+    sample_seed: int = 0,
+    **cluster_kwargs: Any,
+) -> list[dict]
+```
+
+Downsample over-represented topics and drop rare ones.
+
+### `filter.program_verifier`
+
+Not cached: a plain function.
+
+```python
+program_verifier(
+    tests_field: str = "tests",
+    *,
+    extract_code: Callable[[str], str | None] = last_code_block,
+    checker: Checker = outputs_match,
+    timeout_s: float = 10.0,
+    memory_mb: int | None = 2048,
+    command: list[str] | None = None,
+    suffix: str = ".py",
+) -> Callable[[str, dict], bool | None]
+```
+
+A `metric` for the difficulty filters that runs programs on tests.
+
+**Returns:** A `(prediction, row) -> bool | None` verifier with a `cache_key()`, so equal settings share cached grades.
+
 ## `pyforger.inspect`
 
 Inspect operations: analyze existing data.
+
+Also exported, not documented here: `SpendReport`, `SpendTotal`.
 
 ### `inspect.inspect_step`
 
@@ -645,6 +871,16 @@ inspect_step(name: str | None = None) -> StepRecord
 Print the full report of the latest run of step `name` and return it.
 
 **Returns:** The step's `StepRecord`, as printed.
+
+### `inspect.spend`
+
+Not cached: a plain function.
+
+```python
+spend(path: str | Path | None = None, *, since: datetime | str | None = None) -> SpendReport
+```
+
+Print and return the spend ledger's totals by run, pipeline, and step.
 
 ### `inspect.topic_based_clustering`
 
@@ -666,6 +902,7 @@ topic_based_clustering(
     assign_truncation: int = 1500,
     max_assign_retries: int = 5,
     seed: int = 0,
+    **op_controls: Any,
 ) -> list[str]
 ```
 
