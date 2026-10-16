@@ -894,12 +894,23 @@ def test_render_pooled_scores_shows_only_the_current_threshold():
 
 
 def test_render_bool_scores():
-    """Boolean scores show kept / dropped counts on one line."""
+    """Boolean scores show kept / dropped counts and a bar on one line."""
     text = render_scores(
         ScoreRecord(label="kept", values=[True, False, True], keep="true"),
         "filter.by_syntax",
     )
-    assert text == "filter.by_syntax · kept 2 of 3 (0.67) · dropped 1"
+    bar = "█" * 13 + "░" * 7
+    assert text == f"filter.by_syntax · kept 2 of 3 (0.67) · dropped 1  {bar}"
+
+
+def test_render_bool_scores_name_the_check_and_never_hide_a_side():
+    """A named check leads the line; one dropped row of many still gets a ░."""
+    text = render_scores(
+        ScoreRecord(label="has papers", values=[True] * 999 + [False], keep="true"),
+        "filter.by_predicate",
+    )
+    assert text.startswith("filter.by_predicate · has papers · kept 999 of 1,000")
+    assert text.endswith("█" * 19 + "░")
 
 
 def test_sample_values_keep_line_breaks():

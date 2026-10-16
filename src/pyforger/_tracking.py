@@ -1,8 +1,8 @@
 """Shared run-time state for ``@op`` calls, ``@step`` reports, and filter scores.
 
-This module imports nothing from the rest of pyforger but ``_spend`` (which
-imports nothing), so ``op.py``, ``steps.py``, ``acquire/model.py``, and the
-filters can all use it without circular imports.
+This module imports nothing from the rest of pyforger but ``_spend`` and
+``_rowflow`` (which import nothing), so ``op.py``, ``steps.py``,
+``acquire/model.py``, and the filters can all use it without circular imports.
 
 Context variables do not propagate into ``ThreadPoolExecutor`` workers. Ops
 called from such workers see no active step and are not itemized in its report,
@@ -31,12 +31,13 @@ import os
 import threading
 from collections.abc import Callable
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 from pyforger import _spend
+from pyforger._rowflow import PipelineFlow, PythonGap, StepFlow
 
 _CATEGORIES = frozenset({"acquire", "alter", "filter", "inspect"})
 
@@ -159,6 +160,8 @@ class StepRecord(BaseModel):
     ``fields`` describes the output rows (None when they are not dicts);
     ``fields_added`` / ``fields_removed`` compare them with the input rows when
     those are dicts too. ``show`` names fields whose sample values print in full.
+    ``python_gaps`` are rows that changed in plain Python between ops (see
+    ``pyforger._rowflow``); a cached step keeps those of the run that cached it.
     """
 
     name: str
@@ -184,6 +187,7 @@ class StepRecord(BaseModel):
     cost_usd: float = 0.0
     token_units: float = 0.0
     original: UsageTotals | None = None
+    python_gaps: list[PythonGap] = Field(default_factory=list)
 
 
 class PipelineRecord(BaseModel):
@@ -195,6 +199,8 @@ class PipelineRecord(BaseModel):
     thread may not belong to the pipeline.
     ``no_filter_steps`` and ``noop_filters`` (``(op, step, rows)``) are notes,
     not warnings: a filter that removed nothing may be a check that passed.
+    ``python_gaps`` are rows dropped in plain Python between two steps, found
+    by row identity (see ``pyforger._rowflow``).
     """
 
     name: str
@@ -209,6 +215,7 @@ class PipelineRecord(BaseModel):
     token_units: float = 0.0
     unattributed: UsageTotals = Field(default_factory=UsageTotals)
     max_cost_usd: float | None = None
+    python_gaps: list[PythonGap] = Field(default_factory=list)
 
     @property
     def cached_cost_usd(self) -> float:
@@ -311,6 +318,10 @@ _STEP_RESULT_CHECK: ContextVar[Callable[[Any], str | None] | None] = ContextVar(
 _ON_DYNAMIC_STEP: ContextVar[Callable[[StepRecord], None] | None] = ContextVar(
     "forger_on_dynamic_step", default=None
 )
+# The rows the active step's top-level ops took and returned (see _rowflow).
+_ACTIVE_FLOW: ContextVar[StepFlow | None] = ContextVar(
+    "forger_active_flow", default=None
+)
 
 
 def active_step() -> StepRecord | None:
@@ -337,64 +348,21 @@ class ScopeToken:
     hook_token: Token[Any] | None
     usage: Usage
     usage_token: Token[tuple[Usage, ...]]
-    lineage_token: Token[_Lineage | None] | None = None
+    flow_token: Token[StepFlow | None] | None = None
 
 
-def _traceable(row: Any) -> bool:
-    """True when ``id(row)`` names one row: not a str, number, tuple, or None."""
-    return not isinstance(row, (str, bytes, int, float, bool, tuple, type(None)))
-
-
-class _Lineage:
-    """Which earlier top-level calls of one step each call's input rows came from.
-
-    It keeps the row lists it has seen until the step returns, so their
-    ``id()``s stay unique. Rows copied in plain Python (``{**row}``) start a
-    new lineage.
-    """
-
-    def __init__(self) -> None:
-        self.lock = threading.Lock()
-        self.outputs: list[set[int]] = []  # per call: ids of its output rows
-        self.after: list[set[int]] = []  # per call: the calls it came from
-        self.kept: list[Any] = []
-
-    def add(self, step: StepRecord, call: OpCall, rows_in: Any, rows_out: Any) -> None:
-        """Set ``call.after`` and append the call to ``step.ops``."""
-        ids_in = (
-            {id(r) for r in rows_in if _traceable(r)}
-            if isinstance(rows_in, list)
-            else set()
-        )
-        ids_out = (
-            {id(r) for r in rows_out if _traceable(r)}
-            if isinstance(rows_out, list)
-            else set()
-        )
-        with self.lock:
-            parents = {j for j, out in enumerate(self.outputs) if out & ids_in}
-            after = set(parents)
-            for j in parents:
-                after |= self.after[j]
-            call.after = sorted(after)
-            self.outputs.append(ids_out)
-            self.after.append(after)
-            self.kept.append((rows_in, rows_out))
-            step.ops.append(call)
-
-
-_STEP_LINEAGE: ContextVar[_Lineage | None] = ContextVar(
-    "forger_step_lineage", default=None
-)
-
-
-def enter_step(rec: StepRecord, check: Callable[[Any], str | None]) -> ScopeToken:
+def enter_step(
+    rec: StepRecord,
+    check: Callable[[Any], str | None],
+    flow: StepFlow | None = None,
+) -> ScopeToken:
     """Make ``rec`` the active step; ops it calls are top level (depth 0) again.
 
     ``check`` validates the step's result; see ``check_step_result``. The
     step's usage is counted in ``token.usage``. A step called from a worker
     thread that did not copy the context joins the only running pipeline, so
-    its usage counts toward that pipeline (and its cap) as it arrives.
+    its usage counts toward that pipeline (and its cap) as it arrives. Its
+    top-level ops' rows go to ``flow`` (see ``pyforger._rowflow``).
     """
     joined: tuple[Usage, ...] = ()
     if _ACTIVE_PIPELINE.get() is None and _pipeline_usage() is None:
@@ -408,14 +376,14 @@ def enter_step(rec: StepRecord, check: Callable[[Any], str | None]) -> ScopeToke
         _STEP_RESULT_CHECK.set(check),
         usage,
         usage_token,
-        _STEP_LINEAGE.set(_Lineage()),
+        _ACTIVE_FLOW.set(flow if flow is not None else StepFlow(None, [])),
     )
 
 
 def exit_step(token: ScopeToken) -> None:
     """Undo ``enter_step``."""
-    if token.lineage_token is not None:
-        _STEP_LINEAGE.reset(token.lineage_token)
+    if token.flow_token is not None:
+        _ACTIVE_FLOW.reset(token.flow_token)
     _ACCUMULATORS.reset(token.usage_token)
     if token.hook_token is not None:
         _STEP_RESULT_CHECK.reset(token.hook_token)
@@ -455,12 +423,17 @@ def step_meta(rec: StepRecord, original: UsageTotals) -> str:
         for call in rec.ops
     ]
     return json.dumps(
-        {"version": 1, "ops": ops, "original": original.model_dump(mode="json")}
+        {
+            "version": 1,
+            "ops": ops,
+            "original": original.model_dump(mode="json"),
+            "python_gaps": [g.model_dump(mode="json") for g in rec.python_gaps],
+        }
     )
 
 
 def restore_step_meta(text: str) -> None:
-    """Give the active step the ops and usage stored by ``step_meta``.
+    """Give the active step the ops, usage, and (python) rows from ``step_meta``.
 
     Called on a cache hit. Metadata written before usage was stored has no
     ``original``, so the step shows no earlier cost.
@@ -479,6 +452,12 @@ def restore_step_meta(text: str) -> None:
             step.original = UsageTotals.model_validate(meta["original"])
     except ValueError:
         step.original = None
+    try:
+        step.python_gaps = [
+            PythonGap.model_validate(g) for g in meta.get("python_gaps", [])
+        ]
+    except (ValueError, TypeError):
+        step.python_gaps = []
 
 
 @dataclass
@@ -488,6 +467,7 @@ class _Running:
     rec: PipelineRecord
     usage: Usage
     unattributed: Usage
+    flow: PipelineFlow = field(default_factory=PipelineFlow)
 
 
 _RUNNING_PIPELINES: list[_Running] = []
@@ -581,6 +561,46 @@ def pipeline_for_step() -> PipelineRecord | None:
         return _RUNNING_PIPELINES[0].rec if len(_RUNNING_PIPELINES) == 1 else None
 
 
+def _flow_of(rec: PipelineRecord) -> PipelineFlow | None:
+    with _RUNNING_LOCK:
+        running = next((r for r in _RUNNING_PIPELINES if r.rec is rec), None)
+    return running.flow if running is not None else None
+
+
+def step_starting(
+    rec: PipelineRecord, rows_in: list[Any] | None, arg_lists: list[list[Any]]
+) -> Any:
+    """A step of ``rec`` starts with these rows; pass the result to ``join_pipeline``.
+
+    ``rows_in`` is the step's row list (None unless it has exactly one list
+    argument), compared by identity with the previous step's output.
+    """
+    flow = _flow_of(rec)
+    return flow.start(rows_in, arg_lists) if flow is not None else None
+
+
+def join_pipeline(
+    rec: PipelineRecord, step: StepRecord, started: Any, rows_out: Any
+) -> None:
+    """Append a finished step (or bare op) to ``rec`` and hold its output rows.
+
+    ``started`` is what ``step_starting`` returned for it.
+    """
+    flow = _flow_of(rec)
+    with _RUNNING_LOCK:
+        rec.steps.append(step)
+        position = len(rec.steps) - 1
+    if flow is not None:
+        flow.finish(started, position, step.name, rows_out)
+
+
+def close_pipeline_flow(rec: PipelineRecord, result: Any) -> None:
+    """Set ``rec.python_gaps`` once the pipeline returned ``result``."""
+    flow = _flow_of(rec)
+    if flow is not None:
+        rec.python_gaps = flow.close(result)
+
+
 _OPS_STARTED = [0]
 _OPS_LOCK = threading.Lock()
 
@@ -641,7 +661,9 @@ def exit_op(
     pipeline as a bare op when no step is active. A call that raised (``error``
     set) goes only to a step, which may have caught the error; ``call`` is
     None when there is nothing to report. ``rows`` is the op's
-    ``(first argument, result)``, which tells chunks from chained calls.
+    ``(first argument, result)``: the step's ``StepFlow`` uses them to tell
+    chunks from chained calls and to find (python) rows; they are not kept
+    past the step.
     """
     if token.is_step:
         step = _ACTIVE_STEP.get()
@@ -659,16 +681,21 @@ def exit_op(
         return
     step = _ACTIVE_STEP.get()
     if step is not None:
-        lineage = _STEP_LINEAGE.get()
-        if lineage is not None:
-            lineage.add(step, call, *rows)
+        flow = _ACTIVE_FLOW.get()
+        if flow is not None:
+            flow.add(step.ops, call, *rows)
         else:
             step.ops.append(call)
         return
     pipeline = _ACTIVE_PIPELINE.get()
     if pipeline is not None and call.error is None:
         rec = step_from_bare_op(call)
-        pipeline.steps.append(rec)
+        rows_in, rows_out = rows
+        stream = (
+            rows_in if isinstance(rows_in, list) and call.n_in is not None else None
+        )
+        started = step_starting(pipeline, stream, [stream] if stream else [])
+        join_pipeline(pipeline, rec, started, rows_out)
         on_dynamic_step = _ON_DYNAMIC_STEP.get()
         if rec.kind == "dynamic_step" and on_dynamic_step is not None:
             on_dynamic_step(rec)

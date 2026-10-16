@@ -32,10 +32,12 @@ from rich.table import Table
 from rich.text import Text
 
 from pyforger import _summaries
+from pyforger._rowflow import group_calls
 from pyforger._tracking import (
     FieldSummary,
     OpCall,
     PipelineRecord,
+    PythonGap,
     ScoreRecord,
     StepRecord,
 )
@@ -46,6 +48,7 @@ FULL_FIELD_CHARS = 500  # per sample field in inspect_step
 _FULL_FIELD_LINES = 30  # lines kept per multi-line sample field in inspect_step
 _SAMPLE_ITEMS = 20  # items of a list kept in a step's stored sample
 _BAR_CHARS = 28  # length of the longest histogram bar
+_SPLIT_CHARS = 20  # length of a kept / dropped bar
 _MAX_TABLE_FIELDS = 4  # samples with more fields are listed as field / value
 _MAX_DISTINCT_BINS = 12  # up to this many distinct values get one bin each
 _TOKENS_MIN_WIDTH = 110  # narrower terminals drop the per-op token columns
@@ -255,6 +258,7 @@ class _Histogram:
     unparsed: int = 0
     mode: str = "cut"  # "cut", "between", "pooled", or "none"
     note: str = ""
+    split: tuple[int, int] | None = None  # (kept, dropped) of a yes/no filter
 
 
 def _finite(values: Iterable[Any]) -> list[Any]:
@@ -447,8 +451,11 @@ def _histogram(scores: ScoreRecord) -> _Histogram:
     if scores.keep == "true" or (good and all(isinstance(v, bool) for v in good)):
         kept = sum(1 for v in good if v)
         hist.mode = "none"
+        hist.split = (kept, total - kept)
+        # A named check says what it tested: "has ≥3 papers · kept 7 of 10".
+        named = f"{label} · " if label not in ("kept", "") else ""
         hist.title = (
-            f"kept {kept:,} of {total:,} ({kept / total:.2f}) · "
+            f"{named}kept {kept:,} of {total:,} ({kept / total:.2f}) · "
             f"dropped {total - kept:,}"
         )
         return hist
@@ -532,6 +539,16 @@ def _histogram_renderable(
     heading = Text()
     heading.append(_clean(op_name), style="bold")
     heading.append(f" · {hist.title}")
+    if hist.split is not None and hist.split[0] + hist.split[1]:
+        kept, dropped = hist.split
+        n_kept = round(kept / (kept + dropped) * _SPLIT_CHARS)
+        # Never hide a nonzero side: 1 dropped of 1,000 still shows one ░.
+        n_kept = min(
+            max(n_kept, 1 if kept else 0), _SPLIT_CHARS - (1 if dropped else 0)
+        )
+        heading.append("  ")
+        heading.append("█" * n_kept, style="green")
+        heading.append("░" * (_SPLIT_CHARS - n_kept), style="red")
     if hist.mode == "none" or not hist.bins:
         return heading
 
@@ -680,6 +697,7 @@ class _OpGroup:
     """
 
     calls: list[OpCall]
+    first: int = 0  # position of the first call in the step's ops
 
     @property
     def op_name(self) -> str:
@@ -730,20 +748,11 @@ def _group_ops(ops: list[OpCall]) -> list[_OpGroup]:
 
     A call joins the latest row of its op unless its input rows came from that
     row's output (``OpCall.after``): two judges in a row, or a refine pass over
-    generated rows, get a row each, with their own counts and histograms.
+    generated rows, get a row each, with their own counts and histograms. The
+    (python) rows use the same grouping (``_rowflow.group_calls``).
     """
-    groups: list[_OpGroup] = []
-    latest: dict[str, tuple[_OpGroup, set[int]]] = {}
-    for i, call in enumerate(ops):
-        found = latest.get(call.op_name)
-        if found is not None and not found[1] & set(call.after):
-            found[0].calls.append(call)
-            found[1].add(i)
-            continue
-        group = _OpGroup([call])
-        groups.append(group)
-        latest[call.op_name] = (group, {i})
-    return groups
+    positions = group_calls([c.op_name for c in ops], [c.after for c in ops])
+    return [_OpGroup([ops[i] for i in g], g[0]) for g in positions]
 
 
 def _show_yield(group: _OpGroup) -> bool:
@@ -928,7 +937,25 @@ def _drop_columns(
     return headers, rows
 
 
-def _op_table(groups: list[_OpGroup], width: int) -> Table:
+def _gap_cells(gap: PythonGap, n_cells: int) -> list[Text]:
+    """A dim ``(python)  356 → 330  0.93`` row; other columns stay blank."""
+    cells = [
+        Text("(python)"),
+        Text(fmt_int(gap.n_in)),
+        Text(fmt_int(gap.n_out)),
+        Text(fmt_yield(gap.yield_ratio)),
+    ]
+    cells += [Text("") for _ in range(n_cells - len(cells))]
+    for cell in cells:
+        cell.stylize("dim")
+    return cells
+
+
+def _op_table(
+    groups: list[_OpGroup], width: int, gaps: list[PythonGap] | None = None
+) -> RenderableType:
+    """One row per op, with a ``(python)`` row where rows changed between ops."""
+    gaps = gaps or []
     ops = [c for g in groups for c in g.calls]
     show_tokens = width >= _TOKENS_MIN_WIDTH and any(
         c.prompt_tokens or c.completion_tokens for c in ops
@@ -937,10 +964,18 @@ def _op_table(groups: list[_OpGroup], width: int) -> Table:
     show_cost = any(c.cost_usd and math.isfinite(c.cost_usd) for c in ops)
     checks = [_check_text(g) for g in groups]
     show_check = any(checks)
-    show_cached = any(c.cache_hit for c in ops)
+    show_cached = any(c.cache_hit for c in ops) or any(g.inferred for g in gaps)
+    n_cells = 5 + 2 * show_tokens + show_units + show_cost + show_cached + show_check
+
+    def gap_row(gap: PythonGap) -> list[Text]:
+        cells = _gap_cells(gap, n_cells)
+        if gap.inferred:  # in the notes column, where "cached" goes
+            cells[n_cells - 1 - show_check] = Text("inferred", style="dim")
+        return cells
 
     rows: list[list[Text]] = []
     for group, check in zip(groups, checks):
+        rows.extend(gap_row(g) for g in gaps if g.before_call == group.first)
         cells = [
             Text(group.label),
             Text(fmt_int(group.n_in)),
@@ -968,6 +1003,7 @@ def _op_table(groups: list[_OpGroup], width: int) -> Table:
         if show_check:
             cells.append(check)
         rows.append(cells)
+    rows.extend(gap_row(g) for g in gaps if g.before_call is None)
 
     headers = ["op", "in", "out", "yield", "time"]
     if show_tokens:
@@ -1292,7 +1328,10 @@ def step_renderable(
             body.append(Text(""))
 
     one_plain_op = (
-        len(rec.ops) == 1 and not _check_text(groups[0]) and not rec.ops[0].cache_hit
+        len(rec.ops) == 1
+        and not _check_text(groups[0])
+        and not rec.ops[0].cache_hit
+        and not rec.python_gaps
     )
     stats = Text()
     stats.append(
@@ -1320,7 +1359,7 @@ def step_renderable(
 
     if rec.ops and not one_plain_op:
         body.append(Text(""))
-        body.append(_op_table(groups, width - 2))
+        body.append(_op_table(groups, width - 2, rec.python_gaps))
     elif rec.cache_hit and not rec.ops:
         body.append(
             Text("result loaded from the step cache; its ops did not run", style="dim")
@@ -1415,8 +1454,12 @@ def pipeline_renderable(rec: PipelineRecord, *, width: int = WIDTH) -> Renderabl
         (s.cost_usd and math.isfinite(s.cost_usd)) or original_cost(s)
         for s in rec.steps
     )
+    n_cells = 6 + show_units + show_cost
+    gaps = {g.position: g for g in rec.python_gaps}
     rows: list[list[Text]] = []
-    for s in rec.steps:
+    for i, s in enumerate(rec.steps):
+        if i in gaps:
+            rows.append(_gap_cells(gaps[i], n_cells))
         y = s.n_out / s.n_in if s.n_in and s.n_out is not None else None
         n_warn = len(dict.fromkeys(s.warnings))
         flags = Text()

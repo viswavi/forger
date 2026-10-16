@@ -448,29 +448,62 @@ def tracked(op_name: str) -> Callable[[Callable[..., T]], Callable[..., T]]:
     """Report calls in ``@step`` reports like an op, without caching or hashing.
 
     For functions whose arguments cannot be hashed into a cache key, e.g.
-    ``acquire.retrieve`` (a retrieval source holds a client and credentials).
+    ``acquire.retrieve`` (a retrieval source holds a client and credentials),
+    and for cheap ops not worth caching, e.g. ``filter.by_predicate``. Calls
+    take ``min_yield=`` / ``max_yield=`` like ``@op`` calls; ``_no_cache=True``
+    is accepted (nothing is cached) and ``_cache_only=True`` raises.
     """
 
     def decorate(fn: Callable[..., T]) -> Callable[..., T]:
+        sig = inspect.signature(fn)
+        for reserved in ("_no_cache", "_cache_only", "min_yield", "max_yield"):
+            if reserved in sig.parameters:
+                raise TypeError(
+                    "Forger functions decorated with @tracked cannot use the "
+                    f"reserved argument name '{reserved}'."
+                )
+
         @wraps(fn)
-        def wrapper(*args: Any, **kwargs: Any) -> T:
+        def wrapper(
+            *args: Any,
+            _no_cache: bool = False,
+            _cache_only: bool = False,
+            min_yield: float | None = None,
+            max_yield: float | None = None,
+            **kwargs: Any,
+        ) -> T:
+            if _cache_only:
+                raise ValueError(f"_cache_only: {op_name} is never cached")
+            _check_yield_bounds(min_yield, max_yield)
+            if (min_yield is not None or max_yield is not None) and (
+                _tracking.category_of(op_name) == "acquire"
+            ):
+                raise ValueError(
+                    f"{op_name} takes no input rows, so min_yield / max_yield do "
+                    "not apply; put them on the alter or filter op that follows"
+                )
+            # The rows, also when passed by keyword: by_predicate(items=rows, ...).
+            try:
+                first_arg = next(iter(sig.bind(*args, **kwargs).arguments.values()))
+            except (TypeError, StopIteration):
+                first_arg = args[0] if args else None
             token = _tracking.enter_op(op_name)
             start = time.perf_counter()
             call: _tracking.OpCall | None = None
-            rows: tuple[Any, Any] = (args[0] if args else None, None)
+            rows: tuple[Any, Any] = (first_arg, None)
             try:
                 result = fn(*args, **kwargs)
                 rows = (rows[0], result)
                 call = _op_call(
                     op_name,
-                    args[0] if args else None,
+                    first_arg,
                     result,
                     cache_hit=False,
                     duration=time.perf_counter() - start,
                     usage=token.usage_totals(),
                     scores=_tracking.current_scores(),
-                    min_yield=None,
-                    max_yield=None,
+                    min_yield=min_yield,
+                    max_yield=max_yield,
                 )
             except Exception as exc:
                 call = _failed_call(op_name, args, exc, token, start)

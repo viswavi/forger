@@ -14,7 +14,9 @@ A step is a function from rows to rows built from Forger ops::
 Each step is cached like an ``@op`` and prints a report when it returns: the
 output rows' fields, every op it ran with rows in/out, yield, time, tokens, and
 cost (repeated calls of one op share a row), a histogram of each filter's
-scores, warnings, and a sample row. A cached step prints one line. A pipeline
+scores, warnings, and a sample row. Rows that plain Python dropped or added
+between ops, or between steps, show as dim ``(python)`` rows (see
+``pyforger._rowflow``). A cached step prints one line. A pipeline
 prints a summary table of its steps, with notes on steps without a filter and
 filters that removed nothing. ``@step(prod=True)``, ``@pipeline(prod=True)``,
 or ``FORGER_STEP_REPORT=0`` silence the reports; ``strict=True`` turns
@@ -47,6 +49,7 @@ from pyforger._render import (
     render_step,
     sample_summaries,
 )
+from pyforger._rowflow import StepFlow
 from pyforger._summaries import set_report_model
 from pyforger._tracking import (
     BudgetExceededError,
@@ -62,8 +65,9 @@ F = TypeVar("F", bound=Callable[..., Any])
 _DIVERSITY_FILTERS = frozenset(
     {"filter.by_exact_match", "filter.by_rouge_l", "filter.by_n_gram_overlap"}
 )
-# Every other filter.* op counts as a quality filter.
-_NON_QUALITY_FILTERS = _DIVERSITY_FILTERS | {"filter.by_length"}
+# Every other filter.* op counts as a quality filter. by_length and by_predicate
+# check structure ("has ≥3 papers"), and any lambda would pass as a judge.
+_NON_QUALITY_FILTERS = _DIVERSITY_FILTERS | {"filter.by_length", "filter.by_predicate"}
 
 _SAMPLE_ROWS_KEPT = 10  # rows stored per record; inspect_step shows all of them
 _SAMPLE_FIELD_CHARS = 500  # stored per string field; inspect_step shows all of it
@@ -292,6 +296,19 @@ def step(
                 if rows_in and all(isinstance(row, dict) for row in rows_in):
                     input_keys = _keys(rows_in)
 
+            # (python) rows compare the rows of one stream; with several list
+            # arguments the step's input is unclear, so it has none.
+            arg_lists = [a for a in (*args, *kwargs.values()) if isinstance(a, list)]
+            one_list = len(arg_lists) == 1 and arg_lists[0] is rows_in
+            stream = rows_in if one_list else None
+            flow = StepFlow(stream, arg_lists)
+            pipeline_rec = _tracking.pipeline_for_step()
+            started = (
+                _tracking.step_starting(pipeline_rec, stream, arg_lists)
+                if pipeline_rec is not None
+                else None
+            )
+
             checked: list[bool] = []
             strict_failed: list[bool] = []
             ops_before = _tracking.ops_started()
@@ -300,6 +317,8 @@ def step(
                 # Called by @op on a fresh result, before it is cached: raising
                 # here keeps a result that breaks the contract out of the cache.
                 checked.append(True)
+                if isinstance(result, list):
+                    rec.python_gaps = flow.gaps(result)
                 _check_step_result(
                     rec,
                     result,
@@ -314,7 +333,7 @@ def step(
 
             start = time.perf_counter()
 
-            def finish() -> None:
+            def finish(result: Any = None) -> None:
                 rec.duration_s = time.perf_counter() - start
                 usage = scope.usage.totals()
                 (
@@ -324,15 +343,14 @@ def step(
                     rec.token_units,
                 ) = usage
                 _tracking.store_step(rec)
-                pipeline_rec = _tracking.pipeline_for_step()
                 if pipeline_rec is not None:
-                    pipeline_rec.steps.append(rec)
+                    _tracking.join_pipeline(pipeline_rec, rec, started, result)
                 if _reports_enabled(prod):
                     if not rec.cache_hit:  # a cached step prints one line
                         _summaries.add_llm_summaries(rec, rows=rec.sample_shown)
                     print_step(rec)
 
-            scope = _tracking.enter_step(rec, check)
+            scope = _tracking.enter_step(rec, check, flow)
             try:
                 result = cached(*args, **kwargs)
             except StepContractError:
@@ -341,10 +359,11 @@ def step(
                 raise
             finally:
                 _tracking.exit_step(scope)
+                flow.close()  # let go of the rows the step's ops saw
 
             if not checked:  # a cache hit
                 _check_step_result(rec, result, out_model, 0, input_keys)
-            finish()
+            finish(result)
             if strict and rec.warnings:
                 raise _strict_error(rec)
             return result
@@ -499,6 +518,7 @@ def pipeline(
             scope = _tracking.enter_pipeline(rec, on_dynamic_step)
             try:
                 result = fn(*args, **kwargs)
+                _tracking.close_pipeline_flow(rec, result)
             finally:
                 _tracking.exit_pipeline(scope)
             rec.duration_s = time.perf_counter() - start

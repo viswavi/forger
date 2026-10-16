@@ -92,6 +92,14 @@ cached it, marked `cached`, with that run's warnings.
   one histogram when the label, keep rule, and thresholds match, and get one histogram per rule otherwise. A call
   whose input rows are an earlier call's output rows (the same row objects, also through other ops) gets its own
   row: two `by_llm_score` rubric judges in a row read `10 → 8` and `8 → 4`, not one summed row.
+- `(python)` rows: when rows change between two ops with no op to account for it (e.g. `[r for r in rows if ...]`
+  between `generate_from_context` and `by_exact_match`), the op table shows a dim row such as
+  `(python)  356 → 330  0.93` between them, or before the first op / after the last one. They are inferred: by row
+  identity when the next op got some of the same dicts, else from row counts (marked `inferred`) when Python rebuilt
+  them all (`{**r, ...}`) and each op row's calls are contiguous. Merged, split, or ambiguous rows (several list
+  arguments, interleaved chunks, rebuilt rows sent to two ops) show nothing. The pipeline table shows one between two
+  steps when the second got some of the first's rows, by identity only. They are information, never warnings. To see
+  why rows went, write the check as `filter.by_predicate`: it gets its own row and a kept/dropped bar.
 
 - Hard errors (`StepContractError` / `PipelineContractError`): a step returns a non-list, a step calls no Forger ops
   (keep pure-Python helpers as plain functions), a step is called inside another step, a pipeline calls no steps, or
@@ -141,9 +149,10 @@ cached it, marked `cached`, with that run's warnings.
 ### Operation reference
 
 All operations are plain functions. Operations that perform LLM calls or expensive in-process work (`sample_from_LLM`
-every `alter.*` op, every `filter.*` op, every `inspect.*` op) are decorated internally with `@op`, so their results
-are cached on disk and traced. The retrieval functions (`retrieve`, `retrieve_from_*`) are not internally cached; wrap
-them with `@op` to memoize their results. Inside a `@step` they are listed as `acquire.retrieve`.
+every `alter.*` op, every `filter.*` op but the cheap `by_predicate`, every `inspect.*` op) are decorated internally
+with `@op`, so their results are cached on disk and traced. The retrieval functions (`retrieve`, `retrieve_from_*`)
+are not internally cached; wrap them with `@op` to memoize their results. Inside a `@step` they are listed as
+`acquire.retrieve`.
 
 ### Public API summary
 
@@ -241,6 +250,7 @@ Remove rows by criterion. If a filter empties the list, downstream operations re
 | `by_keyword_blocklist` | Drop responses with certain keywords; default blocklist targets common refusal phrases. |
 | `by_llm_score` | LLM-as-judge with optional multi-judge consensus. |
 | `by_syntax` | Validate JSON, YAML, Python, or XML, optionally against required keys or a JSON schema. |
+| `by_predicate` | Keep rows where `fn(row)` is truthy: a plain Python check that shows in the step report. Not cached. |
 
 These are important for assuring quality and diversity in generated data, and one should experiment with their parameters
 and thresholds to find the right balance for a given use case. For example, `by_rouge_l` with a very low threshold
@@ -258,6 +268,15 @@ fraction of judges scoring at least `score_threshold`, which is what `agreement_
 `by_llm_score` caches the judge scores separately from its thresholds, so re-running it with a different
 `score_threshold` or `agreement_threshold` makes no new judge calls (`_no_cache=True` re-asks the judges;
 `_cache_only=True` finds only thresholds that were run before).
+
+Write a Python check on rows as `by_predicate` rather than a list comprehension, so the step report lists it with
+rows in/out and a kept/dropped bar (`label` names it there; default: the function's name, or `predicate` for a
+lambda). An exception from `fn` propagates with the row index in its message. It counts as neither a quality nor a
+diversity filter.
+
+```python
+rows = filter.by_predicate(rows, lambda r: len(r["papers"]) >= 3, label="has ≥3 papers", min_yield=0.5)
+```
 
 #### `pyforger.inspect`
 
