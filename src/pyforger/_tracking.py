@@ -133,6 +133,10 @@ _OP_DEPTH: ContextVar[int] = ContextVar("forger_op_depth", default=0)
 _ACTIVE_SCORES: ContextVar[list[ScoreRecord] | None] = ContextVar(
     "forger_active_scores", default=None
 )
+# Warnings the innermost active op raised about its own work (see ``warn``).
+_ACTIVE_WARNINGS: ContextVar[list[str] | None] = ContextVar(
+    "forger_active_warnings", default=None
+)
 # Set by the active step; ``op.py`` calls it on a step's fresh result before
 # caching it, so a result that breaks the step's contract (or, under
 # strict=True, has warnings) is never cached. It returns the step metadata that
@@ -300,6 +304,7 @@ class OpToken:
     depth: int
     depth_token: Token[int] | None = None
     scores_token: Token[list[ScoreRecord] | None] | None = None
+    warnings_token: Token[list[str] | None] | None = None
 
 
 def enter_op(op_name: str) -> OpToken:
@@ -315,12 +320,30 @@ def enter_op(op_name: str) -> OpToken:
         depth=depth,
         depth_token=_OP_DEPTH.set(depth + 1),
         scores_token=_ACTIVE_SCORES.set([]),
+        warnings_token=_ACTIVE_WARNINGS.set([]),
     )
 
 
 def current_scores() -> list[ScoreRecord]:
     """Return the score records the innermost active op has recorded so far."""
     return list(_ACTIVE_SCORES.get() or [])
+
+
+def add_op_warning(message: str) -> None:
+    """Add ``message`` to the running op's warnings in the step report.
+
+    For an op that logs a problem with its own work, e.g. "3 of 64 prompts
+    failed". The op logs it itself, so it is not logged again; a nested op's
+    warnings go to the op that called it. A no-op outside ops.
+    """
+    warnings = _ACTIVE_WARNINGS.get()
+    if warnings is not None:
+        warnings.append(message)
+
+
+def current_warnings() -> list[str]:
+    """Return the warnings the innermost active op has added so far."""
+    return list(_ACTIVE_WARNINGS.get() or [])
 
 
 def exit_op(token: OpToken, call: OpCall | None) -> None:
@@ -337,6 +360,12 @@ def exit_op(token: OpToken, call: OpCall | None) -> None:
         return
     if token.scores_token is not None:
         _ACTIVE_SCORES.reset(token.scores_token)
+    if token.warnings_token is not None:
+        own = _ACTIVE_WARNINGS.get() or []
+        _ACTIVE_WARNINGS.reset(token.warnings_token)
+        parent = _ACTIVE_WARNINGS.get()
+        if own and parent is not None and token.depth != 0:
+            parent.extend(own)
     if token.depth_token is not None:
         _OP_DEPTH.reset(token.depth_token)
     if call is None or token.depth != 0:

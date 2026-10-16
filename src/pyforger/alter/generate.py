@@ -6,7 +6,15 @@ import re
 from collections.abc import Callable
 from typing import Any, Union
 
-from pyforger.acquire._model_utils import _build_prompt, _parse_output, _reasoning_for
+from pyforger import _tracking
+from pyforger.acquire._model_utils import (
+    _accepts_kwarg,
+    _build_prompt,
+    _is_transient,
+    _parse_output,
+    _reasoning_for,
+    _report_provider_failures,
+)
 from pyforger.acquire.model import Model, Prompt, _cache_kwargs, split_reasoning
 from pyforger.op import op
 from pyforger.utils import get_field
@@ -58,7 +66,9 @@ def generate_from_context(
     temperature: float = 0.7,
     max_retries: int = 3,
     batch_size: int | None = None,
-) -> list[dict | None]:
+    merge: bool = False,
+    output_field: str | None = None,
+) -> list[dict | None] | list[dict]:
     r"""Generate LLM outputs conditioned on upstream input items.
 
     ``prompt_fn`` wraps each input item in a prompt which is passed to ``model`` for
@@ -77,16 +87,27 @@ def generate_from_context(
             JSON-parsed and validated; failures are retried. When None, each
             response is stored as ``{"text": ...}``.
         temperature: Sampling temperature passed to the model.
-        max_retries: Additional attempts for prompts whose output fails to parse.
+        max_retries: Additional attempts for prompts whose output fails to parse
+            or whose request fails at the provider (e.g. a 504).
         batch_size: Number of prompts per ``model.generate_batch()`` call. None
             (default) sends all prompts in one call; the model's
             ``max_concurrency`` bounds how many requests run at once.
+        merge: Return the input rows with the output attached instead of the
+            bare outputs: ``{**item, **parsed}`` per output (the output wins
+            when keys clash; a warning names them), plus ``sample_idx`` when
+            ``samples_per_item > 1``. Failed slots are dropped.
+        output_field: With ``merge=True``, nest the output under this key
+            instead, e.g. ``"solution"`` gives ``{**item, "solution": parsed}``.
 
     Returns:
-        List of length ``len(items) * samples_per_item`` in input order, grouped
-        by item (item ``i``'s samples occupy slots ``i * samples_per_item`` to
-        ``(i + 1) * samples_per_item``). Each slot holds the parsed output dict,
-        or ``None`` if the prompt failed to parse after ``max_retries``. When the
+        By default, a list of length ``len(items) * samples_per_item`` in input
+        order, grouped by item (item ``i``'s samples occupy slots
+        ``i * samples_per_item`` to ``(i + 1) * samples_per_item``). Each slot
+        holds the parsed output dict, or ``None`` if the prompt failed to parse
+        or failed at the provider after ``max_retries``; when any slot failed at
+        the provider, the result is not cached, so a rerun asks again (the
+        request cache replays the completions that arrived). With
+        ``merge=True``, the merged rows of the slots that succeeded. When the
         model returns a reasoning trace separately in `GenerateResult.reasoning`,
         it is included under the `thinking_trace` key. Inline `<think>` traces (e.g.
         from `LocalModel`, which supplies `None` for that metadata) are not extracted;
@@ -98,6 +119,8 @@ def generate_from_context(
         raise ValueError("samples_per_item must be positive")
     if max_retries < 0:
         raise ValueError("max_retries must be non-negative")
+    if output_field is not None and not merge:
+        raise ValueError("output_field needs merge=True")
 
     log = _get_logger()
 
@@ -107,23 +130,33 @@ def generate_from_context(
 
     results: list[dict | None] = [None] * (len(prompts) * samples_per_item)
 
-    # In order to handle retries while generating multiple samples per item via the n=
-    # parameter of generate_batch, we keep a list of pending prompts with the number of
-    # samples still needed for each, so we can track the amount of computation still
-    # required (up to max_retries).
-    pending: list[tuple[Prompt, list[int]]] = [
-        (p, list(range(i * samples_per_item, (i + 1) * samples_per_item)))
-        for i, p in enumerate(prompts)
+    # A transient provider error (e.g. a 504) comes back in the prompt's slot
+    # instead of failing the whole batch; models whose generate_batch lacks the
+    # keyword raise as before.
+    catch: dict[str, Any] = (
+        {"return_exceptions": True}
+        if _accepts_kwarg(getattr(model, "generate_batch", None), "return_exceptions")
+        else {}
+    )
+
+    # Each pending entry is (item index, slots still needed). Retries re-ask
+    # only the missing slots, up to max_retries more attempts.
+    pending: list[tuple[int, list[int]]] = [
+        (i, list(range(i * samples_per_item, (i + 1) * samples_per_item)))
+        for i in range(len(prompts))
     ]
+    # Item index -> type name of its latest provider failure, e.g.
+    # "InternalServerError"; cleared when a later attempt gets a response.
+    provider_errors: dict[int, str] = {}
 
     for attempt in range(1 + max_retries):
         if not pending:
             break
-        next_pending: list[tuple[Prompt, list[int]]] = []
+        next_pending: list[tuple[int, list[int]]] = []
 
         # generate_batch uses one n per call, so group prompts needing the same
         # number of completions (on the first pass all need samples_per_item).
-        by_count: dict[int, list[tuple[Prompt, list[int]]]] = {}
+        by_count: dict[int, list[tuple[int, list[int]]]] = {}
         for entry in pending:
             by_count.setdefault(len(entry[1]), []).append(entry)
 
@@ -132,20 +165,19 @@ def generate_from_context(
             for start in range(0, len(group), chunk):
                 batch = group[start : start + chunk]
                 # Each prompt is keyed on its row, so editing one row re-asks
-                # only that row. A retry re-asks prompts whose output failed to
-                # parse; the salt (e.g. "retry 1, n=2") gets new completions,
-                # not the same failed ones.
+                # only that row. A retry (after a parse failure or a provider
+                # error) is salted, e.g. "retry 1, n=2", and gets new
+                # completions, not the same failed ones.
                 batch_results = model.generate_batch(
-                    [p for p, _ in batch],
+                    [prompts[i] for i, _ in batch],
                     temperature=temperature,
                     n=n,
                     **_cache_kwargs(
                         model.generate_batch,
-                        cache_rows=[
-                            items[slots[0] // samples_per_item] for _, slots in batch
-                        ],
+                        cache_rows=[items[i] for i, _ in batch],
                         cache_salt=f"retry {attempt}, n={n}" if attempt else None,
                     ),
+                    **catch,
                 )
                 if len(batch_results) != len(batch):
                     log.warning(
@@ -156,8 +188,20 @@ def generate_from_context(
                     )
                     next_pending.extend(batch)
                     continue
-                for (prompt, slots), completions in zip(batch, batch_results):
-                    unfilled = slots[len(completions) :]  # short batch -> retry
+                for (i, slots), completions in zip(batch, batch_results):
+                    if isinstance(completions, BaseException):
+                        # A bad key, unknown model, or 400 fails every retry.
+                        if not _is_transient(completions):
+                            raise completions
+                        provider_errors[i] = type(completions).__name__
+                        next_pending.append((i, slots))
+                        continue
+                    provider_errors.pop(i, None)
+                    unfilled = slots[len(completions) :]
+                    if unfilled and catch:
+                        # Fewer completions than asked: some of the prompt's
+                        # requests failed (return_exceptions keeps the rest).
+                        provider_errors[i] = "missing completions"
                     for slot, raw_text, reasoning_text in zip(
                         slots, completions, _reasoning_for(completions)
                     ):
@@ -169,18 +213,69 @@ def generate_from_context(
                         else:
                             results[slot] = parsed
                     if unfilled:
-                        next_pending.append((prompt, unfilled))
+                        next_pending.append((i, unfilled))
         pending = next_pending
 
-    if pending:
-        failed = sum(len(slots) for _, slots in pending)
+    failed_parse = [slots for i, slots in pending if i not in provider_errors]
+    if failed_parse:
         log.warning(
             "%d sample(s) failed to parse after %d retries; "
             "returning None for those slots",
-            failed,
+            sum(len(slots) for slots in failed_parse),
             max_retries,
         )
-    return results
+    failed_provider = [provider_errors[i] for i, _ in pending if i in provider_errors]
+    if failed_provider:
+        _report_provider_failures(
+            f"alter.generate_from_context: {len(failed_provider)} of {len(prompts)} "
+            f"prompts failed after {max_retries} "
+            f"{'retry' if max_retries == 1 else 'retries'}; their slots are None",
+            failed_provider,
+        )
+    if not merge:
+        return results
+    return _merge_outputs(items, results, samples_per_item, output_field, log)
+
+
+def _merge_outputs(
+    items: list[dict],
+    outputs: list[dict | None],
+    samples_per_item: int,
+    output_field: str | None,
+    log: logging.Logger,
+) -> list[dict]:
+    """Attach each parsed output to its input row; drop failed slots.
+
+    ``{**item, **parsed}``, or ``{**item, output_field: parsed}``, plus
+    ``sample_idx`` (0, 1, ...) when there are several samples per item.
+    """
+    merged: list[dict] = []
+    clashes: set[str] = set()
+    for slot, parsed in enumerate(outputs):
+        if parsed is None:
+            continue
+        item = items[slot // samples_per_item]
+        row: dict[str, Any]
+        if output_field is not None:
+            clashes.update({output_field} & item.keys())
+            row = {**item, output_field: parsed}
+        else:
+            clashes.update(parsed.keys() & item.keys())
+            row = {**item, **parsed}
+        if samples_per_item > 1:
+            # e.g. a sample_idx left by an earlier merge=True step.
+            clashes.update({"sample_idx"} & row.keys())
+            row["sample_idx"] = slot % samples_per_item
+        merged.append(row)
+    if clashes:
+        message = (
+            f"alter.generate_from_context: merge=True replaces the input's "
+            f"{sorted(clashes)}; pass another output_field= (or rename the input "
+            "keys) to keep both"
+        )
+        log.warning(message)
+        _tracking.add_op_warning(message)
+    return merged
 
 
 def default_extract_answer(text: str) -> str | None:

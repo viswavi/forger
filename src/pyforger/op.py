@@ -123,6 +123,60 @@ def _legacy_hash(obj: Any) -> str:
 # also skip the cache (e.g. by_llm_score's inner judge-score op).
 _NO_CACHE_SCOPE: ContextVar[bool] = ContextVar("forger_no_cache_scope", default=False)
 
+
+class _CallState:
+    """Mutable per-call flags: ``skip_write`` keeps the result out of the cache.
+
+    ``from_thread`` is set when the flag came from an op in a worker thread
+    that did not copy the context (see ``_skip_running_calls``).
+    """
+
+    __slots__ = ("skip_write", "from_thread")
+
+    def __init__(self) -> None:
+        self.skip_write = False
+        self.from_thread = False
+
+
+# The innermost running op call (including a @step's ``step.*`` wrapper).
+_CALL_STATE: ContextVar[_CallState | None] = ContextVar(
+    "forger_call_state", default=None
+)
+# Every op call running in the process, in any thread.
+_RUNNING_CALLS: set[_CallState] = set()
+_RUNNING_CALLS_LOCK = threading.Lock()
+
+
+def _skip_running_calls(origin: _CallState) -> None:
+    """Keep every other running op and step call out of the cache.
+
+    For an op that skipped its write with no enclosing call in its context: in
+    a worker thread started without ``contextvars.copy_context().run``, the op
+    or step that started the thread cannot be told apart from unrelated ones
+    running at the same time, so none of them is cached.
+    """
+    with _RUNNING_CALLS_LOCK:
+        for state in _RUNNING_CALLS:
+            if state is not origin:
+                state.skip_write = True
+                state.from_thread = True
+
+
+def skip_cache_write() -> None:
+    """Do not cache the result of the running op or of any op or step enclosing it.
+
+    For an op that returns a result it should not replay, e.g. one with ``None``
+    slots for prompts the provider failed on: the result is still returned, and
+    the next call runs the op again. A no-op outside ops. In a worker thread
+    that did not copy the context (plain ``pool.submit``), the enclosing calls
+    cannot be found, so every op and step running in the process at that time
+    is left uncached instead.
+    """
+    state = _CALL_STATE.get()
+    if state is not None:
+        state.skip_write = True
+
+
 _STEP_META_SUFFIX = ".step.json"
 
 
@@ -370,11 +424,16 @@ def op(
                 )
             token = _tracking.enter_op(op_name)
             scope_token = _NO_CACHE_SCOPE.set(True) if _no_cache else None
+            state = _CallState()
+            parent_state = _CALL_STATE.get()
+            state_token = _CALL_STATE.set(state)
+            with _RUNNING_CALLS_LOCK:
+                _RUNNING_CALLS.add(state)
             usage_start = _tracking.usage_snapshot()
             call: _tracking.OpCall | None = None
             try:
                 result, cache_hit, first_arg, duration = _call(
-                    args, kwargs, _no_cache, _cache_only
+                    args, kwargs, _no_cache, _cache_only, state
                 )
                 call = _op_call(
                     op_name,
@@ -386,8 +445,18 @@ def op(
                     scores=_tracking.current_scores(),
                     min_yield=min_yield,
                     max_yield=max_yield,
+                    body_warnings=_tracking.current_warnings(),
                 )
             finally:
+                _CALL_STATE.reset(state_token)
+                with _RUNNING_CALLS_LOCK:
+                    _RUNNING_CALLS.discard(state)
+                # A result the op kept out of the cache makes every enclosing
+                # op's (and step's) result stale too.
+                if state.skip_write and parent_state is not None:
+                    parent_state.skip_write = True
+                elif state.skip_write and not state.from_thread:
+                    _skip_running_calls(state)
                 if scope_token is not None:
                     _NO_CACHE_SCOPE.reset(scope_token)
                 _tracking.exit_op(token, call)
@@ -398,6 +467,7 @@ def op(
             kwargs: dict[str, Any],
             _no_cache: bool,
             _cache_only: bool,
+            state: _CallState,
         ) -> tuple[Any, bool, Any, float]:
             """Run or load the op; return (result, cache_hit, first arg, seconds)."""
             start = time.time()
@@ -496,7 +566,15 @@ def op(
                     # Raises before caching when a @step breaks its contract.
                     meta = _tracking.check_step_result(result)
 
-                if use_cache:
+                if use_cache and state.skip_write:
+                    logger.debug("not caching %s %s", op_name, input_hash[:8])
+                    step_rec = _tracking.active_step() if is_step else None
+                    if state.from_thread and step_rec is not None:
+                        step_rec.warnings.append(
+                            "not cached: an op in a worker thread kept its result "
+                            "out of the cache (e.g. provider errors)"
+                        )
+                elif use_cache:
                     cache_path.parent.mkdir(parents=True, exist_ok=True)
                     if meta is not None:
                         # Written first, so a cached step always has its ops.
@@ -597,6 +675,7 @@ def tracked(op_name: str) -> Callable[[Callable[..., T]], Callable[..., T]]:
                     scores=_tracking.current_scores(),
                     min_yield=None,
                     max_yield=None,
+                    body_warnings=_tracking.current_warnings(),
                 )
             finally:
                 _tracking.exit_op(token, call)
@@ -629,8 +708,13 @@ def _op_call(
     scores: list[_tracking.ScoreRecord],
     min_yield: float | None,
     max_yield: float | None,
+    body_warnings: list[str] | None = None,
 ) -> _tracking.OpCall:
-    """Build the step-report entry for one op call and apply its yield bounds."""
+    """Build the step-report entry for one op call and apply its yield bounds.
+
+    ``body_warnings`` come from ``_tracking.add_op_warning`` in the op's body;
+    the op logged them already, so they are only added to the report.
+    """
     category = _tracking.category_of(op_name)
     # An acquire op's first argument is a prompt or query, not input rows.
     n_in = (
@@ -680,4 +764,5 @@ def _op_call(
     if not _tracking.is_reporting():
         for warning in call.warnings:
             logger.warning(warning)
+    call.warnings.extend(body_warnings or [])
     return call

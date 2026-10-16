@@ -452,13 +452,15 @@ class TestOneBatchByDefault:
         assert [len(batch) for batch in model.recorded_prompts] == [15]
 
     def test_sample_from_llm_asks_for_all_samples_at_once(self):
-        """n=30 is one generate call with n=30."""
+        """n=30 is one generate_batch call with n=30."""
         model = MockModel(responses=[[f"s{i}" for i in range(30)]])
-        with patch.object(model, "generate", wraps=model.generate) as generate:
+        with patch.object(
+            model, "generate_batch", wraps=model.generate_batch
+        ) as generate_batch:
             items = sample_from_LLM("Generate", model, n=30)
         assert len(items) == 30
-        assert generate.call_count == 1
-        assert generate.call_args.kwargs["n"] == 30
+        assert generate_batch.call_count == 1
+        assert generate_batch.call_args.kwargs["n"] == 30
 
 
 class Numbered:
@@ -543,14 +545,16 @@ class TestLargeN:
         assert result == [f"Q#{i}" for i in range(14, 40)]
 
     def test_sample_from_llm_n_100(self, mock_litellm):
-        """sample_from_LLM n=100: one generate call, no request above n=16."""
+        """sample_from_LLM n=100: one generate_batch call, no request above n=16."""
         fake = Numbered()
         mock_litellm.completion.side_effect = fake
         model = Model("gpt-4o", show_progress=False)
-        with patch.object(model, "generate", wraps=model.generate) as generate:
+        with patch.object(
+            model, "generate_batch", wraps=model.generate_batch
+        ) as generate_batch:
             items = sample_from_LLM("Generate", model, n=100)
         assert len(items) == 100
-        assert generate.call_count == 1
+        assert generate_batch.call_count == 1
         assert max(fake.ns) <= 16 and sum(fake.ns) == 100
 
     def test_self_taught_reasoner_large_n(self, mock_litellm):
