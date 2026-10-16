@@ -463,3 +463,12 @@ PDF extraction uses `pypdf.PdfReader` on up to 100 pages; image-only scans need
 OCR, which this operation does not provide.
 RestrictedPython provides accidental-damage guardrails, not isolation against
 adversarial code. Cache directories must be trusted.
+
+### Callable sampling
+
+`alter.sample(rows, generate, sample_ids=["0", "1"])` attaches samples produced by
+an ordinary callable accepting a row and a sample ID. Values may be text or JSON;
+the callable may use an LLM, an agent, or code. `concurrency` bounds simultaneous
+calls across rows and sample IDs while preserving input order.
+Every alter operation uses `@op`; identical identified samples can be reused,
+while distinct IDs or `no_cache` request fresh work.
