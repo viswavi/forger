@@ -230,8 +230,9 @@ vote.
   grouped by `group_by="prompt"`). The judge sees the input once and the candidates labelled A, B, C, ..., answers
   `{"ranking": ["C", "A", "B"], "explanation": "..."}`, and the top `keep` per group survive. With `num_judges > 1`
   each judge sees its own shuffled order (seeded by `seed`) to spread position bias, and rankings combine by Borda
-  count; ties go to the earlier row. Groups of at most `keep` rows are kept without a call. The report histogram
-  shows each row's rank in its group. Judge answers are cached apart from `keep`.
+  count; ties go to the earlier row. Every group of two or more rows is judged, whatever `keep` is, so changing
+  `keep` makes no new judge calls; a single row is kept without a call. The report histogram shows each row's rank
+  in its group.
 
 `prompt_template` replaces either judge's prompt: a format string or a callable taking a dict. The placeholders are
 the row's fields (for the comparative judge, the group's first row) plus `{input}`, `{criteria}`, and for
@@ -239,7 +240,8 @@ the row's fields (for the comparative judge, the group's first row) plus `{input
 `{labels}` (`"A, B, C"`), and `{num_candidates}`. Write literal braces as `{{ }}`. If the prompt does not contain the
 JSON key in double quotes (`"score"` or `"ranking"`), the answer-format line is appended for you.
 `by_llm_score(..., score_field="judge_score", explanation_field="judge_why")` adds the judges' mean score and their
-list of explanations to kept rows.
+list of explanations to kept rows; `by_comparative_judge(..., rank_field="rank", explanation_field="judge_why")` adds
+the row's rank in its group (1 = best) and the group's judge explanations. Without these fields rows are unchanged.
 
 ```python
 best = filter.by_comparative_judge(

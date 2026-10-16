@@ -928,11 +928,21 @@ class TestByComparativeJudge:
         assert all("Input: q1" in p and p.count("Input:") == 1 for p in q1_prompts)
         assert all(set(_shown(p)) == {"A", "B", "C"} for p in q1_prompts)
 
-    def test_groups_no_larger_than_keep_make_no_calls(self):
-        """With every group at most keep rows, nothing is sent and all rows stay."""
+    def test_only_single_rows_skip_the_call(self):
+        """Groups of two or more are judged even when keep covers them."""
         judge = _RankingJudge()
         kept = _comparative(_GROUPED, judge, keep=3)
         assert kept == _GROUPED
+        assert [p.split("Input: ")[1].split("\n")[0] for p in judge.prompts] == [
+            "q1",
+            "q3",
+        ]
+
+    def test_all_single_rows_make_no_calls(self):
+        """Rows with distinct group values are kept without any judge call."""
+        judge = _RankingJudge()
+        rows = [{"q": f"q{i}", "a": "x"} for i in range(3)]
+        assert _comparative(rows, judge) == rows
         assert judge.prompts == []
 
     def test_borda_combines_judges(self):
@@ -980,7 +990,7 @@ class TestByComparativeJudge:
         assert any(not r["a"].endswith("answer 0") for r in kept)
 
     def test_changing_keep_reuses_judge_calls(self):
-        """A new keep makes no new calls when the same groups are judged."""
+        """A new keep makes no new calls."""
         rows = [{"q": f"q{g}", "a": "a" * (i + 1)} for g in range(3) for i in range(4)]
         judge = _RankingJudge()
         one = _comparative(rows, judge, keep=1)
@@ -990,6 +1000,53 @@ class TestByComparativeJudge:
         assert len(one) == 3 and len(two) == 6
         hits = [r.cache_hit for r in trace() if r.op_name.endswith(".rankings")]
         assert hits == [False, True]
+
+    def test_changing_keep_with_mixed_group_sizes_reuses_judge_calls(self):
+        """Groups of 2, 3, and 4 rows: keep 1, 2, 3, 4 all reuse the first calls."""
+        rows = [
+            {"q": f"q{size}", "a": "a" * (i + 1)}
+            for size in (2, 3, 4)
+            for i in range(size)
+        ]
+        judge = _RankingJudge()
+        kept = [len(_comparative(rows, judge, keep=keep)) for keep in (1, 2, 3, 4)]
+        assert kept == [3, 6, 8, 9]
+        assert len(judge.prompts) == 3
+        hits = [r.cache_hit for r in trace() if r.op_name.endswith(".rankings")]
+        assert hits == [False, True, True, True]
+
+    def test_rank_and_explanation_fields(self):
+        """Kept rows carry their rank and the group's judge explanations."""
+        judge = _RankingJudge()
+        kept = _comparative(
+            _GROUPED,
+            judge,
+            keep=2,
+            num_judges=2,
+            rank_field="rank",
+            explanation_field="why",
+        )
+        assert kept == [
+            {**_GROUPED[1], "rank": 1, "why": ["because", "because"]},
+            {**_GROUPED[2], "rank": 1, "why": []},
+            {**_GROUPED[3], "rank": 2, "why": ["because", "because"]},
+            {**_GROUPED[4], "rank": 2, "why": ["because", "because"]},
+            {**_GROUPED[5], "rank": 1, "why": ["because", "because"]},
+        ]
+
+    def test_explanations_skip_unparsed_judges(self):
+        """Only judges whose ranking parsed contribute an explanation."""
+        rows = [{"q": "q", "a": t} for t in ("x", "y")]
+        judge = _BadJudge(
+            ['{"ranking": ["B", "A"], "explanation": "B is right"}', "garbage"]
+        )
+        kept = _comparative(rows, judge, num_judges=2, explanation_field="why")
+        assert len(kept) == 1 and kept[0]["why"] == ["B is right"]
+
+    def test_default_rows_unchanged(self):
+        """Without rank_field or explanation_field, kept rows are input rows."""
+        kept = _comparative(_GROUPED, _RankingJudge())
+        assert all(any(row is k for row in _GROUPED) for k in kept)
 
     def test_unparseable_group_is_dropped(self):
         """A group whose judges all answer garbage is dropped and recorded None."""

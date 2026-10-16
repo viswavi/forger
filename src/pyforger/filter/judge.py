@@ -163,6 +163,8 @@ def by_comparative_judge(
     prompt_template: JudgePromptTemplate | None = None,
     seed: int = 0,
     temperature: float = 0.0,
+    rank_field: str | None = None,
+    explanation_field: str | None = None,
 ) -> list[dict]:
     """Keep the ``keep`` best rows of each group, as ranked side by side by a judge.
 
@@ -175,13 +177,14 @@ def by_comparative_judge(
     judge index, and the group) to spread position bias. Rankings combine by
     Borda count: in a group of ``m`` the candidate ranked ``p``-th (from 0)
     gets ``m - 1 - p`` points, and candidates a judge leaves out share the
-    remaining points. Ties go to the row that came first. Groups of at most
-    ``keep`` rows are kept without a call; a group none of whose judges answered
-    parseably is dropped. Kept rows stay in input order.
+    remaining points. Ties go to the row that came first. Every group of two or
+    more rows is judged, whatever ``keep`` is; a single row is kept without a
+    call. A group none of whose judges answered parseably is dropped. Kept rows
+    stay in input order.
 
     All calls go out in one ``model.generate_batch`` call (``n=1`` each). Judge
     responses are cached apart from ``keep``, so a new ``keep`` makes no new
-    calls as long as the same groups are larger than it.
+    calls.
 
     ``prompt_template`` replaces the default prompt. A string is filled with
     ``str.format_map`` over the group's first row plus ``{input}``,
@@ -189,6 +192,10 @@ def by_comparative_judge(
     ``{num_candidates}``, and ``{criteria}``; a callable receives that dict. If
     the prompt does not contain ``"ranking"``, the JSON answer instruction is
     appended.
+
+    With ``rank_field`` set, kept rows carry their rank in the group (1 = best);
+    with ``explanation_field`` set, the list of the group's judge explanations
+    (empty for a single row).
 
     In a ``@step`` report the per-row score is the row's rank in its group
     (1 = best), kept when at most ``keep``.
@@ -202,7 +209,8 @@ def by_comparative_judge(
     for i, item in enumerate(items):
         value = get_field(item, group_by, "by_comparative_judge")
         groups.setdefault(_hashable(value), []).append(i)
-    judged = [(key, idx) for key, idx in groups.items() if len(idx) > keep]
+    # Judged independently of keep, so the calls (and cache) never depend on it.
+    judged = [(key, idx) for key, idx in groups.items() if len(idx) > 1]
 
     # orders[g][j][k] is the candidate (index into group g) labelled k for judge j.
     orders: list[list[list[int]]] = []
@@ -229,20 +237,25 @@ def by_comparative_judge(
 
     # Rank within the group, 1 = best; None when no judge answered parseably.
     ranks: list[int | None] = [None] * len(items)
+    explanations: list[list[str]] = [[] for _ in items]
     for idx in groups.values():
-        if len(idx) <= keep:
-            for r, i in enumerate(idx, start=1):
-                ranks[i] = r
+        if len(idx) == 1:
+            ranks[idx[0]] = 1
     parse_failures = 0
     for g, (_, idx) in enumerate(judged):
         points = [0.0] * len(idx)
+        whys: list[str] = []
         any_parsed = False
         for j, order in enumerate(orders[g]):
-            ranking = _parse_ranking_response(responses[g * num_judges + j], order)
+            raw = responses[g * num_judges + j]
+            ranking = _parse_ranking_response(raw, order)
             if ranking is None:
                 parse_failures += 1
                 continue
             any_parsed = True
+            why = _ranking_explanation(raw)
+            if why:
+                whys.append(why)
             for candidate, pts in _borda_points(ranking, len(idx)).items():
                 points[candidate] += pts
         if not any_parsed:
@@ -250,10 +263,21 @@ def by_comparative_judge(
         best_first = sorted(range(len(idx)), key=lambda c: (-points[c], c))
         for r, candidate in enumerate(best_first, start=1):
             ranks[idx[candidate]] = r
+            explanations[idx[candidate]] = whys
 
     _warn_unparsed("by_comparative_judge", parse_failures)
     _tracking.record_scores("rank in group", ranks, keep="le", threshold=float(keep))
-    return [item for item, r in zip(items, ranks) if r is not None and r <= keep]
+    kept: list[dict] = []
+    for item, rank, reasons in zip(items, ranks, explanations):
+        if rank is None or rank > keep:
+            continue
+        extra: dict[str, Any] = {}
+        if rank_field is not None:
+            extra[rank_field] = rank
+        if explanation_field is not None:
+            extra[explanation_field] = list(reasons)
+        kept.append({**item, **extra} if extra else item)
+    return kept
 
 
 @op(name="filter.by_comparative_judge.rankings")
@@ -486,6 +510,16 @@ def _parse_ranking_response(raw: str, order: list[int]) -> list[int] | None:
         if candidate is not None and candidate not in candidates:
             candidates.append(candidate)
     return candidates or None
+
+
+def _ranking_explanation(raw: str) -> str | None:
+    """Return the ``explanation`` of a ranking response, if it has one."""
+    parsed = _find_json_with(raw, "ranking")
+    if parsed is not None:
+        why = parsed.get("explanation")
+        return why if isinstance(why, str) else None
+    match = _EXPLANATION_RE.search(raw) if isinstance(raw, str) else None
+    return match.group(1) if match else None
 
 
 def _borda_points(ranking: list[int], m: int) -> dict[int, float]:
