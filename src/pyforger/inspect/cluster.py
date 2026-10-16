@@ -120,6 +120,9 @@ def topic_based_clustering(
     to use another backend. If the LLM still misses ``num_clusters``
     topics after being corrected, a warning is logged and its last
     codebook is used.
+
+    Returns:
+        One topic name per row, aligned with ``items``.
     """
     # Validate input parameters.
     if num_clusters < 2:

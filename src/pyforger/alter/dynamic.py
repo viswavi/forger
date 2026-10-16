@@ -263,6 +263,10 @@ def dynamic_step_source(
 
     Call with ``_cache_only=True`` to inspect cached source without launching
     an agent when there is a cache miss.
+
+    Returns:
+        The accepted Python source. Its last defined function takes one dict
+        and returns a list of strings.
     """
     if not isinstance(goal, str) or not goal.strip():
         raise ValueError("goal must be a nonempty string")
@@ -291,7 +295,12 @@ def dynamic_step(
     execution_timeout_s: float = 10.0,
     source_version: str = _SOURCE_VERSION,
 ) -> list[list[str]]:
-    """Build source per unique input and return one string list per input."""
+    """Build source per unique input and return one string list per input.
+
+    Returns:
+        One list of strings per input, aligned with ``inputs``; a list may be
+        empty. Equal inputs get equal lists.
+    """
     if not isinstance(inputs, list):
         raise TypeError("inputs must be a list of dicts")
     keys = [_record_key(item) for item in inputs]

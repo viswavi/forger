@@ -14,6 +14,9 @@ def inspect_step(name: str | None = None) -> StepRecord:
     report shows the whole docstring, up to 10 sample rows, and up to 500
     characters per field.
 
+    Returns:
+        The step's ``StepRecord``, as printed.
+
     Raises:
         KeyError: No step with that name has run; the message lists known steps.
     """

@@ -17,7 +17,11 @@ def by_exact_match(
     field: str,
     max_count: int = 1,
 ) -> list[dict]:
-    """Keep up to ``max_count`` occurrences of each unique ``field`` value."""
+    """Keep up to ``max_count`` occurrences of each unique ``field`` value.
+
+    Returns:
+        The kept rows, in input order and unchanged.
+    """
     counts: dict[str, int] = {}
     occurrences: list[int] = []
     result: list[dict] = []
@@ -40,7 +44,11 @@ def by_rouge_l(
     field: str,
     threshold: float = 0.7,
 ) -> list[dict]:
-    """Drop items whose ROUGE-L F1 against any kept item exceeds threshold."""
+    """Drop items whose ROUGE-L F1 against any kept item exceeds threshold.
+
+    Returns:
+        The kept rows, in input order and unchanged.
+    """
     try:
         from rouge_score import rouge_scorer
     except ImportError:
@@ -78,7 +86,11 @@ def by_n_gram_overlap(
     threshold: float = 0.7,
     n: int = 2,
 ) -> list[dict]:
-    """Drop items whose word n-gram overlap with the kept pool exceeds threshold."""
+    """Drop items whose word n-gram overlap with the kept pool exceeds threshold.
+
+    Returns:
+        The kept rows, in input order and unchanged.
+    """
     pool: set[tuple[str, ...]] = set()
     kept: list[dict] = []
     overlaps: list[float | None] = []

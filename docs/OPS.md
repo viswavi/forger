@@ -94,6 +94,8 @@ retrieve(
 
 Call source.fetch() once per query and concatenate results.
 
+**Returns:** The source's rows for each query in turn, each with a `query` field added (`None` when `queries` is None).
+
 ### `acquire.retrieve_from_web`
 
 Not cached: a plain function.
@@ -112,6 +114,8 @@ retrieve_from_web(
 
 Search the web via Brave's LLM Context API. QUERY mode only.
 
+**Returns:** Rows with `text`, `id` (the page URL), `title`, `url`, and `query`.
+
 ### `acquire.retrieve_from_wiki`
 
 Not cached: a plain function.
@@ -129,6 +133,8 @@ retrieve_from_wiki(
 ```
 
 Fetch Wikipedia articles. QUERY (full-text) or RANDOM (random article).
+
+**Returns:** Rows with `text` (the intro extract), `id` (the page ID), `title`, `summary` (same as `text`), and `query`.
 
 ### `acquire.retrieve_from_hf`
 
@@ -151,6 +157,8 @@ retrieve_from_hf(
 
 Load rows from a Hugging Face dataset.
 
+**Returns:** Rows with `row_idx`, `dataset_id`, the dataset's column values, and `query`.
+
 ### `acquire.retrieve_from_arxiv`
 
 Not cached: a plain function.
@@ -168,6 +176,8 @@ retrieve_from_arxiv(
 
 Fetch arXiv papers. QUERY (text search) or RANDOM (sample from category).
 
+**Returns:** Rows with `text` (title and abstract), `id` (the arXiv id), `title`, `summary` (the abstract), and `query`.
+
 ### `acquire.retrieve_from_s2`
 
 Not cached: a plain function.
@@ -184,6 +194,8 @@ retrieve_from_s2(
 ```
 
 Fetch papers from Semantic Scholar.
+
+**Returns:** Rows with `text` (title and abstract), `id` (the paper id), `title`, `summary` (the abstract), and `query`.
 
 ### `acquire.sample_from_LLM`
 
@@ -289,6 +301,8 @@ dynamic_step(
 
 Build source per unique input and return one string list per input.
 
+**Returns:** One list of strings per input, aligned with `inputs`; a list may be empty. Equal inputs get equal lists.
+
 ### `alter.dynamic_step_source`
 
 Disk-cached (`@op`).
@@ -306,6 +320,8 @@ dynamic_step_source(
 ```
 
 Generate Python source once per input through Forger's standard @op cache.
+
+**Returns:** The accepted Python source. Its last defined function takes one dict and returns a list of strings.
 
 ### `alter.execute_code`
 
@@ -325,6 +341,9 @@ execute_code(
 ```
 
 Compile each item's code and call it with `arg_field`'s value.
+
+**Returns:** Copies of the rows, in input order, with `output_field` set to the call's return value (`None` on error)
+and `error_field` set to `"ExcType: message"` or `None`.
 
 ### `alter.generate_from_context`
 
@@ -455,6 +474,8 @@ by_exact_match(items: list[dict], *, field: str, max_count: int = 1) -> list[dic
 
 Keep up to `max_count` occurrences of each unique `field` value.
 
+**Returns:** The kept rows, in input order and unchanged.
+
 ### `filter.by_group_agreement`
 
 Disk-cached (`@op`).
@@ -489,6 +510,8 @@ by_invalid_response(
 
 Filter items with invalid responses (copies of instruction or empty).
 
+**Returns:** The kept rows, in input order and unchanged.
+
 ### `filter.by_keyword_blocklist`
 
 Disk-cached (`@op`).
@@ -505,6 +528,8 @@ by_keyword_blocklist(
 
 Drop items whose `response_field` contains any blocklisted phrase.
 
+**Returns:** The kept rows, in input order and unchanged.
+
 ### `filter.by_length`
 
 Disk-cached (`@op`).
@@ -514,6 +539,8 @@ by_length(items: list[dict], *, instruction_field: str, min_len: int = 10, max_l
 ```
 
 Keep items whose `instruction_field` word count is in [min_len, max_len].
+
+**Returns:** The kept rows, in input order and unchanged.
 
 ### `filter.by_llm_score`
 
@@ -537,6 +564,8 @@ by_llm_score(
 
 Keep items where `num_judges` LLM judges sufficiently agree on quality.
 
+**Returns:** The kept rows, in input order and unchanged. Judge scores are not added to the rows.
+
 ### `filter.by_n_gram_overlap`
 
 Disk-cached (`@op`).
@@ -547,6 +576,8 @@ by_n_gram_overlap(items: list[dict], *, field: str, threshold: float = 0.7, n: i
 
 Drop items whose word n-gram overlap with the kept pool exceeds threshold.
 
+**Returns:** The kept rows, in input order and unchanged.
+
 ### `filter.by_rouge_l`
 
 Disk-cached (`@op`).
@@ -556,6 +587,8 @@ by_rouge_l(items: list[dict], *, field: str, threshold: float = 0.7) -> list[dic
 ```
 
 Drop items whose ROUGE-L F1 against any kept item exceeds threshold.
+
+**Returns:** The kept rows, in input order and unchanged.
 
 ### `filter.by_rouge_l_agreement`
 
@@ -594,6 +627,8 @@ by_syntax(
 
 Keep items whose `field` parses as valid `lang`.
 
+**Returns:** The kept rows, in input order and unchanged.
+
 ## `pyforger.inspect`
 
 Inspect operations: analyze existing data.
@@ -607,6 +642,8 @@ inspect_step(name: str | None = None) -> StepRecord
 ```
 
 Print the full report of the latest run of step `name` and return it.
+
+**Returns:** The step's `StepRecord`, as printed.
 
 ### `inspect.topic_based_clustering`
 
@@ -632,3 +669,5 @@ topic_based_clustering(
 ```
 
 Cluster rows into `num_clusters` LLM-named topics by one field.
+
+**Returns:** One topic name per row, aligned with `items`.
