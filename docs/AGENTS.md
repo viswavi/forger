@@ -328,6 +328,7 @@ Remove rows by criterion. If a filter empties the list, downstream operations re
 | `by_comparative_difficulty` | Keep rows a strong model answers correctly and a weak model does not. |
 | `by_pass_at_k` | Sample `k` answers per row; keep rows whose pass rate is within `[min_rate, max_rate]`. |
 | `program_verifier` | Not an op: a `metric` for the difficulty filters that runs sampled programs on the row's tests. |
+| `by_topic_frequency` | Cluster rows into topics; downsample over-represented topics and drop rare ones. |
 
 These are important for assuring quality and diversity in generated data, and one should experiment with their parameters
 and thresholds to find the right balance for a given use case. For example, `by_rouge_l` with a very low threshold
@@ -478,6 +479,25 @@ hard = filter.by_judged_difficulty(
 )
 ```
 
+`by_topic_frequency` balances topics. It clusters `field` into `num_clusters` topics with
+[`inspect.topic_based_clustering`](#pyforgerinspect). A topic whose share of the input rows is above `max_frequency`
+keeps a random subset of `max_frequency` of the input (seeded by `sample_seed`); a topic below `min_frequency` is
+dropped (bounds inclusive). `1 / num_clusters` is the uniform share, and `max_frequency` defaults to twice that.
+`topic_field="topic"` adds each kept row's topic name. The clustering is
+the expensive part (one LLM call per unique value) and is cached as its own op, so trying other bounds makes no new
+model or embedding calls; use the report's histogram of topic shares to choose them.
+
+```python
+balanced = filter.by_topic_frequency(
+    rows,
+    field="problem",
+    model=model,
+    context="competition mathematics problems. Topics should describe the technique, NOT the numeric answer.",
+    num_clusters=20,
+    max_frequency=0.1,  # no topic keeps more than 10% of the rows
+)
+```
+
 #### `pyforger.inspect`
 
 Examine rows without modifying them: inspect ops return a *report* about the rows (e.g. `list[str]`), not rows. At any
@@ -507,6 +527,8 @@ clusters = topic_based_clustering(
 )
 # clusters[i] is the topic name of rows[i]
 ```
+
+`filter.by_topic_frequency` runs this clustering (cached) to downsample over-represented topics.
 
 ### Models, prompts, and credentials
 

@@ -15,6 +15,7 @@ from pyforger.filter.judge import by_comparative_judge, by_llm_score
 from pyforger.filter.model_difficulty import by_comparative_difficulty, by_pass_at_k
 from pyforger.filter.predicate import by_predicate
 from pyforger.filter.programs import by_tests, program_verifier
+from pyforger.filter.topic import by_topic_frequency
 from pyforger.filter.validation import by_syntax
 
 __all__ = [
@@ -35,5 +36,6 @@ __all__ = [
     "by_rouge_l_agreement",
     "by_syntax",
     "by_tests",
+    "by_topic_frequency",
     "program_verifier",
 ]
