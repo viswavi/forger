@@ -781,7 +781,8 @@ class Model:
         empty text, and tool calls are never cached. A reused completion adds
         no usage or cost, and `usage["cached_completions"]` counts them.
         `_no_cache=True` on an enclosing op skips reading (fresh results are
-        still written).
+        still written). Outside any @op / @step (or from a thread that did not
+        copy the context) the request cache is off.
 
         Args:
             prompts: List of prompts. Each prompt is either a string or
@@ -849,38 +850,28 @@ class Model:
         # generate_from_context(rows, "Solve {q}", model) the row {"q": "2+2"}.
         # Slots are handed out per op call, so the same request asked twice in
         # it (two identical rows, three judge copies) gets new slots each time.
-        caching = _request_cache.enabled(
-            getattr(self, "_request_cache", True)
-        ) and _request_cache.cacheable(call_kwargs)
+        # Outside any op (a direct call, or a thread that did not copy the
+        # context) the request cache is off: a key of prompt text and params
+        # alone would share samples between unrelated call sites.
+        scope = _REQUEST_SCOPE.get()
+        caching = (
+            scope is not None
+            and _request_cache.enabled(getattr(self, "_request_cache", True))
+            and _request_cache.cacheable(call_kwargs)
+        )
         keys: list[str | None] = [None] * len(prompts)
         slot_ranges: list[range] = [range(n)] * len(prompts)
         hits: list[dict[int, dict[str, Any]]] = [{} for _ in prompts]
-        scope = _REQUEST_SCOPE.get()
         if caching:
-            # Outside any op, slots are numbered per call instead.
-            call_slots: dict[str, int] = {}
+            assert scope is not None  # mypy hint
             read = not _NO_CACHE_SCOPE.get()  # an enclosing op got _no_cache=True
             for i, messages in enumerate(conversations):
                 row = None if cache_rows is None else cache_rows[i]
-                row_key = (
-                    _hash(row)[0]
-                    if row is not None
-                    else scope.rows_key
-                    if scope is not None
-                    else "(no rows)"
-                )
+                row_key = _hash(row)[0] if row is not None else scope.rows_key
                 key = _request_cache.request_key(
-                    scope.key if scope is not None else "(no op)",
-                    row_key,
-                    messages,
-                    call_kwargs,
-                    cache_salt,
+                    scope.key, row_key, messages, call_kwargs, cache_salt
                 )
-                if scope is not None:
-                    first = scope.take_slots(key, n)
-                else:
-                    first = call_slots.get(key, 0)
-                    call_slots[key] = first + n
+                first = scope.take_slots(key, n)
                 keys[i], slot_ranges[i] = key, range(first, first + n)
                 if read:
                     for slot in slot_ranges[i]:

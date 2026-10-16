@@ -381,9 +381,9 @@ reruns cheap. A completion is keyed on three things, never on the prompt text al
   and arguments replays them in order, as the op cache would.
 
 Your own `@op` that builds one prompt per row can pass `cache_rows=rows` (aligned with the prompts) to
-`generate_batch`, and `@op(samples_arg="n")` names its sample-count argument. Outside any op (including thread-pool
-workers not started with `contextvars.copy_context().run`), requests are keyed on the messages and params alone, so
-repeated direct calls replay. To draw fresh samples, pass `_no_cache=True` to the op (skips reading, still writes),
+`generate_batch`, and `@op(samples_arg="n")` names its sample-count argument. Outside an `@op` / `@step` (or from a
+thread that did not copy the context) the request cache is off: direct `model.generate` calls always send their
+requests. To draw fresh samples, pass `_no_cache=True` to the op (skips reading, still writes),
 change an argument such as the seed, or turn the cache off with `Model(..., request_cache=False)` or
 `FORGER_REQUEST_CACHE=0`. A reused completion adds no tokens or cost; it stays in `model.history` with zero usage and
 `usage["cached_completions"]`, and each op call with hits logs

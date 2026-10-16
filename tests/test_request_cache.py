@@ -8,6 +8,7 @@ import multiprocessing
 import shutil
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -114,6 +115,25 @@ def gpt(**kwargs) -> Model:
     return Model("gpt-4o", show_progress=False, **kwargs)
 
 
+@op(name="alter.ask", cache=False, samples_arg="n")
+def _ask(prompts, model, n=1, **kwargs):
+    """Send `prompts` from inside an op, one row per prompt."""
+    return model.generate_batch(prompts, n=n, cache_rows=prompts, **kwargs)
+
+
+def ask(model, prompts, **kwargs):
+    """model.generate_batch inside an op (the request cache is off outside ops).
+
+    Uncached at the op level, so only the request cache can skip a request.
+    """
+    return _ask(prompts, model, **kwargs)
+
+
+def ask1(model, prompt, **kwargs):
+    """model.generate inside an op."""
+    return ask(model, [prompt], **kwargs)[0]
+
+
 def slot_files(tmp_path: Path) -> list[Path]:
     """Every request-cache slot file under the test's FORGER_CACHE."""
     return sorted((tmp_path / "requests").glob("*/*.json"))
@@ -122,13 +142,36 @@ def slot_files(tmp_path: Path) -> list[Path]:
 class TestHitsAndMisses:
     """Each completion slot is cached and reused on its own."""
 
+    def test_off_outside_ops(self, fake, tmp_path):
+        """Two direct model.generate calls with one prompt both send requests."""
+        model = gpt()
+        first = model.generate("Q")
+        second = model.generate("Q")
+        assert fake.calls == [("Q", 1), ("Q", 1)]
+        assert first != second
+        assert slot_files(tmp_path) == []
+
+    def test_off_in_threads_without_the_context(self, fake, tmp_path):
+        """A worker thread that did not copy the context has no op scope."""
+        model = gpt()
+
+        @op(name="alter.threaded", cache=False)
+        def threaded(prompts, model):
+            with ThreadPoolExecutor(1) as pool:
+                return pool.submit(model.generate_batch, prompts).result()
+
+        threaded(["Q"], model)
+        threaded(["Q"], model)
+        assert len(fake.calls) == 2
+        assert slot_files(tmp_path) == []
+
     def test_second_call_sends_nothing(self, fake, tmp_path):
         """A repeated call replays every completion and costs nothing."""
         model = gpt()
-        first = model.generate_batch(["A", "B"])
+        first = ask(model, ["A", "B"])
         assert fake.sent() == [("A", 1), ("B", 1)]
         fake.reset()
-        second = model.generate_batch(["A", "B"])
+        second = ask(model, ["A", "B"])
         assert fake.calls == []
         assert second == first
         assert second[0].reasoning == first[0].reasoning
@@ -148,19 +191,19 @@ class TestHitsAndMisses:
         """A gateway that ignores n: 1 choice for n=3, 2 refills, all cached."""
         fake.max_choices = 1
         model = gpt()
-        three = model.generate("Q", n=3)
+        three = ask1(model, "Q", n=3)
         assert fake.calls == [("Q", 3), ("Q", 1), ("Q", 1)]
         assert len(set(three)) == 3
         fake.reset()
-        assert model.generate("Q", n=3) == three
+        assert ask1(model, "Q", n=3) == three
         assert fake.calls == []
 
     def test_hits_add_no_step_usage(self, fake):
         """Only freshly sent responses reach the step report's usage."""
         model = gpt()
-        model.generate_batch(["A", "B"])
+        ask(model, ["A", "B"])
         before = _tracking.usage_snapshot()
-        model.generate_batch(["A", "B", "C"])
+        ask(model, ["A", "B", "C"])
         after = _tracking.usage_snapshot()
         assert after[0] - before[0] == 10  # one new request's prompt tokens
         assert after[2] - before[2] == pytest.approx(0.001)
@@ -168,20 +211,24 @@ class TestHitsAndMisses:
     def test_partial_reuse(self, fake):
         """3 of 5 prompts cached: a call for all 5 sends only the other 2."""
         model = gpt()
-        cached = model.generate_batch(["P0", "P1", "P2"])
+        cached = ask(model, ["P0", "P1", "P2"])
         fake.reset()
-        results = model.generate_batch(["P0", "P1", "P2", "P3", "P4"])
+        results = ask(model, ["P0", "P1", "P2", "P3", "P4"])
         assert fake.sent() == [("P3", 1), ("P4", 1)]
         assert results[:3] == cached
         assert results[3][0].startswith("P3#")
 
     def test_logs_reused_count_per_batch_at_debug(self, fake, caplog):
-        """Outside an op, each batch logs its reuse at DEBUG only."""
+        """Each batch logs its reuse at DEBUG only (the op logs the INFO line)."""
         model = gpt()
-        model.generate_batch(["P0", "P1", "P2"])
+        ask(model, ["P0", "P1", "P2"])
         with caplog.at_level(logging.DEBUG, logger="pyforger.acquire.model"):
-            model.generate_batch(["P0", "P1", "P2", "P3", "P4"])
-        records = [r for r in caplog.records if "request cache" in r.message]
+            ask(model, ["P0", "P1", "P2", "P3", "P4"])
+        records = [
+            r
+            for r in caplog.records
+            if r.name == "pyforger.acquire.model" and "request cache" in r.message
+        ]
         assert [(r.levelno, r.message) for r in records] == [
             (logging.DEBUG, "request cache: 3 of 5 completions reused (gpt-4o)")
         ]
@@ -189,9 +236,9 @@ class TestHitsAndMisses:
     def test_n_is_topped_up(self, fake):
         """n=4 cached, then n=6: one request for the 2 missing slots."""
         model = gpt()
-        four = model.generate("Q", n=4)
+        four = ask1(model, "Q", n=4)
         fake.reset()
-        six = model.generate("Q", n=6)
+        six = ask1(model, "Q", n=6)
         assert fake.calls == [("Q", 2)]
         assert six[:4] == four
         assert len(set(six)) == 6
@@ -201,29 +248,29 @@ class TestHitsAndMisses:
     def test_fan_out_is_topped_up(self, fake):
         """On a model without n support the missing slots go as n=1 requests."""
         model = Model("xai/grok-4", show_progress=False)
-        model.generate("Q", n=4)
+        ask1(model, "Q", n=4)
         fake.reset()
-        six = model.generate("Q", n=6)
+        six = ask1(model, "Q", n=6)
         assert fake.calls == [("Q", 1), ("Q", 1)]
         assert len(set(six)) == 6
 
     def test_smaller_n_reads_a_prefix(self, fake):
         """n=2 after n=4 reuses slots 0 and 1."""
         model = gpt()
-        four = model.generate("Q", n=4)
+        four = ask1(model, "Q", n=4)
         fake.reset()
-        assert model.generate("Q", n=2) == four[:2]
+        assert ask1(model, "Q", n=2) == four[:2]
         assert fake.calls == []
 
     def test_large_n_split_and_cached(self, fake):
         """n=20 is split into 10 + 10; a rerun sends nothing; n=40 sends 20."""
         model = gpt()
-        twenty = model.generate("Q", n=20)
+        twenty = ask1(model, "Q", n=20)
         assert fake.calls == [("Q", 10), ("Q", 10)]
         fake.reset()
-        assert model.generate("Q", n=20) == twenty
+        assert ask1(model, "Q", n=20) == twenty
         assert fake.calls == []
-        forty = model.generate("Q", n=40)
+        forty = ask1(model, "Q", n=40)
         assert fake.sent() == [("Q", 10), ("Q", 10)]
         assert forty[:20] == twenty
         assert len(set(forty)) == 40
@@ -235,32 +282,32 @@ class TestSlots:
     def test_repeated_prompt_gets_distinct_slots(self, fake):
         """Three copies of one prompt (three judges) get three completions."""
         model = gpt()
-        first = model.generate_batch(["J", "J", "J"])
+        first = ask(model, ["J", "J", "J"])
         assert len({r[0] for r in first}) == 3
         fake.reset()
-        assert model.generate_batch(["J", "J", "J"]) == first
+        assert ask(model, ["J", "J", "J"]) == first
         assert fake.calls == []
         # The copies used slots 0, 1, 2: the same completions as n=3.
-        assert model.generate("J", n=3) == [r[0] for r in first]
+        assert ask1(model, "J", n=3) == [r[0] for r in first]
         assert fake.calls == []
 
     def test_repeated_prompt_with_n(self, fake):
         """With n=2 the second copy uses slots 2 and 3."""
         model = gpt()
-        pair = model.generate_batch(["J", "J"], n=2)
+        pair = ask(model, ["J", "J"], n=2)
         assert len(set(pair[0] + pair[1])) == 4
         fake.reset()
-        assert model.generate("J", n=4) == pair[0] + pair[1]
+        assert ask1(model, "J", n=4) == pair[0] + pair[1]
         assert fake.calls == []
 
     def test_salt_gets_fresh_completions(self, fake):
         """A new cache_salt asks again; the same salt replays."""
         model = gpt()
-        plain = model.generate("Q")
-        salted = model.generate("Q", cache_salt="retry 1")
+        plain = ask1(model, "Q")
+        salted = ask1(model, "Q", cache_salt="retry 1")
         assert salted != plain
         fake.reset()
-        assert model.generate("Q", cache_salt="retry 1") == salted
+        assert ask1(model, "Q", cache_salt="retry 1") == salted
         assert fake.calls == []
 
     def test_generate_from_context_retry_is_fresh(self, fake):
@@ -335,8 +382,8 @@ class TestBypass:
     def test_model_flag_off(self, fake, tmp_path):
         """request_cache=False neither reads nor writes."""
         model = gpt(request_cache=False)
-        model.generate("Q")
-        model.generate("Q")
+        ask1(model, "Q")
+        ask1(model, "Q")
         assert len(fake.calls) == 2
         assert slot_files(tmp_path) == []
 
@@ -344,8 +391,8 @@ class TestBypass:
         """FORGER_REQUEST_CACHE=0 turns it off for every Model."""
         monkeypatch.setenv("FORGER_REQUEST_CACHE", "0")
         model = gpt()
-        model.generate("Q")
-        model.generate("Q")
+        ask1(model, "Q")
+        ask1(model, "Q")
         assert len(fake.calls) == 2
         assert slot_files(tmp_path) == []
 
@@ -361,11 +408,11 @@ class TestFailures:
         """A 504 leaves its slot empty; the rerun sends only that request."""
         fake.fail = {"B"}
         model = gpt()
-        results = model.generate_batch(["A", "B", "C"], return_exceptions=True)
+        results = ask(model, ["A", "B", "C"], return_exceptions=True)
         assert isinstance(results[1], RuntimeError)
         assert len(slot_files(tmp_path)) == 2
         fake.reset()
-        again = model.generate_batch(["A", "B", "C"])
+        again = ask(model, ["A", "B", "C"], return_exceptions=True)  # same op args
         assert fake.calls == [("B", 1)]
         assert again[0] == results[0] and again[2] == results[2]
 
@@ -373,7 +420,7 @@ class TestFailures:
         """A failed one-request call writes nothing."""
         fake.fail = {"A"}
         with pytest.raises(RuntimeError):
-            gpt().generate("A")
+            ask1(gpt(), "A")
         assert slot_files(tmp_path) == []
 
     def test_raised_failure_keeps_finished(self, fake):
@@ -381,9 +428,9 @@ class TestFailures:
         fake.fail = {"P2"}
         model = gpt()
         with pytest.raises(RuntimeError):
-            model.generate_batch([f"P{i}" for i in range(5)])
+            ask(model, [f"P{i}" for i in range(5)])
         fake.reset()
-        model.generate_batch([f"P{i}" for i in range(5)])
+        ask(model, [f"P{i}" for i in range(5)])
         assert fake.calls == [("P2", 1)]
 
     def test_killed_run_keeps_finished(self, fake):
@@ -393,19 +440,19 @@ class TestFailures:
         model = gpt()
         prompts = ["SLOW", "P1", "P2", "P3"]
         with pytest.raises(Killed):
-            model.generate_batch(prompts)
+            ask(model, prompts)
         assert len(model.history) == 0  # the batch never returned
         fake.kill = set()
         fake.reset()
-        model.generate_batch(prompts)
+        ask(model, prompts)
         assert fake.calls == [("SLOW", 1)]
 
     def test_partial_fan_out_with_hits(self, fake):
         """Hits plus a failed top-up request: the hits come back, fewer than n."""
         model = Model("xai/grok-4", show_progress=False)
-        two = model.generate("Q", n=2)
+        two = ask1(model, "Q", n=2, return_exceptions=True)
         fake.fail = {"Q"}
-        [result] = model.generate_batch(["Q"], n=3, return_exceptions=True)
+        [result] = ask(model, ["Q"], n=3, return_exceptions=True)
         assert list(result) == list(two)
 
 
@@ -414,10 +461,10 @@ class TestKey:
 
     def test_key_ignores_credentials_and_transport(self, fake):
         """api_key, timeouts, retries, and metadata do not change the key."""
-        first = gpt(api_key="sk-a", timeout=5).generate("Q")
-        again = gpt(
-            api_key="sk-b", timeout=60, num_retries=0, metadata={"run": 2}
-        ).generate("Q")
+        first = ask1(gpt(api_key="sk-a", timeout=5), "Q")
+        again = ask1(
+            gpt(api_key="sk-b", timeout=60, num_retries=0, metadata={"run": 2}), "Q"
+        )
         assert again == first
         assert len(fake.calls) == 1
 
@@ -432,10 +479,10 @@ class TestKey:
     )
     def test_key_changes_with_server(self, fake, server):
         """Another server can serve other weights under the same model name."""
-        Model("hosted_vllm/policy", api_base="http://ckpt-a").generate("Q")
-        Model(
-            "hosted_vllm/policy", **({"api_base": "http://ckpt-a"} | server)
-        ).generate("Q")
+        ask1(Model("hosted_vllm/policy", api_base="http://ckpt-a"), "Q")
+        ask1(
+            Model("hosted_vllm/policy", **({"api_base": "http://ckpt-a"} | server)), "Q"
+        )
         assert len(fake.calls) == 2
 
     def test_model_retries_and_timeout_keep_op_requests(self, fake):
@@ -464,23 +511,24 @@ class TestKey:
     )
     def test_key_changes_with_params(self, fake, change):
         """Output-changing params give a new key."""
-        gpt().generate("Q")
-        gpt(**change).generate("Q")
+        ask1(gpt(), "Q")
+        ask1(gpt(**change), "Q")
         assert len(fake.calls) == 2
 
     def test_key_changes_with_messages_and_model(self, fake):
         """Different messages, system prompt, or model id: new requests."""
-        gpt().generate("Q")
-        gpt().generate([{"role": "user", "content": "Q"}])  # same messages
+        ask1(gpt(), "Q")
+        ask1(gpt(), "Q")
         assert len(fake.calls) == 1
-        gpt().generate(
+        ask1(
+            gpt(),
             [
                 {"role": "system", "content": "Be brief."},
                 {"role": "user", "content": "Q"},
-            ]
+            ],
         )
-        Model("gpt-4o-mini", show_progress=False).generate("Q")
-        gpt().generate("Q", temperature=0.1)
+        ask1(Model("gpt-4o-mini", show_progress=False), "Q")
+        ask1(gpt(), "Q", temperature=0.1)
         assert len(fake.calls) == 4
 
 
@@ -676,24 +724,24 @@ class TestNotCached:
         """An empty or missing text is a glitch, not an answer to replay."""
         fake.script = {"Q": [text, "real"]}
         model = gpt()
-        assert model.generate("Q") == [text or ""]
+        assert ask1(model, "Q") == [text or ""]
         assert slot_files(tmp_path) == []
-        assert model.generate("Q") == ["real"]
+        assert ask1(model, "Q") == ["real"]
 
     def test_tool_call_choices_are_not_cached(self, fake, tmp_path):
         """A replay could not rebuild tool calls, so they are asked again."""
         fake.tool_calls = True
         model = gpt()
-        model.generate("Q")
-        model.generate("Q")
+        ask1(model, "Q")
+        ask1(model, "Q")
         assert len(fake.calls) == 2
         assert slot_files(tmp_path) == []
 
     def test_requests_with_tools_are_not_cached(self, fake, tmp_path):
         """A Model with tools= (or logprobs=) skips the request cache."""
         model = gpt(tools=[{"type": "function", "function": {"name": "f"}}])
-        model.generate("Q")
-        model.generate("Q")
+        ask1(model, "Q")
+        ask1(model, "Q")
         assert len(fake.calls) == 2
         assert slot_files(tmp_path) == []
 
@@ -706,14 +754,14 @@ class TestClusterRetries:
         codebook = {"Algebra": "equations", "Geometry": "shapes"}
         prompt = _assign_prompt("A triangle has three sides.", codebook)
         fake.script = {prompt: ['{"topic": "Nope"}', '{"topic": "Geometry"}']}
-        topics = _assign_topics(
-            ["A triangle has three sides."],
-            gpt(),
-            "math",
-            codebook,
-            truncation=1000,
-            max_retries=2,
-        )
+
+        @op(name="inspect.assign", cache=False)
+        def assign(docs, model):
+            return _assign_topics(
+                docs, model, "math", codebook, truncation=1000, max_retries=2
+            )
+
+        topics = assign(["A triangle has three sides."], gpt())
         assert topics == {"A triangle has three sides.": "Geometry"}
         assert len(fake.calls) == 2
 
@@ -785,7 +833,7 @@ class TestConcurrency:
         results = {}
         threads = [
             threading.Thread(
-                target=lambda k=k: results.setdefault(k, model.generate_batch(prompts))
+                target=lambda k=k: results.setdefault(k, ask(model, prompts))
             )
             for k in ("a", "b")
         ]
@@ -795,7 +843,7 @@ class TestConcurrency:
             t.join()
         assert all(len(r) == 10 and len(r[0]) == 1 for r in results.values())
         fake.reset()
-        replay = model.generate_batch(prompts)
+        replay = ask(model, prompts)
         assert fake.calls == []
         assert all(len(r) == 1 for r in replay)
 
