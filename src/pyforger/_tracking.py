@@ -342,6 +342,10 @@ _OP_DEPTH: ContextVar[int] = ContextVar("forger_op_depth", default=0)
 _ACTIVE_SCORES: ContextVar[list[ScoreRecord] | None] = ContextVar(
     "forger_active_scores", default=None
 )
+# Warnings the innermost active op raised about its own work (see ``warn``).
+_ACTIVE_WARNINGS: ContextVar[list[str] | None] = ContextVar(
+    "forger_active_warnings", default=None
+)
 # Set by the active step; ``op.py`` calls it on a step's fresh result before
 # caching it, so a result that breaks the step's contract (or, under
 # strict=True, has warnings) is never cached. It returns the step metadata that
@@ -658,6 +662,7 @@ class OpToken:
     scores_token: Token[list[ScoreRecord] | None] | None = None
     usage: Usage | None = None
     usage_token: Token[tuple[Usage, ...]] | None = None
+    warnings_token: Token[list[str] | None] | None = None
 
     def usage_totals(self) -> tuple[int, int, float, float]:
         """The op's own usage so far (zero for a step's cache wrapper)."""
@@ -681,12 +686,30 @@ def enter_op(op_name: str) -> OpToken:
         scores_token=_ACTIVE_SCORES.set([]),
         usage=usage,
         usage_token=usage_token,
+        warnings_token=_ACTIVE_WARNINGS.set([]),
     )
 
 
 def current_scores() -> list[ScoreRecord]:
     """Return the score records the innermost active op has recorded so far."""
     return list(_ACTIVE_SCORES.get() or [])
+
+
+def add_op_warning(message: str) -> None:
+    """Add ``message`` to the running op's warnings in the step report.
+
+    For an op that logs a problem with its own work, e.g. "3 of 64 prompts
+    failed". The op logs it itself, so it is not logged again; a nested op's
+    warnings go to the op that called it. A no-op outside ops.
+    """
+    warnings = _ACTIVE_WARNINGS.get()
+    if warnings is not None:
+        warnings.append(message)
+
+
+def current_warnings() -> list[str]:
+    """Return the warnings the innermost active op has added so far."""
+    return list(_ACTIVE_WARNINGS.get() or [])
 
 
 def exit_op(
@@ -712,6 +735,12 @@ def exit_op(
         _ACCUMULATORS.reset(token.usage_token)
     if token.scores_token is not None:
         _ACTIVE_SCORES.reset(token.scores_token)
+    if token.warnings_token is not None:
+        own = _ACTIVE_WARNINGS.get() or []
+        _ACTIVE_WARNINGS.reset(token.warnings_token)
+        parent = _ACTIVE_WARNINGS.get()
+        if own and parent is not None and token.depth != 0:
+            parent.extend(own)
     if token.depth_token is not None:
         _OP_DEPTH.reset(token.depth_token)
     if call is None or token.depth != 0:

@@ -195,6 +195,8 @@ Generate or retrieve new rows.
 validation, making this a superior choice to calling `Model` directly. Any reasoning traces contained in a completion are
 contained in the output dict under a `thinking_trace` key. Inline traces are not extracted: `LocalModel` leaves `<think>`
 blocks in the completion text and supplies `None` for that metadata; use `split_reasoning` to separate them out.
+A round whose request fails at the provider with a transient error counts as a failed round (see `max_retries`); if
+failures leave fewer than `n` samples, it returns the shorter list with a warning and is not cached. Other errors raise.
 
 `n` is per query, so three queries with `n=5` return up to 15 rows. A Semantic Scholar query asks the API for only `n`
 results. `retrieve_from_s2` runs one query at a time by default, because an API key is usually limited to 1 request
@@ -217,9 +219,28 @@ Transform rows without removing items.
 | `dynamic_step_source` | Generate or inspect sub-pipeline generated for a single input. |
 
 `generate_from_context` performs `samples_per_item` LLM calls per input and returns parsed dicts, with retry against an
-optional JSON schema. If the validated LLM call fails after `num_retries`, we return `None` for the failing slots.
+optional JSON schema. A prompt whose output fails to parse, or whose request fails with a transient provider error
+(timeout, lost connection, 429, or 5xx), is retried up to `max_retries` times; after that its slots are `None` and the
+other prompts' results are kept. Other provider errors (a bad API key, an unknown model, a 400 such as an over-long
+prompt) raise at once, since retrying cannot fix them. When any slot failed at the provider, the op logs one warning
+(`1 of 64 prompts failed after 3 retries; their slots are None: InternalServerError ×1`), shows it in the step report,
+and is not cached (nor is its step), so a rerun re-sends only the failed prompts (the request cache replays the rest).
+Parse-failure `None`s are cached.
 As with `sample_from_LLM`, reasoning traces are included under a `thinking_trace` key. Inline traces are not extracted:
 `LocalModel` leaves `<think>` blocks in the completion text. Use `split_reasoning` to separate them out.
+
+By default the op returns a flat list of `len(items) * samples_per_item` outputs (or `None`). `merge=True` returns the
+input rows with the output attached instead, one row per successful sample (failed slots dropped), with `sample_idx`
+when `samples_per_item > 1`. The output's keys win over the input's (a warning names the clashing keys);
+`output_field="name"` nests the output under one key instead (a warning also names an input key it, or `sample_idx`,
+replaces):
+
+```python
+rows = alter.generate_from_context(problems, "Solve: {problem}", model, output_schema={"answer": str}, merge=True)
+# [{"problem": "...", "answer": "4"}, ...]
+rows = alter.generate_from_context(problems, "Solve: {problem}", model, merge=True, output_field="solution")
+# [{"problem": "...", "solution": {"text": "..."}}, ...]
+```
 
 `self_taught_reasoner` (re-exported from `pyforger.alter`, also in `pyforger.alter.generate`) implements the
 **Self-Taught Reasoner (STaR)** approach ([Zelikman et al., 2022](https://arxiv.org/abs/2203.14465)) -- closely
@@ -655,6 +676,13 @@ can redirect it.
 **Per-call bypass.** Pass `_no_cache=True` at the call site to skip the cache for a single invocation, including the
 ops it calls. Pass `_cache_only=True` to retrieve an existing result without executing the function;
 a miss raises `FileNotFoundError`.
+
+**Skipping the write.** Code running inside an `@op` can call `pyforger.op.skip_cache_write()` to keep the result
+out of the cache, e.g. when it holds `None`s for failed requests. It applies to every enclosing op and step too; the
+result is still returned, and the next call runs again. An op in a worker thread started with plain `pool.submit` /
+`pool.map` cannot see which op or step started the thread, so every op and step running in the process at that moment
+is left uncached instead, and a step that is skipped this way gets the warning `not cached: an op in a worker thread
+kept its result out of the cache`. Submit with `contextvars.copy_context().run` to limit it to the enclosing calls.
 
 **Custom hash keys for objects.** If an argument defines `cache_key() -> Any`, this is used in place of the argument's
 canonical form. This is useful for objects that are expensive to serialize or contain ever-changing state. Here is
