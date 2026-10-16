@@ -74,6 +74,8 @@ split_reasoning(text: str) -> tuple[str, str]
 
 Split a reasoning-model completion into (thinking, answer).
 
+**Returns:** `(thinking, answer)` with surrounding whitespace stripped.
+
 ### `acquire.retrieve`
 
 Not cached (wrap it with `@op` to memoize); listed in step reports under its name.
@@ -201,6 +203,11 @@ sample_from_LLM(
 ```
 
 Generate from `model` until `n` samples are generated.
+
+**Returns:** List of accepted sample dicts. `{"text": <raw>}` when no schema; otherwise the parsed JSON objects. When
+the model returns a reasoning trace separately in `GenerateResult.reasoning`, it is included under the `thinking_trace`
+key. Inline `<think>` traces (e.g. from `LocalModel`, which supplies `None` for that metadata) are not extracted; use
+`split_reasoning` to separate them out as needed.
 
 ### `acquire.WebRetrievalSource`
 
@@ -339,6 +346,13 @@ generate_from_context(
 
 Generate LLM outputs conditioned on upstream input items.
 
+**Returns:** List of length `len(items) * samples_per_item` in input order, grouped by item (item `i`'s samples occupy
+slots `i * samples_per_item` to `(i + 1) * samples_per_item`). Each slot holds the parsed output dict, or `None` if the
+prompt failed to parse after `max_retries`. When the model returns a reasoning trace separately in
+`GenerateResult.reasoning`, it is included under the `thinking_trace` key. Inline `<think>` traces (e.g. from
+`LocalModel`, which supplies `None` for that metadata) are not extracted; use `split_reasoning` to separate them out as
+needed.
+
 ### `alter.self_taught_reasoner`
 
 Disk-cached (`@op`).
@@ -367,6 +381,8 @@ self_taught_reasoner(
 
 Self-Taught Reasoner (STaR): keep a student model's own correct solutions.
 
+**Returns:** Output rows, in item order, one per accepted response.
+
 ## `pyforger.alter.translate`
 
 Translation alter operations.
@@ -389,6 +405,9 @@ to_code(
 
 Translate text fields on each item into code in `target_language`.
 
+**Returns:** New list of dicts with generated code written to `target_fields` (or back into `fields` when
+`target_fields` is None).
+
 ### `alter.translate.to_language`
 
 Disk-cached (`@op`).
@@ -406,6 +425,9 @@ to_language(
 
 Translate text fields on each item into `target_language` using a Model.
 
+**Returns:** New list of dicts with translations written to `target_fields` (or back into `fields` when `target_fields`
+is None).
+
 ## `pyforger.filter`
 
 Filter operations for Forger.
@@ -419,6 +441,9 @@ by_exact_agreement(items: list[dict], *, field_a: str, field_b: str, disagree: b
 ```
 
 Keep items where two fields agree or disagree, by exact match.
+
+**Returns:** A filtered list of data items where the specified fields all agree (or disagree if `disagree=True`) by
+exact match.
 
 ### `filter.by_exact_match`
 
@@ -445,6 +470,8 @@ by_group_agreement(
 ```
 
 Keep only groups of items whose outputs all agree.
+
+**Returns:** Items from agreeing groups, in their original order.
 
 ### `filter.by_invalid_response`
 
@@ -546,6 +573,9 @@ by_rouge_l_agreement(
 ```
 
 Keep items where ROUGE-L F1 between two fields meets or misses threshold.
+
+**Returns:** A filtered list of data items where the specified fields all agree (or disagree if `disagree=True`) by
+ROUGE-L F1.
 
 ### `filter.by_syntax`
 

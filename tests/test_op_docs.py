@@ -37,6 +37,18 @@ def _fake_filter(
     """Keep items whose `field` is long enough.
 
     Second paragraph, not rendered.
+
+    Args:
+        items: Rows to filter; not rendered.
+
+    Returns:
+        Kept items, each with a ``score``
+            field added.
+
+        A second paragraph.
+
+    Raises:
+        ValueError: Not rendered.
     """
     return items
 
@@ -98,9 +110,24 @@ def test_status_reports_caching():
     assert gen_op_docs._status(len, "len") == "Not cached: a plain function."
 
 
-def test_first_paragraph_only():
-    """Only the docstring's first paragraph is rendered, with single backticks."""
-    assert (
-        gen_op_docs._first_paragraph(_fake_filter)
-        == "Keep items whose `field` is long enough."
+def test_entry_renders_first_paragraph_and_returns_only():
+    """An entry has the first paragraph and Returns:, not Args: or Raises:."""
+    entry = gen_op_docs._entry("by_fake", "filter.by_fake", _fake_filter)
+    assert entry.endswith(
+        "Keep items whose `field` is long enough.\n\n"
+        "**Returns:** Kept items, each with a `score` field added.\n\n"
+        "A second paragraph.\n"
     )
+    assert "Second paragraph" not in entry
+    assert "Rows to filter" not in entry and "Not rendered" not in entry
+
+
+def test_entry_without_returns_section():
+    """A docstring without Returns: renders no Returns line."""
+
+    def plain(rows):
+        """Do nothing."""
+        return rows
+
+    assert gen_op_docs._returns_section(plain) is None
+    assert "Returns" not in gen_op_docs._entry("plain", "alter.plain", plain)

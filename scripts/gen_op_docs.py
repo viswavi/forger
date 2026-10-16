@@ -7,10 +7,11 @@ docstring of any public op (``tests/test_op_docs.py`` fails until you do)::
 
 Each export in ``__all__`` of ``pyforger.acquire``, ``pyforger.alter``,
 ``pyforger.alter.translate``, ``pyforger.filter``, and ``pyforger.inspect`` gets an
-entry: its call signature, whether it is disk-cached, and the first paragraph of
-its docstring. Classes are documented only when listed in ``ENTRY_POINT_CLASSES``
-(classes users construct and pass to ops); other exported classes are named in one
-line. Annotations and defaults are copied from the source text, e.g.
+entry: its call signature, whether it is disk-cached, and the first paragraph and
+``Returns:`` section of its docstring (``Args:`` is left out; the signature covers
+it). Classes are documented only when listed in ``ENTRY_POINT_CLASSES`` (classes
+users construct and pass to ops); other exported classes are named in one line.
+Annotations and defaults are copied from the source text, e.g.
 ``mode: RetrieveMode = RetrieveMode.QUERY``, so the output does not depend on how a
 Python version prints objects.
 """
@@ -213,17 +214,57 @@ def render_signature(name: str, obj: Any) -> str:
     return f"{name}(\n{body}{tail}"
 
 
+def _markdown(paragraph: str) -> str:
+    """Join a docstring paragraph into Markdown wrapped at 120 chars."""
+    text = " ".join(line.strip() for line in paragraph.splitlines())
+    return textwrap.fill(
+        text.replace("``", "`"),
+        width=MAX_WIDTH,
+        break_long_words=False,
+        break_on_hyphens=False,
+    )
+
+
 def _first_paragraph(obj: Any) -> str:
     """Return the docstring's first paragraph, in Markdown, wrapped at 120 chars."""
     doc = inspect.getdoc(obj) or ""
     paragraph = doc.strip().split("\n\n", 1)[0]
-    text = " ".join(line.strip() for line in paragraph.splitlines())
-    text = text.replace("``", "`")
-    if not text:
-        return "_No docstring._"
-    return textwrap.fill(
-        text, width=MAX_WIDTH, break_long_words=False, break_on_hyphens=False
-    )
+    return _markdown(paragraph) if paragraph.strip() else "_No docstring._"
+
+
+def _returns_section(obj: Any) -> str | None:
+    """Return the docstring's ``Returns:`` section in Markdown, or None if absent.
+
+    It says which fields an op writes, e.g. ``thinking_trace``. The section ends at
+    the next unindented line, e.g. ``Raises:`` or ``Note:``.
+    """
+    lines = (inspect.getdoc(obj) or "").splitlines()
+    if "Returns:" not in lines:
+        return None
+    body: list[str] = []
+    for line in lines[lines.index("Returns:") + 1 :]:
+        if line.strip() and not line[0].isspace():
+            break
+        body.append(line)
+    paragraphs = [p for p in "\n".join(body).split("\n\n") if p.strip()]
+    if not paragraphs:
+        return None
+    paragraphs[0] = "**Returns:** " + paragraphs[0].strip()
+    return "\n\n".join(_markdown(p) for p in paragraphs)
+
+
+def _entry(name: str, qualified: str, obj: Any) -> str:
+    """Render one op: heading, caching status, signature, docstring summary."""
+    parts = [
+        f"### `{qualified}`",
+        _status(obj, qualified),
+        f"```python\n{render_signature(name, obj)}\n```",
+        _first_paragraph(obj),
+    ]
+    returns = _returns_section(obj)
+    if returns is not None:
+        parts.append(returns)
+    return "\n\n".join(parts) + "\n"
 
 
 def _status(obj: Any, qualified: str) -> str:
@@ -261,11 +302,7 @@ def _module_section(module_name: str) -> str:
             skipped.append(name)
             continue
         qualified = f"{short}.{name}"
-        entries.append(
-            f"### `{qualified}`\n\n{_status(obj, qualified)}\n\n"
-            f"```python\n{render_signature(name, obj)}\n```\n\n"
-            f"{_first_paragraph(obj)}\n"
-        )
+        entries.append(_entry(name, qualified, obj))
     section = f"## `{module_name}`\n\n{_first_paragraph(module)}\n"
     if skipped:
         names = ", ".join(f"`{n}`" for n in skipped)
