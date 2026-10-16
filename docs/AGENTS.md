@@ -197,8 +197,9 @@ arguments (e.g. `["7", "small"]` for a test generator) and `"timeout_s"` overrid
 
 Each row gets `test_results` (`result_field`), one result per test: `{"status", "passed", "exit_code", "timed_out",
 "stdout", "stderr", "seconds"}`. `status` is `"ok"`, `"wrong_answer"`, `"runtime_error"` (non-zero exit or a signal;
-running out of memory usually shows up here as a `MemoryError`), `"timeout"`, or `"output_limit"` (stdout reached
-`max_output_mb`). `passed` is `True`, `False`, or `None` for an ungraded test. Output is compared with
+running out of memory usually shows up here as a `MemoryError`), `"timeout"`, or `"output_limit"` (see below).
+`passed` is `True`, `False`, or `None` for an ungraded test. A test whose `"input"` is missing or `None` gets empty
+stdin. Output is compared with
 `outputs_match`, equality up to whitespace (`"1 2\n3"` matches `"1 2 3"`); pass `checker=(stdout, expected) -> bool`
 to change it. A row whose code is missing or empty gets `None`. Programs run in Python (this interpreter, with `-I`)
 unless `command` names another interpreter, e.g. `command=["node", "{file}"], suffix=".js"`.
@@ -229,12 +230,17 @@ Python block from each sampled answer (`last_code_block`), runs it on the row's 
 `run_programs` and `by_tests` when a field holds a model's answer.
 
 Every run is its own process, so the ops are safe to call from threads and run up to `max_workers` (default
-`min(8, cpu count)`) programs at a time; `max_workers` is not part of the cache key. Each process starts with an empty
-environment except `PATH` and the locale, so API keys are not visible to it, in a fresh temporary directory that is
-removed afterwards. A run that exceeds `timeout_s` is killed with every process it started, and each output file is
-capped at `max_output_mb`. `memory_mb` (default 2048) caps the address space with `RLIMIT_AS` on Linux; macOS has no
-working `RLIMIT_AS`, so there the limit is skipped and a warning says so once. Interpreters that reserve a large
-address space at startup (e.g. `node`, `java`) may need `memory_mb=None` on Linux.
+`min(8, cpu count)`) programs at a time. `timeout_s` is wall-clock time, so too many workers on a loaded machine
+turn slow passing runs into `"timeout"`; `max_workers` is part of the cache key, so lowering it and rerunning runs
+the programs again. Each process starts with an empty environment except `PATH` and the locale, so API keys are not
+visible to it, in a fresh temporary directory that is removed afterwards. A run that exceeds `timeout_s` is killed
+with its process group, which holds every process it started unless one left the group (`setsid`, a daemon); such a
+process keeps running. `max_output_mb` (default 64, 0 for none) caps the size of every file a run writes (stdout,
+stderr, and scratch files), and a write past it fails. The status is `"output_limit"` when stdout reached the cap,
+or when the run failed after stderr or a file in its working directory reached it. `memory_mb` (default 2048) caps
+the address space with `RLIMIT_AS` on Linux; macOS has no working `RLIMIT_AS`, so there the limit is skipped and a
+warning says so once. Interpreters that reserve a large address space at startup (e.g. `node`, `java`) may need
+`memory_mb=None` on Linux.
 
 Neither `run_programs` nor `execute_code` is a security sandbox. `execute_code`'s RestrictedPython is a guardrail
 against accidental damage from machine-generated code, not a boundary against adversarial code, and `run_programs`
@@ -296,8 +302,8 @@ of surrounding whitespace. `metric` is `"exact_match"` (normalized equality with
 least `rouge_l_threshold`), or a verifier `(prediction, row) -> bool | None`, e.g. `filter.program_verifier("tests")`,
 which runs generated programs on the row's tests (see [Running programs against tests](#running-programs-against-tests)).
 `ground_truth_field` is needed only for `exact_match` and `rouge_l`; a verifier reads the row itself. Verifiers run
-`verifier_workers` (default 8) calls at a time, so one must be safe to call from several threads; `verifier_workers`
-is not part of the cache key.
+`verifier_workers` (default 8) calls at a time, so one must be safe to call from several threads. It is part of the
+cache key, since a verifier with wall-clock timeouts (e.g. `program_verifier`) can grade differently under load.
 
 By default the whole answer segment is compared, so for `exact_match` the task or `prompt_template` should ask for a
 bare answer, or pass your own `extract_answer(completion) -> str | None`. It replaces the default and sees the raw
@@ -445,10 +451,10 @@ class ExecutionSandbox:
 `_compiled_fns` accumulates entries across calls and isn't hashable. `cache_key()` here omits this field to avoid
 cache misses. Repeated calls with the same sandbox stay cache hits.
 
-**Arguments left out of the key.** `@op(unkeyed=("max_workers",))` leaves the named parameters out of the cache key,
-for knobs that change how an op runs but not what it returns. `run_programs(rows, ..., max_workers=2)` is then a cache
-hit after `run_programs(rows, ...)`. Forger's own worker counts (`run_programs` / `by_tests` `max_workers`, the
-difficulty filters' `verifier_workers`) are unkeyed this way.
+**Arguments left out of the key.** `@op(unkeyed=("show_progress",))` leaves the named parameters out of the cache
+key. Use it only for knobs that cannot change what the op returns, e.g. a progress bar: `score_all(rows,
+show_progress=False)` is then a cache hit after `score_all(rows)`. A worker count is not such a knob when the op has
+wall-clock timeouts (more workers, more contention, more timeouts), so Forger's own worker counts are keyed.
 
 **Trace.** Import the trace helpers from the module:
 

@@ -771,22 +771,25 @@ class TestCompletionsAndVerifiers:
         _pass_at_k(self.ROWS, model, metric=verify, verifier_workers=1, max_rate=1.0)
         assert verify.peak == 1
 
-    def test_verifier_workers_not_in_cache_key(self):
-        """A new verifier_workers is a cache hit: no new samples or grades."""
+    def test_verifier_workers_in_cache_key(self):
+        """A new verifier_workers regrades (timeouts depend on load), not resamples."""
         verify = _CountingVerifier()
         model = ScriptedModel("m", self.SCRIPT)
-        first = _pass_at_k(self.ROWS, model, metric=verify, verifier_workers=1)
-        again = _pass_at_k(self.ROWS, model, metric=verify, verifier_workers=4)
+        first = _pass_at_k(self.ROWS, model, metric=verify, verifier_workers=4)
+        again = _pass_at_k(self.ROWS, model, metric=verify, verifier_workers=1)
         assert again == first
-        assert len(verify.graded) == 16 and len(model.calls) == 1
+        assert len(verify.graded) == 32 and len(model.calls) == 1
         hits = [r.cache_hit for r in trace() if r.op_name == "filter.by_pass_at_k"]
-        assert hits == [False, True]
+        assert hits == [False, False]
+        _pass_at_k(self.ROWS, model, metric=verify, verifier_workers=1)
+        assert len(verify.graded) == 32
         weak, strong = ScriptedModel("weak", WEAK), ScriptedModel("strong", STRONG)
-        for workers in (1, 3):
+        for workers in (3, 1):
             _comparative(
                 weak=weak, strong=strong, metric=verify, verifier_workers=workers
             )
         assert len(weak.calls) == len(strong.calls) == 1
+        assert len(verify.graded) == 32 + 2 * 9  # 9 non-empty predictions per run
 
     def test_verifier_error_propagates(self):
         """An exception in one verifier call fails the filter."""

@@ -12,7 +12,9 @@ op's ``timeout_s`` for that test).
 
 Each run is its own process, started with an empty environment except
 ``PATH`` and the locale (so no API keys), in a fresh temporary directory,
-with a wall-clock timeout and limits on memory (not on macOS) and output size.
+with a wall-clock timeout and limits on memory (not on macOS) and on the
+size of each file it writes. A timeout kills the program's process group, so
+a process that leaves the group (``setsid``, a daemon) is not killed.
 Runs use threads and no signals, so the ops work from any thread.
 
 This is NOT a security sandbox. The program runs as your user, with your
@@ -119,9 +121,15 @@ def run_program(
         ``{"status", "exit_code", "timed_out", "stdout", "stderr", "seconds"}``.
         ``status`` is ``"ok"`` (exit code 0), ``"runtime_error"`` (non-zero
         exit or killed by a signal; exceeding ``memory_mb`` usually shows up
-        here as a ``MemoryError``), ``"timeout"``, or ``"output_limit"``
-        (stdout reached ``max_output_mb``). ``exit_code`` is None after a
-        timeout and negative when a signal killed the program.
+        here as a ``MemoryError``), ``"timeout"``, or ``"output_limit"``.
+        ``exit_code`` is None after a timeout and negative when a signal
+        killed the program.
+
+        ``max_output_mb`` caps every file the program writes (``RLIMIT_FSIZE``:
+        stdout, stderr, and scratch files); a write past it fails. The status
+        is ``"output_limit"`` when stdout reached the cap (its output is cut
+        short), or when the run failed after stderr or a file in its working
+        directory reached it. 0 sets no cap.
     """
     if os.name != "posix":
         raise OSError("run_program needs a POSIX system (Linux or macOS)")
@@ -151,8 +159,9 @@ def run_program(
         ]
         out_path = os.path.join(workdir, "stdout")
         err_path = os.path.join(workdir, "stderr")
+        stdin_path = os.path.join(workdir, "stdin")  # ours, so not size-checked
         with (
-            open(os.path.join(workdir, "stdin"), "w+", encoding="utf-8") as fin,
+            open(stdin_path, "w+", encoding="utf-8") as fin,
             open(out_path, "wb") as fout,
             open(err_path, "wb") as ferr,
         ):
@@ -173,21 +182,25 @@ def run_program(
                 proc.wait(timeout=timeout_s)
             except subprocess.TimeoutExpired:
                 timed_out = True
-            # Kill the whole group: the program, and anything it started.
+            # Kill the program's process group: the program and the processes
+            # it started, except any that left the group (setsid, daemons).
             try:
                 os.killpg(proc.pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 pass
             proc.wait()
             seconds = time.perf_counter() - start
-        stdout_bytes = os.path.getsize(out_path)
+        exit_code = proc.returncode
         if timed_out:
             status, exit_code = "timeout", None
-        elif stdout_bytes >= output_limit:
-            status, exit_code = "output_limit", proc.returncode
+        elif output_limit and os.path.getsize(out_path) >= output_limit:
+            status = "output_limit"
+        elif exit_code == 0:
+            status = "ok"
+        elif output_limit and _wrote_past(workdir, output_limit, {stdin_path, program}):
+            status = "output_limit"  # e.g. a write to stderr failed with EFBIG
         else:
-            exit_code = proc.returncode
-            status = "ok" if exit_code == 0 else "runtime_error"
+            status = "runtime_error"
         return {
             "status": status,
             "exit_code": exit_code,
@@ -198,6 +211,21 @@ def run_program(
         }
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _wrote_past(workdir: str, limit: int, skip: set[str]) -> bool:
+    """Whether a file under ``workdir``, except the paths in ``skip``, hit ``limit``.
+
+    E.g. stderr, or a scratch file the program wrote, at ``max_output_mb``.
+    """
+    for root, _, files in os.walk(workdir):
+        for path in (os.path.join(root, name) for name in files):
+            try:
+                if path not in skip and os.path.getsize(path) >= limit:
+                    return True
+            except OSError:  # removed while we looked, or not a regular file
+                continue
+    return False
 
 
 def _target_command(
@@ -261,7 +289,7 @@ def _run_test(
     if test.get("timeout_s") is not None:
         kwargs["timeout_s"] = float(test["timeout_s"])
     result = run_program(
-        code, str(test.get("input", "")), args=test.get("args") or (), **kwargs
+        code, _stdin_text(test.get("input")), args=test.get("args") or (), **kwargs
     )
     expected = test.get("output")
     if expected is None:
@@ -277,6 +305,11 @@ def _run_test(
         # The end of stderr, where a traceback's error is.
         result["stderr"] = result["stderr"][-max_chars:] if max_chars else ""
     return result
+
+
+def _stdin_text(value: Any) -> str:
+    """Stdin for a test's ``"input"``: missing or None is empty, not ``"None"``."""
+    return "" if value is None else str(value)
 
 
 def _code_of(
@@ -295,7 +328,7 @@ def _default_workers() -> int:
     return min(8, os.cpu_count() or 1)
 
 
-@op(name="alter.run_programs", unkeyed=("max_workers",))
+@op(name="alter.run_programs")
 def run_programs(
     items: list[dict],
     *,
@@ -335,7 +368,9 @@ def run_programs(
         timeout_s: Wall-clock limit per run, in seconds.
         memory_mb: Address-space limit per run (None for none). Not enforced
             on macOS, which has no working ``RLIMIT_AS``.
-        max_output_mb: Stdout size at which a run stops with ``output_limit``.
+        max_output_mb: Size cap on every file a run writes (stdout, stderr,
+            scratch files); see ``run_program`` for when it gives
+            ``output_limit``. 0 for none.
         max_chars: Characters of stdout (first) and stderr (last) kept per
             result. None keeps them whole, e.g. to use a reference program's
             outputs as expected outputs.
@@ -344,7 +379,8 @@ def run_programs(
             ``suffix=".js"``. None runs Python (this interpreter, ``-I``).
         suffix: File name suffix for the program.
         max_workers: Runs at a time across all rows (default
-            ``min(8, cpu count)``).
+            ``min(8, cpu count)``). Part of the cache key: timeouts are
+            wall-clock, so fewer workers can turn timeouts into passes.
 
     Returns:
         New rows (inputs are not mutated), in input order.

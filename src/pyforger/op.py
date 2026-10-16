@@ -196,12 +196,15 @@ def op(
         @op(name="custom", cache=False)
         def debug_op(x): ...
 
-        @op(unkeyed=("max_workers",))
-        def run_all(items, *, max_workers=8): ...
+        @op(unkeyed=("show_progress",))
+        def score_all(items, *, show_progress=True): ...
 
-    ``unkeyed`` names parameters left out of the cache key: knobs that change
-    how the op runs but not what it returns, e.g. a worker count. So
-    ``run_all(rows, max_workers=2)`` is a cache hit after ``run_all(rows)``.
+    ``unkeyed`` names parameters left out of the cache key. Use it only for
+    knobs that cannot change what the op returns, e.g. a progress bar, so
+    ``score_all(rows, show_progress=False)`` is a cache hit after
+    ``score_all(rows)``. A worker count can change results when the op has
+    wall-clock timeouts (more workers, more contention, more timeouts), so
+    Forger keys its own worker counts.
 
     Pass ``_no_cache=True`` at call time to bypass the cache for one call,
     including the ops that call makes. Pass ``_cache_only=True`` to return only

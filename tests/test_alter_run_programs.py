@@ -85,6 +85,35 @@ class TestRunProgram:
         assert result["status"] == "output_limit"
         assert len(result["stdout"]) == 1 << 20
 
+    @pytest.mark.parametrize(
+        "code",
+        [
+            "import sys\nfor _ in range(64):\n    sys.stderr.write('x' * 65536)\n",
+            "with open('scratch', 'w') as f:\n    for _ in range(64):\n"
+            "        f.write('x' * 65536)\n",
+        ],
+        ids=["stderr", "scratch_file"],
+    )
+    def test_output_limit_on_other_files(self, code):
+        """Failing to write stderr or a scratch file past the cap is output_limit."""
+        result = run_program(code + "print('done')", max_output_mb=1, timeout_s=20)
+        assert result["status"] == "output_limit"
+        assert result["exit_code"] not in (0, None)
+        assert "done" not in result["stdout"]
+
+    def test_output_limit_zero_is_no_limit(self):
+        """max_output_mb=0 sets no cap, rather than flagging every run."""
+        result = run_program("print('hi')", max_output_mb=0)
+        assert result["status"] == "ok"
+        assert result["stdout"] == "hi\n"
+
+    def test_large_input_is_not_output(self):
+        """Stdin bigger than the cap is ours, not the program's output."""
+        code = "import sys\nprint(len(sys.stdin.read()))"
+        result = run_program(code, "x" * (2 << 20), max_output_mb=1, timeout_s=20)
+        assert result["status"] == "ok"
+        assert result["stdout"].strip() == str(2 << 20)
+
     @pytest.mark.skipif(sys.platform != "linux", reason="RLIMIT_AS is Linux only")
     def test_memory_limit(self):
         """Allocating past memory_mb fails the run."""
@@ -149,6 +178,12 @@ class TestRunTests:
         tests = [{"input": "1", "output": "done", "timeout_s": 0.3}]
         (result,) = run_tests(code, tests, timeout_s=30)
         assert result["status"] == "timeout"
+
+    def test_none_input_is_empty_stdin(self):
+        """A test with "input": None feeds empty stdin, not the text None."""
+        code = "import sys\nprint(repr(sys.stdin.read()))"
+        results = run_tests(code, [{"input": None, "output": "''"}, {"output": "''"}])
+        assert [r["passed"] for r in results] == [True, True]
 
     def test_custom_checker(self):
         """A checker replaces whitespace-insensitive equality."""
@@ -221,12 +256,17 @@ class TestRunProgramsOp:
         hits = [r.cache_hit for r in trace() if r.op_name == "alter.run_programs"]
         assert hits == [False, True]
 
-    def test_max_workers_not_in_cache_key(self):
-        """A new worker count is a cache hit, for run_programs and by_tests."""
-        run_programs(self.ROWS, code_field="code", max_workers=1)
+    def test_max_workers_in_cache_key(self):
+        """A new worker count runs again: wall-clock timeouts depend on load.
+
+        E.g. 48 CPU-bound runs at once all time out; rerunning with
+        max_workers=1 must not replay those cached timeouts.
+        """
         run_programs(self.ROWS, code_field="code", max_workers=4)
-        by_tests(self.ROWS, code_field="code", max_workers=1)
+        run_programs(self.ROWS, code_field="code", max_workers=1)
+        run_programs(self.ROWS, code_field="code", max_workers=1)
         by_tests(self.ROWS, code_field="code", max_workers=4)
+        by_tests(self.ROWS, code_field="code", max_workers=1)
         hits = [
             (r.op_name, r.cache_hit)
             for r in trace()
@@ -234,10 +274,12 @@ class TestRunProgramsOp:
         ]
         assert hits == [
             ("alter.run_programs", False),
+            ("alter.run_programs", False),
             ("alter.run_programs", True),
             ("alter.run_programs", False),  # by_tests runs only code and tests
             ("filter.by_tests", False),
-            ("filter.by_tests", True),
+            ("alter.run_programs", False),
+            ("filter.by_tests", False),
         ]
 
     def test_max_workers_validated(self):

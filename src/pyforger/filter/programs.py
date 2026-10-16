@@ -25,7 +25,7 @@ from pyforger.op import op
 from pyforger.utils import get_field
 
 
-@op(name="filter.by_tests", unkeyed=("max_workers",))
+@op(name="filter.by_tests")
 def by_tests(
     items: list[dict],
     *,
@@ -67,7 +67,8 @@ def by_tests(
             on macOS).
         command: Interpreter command with ``{file}`` for non-Python programs.
         suffix: File name suffix for the program.
-        max_workers: Runs at a time (default ``min(8, cpu count)``).
+        max_workers: Runs at a time (default ``min(8, cpu count)``); part
+            of the cache key, since wall-clock timeouts depend on load.
 
     Returns:
         The kept rows, in input order.
