@@ -757,7 +757,7 @@ class TestLenientParsing:
             ('{"explanation": "cut off", "score": 4', (4, "cut off")),
             ("{'score': 3, 'explanation': 'python dict'}", (3, None)),
             ('{"score": "4"}', (4, None)),
-            ('{"score": 4.7}', (4, None)),
+            ('{"score": 4.7}', (4.7, None)),
             ('{"score": "high"}', (None, None)),
             ('{"score": 9}', (None, None)),
             ('{"score": true}', (None, None)),
@@ -899,6 +899,8 @@ _GROUPED = [
 
 def _comparative(rows, judge, **kwargs):
     kwargs.setdefault("keep", 1)
+    if kwargs.get("num_judges", 1) > 1:
+        kwargs.setdefault("temperature", 0.7)
     return by_comparative_judge(
         rows, group_by="q", model=judge, input_field="q", output_field="a", **kwargs
     )
@@ -1153,7 +1155,8 @@ class TestRankingHelpers:
             ('{"ranking": ["B", "A", "C"]}', [1, 0, 2]),
             ('{"ranking": ["Candidate C", "(a)", "b."]}', [2, 0, 1]),
             ('{"ranking": "B > C > A"}', [1, 2, 0]),
-            ('{"ranking": ["B", "B", "Z", "A"]}', [1, 0]),
+            ('{"ranking": ["B", "B", "A"]}', [1, 0]),
+            ('{"ranking": ["B", "Z", "A"]}', None),
             ('{"explanation": "x", "ranking": ["C", "A"', [2, 0]),
             ('{"ranking": []}', None),
             ("B is best", None),
@@ -1175,3 +1178,188 @@ class TestRankingHelpers:
     def test_labels(self):
         """Labels run A..Z then AA, AB."""
         assert [_label(k) for k in (0, 1, 25, 26, 27)] == ["A", "B", "Z", "AA", "AB"]
+
+
+# ------------------------------------------------------- review regressions
+
+
+class _AnnotatingJudge(_RankingJudge):
+    """Ranks the candidate "BEST" first, labelled with an annotation."""
+
+    def __init__(self, annotation):
+        """Store the annotation format, e.g. ``"{} (best)"``."""
+        super().__init__()
+        self.annotation = annotation
+
+    def cache_key(self):
+        """Stable key per annotation."""
+        return ("_AnnotatingJudge", self.annotation)
+
+    def generate_batch(self, prompts, *, n=1, temperature=None, max_tokens=None):
+        """Put BEST first with an annotated label, then the rest bare."""
+        results = []
+        for prompt in prompts:
+            self.prompts.append(prompt)
+            shown = _shown(prompt)
+            best = next(lab for lab, text in shown.items() if text == "BEST")
+            rest = [lab for lab in shown if lab != best]
+            ranking = [self.annotation.format(best), *rest]
+            results.append([json.dumps({"ranking": ranking})] * n)
+        return results
+
+
+class TestAnnotatedLabels:
+    """#20: labels with words after them map to their label."""
+
+    @pytest.mark.parametrize(
+        "entry", ["A (best)", "Candidate A:", "A - clearest", "a) most accurate"]
+    )
+    def test_annotated_label_maps(self, entry):
+        """The annotated first entry still names candidate A."""
+        raw = json.dumps({"ranking": [entry, "C", "B"]})
+        assert _parse_ranking_response(raw, [2, 0, 1]) == [2, 1, 0]
+
+    @pytest.mark.parametrize(
+        "annotation", ["{} (best)", "Candidate {}:", "{} - clearest"]
+    )
+    def test_top_pick_is_kept(self, annotation):
+        """The judge's annotated top pick wins its group."""
+        rows = [{"q": "q", "a": t} for t in ("meh-1", "BEST", "meh-2")]
+        kept = _comparative(rows, _AnnotatingJudge(annotation), rank_field="rank")
+        assert kept == [{"q": "q", "a": "BEST", "rank": 1}]
+
+    def test_unmappable_entry_makes_the_answer_unparseable(self):
+        """An entry naming no label never demotes the top pick; it voids the answer."""
+        raw = json.dumps({"ranking": ["the first one", "C", "B"]})
+        assert _parse_ranking_response(raw, [2, 0, 1]) is None
+        rows = [{"q": "q", "a": t} for t in ("x", "y")]
+        assert _comparative(rows, _BadJudge([raw])) == []
+
+
+class TestThinkBlocks:
+    """#21: only the text after a closed </think> block is parsed."""
+
+    def test_score_draft_in_think_is_ignored(self):
+        """A draft score inside <think> does not count, in either parsing path."""
+        raw = '<think>Draft: {"score": 2, "explanation": "first"}</think>\n'
+        assert _parse_score_response(
+            raw + '{"score": 5, "explanation": "final"}', 5
+        ) == (
+            5,
+            "final",
+        )
+        assert _parse_score_response(
+            '<think>maybe "score": 2</think> "score": 5', 5
+        ) == (
+            5,
+            None,
+        )
+
+    def test_unclosed_think_is_unparseable(self):
+        """An unclosed <think> block gives no score and no ranking."""
+        assert _parse_score_response('<think>{"score": 5}', 5) == (None, None)
+        assert _parse_ranking_response('<think>{"ranking": ["A"]}', [0, 1]) is None
+
+    def test_ranking_draft_in_think_is_ignored(self):
+        """The final ranking after </think> is used, not the draft."""
+        raw = '<think>{"ranking": ["C","B","A"]}</think>{"ranking": ["A","B","C"]}'
+        assert _parse_ranking_response(raw, [2, 0, 1]) == [2, 0, 1]
+
+    def test_last_json_object_wins(self):
+        """Outside think blocks the last object with the key counts, like the regex."""
+        assert _parse_score_response('draft {"score": 2} final {"score": 5}', 5)[0] == 5
+        assert _parse_score_response('{"score": 4, "detail": {"score": 2}}', 5)[0] == 4
+
+    def test_by_llm_score_uses_the_final_answer(self):
+        """The repro: final score 5 after a draft of 1 keeps the row."""
+        judge = _BadJudge(
+            [
+                '<think>A first guess would be {"score": 1, "explanation": "x"}'
+                '</think>\n{"score": 5, "explanation": "final"}'
+            ]
+        )
+        kept = by_llm_score(
+            _THRESHOLD_DATA[:1],
+            model=judge,
+            input_field="instruction",
+            output_field="response",
+            score_threshold=4,
+            explanation_field="why",
+        )
+        assert kept == [{**_THRESHOLD_DATA[0], "why": ["final"]}]
+
+    def test_comparative_unclosed_think_drops_the_group(self):
+        """A comparative answer with an unclosed <think> counts as unparseable."""
+        rows = [{"q": "q", "a": t} for t in ("x", "y")]
+        assert _comparative(rows, _BadJudge(['<think>{"ranking": ["A", "B"]}'])) == []
+
+
+class TestComparativeJudgesDiffer:
+    """#37: several comparative judges never get identical prompts at temperature 0."""
+
+    def test_several_judges_need_temperature(self):
+        """num_judges > 1 at temperature 0 raises, like by_llm_score."""
+        rows = [{"q": "q", "a": t} for t in ("x", "y")]
+        with pytest.raises(ValueError, match="temperature must be > 0.0"):
+            by_comparative_judge(
+                rows,
+                group_by="q",
+                model=_RankingJudge(),
+                input_field="q",
+                output_field="a",
+                num_judges=3,
+            )
+
+    @pytest.mark.parametrize("size", [2, 3, 4])
+    def test_rotations_balance_positions(self, size):
+        """With size judges, every candidate is shown once in every position."""
+        rows = [{"q": "q", "a": f"c{i}"} for i in range(size)]
+        judge = _RankingJudge()
+        _comparative(rows, judge, num_judges=size)
+        orders = [list(_shown(p).values()) for p in judge.prompts]
+        assert len(set(map(tuple, orders))) == size
+        for position in range(size):
+            assert sorted(o[position] for o in orders) == sorted(r["a"] for r in rows)
+
+
+class TestScoreValues:
+    """#38: both parsing paths read scores the same way; fractions are kept."""
+
+    @pytest.mark.parametrize(
+        "json_raw, text_raw, expected",
+        [
+            ('{"score": 4.9}', 'score is "score": 4.9 here', 4.9),
+            ('{"score": "4/5"}', '"score": "4/5"', 4),
+            ('{"score": "4.5 out of 5"}', '"score": "4.5 out of 5"', 4.5),
+            ('{"score": 5}', '"score": 5', 5),
+            ('{"score": 0.5}', '"score": 0.5', None),
+        ],
+    )
+    def test_json_and_regex_paths_agree(self, json_raw, text_raw, expected):
+        """The JSON object and the regex fallback give the same score."""
+        assert _parse_score_response(json_raw, 5)[0] == expected
+        assert _parse_score_response(text_raw, 5)[0] == expected
+
+    def test_fraction_compared_unrounded(self):
+        """4.9 is below score_threshold 5; score_field keeps the fractional mean."""
+        judge = _BadJudge([json.dumps({"score": 4.9}), json.dumps({"score": 4.5})])
+        kept = by_llm_score(
+            _THRESHOLD_DATA[:2],
+            model=judge,
+            input_field="instruction",
+            output_field="response",
+            score_threshold=5,
+        )
+        assert kept == []
+        judge = _BadJudge([json.dumps({"score": 4.5}), json.dumps({"score": 5})])
+        kept = by_llm_score(
+            _THRESHOLD_DATA[:1],
+            model=judge,
+            input_field="instruction",
+            output_field="response",
+            num_judges=2,
+            temperature=0.7,
+            score_threshold=4,
+            score_field="s",
+        )
+        assert kept == [{**_THRESHOLD_DATA[0], "s": 4.75}]

@@ -218,9 +218,12 @@ fraction of judges scoring at least `score_threshold`, which is what `agreement_
 ##### LLM judges
 
 Both judges send all their calls (rows × `num_judges`) in one `model.generate_batch` call, one `n=1` request each,
-so they run concurrently. Judge answers are read leniently: the first JSON object with the expected key, also inside
-code fences or prose, else a `"score": <number>` (or `"ranking": [...]`) pattern. Unparseable answers count as no
-vote.
+so they run concurrently. Judge answers are read leniently: only the text after a closed `</think>` block (an
+unclosed `<think>` is unparseable), then the last JSON object with the expected key, also inside code fences or
+prose, else the last `"score": <number>` (or `"ranking": [...]`) pattern. Scores keep fractions (`4.9` stays `4.9`,
+so it fails `score_threshold=5`), and a string score gives its leading number (`"4/5"` is 4). Ranking entries may
+carry words after the label (`"A (best)"`, `"Candidate B:"`); an entry that names no shown label voids that judge's
+ranking. Unparseable answers count as no vote.
 
 - **Absolute (`by_llm_score`)** rates each row alone on 1 to `max_score`. Absolute judges tend to score nearly
   everything at the top of the scale, so check the step report's histogram; if it is piled up at the top, the
@@ -228,8 +231,9 @@ vote.
 - **Comparative (`by_comparative_judge`)** ranks the candidates for the same input against each other, which
   discriminates far better. Use it whenever there are several candidates per input (e.g. `n=4` samples per prompt,
   grouped by `group_by="prompt"`). The judge sees the input once and the candidates labelled A, B, C, ..., answers
-  `{"ranking": ["C", "A", "B"], "explanation": "..."}`, and the top `keep` per group survive. With `num_judges > 1`
-  each judge sees its own shuffled order (seeded by `seed`) to spread position bias, and rankings combine by Borda
+  `{"ranking": ["C", "A", "B"], "explanation": "..."}`, and the top `keep` per group survive. Candidates are
+  shuffled per group (seeded by `seed`) and judge `j` sees that order rotated by `j`, so each candidate takes each
+  position equally often; `num_judges > 1` needs `temperature > 0`, as for `by_llm_score`. Rankings combine by Borda
   count; ties go to the earlier row. Every group of two or more rows is judged, whatever `keep` is, so changing
   `keep` makes no new judge calls; a single row is kept without a call. The report histogram shows each row's rank
   in its group.
@@ -253,6 +257,7 @@ best = filter.by_comparative_judge(
     criteria="correctness, then clarity",
     keep=1,
     num_judges=3,
+    temperature=0.7,            # required with several judges
 )
 ```
 

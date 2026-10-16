@@ -60,10 +60,13 @@ def by_llm_score(
     instruction to answer with ``{"score": ..., "explanation": ...}`` is
     appended to it.
 
-    The score is read from the first JSON object with a ``score`` key, also
-    inside code fences or surrounding text, else from a ``"score": <number>``
-    pattern; it must lie in ``[1, max_score]``. Unparseable responses count as
-    a judge that did not approve.
+    Only the text after a closed ``</think>`` block is read; a response with an
+    unclosed ``<think>`` is unparseable. The score comes from the last JSON
+    object with a ``score`` key, also inside code fences or surrounding text,
+    else from the last ``"score": <number>`` pattern. Both paths read a string
+    score's leading number (``"4/5"`` is 4) and keep fractions (``4.5`` stays
+    ``4.5``); the score must lie in ``[1, max_score]``. Unparseable responses
+    count as a judge that did not approve.
 
     With ``score_field`` set, kept rows carry the mean of the judges' parsed
     scores; with ``explanation_field`` set, a list of their explanations.
@@ -172,9 +175,14 @@ def by_comparative_judge(
     e.g. four sampled answers to one question. One prompt shows the input (from
     the group's first row) once and the candidates' ``output_field`` values
     labelled A, B, C, ...; the judge answers with JSON
-    ``{"ranking": ["C", "A", "B"], "explanation": "..."}``, best first. Each
-    judge sees the candidates in its own shuffled order (seeded by ``seed``, the
-    judge index, and the group) to spread position bias. Rankings combine by
+    ``{"ranking": ["C", "A", "B"], "explanation": "..."}``, best first; entries
+    may carry words after the label (``"A (best)"``), but an entry naming no
+    shown label makes that judge's answer unparseable. Text before a closed
+    ``</think>`` is ignored, and an unclosed ``<think>`` is unparseable. The
+    candidates are shuffled per group (seeded by ``seed`` and the group), and
+    judge ``j`` sees that order rotated by ``j``, so each candidate takes each
+    position equally often to spread position bias. ``num_judges > 1`` needs
+    ``temperature > 0``. Rankings combine by
     Borda count: in a group of ``m`` the candidate ranked ``p``-th (from 0)
     gets ``m - 1 - p`` points, and candidates a judge leaves out share the
     remaining points. Ties go to the row that came first. Every group of two or
@@ -204,6 +212,11 @@ def by_comparative_judge(
         raise ValueError("keep must be at least 1")
     if num_judges < 1:
         raise ValueError("num_judges must be at least 1")
+    if num_judges > 1 and temperature == 0.0:
+        raise ValueError(
+            "temperature must be > 0.0 when num_judges > 1; with more judges "
+            "than candidates, judges see the same order and would answer alike"
+        )
 
     groups: dict[Hashable, list[int]] = {}
     for i, item in enumerate(items):
@@ -218,9 +231,13 @@ def by_comparative_judge(
     for key, idx in judged:
         group = [items[i] for i in idx]
         group_orders = []
+        base = list(range(len(group)))
+        random.Random(f"{seed}|{key!r}").shuffle(base)
         for j in range(num_judges):
-            order = list(range(len(group)))
-            random.Random(f"{seed}|{j}|{key!r}").shuffle(order)
+            # Judge j sees the shuffled list rotated by j, so over len(group)
+            # judges every candidate is shown once in every position.
+            shift = j % len(base)
+            order = base[shift:] + base[:shift]
             group_orders.append(order)
             prompts.append(
                 _ranking_prompt(
@@ -430,95 +447,137 @@ _SCORE_RE = re.compile(r"[\"']score[\"']\s*:\s*\"?(-?\d+(?:\.\d+)?)")
 _EXPLANATION_RE = re.compile(r"[\"']explanation[\"']\s*:\s*\"((?:[^\"\\]|\\.)*)\"")
 # No closing bracket needed, so a truncated '"ranking": ["C", "A"' still parses.
 _RANKING_RE = re.compile(r"[\"']ranking[\"']\s*:\s*\[([^\]]*)")
-_LABEL_RE = re.compile(r"^\W*(?:candidate\s+)?([A-Z]{1,2})\W*$", re.I)
+# The label at the start of an entry: "B", "(b)", "Candidate A:", "A (best)".
+_LABEL_RE = re.compile(r"^\W*(?:candidate\s+)?([A-Z]{1,2})\b", re.I)
+# A leading number: "4", "4.5", "4/5", "4 out of 5".
+_NUMBER_RE = re.compile(r"^\s*(-?\d+(?:\.\d+)?)")
 
 
-def _find_json_with(raw: str, key: str) -> dict | None:
-    """Return the first JSON object in ``raw`` that has ``key``.
+def _answer_text(raw: Any) -> str | None:
+    """Return the text after a closed ``</think>`` block; None if unclosed.
 
-    Handles bare JSON, code fences, and JSON inside prose, e.g.
-    ``Sure! ```json {"score": 4} ``` ``. Nested objects count, so
-    ``{"result": {"score": 4}}`` gives ``{"score": 4}``.
+    A draft inside the block must not count, e.g.
+    ``<think>maybe {"score": 2}</think>{"score": 5}`` is read as ``{"score": 5}``.
     """
     if not isinstance(raw, str):
         return None
+    if "</think>" in raw:
+        return raw.rsplit("</think>", 1)[1]
+    if "<think>" in raw:
+        return None
+    return raw
+
+
+def _find_json_with(raw: str, key: str) -> dict | None:
+    """Return the last top-level JSON object in ``raw`` that has ``key``.
+
+    Handles bare JSON, code fences, and JSON inside prose, e.g.
+    ``Sure! ```json {"score": 4} ``` ``. An object without ``key`` is searched
+    inside, so ``{"result": {"score": 4}}`` gives ``{"score": 4}``. The last
+    object wins, like the regex fallback's last match.
+    """
     decoder = json.JSONDecoder()
+    found = None
     start = raw.find("{")
     while start != -1:
         try:
-            obj, _ = decoder.raw_decode(raw, start)
+            obj, end = decoder.raw_decode(raw, start)
         except json.JSONDecodeError:
-            obj = None
+            obj, end = None, start + 1
         if isinstance(obj, dict) and key in obj:
-            return obj
-        start = raw.find("{", start + 1)
-    return None
+            found = obj
+        else:
+            end = start + 1  # look for the key in nested objects
+        start = raw.find("{", end)
+    return found
 
 
-def _parse_score_response(raw: str, max_score: int) -> tuple[int | None, str | None]:
+def _to_score(value: Any, max_score: int) -> int | float | None:
+    """Read a judge score: a number, or a string's leading number ("4/5" is 4).
+
+    Fractions are kept (``4.5`` stays ``4.5``); None when off ``[1, max_score]``.
+    """
+    if isinstance(value, str):
+        match = _NUMBER_RE.match(value)
+        if match is None:
+            return None
+        text = match.group(1)
+        value = float(text) if "." in text else int(text)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not 1 <= value <= max_score:
+        return None
+    return value
+
+
+def _parse_score_response(
+    raw: str, max_score: int
+) -> tuple[int | float | None, str | None]:
     """Return ``(score, explanation)``; score is None when missing or off-scale."""
-    parsed = _find_json_with(raw, "score")
+    text = _answer_text(raw)
+    if text is None:
+        return None, None
+    parsed = _find_json_with(text, "score")
     if parsed is not None:
-        score: Any = parsed.get("score")
         why = parsed.get("explanation")
-        explanation = why if isinstance(why, str) else None
-    else:
-        matches = _SCORE_RE.findall(raw) if isinstance(raw, str) else []
-        if not matches:
-            return None, None
-        score = matches[-1]
-        why_match = _EXPLANATION_RE.search(raw)
-        explanation = why_match.group(1) if why_match else None
-    if isinstance(score, str):
-        try:
-            score = float(score.strip())
-        except ValueError:
-            return None, explanation
-    if isinstance(score, bool) or not isinstance(score, (int, float)):
-        return None, explanation
-    int_score = int(score)
-    if int_score < 1 or int_score > max_score:
-        return None, explanation
-    return int_score, explanation
+        return (
+            _to_score(parsed["score"], max_score),
+            why if isinstance(why, str) else None,
+        )
+    matches = _SCORE_RE.findall(text)
+    if not matches:
+        return None, None
+    why_match = _EXPLANATION_RE.search(text)
+    return _to_score(matches[-1], max_score), why_match.group(1) if why_match else None
 
 
 def _parse_ranking_response(raw: str, order: list[int]) -> list[int] | None:
     """Map a judge's ranking of labels to candidate indices, best first.
 
-    Unknown and repeated labels are skipped; None when no label is usable.
-    ``order[k]`` is the candidate shown with label k.
+    Entries may carry words after the label ("A (best)", "Candidate B:").
+    Repeated labels are skipped. Any entry that names no shown label makes the
+    whole ranking unparseable (None), so a garbled entry can never push the
+    judge's top pick to the bottom. ``order[k]`` is the candidate shown with
+    label k.
     """
-    parsed = _find_json_with(raw, "ranking")
+    text = _answer_text(raw)
+    if text is None:
+        return None
+    parsed = _find_json_with(text, "ranking")
     if parsed is not None:
         ranking = parsed["ranking"]
         if isinstance(ranking, str):
-            ranking = re.split(r"[\s,>;]+", ranking)
+            parts = [p for p in re.split(r"\s*[,>;\n]\s*", ranking) if p]
+            ranking = ranking.split() if len(parts) == 1 else parts
         if not isinstance(ranking, list):
             return None
     else:
-        match = _RANKING_RE.search(raw) if isinstance(raw, str) else None
+        match = _RANKING_RE.search(text)
         if match is None:
             return None
-        ranking = match.group(1).split(",")
+        ranking = [entry for entry in match.group(1).split(",") if entry.strip()]
     by_label = {_label(k): c for k, c in enumerate(order)}
     candidates: list[int] = []
     for entry in ranking:
         label_match = _LABEL_RE.match(str(entry))
-        if label_match is None:
-            continue
-        candidate = by_label.get(label_match.group(1).upper())
-        if candidate is not None and candidate not in candidates:
+        candidate = by_label.get(label_match.group(1).upper()) if label_match else None
+        if candidate is None:
+            return None
+        if candidate not in candidates:
             candidates.append(candidate)
     return candidates or None
 
 
 def _ranking_explanation(raw: str) -> str | None:
     """Return the ``explanation`` of a ranking response, if it has one."""
-    parsed = _find_json_with(raw, "ranking")
+    text = _answer_text(raw)
+    if text is None:
+        return None
+    parsed = _find_json_with(text, "ranking")
     if parsed is not None:
         why = parsed.get("explanation")
         return why if isinstance(why, str) else None
-    match = _EXPLANATION_RE.search(raw) if isinstance(raw, str) else None
+    match = _EXPLANATION_RE.search(text)
     return match.group(1) if match else None
 
 
