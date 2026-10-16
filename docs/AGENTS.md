@@ -237,10 +237,9 @@ the last `ANSWER:`. By default an empty answer segment or an unclosed `<think>` 
 `extract_answer` or a verifier returning `None`: excluded, not failed. A model that does not return exactly `n`
 completions per prompt raises `ValueError`; missing samples are never padded.
 `by_pass_at_k` needs all `k` grades valid unless `min_valid` allows fewer, and a row needs both comparative grades.
-Grades use the `{group: [True | False | None, ...]}` format of `filter.by_success_rate`, and `min_rate`, `max_rate`, and
-`min_valid` mean the same there; with `outcomes_field` set, kept rows carry them (`{"model": [...]}`, or
-`{"weak": [...], "strong": [...]}`). Predictions are cached apart from grades, so changing the rate bounds makes no
-model calls and changing the metric regrades the cached predictions.
+Grades use the format `{group: [True | False | None, ...]}`; with `outcomes_field` set, kept rows carry them
+(`{"model": [...]}`, or `{"weak": [...], "strong": [...]}`). Predictions are cached apart from grades, so changing
+the rate bounds makes no model calls and changing the metric regrades the cached predictions.
 
 ```python
 hard = filter.by_pass_at_k(

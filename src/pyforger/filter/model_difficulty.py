@@ -11,10 +11,10 @@ after a closed ``<think>...</think>`` block with surrounding whitespace
 stripped; pass another function, e.g. one reading an ``ANSWER:`` line, to
 replace it.
 
-Grades use the format of ``filter.by_success_rate``: ``{group: [True | False |
-None, ...]}``, where ``None`` is a grade that could not be made (an empty
-answer, a ``<think>`` block that never closes, ``extract_answer`` returning
-``None``, or a verifier returning ``None``) and is excluded, not failed.
+Grades use the format ``{group: [True | False | None, ...]}``, where ``None``
+is a grade that could not be made (an empty answer, a ``<think>`` block that
+never closes, ``extract_answer`` returning ``None``, or a verifier returning
+``None``) and is excluded, not failed.
 Predictions and grades are cached in separate inner ops, so changing only the
 rate bounds makes no model calls, and changing only the metric regrades the
 cached predictions.
@@ -198,9 +198,9 @@ def by_pass_at_k(
     """Keep rows whose pass rate over ``k`` samples is within the bounds.
 
     Each prompt is sent once with ``n=k``. The pass rate is passed / valid
-    grades, and a row is kept when ``min_rate <= rate <= max_rate``. As in
-    ``filter.by_success_rate``, all ``k`` grades must be valid unless
-    ``min_valid`` allows exclusions, and a row with no valid grade never passes.
+    grades, and a row is kept when ``min_rate <= rate <= max_rate``. All
+    ``k`` grades must be valid unless ``min_valid`` allows exclusions, and a
+    row with no valid grade never passes.
     E.g. with ``k=4``, grades ``[True, False, None, False]`` are dropped by
     default, and kept with ``min_valid=3`` (rate 1/3).
 
@@ -234,8 +234,8 @@ def by_pass_at_k(
         max_tokens: Max tokens per completion (the model's default when None).
         batch_size: Prompts per ``model.generate_batch()`` call.
         outcomes_field: When set, kept rows carry ``{"model": [bool | None] * k}``
-            under this key, replacing any value already there, so
-            ``filter.by_success_rate`` can re-select them later.
+            under this key, replacing any value already there, so a later
+            filter can re-select them without new model calls.
 
     Returns:
         The kept rows, in input order.
@@ -371,7 +371,7 @@ def _grades(
 
 
 def _pass_rate(grades: list[bool | None], min_valid: int | None) -> float | None:
-    """Pass rate as ``filter.by_success_rate`` computes it, or None if it fails.
+    """Pass rate (passed / valid grades), or None if the row fails ``min_valid``.
 
     None when no grade is valid or fewer than ``min_valid`` (default: all) are.
     """
