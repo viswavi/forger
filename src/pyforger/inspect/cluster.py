@@ -19,6 +19,10 @@ from pyforger.utils import get_field, get_formatted_logger
 logger = get_formatted_logger("Inspect")
 
 _DEFAULT_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
+# embedding_model value that selects the built-in TF-IDF + SVD embedder.
+_TFIDF_EMBEDDING = "tfidf"
+_TFIDF_MAX_DIM = 256
+_TFIDF_MAX_FEATURES = 50_000
 
 _SUMMARIZE_SYSTEM = (
     "You are an intelligent assistant skilled in summarizing and extracting insights."
@@ -93,7 +97,6 @@ def _clip(doc: str, truncation: int) -> str:
     return doc.replace("\n", " ")[:truncation]
 
 
-@op(name="inspect.topic_based_clustering")
 def topic_based_clustering(
     items: list[dict],
     *,
@@ -109,18 +112,92 @@ def topic_based_clustering(
     assign_truncation: int = 1500,
     max_assign_retries: int = 5,
     seed: int = 0,
+    **op_controls: Any,
 ) -> list[str]:
     """Cluster rows into ``num_clusters`` LLM-named topics by one field.
 
     Returns one topic name per row, aligned with ``items``. ``context``
     describes the corpus and what topics should capture, e.g.
     "competition math problems. Topics should describe the technique,
-    NOT the numeric answer.". Embeddings default to ``embedding_model``
-    via sentence-transformers (GPU when available); pass ``embed_fn``
-    to use another backend. If the LLM still misses ``num_clusters``
+    NOT the numeric answer.". If the LLM still misses ``num_clusters``
     topics after being corrected, a warning is logged and its last
     codebook is used.
+
+    Embeddings only guide which rows the LLM summarizes together. They come
+    from, in order of precedence:
+
+    - ``embed_fn``: any function taking the field values as ``list[str]``
+      and returning an array-like of shape ``(len(docs), dim)``, one row
+      vector per document.
+    - ``embedding_model="tfidf"``: TF-IDF + SVD on the CPU, no extra
+      dependencies beyond scikit-learn.
+    - ``embedding_model``: a sentence-transformers model id (GPU when
+      available). If sentence-transformers cannot be imported, this falls
+      back to ``"tfidf"`` with a warning.
+
+    ``op_controls`` are per-call ``@op`` controls (``_no_cache``,
+    ``_cache_only``). The fallback is resolved before the cache lookup, so
+    a TF-IDF result is never cached under a sentence-transformers key.
     """
+    if (
+        embed_fn is None
+        and embedding_model != _TFIDF_EMBEDDING
+        and not _sentence_transformers_importable()
+    ):
+        logger.warning(
+            "topic_based_clustering: sentence-transformers cannot be imported, so "
+            "embedding with TF-IDF instead of %s. Install it with "
+            "`pip install pyforger[clustering]`, or pass embedding_model=%r "
+            "to choose TF-IDF explicitly.",
+            embedding_model,
+            _TFIDF_EMBEDDING,
+        )
+        embedding_model = _TFIDF_EMBEDDING
+    return _topic_based_clustering(
+        items,
+        field=field,
+        model=model,
+        context=context,
+        num_clusters=num_clusters,
+        embed_fn=embed_fn,
+        embedding_model=embedding_model,
+        sample_size=sample_size,
+        tokens_per_shard=tokens_per_shard,
+        summarize_truncation=summarize_truncation,
+        assign_truncation=assign_truncation,
+        max_assign_retries=max_assign_retries,
+        seed=seed,
+        **op_controls,
+    )
+
+
+def _sentence_transformers_importable() -> bool:
+    """Whether the default embedding backend can be imported."""
+    try:
+        import sentence_transformers  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+@op(name="inspect.topic_based_clustering")
+def _topic_based_clustering(
+    items: list[dict],
+    *,
+    field: str,
+    model: Model,
+    context: str,
+    num_clusters: int,
+    embed_fn: Callable[[list[str]], Any] | None,
+    embedding_model: str,
+    sample_size: int,
+    tokens_per_shard: int,
+    summarize_truncation: int,
+    assign_truncation: int,
+    max_assign_retries: int,
+    seed: int,
+) -> list[str]:
+    """The cached body of ``topic_based_clustering``, with the embedder resolved."""
     # Validate input parameters.
     if num_clusters < 2:
         raise ValueError("num_clusters must be at least 2")
@@ -145,11 +222,7 @@ def topic_based_clustering(
             f"({num_clusters}) unique '{field}' values, got {len(unique_docs)}"
         )
 
-    embeddings = (
-        embed_fn(unique_docs)
-        if embed_fn is not None
-        else _default_embed(unique_docs, embedding_model)
-    )
+    embeddings = _embed(unique_docs, embed_fn, embedding_model, seed)
     shards = _partition(
         unique_docs,
         embeddings,
@@ -168,6 +241,77 @@ def topic_based_clustering(
     return [topic_of[doc] for doc in row_docs]
 
 
+def _embed(
+    docs: list[str],
+    embed_fn: Callable[[list[str]], Any] | None,
+    embedding_model: str,
+    seed: int,
+) -> Any:
+    """Embed documents with ``embed_fn``, TF-IDF, or sentence-transformers."""
+    if embed_fn is not None:
+        return embed_fn(docs)
+    if embedding_model == _TFIDF_EMBEDDING:
+        return _tfidf_embed(docs, seed=seed)
+    return _default_embed(docs, embedding_model)
+
+
+def _tfidf_embed(docs: list[str], *, seed: int = 0) -> Any:
+    """Embed documents as L2-normalized TF-IDF vectors reduced by SVD.
+
+    Returns an array of shape ``(len(docs), dim)`` with
+    ``dim = min(256, n_features - 1, len(docs))``; with too few
+    features to reduce (e.g. one distinct word), the TF-IDF vectors are
+    used unreduced. Deterministic for a given ``seed``.
+    """
+    try:
+        import numpy as np
+        from sklearn.decomposition import TruncatedSVD
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        from sklearn.preprocessing import normalize
+    except ImportError as e:
+        raise ImportError(
+            "topic_based_clustering's TF-IDF embedder requires numpy and "
+            "scikit-learn: `pip install pyforger[clustering]`."
+        ) from e
+
+    word_vectorizer = TfidfVectorizer(
+        sublinear_tf=True,
+        ngram_range=(1, 2),
+        max_features=_TFIDF_MAX_FEATURES,
+        token_pattern=r"(?u)\b\w+\b",  # keep one-character words like "x" or "5"
+    )
+    # Documents with no word characters (e.g. only "?!" or emoji) have an empty
+    # word vocabulary, so fall back to character n-grams.
+    char_vectorizer = TfidfVectorizer(
+        sublinear_tf=True,
+        analyzer="char_wb",
+        ngram_range=(1, 3),
+        max_features=_TFIDF_MAX_FEATURES,
+    )
+    for vectorizer in (word_vectorizer, char_vectorizer):
+        try:
+            tfidf = vectorizer.fit_transform(docs)
+            break
+        except ValueError:  # empty vocabulary
+            continue
+    else:  # e.g. only empty strings: every document gets the zero vector
+        return np.zeros((len(docs), 1))
+
+    num_rows, num_features = tfidf.shape
+    # Up to num_rows components keep every document; num_rows - 1 would drop one,
+    # e.g. two unrelated documents would become [1.0] and [0.0].
+    dim = min(_TFIDF_MAX_DIM, num_features - 1, num_rows)
+    if dim < 1:
+        vectors = tfidf.toarray()
+    else:
+        svd = TruncatedSVD(n_components=dim, random_state=seed)
+        # Identical documents have zero variance, so sklearn's explained-variance
+        # ratio divides by zero; the vectors themselves are fine.
+        with np.errstate(divide="ignore", invalid="ignore"):
+            vectors = svd.fit_transform(tfidf)
+    return normalize(vectors)
+
+
 def _default_embed(docs: list[str], embedding_model: str) -> Any:
     """Embed documents with sentence-transformers, preferring the GPU."""
     try:
@@ -182,10 +326,11 @@ def _default_embed(docs: list[str], embedding_model: str) -> Any:
     if encoder.device.type == "cpu":
         logger.warning(
             "topic_based_clustering: no GPU detected; embedding %d documents "
-            "with %s on CPU may be slow. Pass embed_fn= to use a different "
-            "embedding backend.",
+            "with %s on CPU may be slow. Pass embedding_model=%r or embed_fn= "
+            "to use a different embedding backend.",
             len(docs),
             embedding_model,
+            _TFIDF_EMBEDDING,
         )
     return encoder.encode(
         docs, batch_size=64, normalize_embeddings=True, convert_to_numpy=True
