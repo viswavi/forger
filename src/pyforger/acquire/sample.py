@@ -23,7 +23,7 @@ def _generation_loop(
     output_schema: dict[str, Any] | None,
     temperature: float,
     max_retries: int,
-    batch_size: int,
+    batch_size: int | None,
 ) -> Generator[dict[str, Any], None, None]:
     """Yield accepted samples until ``n`` collected or retries exhausted."""
     accepted: list[dict[str, Any]] = []
@@ -31,7 +31,9 @@ def _generation_loop(
 
     while len(accepted) < n and consecutive_failed_rounds < max_retries:
         remaining = n - len(accepted)
-        current_batch_size = min(batch_size, remaining)
+        current_batch_size = (
+            remaining if batch_size is None else min(batch_size, remaining)
+        )
         full_prompt = _build_prompt(prompt, output_schema)
 
         raw_responses = model.generate(
@@ -79,7 +81,7 @@ def sample_from_LLM(
     output_schema: dict[str, Any] | None = None,
     temperature: float = 0.7,
     max_retries: int = 3,
-    batch_size: int = 10,
+    batch_size: int | None = None,
     name: str = "sample_from_LLM",
 ) -> list[dict]:
     """Generate from `model` until `n` samples are generated.
@@ -91,7 +93,9 @@ def sample_from_LLM(
         output_schema: Optional dict of expected keys; triggers JSON parse + validation.
         temperature: Sampling temperature.
         max_retries: Consecutive zero-acceptance rounds before stopping.
-        batch_size: Number of responses to generate at a time.
+        batch_size: Number of responses to request per round (one
+            ``model.generate`` call with ``n=batch_size``). None (default) requests
+            all that are still missing at once.
         name: A string used to distinguish cache keys for otherwise identical calls.
 
     Returns:
@@ -108,7 +112,7 @@ def sample_from_LLM(
         the same samples if all other arguments are the same. If this is not desired,
         force fresh generation by passing `_no_cache=True` or varying `name`.
     """
-    if batch_size <= 0:
+    if batch_size is not None and batch_size <= 0:
         raise ValueError("batch_size must be positive")
     if n <= 0:
         raise ValueError("n must be positive")

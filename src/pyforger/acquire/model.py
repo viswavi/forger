@@ -6,45 +6,117 @@ completions from any supported LLM provider.
 
 from __future__ import annotations
 
+import os
+import sys
+import threading
+import time
 import warnings
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections.abc import Iterable, Iterator
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from typing import Any, Union
 
 import litellm
 
 from pyforger import _tracking
+from pyforger.utils import get_formatted_logger
 
 # Type aliases
 Message = dict[str, str]
 Prompt = Union[str, list[Message]]
 
+# Threads per generate_batch call when the Model sets no max_concurrency.
+_DEFAULT_MAX_WORKERS = 100
+# Without a terminal (stderr redirected to a log file), progress is a plain log
+# line at most this often instead of a redrawn bar.
+_PROGRESS_LOG_INTERVAL_S = 30.0
+
+_progress_logger = get_formatted_logger(__name__)
+
+
+def _progress_mode(show_progress: bool | None) -> str:
+    """Return "bar" in a terminal, "log" if stderr is redirected, or "off".
+
+    `show_progress=None` reads `FORGER_PROGRESS` (on unless "0"/"false"/"no").
+    """
+    if show_progress is None:
+        flag = os.environ.get("FORGER_PROGRESS", "").strip().lower()
+        show_progress = flag not in {"0", "false", "no"}
+    if not show_progress:
+        return "off"
+    isatty = getattr(sys.stderr, "isatty", None)
+    return "bar" if isatty is not None and isatty() else "log"
+
+
+def _log_progress(futures: Iterable[Future], total: int, desc: str) -> Iterator[Future]:
+    """Yield `futures` and log "<desc>: 120/500 done, 31s" at most every 30s.
+
+    A batch that finishes within the interval logs nothing.
+    """
+    start = last = time.monotonic()
+    done = 0
+    for future in futures:
+        done += 1
+        now = time.monotonic()
+        if now - last >= _PROGRESS_LOG_INTERVAL_S or (done == total and last > start):
+            _progress_logger.info(
+                "%s: %d/%d done, %.0fs", desc, done, total, now - start
+            )
+            last = now
+        yield future
+
+
+def _make_semaphore(max_concurrency: int | None) -> threading.BoundedSemaphore | None:
+    """The per-Model request cap, or None for no cap."""
+    if max_concurrency is None:
+        return None
+    return threading.BoundedSemaphore(max_concurrency)
+
+
+def _complete(
+    messages: list[Message],
+    call_kwargs: dict[str, Any],
+    semaphore: threading.BoundedSemaphore | None,
+) -> Any:
+    """One litellm.completion call, holding a `max_concurrency` slot if any."""
+    if semaphore is None:
+        return litellm.completion(messages=messages, **call_kwargs)
+    with semaphore:
+        return litellm.completion(messages=messages, **call_kwargs)
+
 
 def _batch_completion_with_progress(
-    all_messages: list[list[dict[str, str]]], call_kwargs: dict[str, Any]
+    all_messages: list[list[dict[str, str]]],
+    call_kwargs: dict[str, Any],
+    *,
+    semaphore: threading.BoundedSemaphore | None = None,
+    max_workers: int = _DEFAULT_MAX_WORKERS,
+    progress: str = "bar",
 ) -> list[Any]:
-    """Concurrent, progress-tracked replacement for litellm.batch_completion.
+    """Send every request concurrently; return responses or exceptions in order.
 
-    Unlike `litellm.batch_completion` -- which retrieves `future.result()`
-    in submission order, so the whole call looks frozen until the *slowest*
-    early-submitted item finishes even if later ones completed first -- this
-    updates a tqdm bar via `as_completed` as each call actually finishes.
+    A replacement for `litellm.batch_completion`, which retrieves
+    `future.result()` in submission order, so the whole call looks frozen until
+    the *slowest* early-submitted item finishes. This reports progress via
+    `as_completed` as each call actually finishes: a tqdm bar (`progress="bar"`),
+    a log line every 30s (`"log"`), or nothing (`"off"`). Each request holds a
+    slot of `semaphore` (the Model's `max_concurrency`) while in flight.
     """
-    from tqdm import tqdm
-
     results: list[Any] = [None] * len(all_messages)
-    model_id = call_kwargs.get("model", "?")
-    max_workers = min(100, len(all_messages))
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    total = len(all_messages)
+    desc = f"LLM calls ({call_kwargs.get('model', '?')})"
+    with ThreadPoolExecutor(max_workers=min(max_workers, total)) as executor:
         future_to_idx = {
-            executor.submit(litellm.completion, messages=msgs, **call_kwargs): i
+            executor.submit(_complete, msgs, call_kwargs, semaphore): i
             for i, msgs in enumerate(all_messages)
         }
-        for future in tqdm(
-            as_completed(future_to_idx),
-            total=len(all_messages),
-            desc=f"LLM calls ({model_id})",
-            leave=False,
-        ):
+        finished: Iterable[Future] = as_completed(future_to_idx)
+        if progress == "bar":
+            from tqdm import tqdm
+
+            finished = tqdm(finished, total=total, desc=desc, leave=False)
+        elif progress == "log":
+            finished = _log_progress(finished, total, desc)
+        for future in finished:
             idx = future_to_idx[future]
             try:
                 results[idx] = future.result()
@@ -177,11 +249,19 @@ def _merge_responses(responses: list[Any], model_id: str) -> GenerateResult:
 
 
 def _check_completion_count(
-    model_id: str, n: int, results: list[GenerateResult], fanned_out: bool
+    model_id: str,
+    n: int,
+    results: list[Any],
+    fanned_out: bool,
+    skip: set[int] = frozenset(),  # type: ignore[assignment]
 ) -> None:
-    """Raise `ValueError` when a prompt got other than `n` completions."""
+    """Raise `ValueError` when a prompt got other than `n` completions.
+
+    Exceptions (from `return_exceptions=True`) and prompts in `skip` (partial
+    fan-out results) are not checked.
+    """
     for i, result in enumerate(results):
-        if len(result) == n:
+        if isinstance(result, BaseException) or i in skip or len(result) == n:
             continue
         if fanned_out:
             hint = f"{n} separate n=1 requests did not return one completion each."
@@ -337,7 +417,8 @@ class Model:
         temperature: float = 0.7,
         max_tokens: int | None = None,
         num_retries: int = 2,
-        show_progress: bool = False,
+        show_progress: bool | None = None,
+        max_concurrency: int | None = None,
         **kwargs: Any,
     ) -> None:
         """Create a Model instance.
@@ -351,18 +432,28 @@ class Model:
             max_tokens: Default max tokens. None lets the provider decide.
             num_retries: Retries with exponential backoff on transient
                 failures.
-            show_progress: When True, a generate_batch() call that sends more
-                than one request (several prompts, or n > 1 on a model that
-                does not support n) shows a live tqdm progress bar to stderr.
+            show_progress: Progress for a generate_batch() call that sends
+                more than one request (several prompts, or n > 1 on a model
+                that does not support n): a tqdm bar when stderr is a
+                terminal, otherwise a log line every 30 seconds. None (default)
+                shows it unless the environment sets FORGER_PROGRESS=0.
+            max_concurrency: Most requests this instance has in flight at once,
+                across all generate_batch() calls and threads (each n fan-out
+                copy counts). None (default) caps each call at 100 requests.
+                Not part of cache_key().
             **kwargs: Passed through to litellm.completion()
                 (e.g. api_base, timeout, organization).
         """
+        if max_concurrency is not None and max_concurrency <= 0:
+            raise ValueError("max_concurrency must be positive")
         self._model_id = model_id
         self._api_key = api_key
         self._temperature = temperature
         self._max_tokens = max_tokens
         self._num_retries = num_retries
         self._show_progress = show_progress
+        self._max_concurrency = max_concurrency
+        self._semaphore = _make_semaphore(max_concurrency)
         self._kwargs = kwargs
         self.history: list[GenerateResult] = []
         self._check_params(
@@ -374,6 +465,17 @@ class Model:
     def __repr__(self) -> str:
         """Show model id for debugging."""
         return f"Model({self._model_id!r})"
+
+    def __getstate__(self) -> dict[str, Any]:
+        """Pickle/copy without the semaphore (locks cannot be pickled)."""
+        state = self.__dict__.copy()
+        state.pop("_semaphore", None)
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        """Restore, with a fresh semaphore of the same max_concurrency."""
+        self.__dict__.update(state)
+        self._semaphore = _make_semaphore(state.get("_max_concurrency"))
 
     def _check_params(self, **params: Any) -> None:
         """Validate params against LiteLLM's registry for this model id."""
@@ -453,6 +555,7 @@ class Model:
         max_tokens: int | None = None,
         stop: list[str] | None = None,
         show_progress: bool | None = None,
+        return_exceptions: bool = False,
     ) -> list[GenerateResult]:
         """Generate n responses for each prompt in a batch.
 
@@ -460,6 +563,7 @@ class Model:
         gpt-5, or any whose LiteLLM supported params lack "n") get n separate
         concurrent n=1 requests per prompt, merged into one GenerateResult
         with summed usage and cost. Other models get one request with n.
+        All requests are sent at once, up to the Model's max_concurrency.
 
         Args:
             prompts: List of prompts. Each prompt is either a string or
@@ -470,15 +574,23 @@ class Model:
             stop: Stop sequences.
             show_progress: Per-call override of the instance's show_progress
                 (see __init__). None (default) uses the instance setting.
+            return_exceptions: When True, a request that still fails after
+                retries (e.g. a gateway 504) does not discard the others: a
+                prompt whose requests all failed gets the exception in its
+                slot, and a prompt with only some failed fan-out copies gets
+                the completions that arrived (fewer than n, not checked).
+                When False (default), the first failure is raised.
 
         Returns:
-            List of GenerateResult, one per prompt. Each GenerateResult
-            is a list of n completion strings carrying usage / reasoning
-            / model_id / raw as attributes.
+            List with one entry per prompt. Each GenerateResult is a list of
+            n completion strings carrying usage / reasoning / model_id / raw
+            as attributes; with return_exceptions=True an entry can instead be
+            the exception its requests raised.
 
         Raises:
-            ValueError: If a prompt gets other than n completions. Usage is
-                recorded in history before raising.
+            ValueError: If a prompt whose requests all succeeded gets other
+                than n completions. Usage is recorded in history before
+                raising.
         """
         if not prompts:
             return []
@@ -512,30 +624,45 @@ class Model:
             num_retries=self._num_retries,
             **self._kwargs,
         )
+        responses: list[Any]
         if len(all_messages) == 1:
-            responses = [litellm.completion(messages=all_messages[0], **call_kwargs)]
+            try:
+                responses = [_complete(all_messages[0], call_kwargs, self._semaphore)]
+            except Exception as exc:
+                if not return_exceptions:
+                    raise
+                responses = [exc]
         else:
-            use_progress = (
-                self._show_progress if show_progress is None else show_progress
+            responses = _batch_completion_with_progress(
+                all_messages,
+                call_kwargs,
+                semaphore=self._semaphore,
+                max_workers=self._max_concurrency or _DEFAULT_MAX_WORKERS,
+                progress=_progress_mode(
+                    self._show_progress if show_progress is None else show_progress
+                ),
             )
-            if use_progress:
-                responses = _batch_completion_with_progress(all_messages, call_kwargs)
-            else:
-                responses = litellm.batch_completion(
-                    messages=all_messages, **call_kwargs
-                )
-        for response in responses:
-            # batch_completion returns (rather than raises) per-request exceptions.
-            if isinstance(response, Exception):
-                raise response
+        if not return_exceptions:
+            for response in responses:
+                if isinstance(response, Exception):
+                    raise response
 
-        results = [
-            _merge_responses(responses[i : i + copies], self._model_id)
-            for i in range(0, len(responses), copies)
-        ]
-        self._record(results)
+        results: list[Any] = []
+        partial: set[int] = set()
+        for i in range(0, len(responses), copies):
+            group = responses[i : i + copies]
+            finished = [r for r in group if not isinstance(r, Exception)]
+            if not finished:
+                results.append(group[0])
+                continue
+            if len(finished) < len(group):
+                partial.add(len(results))
+            results.append(_merge_responses(finished, self._model_id))
+        self._record([r for r in results if isinstance(r, GenerateResult)])
         if n != 1:
-            _check_completion_count(self._model_id, n, results, fanned_out=fan_out)
+            _check_completion_count(
+                self._model_id, n, results, fanned_out=fan_out, skip=partial
+            )
         return results
 
     def _record(self, results: list[GenerateResult]) -> None:
@@ -715,6 +842,7 @@ class LocalModel(Model):
         max_tokens: int | None = None,
         stop: list[str] | None = None,
         show_progress: bool | None = None,
+        return_exceptions: bool = False,
     ) -> list[GenerateResult]:
         """Generate `n` completions per prompt with the local vLLM engine.
 
@@ -727,6 +855,9 @@ class LocalModel(Model):
             stop: Optional stop strings.
             show_progress: Per-call override of the instance's show_progress.
                 None (default) uses the instance setting.
+            return_exceptions: vLLM runs the batch as one engine call, so when
+                True an engine error fills every prompt's slot instead of
+                being raised.
 
         Returns:
             List of GenerateResult, one per prompt, in input order. Each is a
@@ -756,12 +887,19 @@ class LocalModel(Model):
             stop=stop,
             seed=self._seed,
         )
-        outputs = self._engine().chat(
-            conversations,
-            sampling_params,
-            chat_template_kwargs=self._template_kwargs(),
-            use_tqdm=self._show_progress if show_progress is None else show_progress,
-        )
+        try:
+            outputs = self._engine().chat(
+                conversations,
+                sampling_params,
+                chat_template_kwargs=self._template_kwargs(),
+                use_tqdm=(
+                    self._show_progress if show_progress is None else show_progress
+                ),
+            )
+        except Exception as exc:
+            if not return_exceptions:
+                raise
+            return [exc] * len(prompts)  # type: ignore[list-item]
 
         results: list[GenerateResult] = []
         for output in outputs:

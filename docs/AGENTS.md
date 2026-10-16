@@ -257,8 +257,29 @@ model = Model(
     temperature=0.7,
     max_tokens=None,
     num_retries=2,
+    max_concurrency=16,
 )
 ```
+
+`max_concurrency` caps how many requests this `Model` has in flight at once, across every op, `generate_batch` call,
+and thread that uses it (each `n` fan-out copy counts). Ops send all their prompts at once, so set it to what your
+provider's rate limit allows; you should never need to write your own thread pool around ops. `None` (default) allows
+up to 100 requests per `generate_batch` call. It is not part of the cache key, so changing it keeps cached results.
+
+`generate_from_context`, `sample_from_LLM`, and `self_taught_reasoner` take `batch_size=None` (default): all prompts
+(or, for `sample_from_LLM`, all `n` samples) in one `generate_batch` call. An int splits them into calls of that size,
+sent one after another.
+
+Progress is on by default for a `generate_batch` call that sends more than one request: a tqdm bar when stderr is a
+terminal, otherwise a log line at most every 30 seconds (`LLM calls (<model>): 120/500 done, 31s`). Turn it off with
+`Model(..., show_progress=False)` (or per call) or the environment variable `FORGER_PROGRESS=0`; an explicit
+`show_progress` wins over the variable. `LocalModel` keeps vLLM's own bar, off unless `show_progress=True`.
+
+`model.generate_batch(prompts, return_exceptions=True)` keeps finished results when a request still fails after
+`num_retries` (e.g. a gateway 504): the list has one entry per prompt, a prompt whose requests all failed holds the
+exception, and a prompt where only some fan-out copies failed holds the completions that arrived (fewer than `n`).
+Usage of finished requests is recorded. The default (`False`) raises the first failure. On `LocalModel` an engine
+error fills every slot, since vLLM runs the batch as one call.
 
 Use `Model(..., reasoning_effort="low")` where supported by the model/provider.
 `dynamic_step` forwards `reasoning_effort` and `extra_body` to OpenHands.

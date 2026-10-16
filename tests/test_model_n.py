@@ -62,15 +62,27 @@ def make_response(contents, prompt_tokens=10, completion_tokens=20, cost=0.001):
     return response
 
 
-def numbered_responses(messages, **kwargs):
-    """batch_completion stand-in: request ``j`` for prompt "P" answers "P#j"."""
+def numbered():
+    """Fake completion: the j-th request for prompt "P" answers "P#j"."""
     seen: dict[str, int] = {}
-    out = []
-    for msgs in messages:
-        text = msgs[0]["content"]
-        seen[text] = seen.get(text, 0) + 1
-        out.append(make_response([f"{text}#{seen[text] - 1}"]))
-    return out
+    lock = threading.Lock()
+
+    def fake_completion(messages, **kwargs):
+        text = messages[0]["content"]
+        with lock:
+            seen[text] = seen.get(text, 0) + 1
+            j = seen[text] - 1
+        return make_response([f"{text}#{j}"])
+
+    return fake_completion
+
+
+def sent_contents(mock_litellm):
+    """First-message content of every completion request, in send order."""
+    return [
+        c.kwargs["messages"][0]["content"]
+        for c in mock_litellm.completion.call_args_list
+    ]
 
 
 @pytest.fixture
@@ -126,29 +138,29 @@ class TestFanOut:
     )
     def test_requests_and_merge_order(self, mock_litellm, model_id):
         """Prompts [A, B] with n=3 send [A, A, A, B, B, B] and merge in order."""
-        mock_litellm.batch_completion.side_effect = numbered_responses
-        model = Model(model_id, api_key="sk-test", temperature=1.0)
+        mock_litellm.completion.side_effect = numbered()
+        model = Model(model_id, api_key="sk-test", temperature=1.0, max_concurrency=1)
         results = model.generate_batch(["A", "B"], n=3)
         assert results == [["A#0", "A#1", "A#2"], ["B#0", "B#1", "B#2"]]
-        mock_litellm.completion.assert_not_called()
-        kwargs = mock_litellm.batch_completion.call_args.kwargs
-        assert kwargs["n"] == 1
-        assert [m[0]["content"] for m in kwargs["messages"]] == ["A"] * 3 + ["B"] * 3
+        assert sent_contents(mock_litellm) == ["A"] * 3 + ["B"] * 3
+        for c in mock_litellm.completion.call_args_list:
+            assert c.kwargs["n"] == 1
 
     def test_single_prompt_is_one_concurrent_batch(self, mock_litellm):
-        """One prompt with n=4 is one batch_completion call of 4 requests."""
-        mock_litellm.batch_completion.side_effect = numbered_responses
-        model = Model("litellm_proxy/claude-sonnet-4-5", api_key="sk-test")
+        """One prompt with n=4 sends 4 requests."""
+        mock_litellm.completion.side_effect = numbered()
+        model = Model(
+            "litellm_proxy/claude-sonnet-4-5", api_key="sk-test", max_concurrency=1
+        )
         assert model.generate("Q", n=4) == ["Q#0", "Q#1", "Q#2", "Q#3"]
-        mock_litellm.batch_completion.assert_called_once()
-        assert len(mock_litellm.batch_completion.call_args.kwargs["messages"]) == 4
+        assert mock_litellm.completion.call_count == 4
 
     def test_chat_messages_are_copied_per_request(self, mock_litellm):
         """Each request gets its own message dicts with the same content."""
-        mock_litellm.batch_completion.side_effect = numbered_responses
+        mock_litellm.completion.side_effect = numbered()
         messages = [{"role": "user", "content": "Q"}]
         Model("xai/grok-4").generate_batch([messages], n=2)
-        sent = mock_litellm.batch_completion.call_args.kwargs["messages"]
+        sent = [c.kwargs["messages"] for c in mock_litellm.completion.call_args_list]
         assert sent == [messages, messages]
         assert sent[0][0] is not sent[1][0]
 
@@ -158,8 +170,8 @@ class TestFanOut:
             make_response(["a"], prompt_tokens=10, completion_tokens=1, cost=0.25),
             make_response(["b"], prompt_tokens=10, completion_tokens=2, cost=0.5),
         ]
-        mock_litellm.batch_completion.return_value = responses
-        result = Model("gemini/gemini-2.5-pro").generate("Q", n=2)
+        mock_litellm.completion.side_effect = responses
+        result = Model("gemini/gemini-2.5-pro", max_concurrency=1).generate("Q", n=2)
         assert result == ["a", "b"]
         assert result.usage == {
             "prompt_tokens": 20,
@@ -173,13 +185,13 @@ class TestFanOut:
 
     def test_history_and_step_usage_recorded_once_per_prompt(self, mock_litellm):
         """History gets one merged result per prompt; add_usage sees the sums."""
-        mock_litellm.batch_completion.return_value = [
+        mock_litellm.completion.side_effect = [
             make_response(["a0"], prompt_tokens=5, completion_tokens=1, cost=0.25),
             make_response(["a1"], prompt_tokens=5, completion_tokens=2, cost=0.25),
             make_response(["b0"], prompt_tokens=7, completion_tokens=3, cost=0.5),
             make_response(["b1"], prompt_tokens=7, completion_tokens=4, cost=0.5),
         ]
-        model = Model("litellm_proxy/claude-sonnet-4-5")
+        model = Model("litellm_proxy/claude-sonnet-4-5", max_concurrency=1)
         with patch("pyforger.acquire.model._tracking.add_usage") as add_usage:
             results = model.generate_batch(["A", "B"], n=2)
         assert model.history == results
@@ -214,24 +226,23 @@ class TestFanOut:
         model = Model("xai/grok-4", show_progress=True)
         assert model.generate_batch(["A", "B"], n=2) == [["A", "A"], ["B", "B"]]
         assert mock_litellm.completion.call_count == 4
-        mock_litellm.batch_completion.assert_not_called()
 
     def test_sub_request_without_a_choice_raises(self, mock_litellm):
         """A fanned-out request with no choice raises instead of returning short."""
-        mock_litellm.batch_completion.return_value = [
+        mock_litellm.completion.side_effect = [
             make_response(["a"]),
             make_response([]),
         ]
-        model = Model("gemini/gemini-2.5-pro")
+        model = Model("gemini/gemini-2.5-pro", max_concurrency=1)
         with pytest.raises(ValueError, match="returned 1 completions .* n=2"):
             model.generate("Q", n=2)
         assert len(model.history) == 1  # the spend is still recorded
 
     def test_request_exception_is_raised(self, mock_litellm):
-        """An exception returned by batch_completion is raised as before."""
+        """An exception from one request is raised as before."""
         error = RuntimeError("rate limited")
-        mock_litellm.batch_completion.return_value = [make_response(["a"]), error]
-        model = Model("xai/grok-4")
+        mock_litellm.completion.side_effect = [make_response(["a"]), error]
+        model = Model("xai/grok-4", max_concurrency=1)
         with pytest.raises(RuntimeError) as excinfo:
             model.generate("Q", n=2)
         assert excinfo.value is error
@@ -246,8 +257,8 @@ class TestSingleRequest:
         mock_litellm.completion.return_value = make_response(["a", "b", "c"])
         result = Model("gpt-4o").generate("Q", n=3)
         assert result == ["a", "b", "c"]
+        assert mock_litellm.completion.call_count == 1
         assert mock_litellm.completion.call_args.kwargs["n"] == 3
-        mock_litellm.batch_completion.assert_not_called()
 
     def test_fewer_choices_raise(self, mock_litellm):
         """A provider that ignores n raises a ValueError naming the model."""
@@ -264,12 +275,12 @@ class TestSingleRequest:
 
     def test_mismatch_in_any_prompt_of_a_batch_raises(self, mock_litellm):
         """Every prompt's response is checked, not only the first."""
-        mock_litellm.batch_completion.return_value = [
+        mock_litellm.completion.side_effect = [
             make_response(["a", "b"]),
             make_response(["c"]),
         ]
         with pytest.raises(ValueError, match="for prompt 1"):
-            Model("gpt-4o").generate_batch(["Q1", "Q2"], n=2)
+            Model("gpt-4o", max_concurrency=1).generate_batch(["Q1", "Q2"], n=2)
 
 
 class TestNEqualsOne:
@@ -286,14 +297,14 @@ class TestNEqualsOne:
         kwargs = mock_litellm.completion.call_args.kwargs
         assert kwargs["n"] == 1
         assert kwargs["messages"] == [{"role": "user", "content": "Q"}]
-        mock_litellm.batch_completion.assert_not_called()
+        assert mock_litellm.completion.call_count == 1
 
     def test_batch_is_one_request_per_prompt(self, mock_litellm):
         """Several prompts with n=1 send one request each."""
-        mock_litellm.batch_completion.side_effect = numbered_responses
+        mock_litellm.completion.side_effect = numbered()
         model = Model("xai/grok-4")
         assert model.generate_batch(["A", "B"]) == [["A#0"], ["B#0"]]
-        assert len(mock_litellm.batch_completion.call_args.kwargs["messages"]) == 2
+        assert sorted(sent_contents(mock_litellm)) == ["A", "B"]
 
     def test_supported_params_without_n_still_one_request(self, mock_litellm):
         """n=1 never consults the fan-out rule."""

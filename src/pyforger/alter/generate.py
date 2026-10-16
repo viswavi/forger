@@ -57,7 +57,7 @@ def generate_from_context(
     output_schema: dict[str, Any] | None = None,
     temperature: float = 0.7,
     max_retries: int = 3,
-    batch_size: int = 10,
+    batch_size: int | None = None,
 ) -> list[dict | None]:
     r"""Generate LLM outputs conditioned on upstream input items.
 
@@ -78,7 +78,9 @@ def generate_from_context(
             response is stored as ``{"text": ...}``.
         temperature: Sampling temperature passed to the model.
         max_retries: Additional attempts for prompts whose output fails to parse.
-        batch_size: Number of prompts per ``model.generate_batch()`` call.
+        batch_size: Number of prompts per ``model.generate_batch()`` call. None
+            (default) sends all prompts in one call; the model's
+            ``max_concurrency`` bounds how many requests run at once.
 
     Returns:
         List of length ``len(items) * samples_per_item`` in input order, grouped
@@ -90,7 +92,7 @@ def generate_from_context(
         from `LocalModel`, which supplies `None` for that metadata) are not extracted;
         use `split_reasoning` to separate them out as needed.
     """
-    if batch_size <= 0:
+    if batch_size is not None and batch_size <= 0:
         raise ValueError("batch_size must be positive")
     if samples_per_item <= 0:
         raise ValueError("samples_per_item must be positive")
@@ -126,8 +128,9 @@ def generate_from_context(
             by_count.setdefault(len(entry[1]), []).append(entry)
 
         for n, group in by_count.items():
-            for start in range(0, len(group), batch_size):
-                batch = group[start : start + batch_size]
+            chunk = batch_size or len(group)
+            for start in range(0, len(group), chunk):
+                batch = group[start : start + chunk]
                 batch_results = model.generate_batch(
                     [p for p, _ in batch], temperature=temperature, n=n
                 )
@@ -224,7 +227,7 @@ def self_taught_reasoner(
     split_thinking: bool = True,
     temperature: float = 0.7,
     max_tokens: int | None = None,
-    batch_size: int = 10,
+    batch_size: int | None = None,
 ) -> list[dict]:
     r"""Self-Taught Reasoner (STaR): keep a student model's own correct solutions.
 
@@ -279,14 +282,15 @@ def self_taught_reasoner(
             ``thinking_field`` is left empty.
         temperature: Sampling temperature passed to the model.
         max_tokens: Max tokens per response (model default when None).
-        batch_size: Number of items per ``model.generate_batch()`` call.
+        batch_size: Number of items per ``model.generate_batch()`` call. None
+            (default) sends all items in one call.
 
     Returns:
         Output rows, in item order, one per accepted response.
     """
     if n <= 0:
         raise ValueError("n must be positive")
-    if batch_size <= 0:
+    if batch_size is not None and batch_size <= 0:
         raise ValueError("batch_size must be positive")
     if not items:
         return []
@@ -305,8 +309,9 @@ def self_taught_reasoner(
 
     # Sample n responses per item, batching items together for throughput.
     item_responses: list[tuple[dict, list[str]]] = []
-    for start in range(0, len(prompts), batch_size):
-        batch = prompts[start : start + batch_size]
+    chunk = batch_size or len(prompts)
+    for start in range(0, len(prompts), chunk):
+        batch = prompts[start : start + chunk]
         batch_results = model.generate_batch(
             batch, n=n, temperature=temperature, max_tokens=max_tokens
         )
@@ -317,7 +322,7 @@ def self_taught_reasoner(
                 len(batch),
             )
         # zip drops items left without results; they contribute no rows.
-        item_responses.extend(zip(items[start : start + batch_size], batch_results))
+        item_responses.extend(zip(items[start : start + chunk], batch_results))
 
     # Build one candidate row per generated response.
     candidates: list[dict] = []
