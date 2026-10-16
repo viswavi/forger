@@ -7,7 +7,7 @@ from collections.abc import Callable
 from typing import Any, Union
 
 from pyforger.acquire._model_utils import _build_prompt, _parse_output, _reasoning_for
-from pyforger.acquire.model import Model, Prompt, split_reasoning
+from pyforger.acquire.model import Model, Prompt, _cache_kwargs, split_reasoning
 from pyforger.op import op
 from pyforger.utils import get_field
 
@@ -47,7 +47,7 @@ def _resolve_prompt(template: PromptTemplate, item: dict) -> Prompt:
     return template(item)
 
 
-@op(name="alter.generate_from_context")
+@op(name="alter.generate_from_context", samples_arg="samples_per_item")
 def generate_from_context(
     items: list[dict],
     prompt_fn: PromptTemplate,
@@ -131,8 +131,21 @@ def generate_from_context(
             chunk = batch_size or len(group)
             for start in range(0, len(group), chunk):
                 batch = group[start : start + chunk]
+                # Each prompt is keyed on its row, so editing one row re-asks
+                # only that row. A retry re-asks prompts whose output failed to
+                # parse; the salt (e.g. "retry 1, n=2") gets new completions,
+                # not the same failed ones.
                 batch_results = model.generate_batch(
-                    [p for p, _ in batch], temperature=temperature, n=n
+                    [p for p, _ in batch],
+                    temperature=temperature,
+                    n=n,
+                    **_cache_kwargs(
+                        model.generate_batch,
+                        cache_rows=[
+                            items[slots[0] // samples_per_item] for _, slots in batch
+                        ],
+                        cache_salt=f"retry {attempt}, n={n}" if attempt else None,
+                    ),
                 )
                 if len(batch_results) != len(batch):
                     log.warning(
@@ -209,7 +222,7 @@ def _normalized_equal(a: Any, b: Any) -> bool:
     return _normalize_answer(a) == _normalize_answer(b)
 
 
-@op(name="alter.self_taught_reasoner")
+@op(name="alter.self_taught_reasoner", samples_arg="n")
 def self_taught_reasoner(
     items: list[dict],
     prompt_fn: PromptTemplate,
@@ -313,7 +326,13 @@ def self_taught_reasoner(
     for start in range(0, len(prompts), chunk):
         batch = prompts[start : start + chunk]
         batch_results = model.generate_batch(
-            batch, n=n, temperature=temperature, max_tokens=max_tokens
+            batch,
+            n=n,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            **_cache_kwargs(
+                model.generate_batch, cache_rows=items[start : start + chunk]
+            ),
         )
         if len(batch_results) != len(batch):
             log.warning(

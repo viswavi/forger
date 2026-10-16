@@ -12,7 +12,7 @@ from typing import Any
 
 import tiktoken
 
-from pyforger.acquire.model import Message, Model, Prompt
+from pyforger.acquire.model import Message, Model, Prompt, _cache_kwargs
 from pyforger.op import op
 from pyforger.utils import get_field, get_formatted_logger
 
@@ -289,8 +289,15 @@ def _build_codebook(
         ),
     )
     codebook: dict[str, str] = {}  # latest nonempty attempt
-    for _ in range(3):  # retry on unparseable JSON or the wrong topic count
-        response = model.generate(messages, temperature=0.0)[0]
+    for retry in range(3):  # retry on unparseable JSON or the wrong topic count
+        # The salt gets a new answer, not the cached unparseable one.
+        response = model.generate(
+            messages,
+            temperature=0.0,
+            **_cache_kwargs(
+                model.generate, cache_salt=f"retry {retry}" if retry else None
+            ),
+        )[0]
         try:
             parsed = _parse_json(response)
         except ValueError:
@@ -347,9 +354,18 @@ def _assign_topics(
     }
     topic_of: dict[str, str] = {}
     pending = list(docs)
-    for _ in range(1 + max_retries):  # rerun documents whose label was invalid
+    for attempt in range(1 + max_retries):  # rerun documents with invalid labels
         prompts: list[Prompt] = [prompt_of[doc] for doc in pending]
-        responses = model.generate_batch(prompts, temperature=0.0)
+        # Keyed per document; the salt gets a new label, not the invalid one.
+        responses = model.generate_batch(
+            prompts,
+            temperature=0.0,
+            **_cache_kwargs(
+                model.generate_batch,
+                cache_rows=pending,
+                cache_salt=f"retry {attempt}" if attempt else None,
+            ),
+        )
         still_pending = []
         for doc, doc_responses in zip(pending, responses):
             try:

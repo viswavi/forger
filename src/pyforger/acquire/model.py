@@ -7,6 +7,7 @@ completions from any supported LLM provider.
 from __future__ import annotations
 
 import contextvars
+import inspect
 import os
 import sys
 import threading
@@ -19,6 +20,8 @@ from typing import Any, Union
 import litellm
 
 from pyforger import _tracking
+from pyforger.acquire import _request_cache
+from pyforger.op import _NO_CACHE_SCOPE, _REQUEST_SCOPE, _hash
 from pyforger.utils import get_formatted_logger
 
 # Type aliases
@@ -117,6 +120,21 @@ def _complete(
     return response
 
 
+def _complete_and_report(
+    i: int,
+    messages: list[Message],
+    n: int,
+    call_kwargs: dict[str, Any],
+    semaphore: threading.BoundedSemaphore | None,
+    on_response: Callable[[int, Any], None] | None,
+) -> Any:
+    """`_complete`, then `on_response(i, response)` in the same worker thread."""
+    response = _complete(messages, n, call_kwargs, semaphore)
+    if on_response is not None:
+        on_response(i, response)
+    return response
+
+
 def _batch_completion_with_progress(
     requests: list[tuple[list[Message], int]],
     call_kwargs: dict[str, Any],
@@ -124,10 +142,13 @@ def _batch_completion_with_progress(
     semaphore: threading.BoundedSemaphore | None = None,
     max_workers: int = _DEFAULT_MAX_WORKERS,
     progress: str = "bar",
+    on_response: Callable[[int, Any], None] | None = None,
 ) -> list[Any]:
     """Send (messages, n) requests concurrently; return responses or errors.
 
-    Results are in request order.
+    Results are in request order. `on_response(i, response)` runs in the worker
+    as each request succeeds (the request cache writes there, so a run killed
+    mid-batch keeps every finished request).
 
     A replacement for `litellm.batch_completion`, which retrieves
     `future.result()` in submission order, so the whole call looks frozen until
@@ -146,7 +167,16 @@ def _batch_completion_with_progress(
             # One context copy per request, so add_usage in the worker sees the
             # caller's op / step / pipeline contextvars.
             run: Callable[..., Any] = contextvars.copy_context().run
-            future = executor.submit(run, _complete, msgs, n, call_kwargs, semaphore)
+            future = executor.submit(
+                run,
+                _complete_and_report,
+                i,
+                msgs,
+                n,
+                call_kwargs,
+                semaphore,
+                on_response,
+            )
             future_to_idx[future] = i
         finished: Iterable[Future] = as_completed(future_to_idx)
         if progress == "bar":
@@ -175,6 +205,8 @@ class GenerateResult(list):
 
     `raw` is the LiteLLM response. When `Model.generate_batch` fans `n` out into
     separate requests, it is the list of those responses, in completions order.
+    It holds only the requests actually sent: None when every completion came
+    from the request cache.
     """
 
     usage: dict[str, Any]
@@ -292,26 +324,98 @@ def _fans_out_n(model_id: str) -> bool:
     return bool(supported) and "n" not in supported
 
 
-def _merge_responses(responses: list[Any], model_id: str) -> GenerateResult:
-    """One GenerateResult from one prompt's responses, summing their usage."""
-    completions: list[str] = []
-    reasoning: list[str | None] = []
-    usage: dict[str, Any] = {}
-    for response in responses:
-        completions.extend(choice.message.content or "" for choice in response.choices)
-        reasoning.extend(_extract_reasoning(response, model_id))
+def _merge_responses(
+    slots: range,
+    hits: dict[int, dict[str, Any]],
+    fresh: list[tuple[list[int], Any]],
+    model_id: str,
+) -> GenerateResult:
+    """One prompt's GenerateResult: cached and fresh completions in slot order.
+
+    `hits` maps slot -> cached entry; `fresh` pairs each successful response
+    with the slots it was asked for, e.g. ([2, 3], response with 2 choices).
+    Usage and cost sum the fresh responses only: a cache hit costs nothing.
+    A short response fills the first of its slots (the rest are refilled or
+    stay missing); choices beyond the slots asked come after the slotted ones,
+    so the completion-count check still sees the mismatch.
+    """
+    by_slot: dict[int, tuple[str, str | None]] = {
+        slot: (entry["text"], entry.get("reasoning")) for slot, entry in hits.items()
+    }
+    unslotted: list[tuple[str, str | None]] = []
+    usage: dict[str, Any] = {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "reasoning_tokens": 0,
+        "cost_usd": 0.0,
+    }
+    responses = [response for _, response in fresh]
+    for asked, response in fresh:
+        texts = [choice.message.content or "" for choice in response.choices]
+        pairs = list(zip(texts, _extract_reasoning(response, model_id)))
+        by_slot.update(zip(asked, pairs))
+        unslotted.extend(pairs[len(asked) :])
         for key, value in _extract_usage(response).items():
-            usage[key] = usage.get(key, 0) + value
-        usage["cost_usd"] = usage.get("cost_usd", 0.0) + _extract_cost(
-            response, model_id
-        )
+            usage[key] += value
+        usage["cost_usd"] += _extract_cost(response, model_id)
+    if hits:
+        usage["cached_completions"] = len(hits)
+    ordered = [by_slot[slot] for slot in slots if slot in by_slot] + unslotted
     return GenerateResult(
-        completions,
+        [text for text, _ in ordered],
         usage=usage,
-        reasoning=reasoning,
+        reasoning=[reasoning for _, reasoning in ordered],
         model_id=model_id,
-        raw=responses[0] if len(responses) == 1 else list(responses),
+        raw=(
+            None
+            if not responses
+            else responses[0]
+            if len(responses) == 1
+            else responses
+        ),
     )
+
+
+def _cache_entry(choice: Any, reasoning: Any) -> dict[str, Any] | None:
+    """What the request cache stores for one choice, or None to not cache it.
+
+    Only plain text is cached. Empty or missing text (often a transient glitch),
+    a content-filter stop, and choices carrying tool calls, a function call, or
+    a refusal are not: a replay could not rebuild them, so they are asked again.
+    """
+    message = choice.message
+    text = message.content
+    finish_reason = getattr(choice, "finish_reason", None)
+    if not isinstance(text, str) or not text or finish_reason == "content_filter":
+        return None
+    for extra in ("tool_calls", "function_call", "refusal"):
+        if getattr(message, extra, None):
+            return None
+    return {
+        "text": text,
+        "reasoning": reasoning if isinstance(reasoning, str) else None,
+        "finish_reason": finish_reason if isinstance(finish_reason, str) else None,
+    }
+
+
+def _cache_kwargs(method: Callable[..., Any], **values: Any) -> dict[str, Any]:
+    """The request-cache keywords (`cache_rows`, `cache_salt`, ...) `method` takes.
+
+    Values that are None are dropped, and so are keywords a subclass's own
+    generate_batch does not accept (test fakes, backends written before these keywords),
+    e.g. ``model.generate_batch(prompts, **_cache_kwargs(model.generate_batch,
+    cache_rows=items))``.
+    """
+    try:
+        params = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        return {}
+    takes_any = any(p.kind is p.VAR_KEYWORD for p in params.values())
+    return {
+        name: value
+        for name, value in values.items()
+        if value is not None and (takes_any or name in params)
+    }
 
 
 def _check_completion_count(
@@ -485,6 +589,7 @@ class Model:
         num_retries: int = 2,
         show_progress: bool | None = None,
         max_concurrency: int | None = None,
+        request_cache: bool = True,
         **kwargs: Any,
     ) -> None:
         """Create a Model instance.
@@ -507,11 +612,17 @@ class Model:
                 across all generate_batch() calls and threads (each n fan-out
                 copy counts). None (default) caps each call at 100 requests.
                 Not part of cache_key().
+            request_cache: Keep each completion on disk under
+                $FORGER_CACHE/requests and reuse it when the same op call asks
+                the same request again (see generate_batch). False, or the
+                environment variable FORGER_REQUEST_CACHE=0, turns it off. Not
+                part of cache_key().
             **kwargs: Passed through to litellm.completion()
                 (e.g. api_base, timeout, organization).
         """
         if max_concurrency is not None and max_concurrency <= 0:
             raise ValueError("max_concurrency must be positive")
+        self._request_cache = request_cache
         self._model_id = model_id
         self._api_key = api_key
         self._temperature = temperature
@@ -559,6 +670,20 @@ class Model:
             kwargs_items,
         )
 
+    def request_scope_key(self) -> tuple:
+        """This Model as an op argument in request-cache scopes.
+
+        Only what can change a completion: the model id and output-changing
+        params. Unlike cache_key(), retries and timeouts are left out, so
+        changing them reuses the request cache.
+        """
+        params = _request_cache.keyed_params(
+            dict(temperature=self._temperature, max_tokens=self._max_tokens)
+            | self._kwargs
+        )
+        items = tuple(sorted(params.items(), key=lambda kv: str(kv[0])))
+        return (type(self).__name__, self._model_id, items)
+
     @property
     def total_cost(self) -> float:
         """Sum of cost_usd across every call in this Model's history."""
@@ -585,6 +710,8 @@ class Model:
         temperature: float | None = None,
         max_tokens: int | None = None,
         stop: list[str] | None = None,
+        cache_salt: str | None = None,
+        cache_row: Any = None,
     ) -> GenerateResult:
         """Generate n responses for a single prompt.
 
@@ -600,6 +727,9 @@ class Model:
             max_tokens: Max tokens. Overrides the instance default.
             stop: Stop sequences. Generation stops when any of these
                 strings is produced.
+            cache_salt: Request-cache salt (see generate_batch).
+            cache_row: The row the prompt was built from (see generate_batch's
+                cache_rows).
 
         Returns:
             List of n response strings.
@@ -610,6 +740,11 @@ class Model:
             temperature=temperature,
             max_tokens=max_tokens,
             stop=stop,
+            **_cache_kwargs(
+                self.generate_batch,
+                cache_salt=cache_salt,
+                cache_rows=None if cache_row is None else [cache_row],
+            ),
         )[0]
 
     def generate_batch(
@@ -622,6 +757,8 @@ class Model:
         stop: list[str] | None = None,
         show_progress: bool | None = None,
         return_exceptions: bool = False,
+        cache_salt: str | None = None,
+        cache_rows: list[Any] | None = None,
     ) -> list[GenerateResult]:
         """Generate n responses for each prompt in a batch.
 
@@ -631,6 +768,20 @@ class Model:
         with summed usage and cost. Other models get one request with n, or
         several when n > 16 (n=40 sends n=14, 13, 13), merged the same way.
         All requests are sent at once, up to the Model's max_concurrency.
+
+        Request cache (unless off, see __init__): each completion is stored
+        under a key of the enclosing @op call (op, body, and every argument
+        but its rows), the prompt's row (`cache_rows`, else all of the op's
+        rows), the messages, output-changing params, and `cache_salt`, plus a
+        slot index. Slots are numbered per op call: n=4 fills slots 0..3, and
+        the same request asked again in that op call (a duplicate row, a
+        retry, a later chunk) fills 4..7. A rerun of the op asks the same
+        requests in the same order, so it reuses cached slots and requests only
+        missing ones. Results are written as each request finishes; errors,
+        empty text, and tool calls are never cached. A reused completion adds
+        no usage or cost, and `usage["cached_completions"]` counts them.
+        `_no_cache=True` on an enclosing op skips reading (fresh results are
+        still written).
 
         Args:
             prompts: List of prompts. Each prompt is either a string or
@@ -648,6 +799,13 @@ class Model:
                 copies or n > 16 parts) gets the completions that arrived
                 (fewer than n, not checked).
                 When False (default), the first failure is raised.
+            cache_salt: Part of the request-cache key. Pass a new value to get
+                fresh completions for a prompt asked before on purpose, e.g.
+                "retry 1" when re-asking prompts whose output failed to parse.
+            cache_rows: For an op that builds one prompt per row, the row
+                each prompt came from (aligned with `prompts`; None entries
+                allowed). Changing one row then re-sends only its requests.
+                Without it, a prompt is keyed on all of the op's rows.
 
         Returns:
             List with one entry per prompt. Each GenerateResult is a list of
@@ -662,6 +820,10 @@ class Model:
         """
         if not prompts:
             return []
+        if cache_rows is not None and len(cache_rows) != len(prompts):
+            raise ValueError(
+                f"cache_rows has {len(cache_rows)} entries for {len(prompts)} prompts"
+            )
 
         temperature = temperature if temperature is not None else self._temperature
         max_tokens = max_tokens if max_tokens is not None else self._max_tokens
@@ -673,18 +835,7 @@ class Model:
             thinking=self._kwargs.get("thinking"),
         )
 
-        # Models that ignore or reject n > 1 get n concurrent n=1 requests per
-        # prompt, e.g. prompts [A, B] with n=2 send [A, A, B, B]. Others get
-        # requests of at most _MAX_N_PER_REQUEST, e.g. n=40 sends n=14, 13, 13.
-        fan_out = n != 1 and _fans_out_n(self._model_id)
-        sizes = _request_sizes(n, fan_out)
-        copies = len(sizes)
-        prompt_messages = [_to_messages(prompt) for prompt in prompts]
-        requests = [
-            ([dict(m) for m in messages] if copies > 1 else messages, size)
-            for messages in prompt_messages
-            for size in sizes
-        ]
+        conversations = [_to_messages(prompt) for prompt in prompts]
         call_kwargs = dict(
             model=self._model_id,
             temperature=temperature,
@@ -694,48 +845,160 @@ class Model:
             num_retries=self._num_retries,
             **self._kwargs,
         )
+        # Key each prompt on the op call it comes from and its row, e.g. in
+        # generate_from_context(rows, "Solve {q}", model) the row {"q": "2+2"}.
+        # Slots are handed out per op call, so the same request asked twice in
+        # it (two identical rows, three judge copies) gets new slots each time.
+        caching = _request_cache.enabled(
+            getattr(self, "_request_cache", True)
+        ) and _request_cache.cacheable(call_kwargs)
+        keys: list[str | None] = [None] * len(prompts)
+        slot_ranges: list[range] = [range(n)] * len(prompts)
+        hits: list[dict[int, dict[str, Any]]] = [{} for _ in prompts]
+        scope = _REQUEST_SCOPE.get()
+        if caching:
+            # Outside any op, slots are numbered per call instead.
+            call_slots: dict[str, int] = {}
+            read = not _NO_CACHE_SCOPE.get()  # an enclosing op got _no_cache=True
+            for i, messages in enumerate(conversations):
+                row = None if cache_rows is None else cache_rows[i]
+                row_key = (
+                    _hash(row)[0]
+                    if row is not None
+                    else scope.rows_key
+                    if scope is not None
+                    else "(no rows)"
+                )
+                key = _request_cache.request_key(
+                    scope.key if scope is not None else "(no op)",
+                    row_key,
+                    messages,
+                    call_kwargs,
+                    cache_salt,
+                )
+                if scope is not None:
+                    first = scope.take_slots(key, n)
+                else:
+                    first = call_slots.get(key, 0)
+                    call_slots[key] = first + n
+                keys[i], slot_ranges[i] = key, range(first, first + n)
+                if read:
+                    for slot in slot_ranges[i]:
+                        entry = _request_cache.read_slot(key, slot)
+                        if entry is not None:
+                            hits[i][slot] = entry
+
+        # Request only the missing slots. Models that ignore or reject n > 1
+        # get one n=1 request per slot, e.g. prompts [A, B] with n=2 send
+        # [A, A, B, B]. Others get requests of at most _MAX_N_PER_REQUEST, e.g.
+        # n=40 sends n=14, 13, 13.
+        fan_out = n != 1 and _fans_out_n(self._model_id)
+        requests: list[tuple[list[Message], int]] = []
+        owners: list[tuple[int, list[int]]] = []  # (prompt, slots asked)
+        for i, messages in enumerate(conversations):
+            missing = [slot for slot in slot_ranges[i] if slot not in hits[i]]
+            if not missing:
+                continue
+            sizes = _request_sizes(len(missing), fan_out)
+            start = 0
+            for size in sizes:
+                copy = [dict(m) for m in messages] if len(sizes) > 1 else messages
+                requests.append((copy, size))
+                owners.append((i, missing[start : start + size]))
+                start += size
+
+        if caching:
+            # The op logs one INFO line per call; each batch only at DEBUG.
+            reused = sum(len(h) for h in hits)
+            if scope is not None:
+                scope.count(reused, n * len(prompts))
+            _logger.debug(
+                "request cache: %d of %d completions reused (%s)",
+                reused,
+                n * len(prompts),
+                self._model_id,
+            )
+
+        def store(j: int, response: Any) -> None:
+            """Cache request j's completions as soon as it succeeds."""
+            i, asked = owners[j]
+            key = keys[i]
+            if key is None:
+                return
+            try:
+                if len(response.choices) > len(asked):
+                    return  # the count check reports it; slots would be guesses
+                reasoning = _extract_reasoning(response, self._model_id)
+                for slot, choice, thinking in zip(asked, response.choices, reasoning):
+                    entry = _cache_entry(choice, thinking)
+                    if entry is not None:
+                        _request_cache.write_slot(key, slot, entry)
+            except Exception as exc:  # a full disk must not fail the request
+                _logger.warning("request cache write failed: %s", exc)
+
         progress = _progress_mode(
             self._show_progress if show_progress is None else show_progress
         )
-        responses = self._send(requests, call_kwargs, progress, return_exceptions)
-        groups = [responses[i : i + copies] for i in range(0, len(responses), copies)]
+        responses = self._send(
+            requests, call_kwargs, progress, return_exceptions, store
+        )
 
         # A model that should support n but returned fewer completions (e.g. a
-        # gateway alias that ignores n): send the missing ones as n=1 requests.
+        # gateway alias that ignores n): send each missing slot as an n=1
+        # request. A short response keeps the first of its slots.
         refilled = False
         if n != 1 and not fan_out:
-            short = {
-                i: n - got
-                for i, group in enumerate(groups)
-                if not any(isinstance(r, Exception) for r in group)
-                and (got := sum(len(r.choices) for r in group)) < n
+            failed = {
+                i for (i, _), r in zip(owners, responses) if isinstance(r, Exception)
             }
-            if short:
-                first = next(iter(short))
-                _learn_no_n(self._model_id, n, n - short[first])
-                refill = [
-                    ([dict(m) for m in prompt_messages[i]], 1)
-                    for i, missing in short.items()
-                    for _ in range(missing)
-                ]
-                extra = iter(
-                    self._send(refill, call_kwargs, progress, return_exceptions)
+            refill_owners = [
+                (i, [slot])
+                for (i, asked), r in zip(owners, responses)
+                if i not in failed
+                for slot in asked[len(r.choices) :]
+            ]
+            if refill_owners:
+                first_short = next(
+                    (len(asked), len(r.choices))
+                    for (_, asked), r in zip(owners, responses)
+                    if not isinstance(r, Exception) and len(r.choices) < len(asked)
                 )
-                for i, missing in short.items():
-                    groups[i] = groups[i] + [next(extra) for _ in range(missing)]
+                _learn_no_n(self._model_id, *first_short)
+                offset = len(owners)
+                owners.extend(refill_owners)
+                refill = [
+                    ([dict(m) for m in conversations[i]], 1) for i, _ in refill_owners
+                ]
+                responses += self._send(
+                    refill,
+                    call_kwargs,
+                    progress,
+                    return_exceptions,
+                    lambda j, response: store(offset + j, response),
+                )
                 refilled = True
+
+        fresh: list[list[tuple[list[int], Any]]] = [[] for _ in prompts]
+        errors: list[list[Exception]] = [[] for _ in prompts]
+        for (i, asked), response in zip(owners, responses):
+            if isinstance(response, Exception):
+                errors[i].append(response)
+            else:
+                fresh[i].append((asked, response))
 
         results: list[Any] = []
         partial: set[int] = set()
-        for group in groups:
-            finished = [r for r in group if not isinstance(r, Exception)]
-            if not finished:
-                results.append(group[0])
+        for i in range(len(prompts)):
+            if errors[i] and not fresh[i] and not hits[i]:
+                results.append(errors[i][0])
                 continue
-            if len(finished) < len(group):
-                partial.add(len(results))
-            results.append(_merge_responses(finished, self._model_id))
-        # Usage already reached the step report per response (see _complete).
+            if errors[i]:
+                partial.add(i)
+            results.append(
+                _merge_responses(slot_ranges[i], hits[i], fresh[i], self._model_id)
+            )
+        # Usage already reached the step report per response (see _complete),
+        # and a cache hit adds none.
         self._record(
             [r for r in results if isinstance(r, GenerateResult)], add_usage=False
         )
@@ -755,24 +1018,33 @@ class Model:
         call_kwargs: dict[str, Any],
         progress: str,
         return_exceptions: bool,
+        on_response: Callable[[int, Any], None] | None = None,
     ) -> list[Any]:
-        """Send (messages, n) requests; raise the first failure unless asked not to."""
-        responses: list[Any]
+        """Send (messages, n) requests; raise the first failure unless asked not to.
+
+        `on_response(i, response)` runs as each request succeeds.
+        """
+        responses: list[Any] = []
         if len(requests) == 1:
             messages, size = requests[0]
             try:
-                responses = [_complete(messages, size, call_kwargs, self._semaphore)]
+                responses = [
+                    _complete_and_report(
+                        0, messages, size, call_kwargs, self._semaphore, on_response
+                    )
+                ]
             except Exception as exc:
                 if not return_exceptions:
                     raise
                 responses = [exc]
-        else:
+        elif requests:
             responses = _batch_completion_with_progress(
                 requests,
                 call_kwargs,
                 semaphore=self._semaphore,
                 max_workers=self._max_concurrency or _DEFAULT_MAX_WORKERS,
                 progress=progress,
+                on_response=on_response,
             )
         if not return_exceptions:
             for response in responses:
@@ -959,8 +1231,13 @@ class LocalModel(Model):
         stop: list[str] | None = None,
         show_progress: bool | None = None,
         return_exceptions: bool = False,
+        cache_salt: str | None = None,
+        cache_rows: list[Any] | None = None,
     ) -> list[GenerateResult]:
         """Generate `n` completions per prompt with the local vLLM engine.
+
+        Not request-cached: local inference is free. `cache_salt` and `cache_rows`
+        are accepted for interface compatibility and ignored.
 
         Args:
             prompts: List of prompts (string or OpenAI-format message list).

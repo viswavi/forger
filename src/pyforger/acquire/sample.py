@@ -9,7 +9,7 @@ from collections.abc import Generator
 from typing import Any
 
 from pyforger.acquire._model_utils import _build_prompt, _parse_output, _reasoning_for
-from pyforger.acquire.model import Model, Prompt
+from pyforger.acquire.model import Model, Prompt, _cache_kwargs
 from pyforger.op import op
 from pyforger.utils import get_formatted_logger
 
@@ -28,6 +28,7 @@ def _generation_loop(
     """Yield accepted samples until ``n`` collected or retries exhausted."""
     accepted: list[dict[str, Any]] = []
     consecutive_failed_rounds = 0
+    round_index = 0
 
     while len(accepted) < n and consecutive_failed_rounds < max_retries:
         remaining = n - len(accepted)
@@ -36,9 +37,18 @@ def _generation_loop(
         )
         full_prompt = _build_prompt(prompt, output_schema)
 
+        # Each round re-asks the same prompt, so it salts the request cache to
+        # get new completions instead of the earlier rounds' (e.g. "round 1").
         raw_responses = model.generate(
-            full_prompt, n=current_batch_size, temperature=temperature
+            full_prompt,
+            n=current_batch_size,
+            temperature=temperature,
+            **_cache_kwargs(
+                model.generate,
+                cache_salt=f"round {round_index}" if round_index else None,
+            ),
         )
+        round_index += 1
 
         short_response = len(raw_responses) < current_batch_size
         if short_response:
@@ -73,7 +83,7 @@ def _generation_loop(
             consecutive_failed_rounds = 0
 
 
-@op(name="acquire.sample_from_LLM")
+@op(name="acquire.sample_from_LLM", samples_arg="n")
 def sample_from_LLM(
     prompt: Prompt,
     model: Model,
@@ -110,7 +120,10 @@ def sample_from_LLM(
         Because this is decorated with `@op`, outputs are memoized on disk by argument
         hash. Therefore, repeat calls with a non-zero temperature will still produce
         the same samples if all other arguments are the same. If this is not desired,
-        force fresh generation by passing `_no_cache=True` or varying `name`.
+        force fresh generation by passing `_no_cache=True` or varying `name`. The
+        model's request cache follows the same rule: a call that differs in any
+        argument but `n` draws new samples, and raising `n` keeps the samples
+        already drawn and requests only the extra ones.
     """
     if batch_size is not None and batch_size <= 0:
         raise ValueError("batch_size must be positive")

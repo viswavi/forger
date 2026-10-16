@@ -361,6 +361,35 @@ class ExecutionSandbox:
 `_compiled_fns` accumulates entries across calls and isn't hashable. `cache_key()` here omits this field to avoid
 cache misses. Repeated calls with the same sandbox stay cache hits.
 
+**Request cache.** Below `@op`, `Model.generate_batch` stores every completion it receives under
+`$FORGER_CACHE/requests/`, so a rerun only pays for requests that never completed: if one row of 260 changes, one
+request 504s, or the run is killed, the finished requests are reused (each is written as it finishes; errors, empty
+text, and tool calls are never cached). The op cache is checked first; the request cache makes the op's partial
+reruns cheap. A completion is keyed on three things, never on the prompt text alone:
+
+- **The op call:** the op's name, its body, and every argument except its input rows, e.g. the template, the model's
+  id and output-changing params (temperature, seed, `api_base`, ..., not the API key, timeouts, or retries), and the
+  output schema. Each op has its own scope, so two ops never share samples. In `A(D(C(x)))` then `A(B(C(x)))`, C's
+  requests are reused, and B never gets D's samples, even with the same template. The sample-count argument (`n`,
+  `samples_per_item`, `num_judges`) is left out, so raising it requests only the extra samples; as a consequence,
+  `sample_from_LLM` pools that differ only in `n` overlap (pass another `name` for an independent pool).
+- **The row** each prompt was built from, so changing one row re-sends only that row's requests, and
+  `generate_from_context(rows, SOLVE, model)` run again on rows that now carry an `expert1` field draws fresh
+  `expert2` samples. A prompt with no row of its own is keyed on all of the op's rows.
+- **The messages and a slot index.** Slots are numbered within one op call, so a request asked again in it (a
+  duplicate row, a retry, a later `batch_size` chunk) gets new samples, and a rerun of the same op with the same rows
+  and arguments replays them in order, as the op cache would.
+
+Your own `@op` that builds one prompt per row can pass `cache_rows=rows` (aligned with the prompts) to
+`generate_batch`, and `@op(samples_arg="n")` names its sample-count argument. Outside any op (including thread-pool
+workers not started with `contextvars.copy_context().run`), requests are keyed on the messages and params alone, so
+repeated direct calls replay. To draw fresh samples, pass `_no_cache=True` to the op (skips reading, still writes),
+change an argument such as the seed, or turn the cache off with `Model(..., request_cache=False)` or
+`FORGER_REQUEST_CACHE=0`. A reused completion adds no tokens or cost; it stays in `model.history` with zero usage and
+`usage["cached_completions"]`, and each op call with hits logs
+`request cache: 57 of 64 completions reused in alter.generate_from_context`. `LocalModel` is not request-cached (local
+inference is free), nor are requests that ask for tools or logprobs, since a replay has only the text.
+
 **Trace.** Import the trace helpers from the module:
 
 ```python

@@ -120,7 +120,9 @@ class TestMaxConcurrency:
         """Two threads, 6 prompts each, cap 3: never more than 3 in flight."""
         fake = InFlight()
         mock_litellm.completion.side_effect = fake
-        model = Model("gpt-4o", max_concurrency=3, show_progress=False)
+        model = Model(
+            "gpt-4o", max_concurrency=3, show_progress=False, request_cache=False
+        )
         prompts = [f"Q{i}" for i in range(6)]
         results = {}
         run_in_threads(
@@ -136,7 +138,7 @@ class TestMaxConcurrency:
         """Without max_concurrency the same calls go far past 3 in flight."""
         fake = InFlight(delay=0.2)
         mock_litellm.completion.side_effect = fake
-        model = Model("gpt-4o", show_progress=False)
+        model = Model("gpt-4o", show_progress=False, request_cache=False)
         prompts = [f"Q{i}" for i in range(6)]
         run_in_threads(
             lambda: model.generate_batch(prompts),
@@ -157,7 +159,7 @@ class TestMaxConcurrency:
         """One-prompt calls from several threads also wait for a slot."""
         fake = InFlight()
         mock_litellm.completion.side_effect = fake
-        model = Model("gpt-4o", max_concurrency=1)
+        model = Model("gpt-4o", max_concurrency=1, request_cache=False)
         run_in_threads(*[lambda: model.generate("Q")] * 4)
         assert fake.calls == 4
         assert fake.max == 1
@@ -352,7 +354,7 @@ class TestProgress:
     def test_model_default_reaches_the_sender(self, mock_litellm, monkeypatch):
         """Model() with no show_progress sends with progress on; env=0 turns it off."""
         mock_litellm.completion.side_effect = InFlight(delay=0)
-        model = Model("gpt-4o")
+        model = Model("gpt-4o", request_cache=False)
         with patch(
             "pyforger.acquire.model._batch_completion_with_progress",
             wraps=model_module._batch_completion_with_progress,

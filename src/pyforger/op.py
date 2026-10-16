@@ -126,6 +126,117 @@ _NO_CACHE_SCOPE: ContextVar[bool] = ContextVar("forger_no_cache_scope", default=
 _STEP_META_SUFFIX = ".step.json"
 
 
+class _RequestScope:
+    """The @op call a Model's requests come from, for request-cache keys.
+
+    ``key`` hashes the op name, its body, and every argument except the input
+    rows (and the op's ``samples_arg``), so another op, or the same op with
+    another template, never shares samples. ``rows_key`` hashes the whole rows
+    argument, for prompts that name no row of their own. ``take_slots`` numbers
+    completions in call order, so a prompt asked again in the same op call
+    (a duplicate row, a retry, a later batch_size chunk) gets new slots.
+    Both hashes are computed on first use, so ops that call no model pay
+    nothing.
+    """
+
+    def __init__(self, op_name: str, parts: Any, rows: Any) -> None:
+        """`parts`: what identifies the call besides the rows; `rows` or None."""
+        self.op_name = op_name
+        self._parts = parts
+        self._rows = rows
+        self._key: str | None = None
+        self._rows_key: str | None = None
+        self._lock = threading.Lock()
+        self._next_slot: dict[str, int] = {}
+        self.reused = 0
+        self.total = 0
+
+    @property
+    def key(self) -> str:
+        """Hash of the op name, body, and non-row arguments."""
+        with self._lock:
+            if self._key is None:
+                self._key, _ = _hash(self._parts)
+            return self._key
+
+    @property
+    def rows_key(self) -> str:
+        """Hash of the whole rows argument; "(no rows)" for ops without one."""
+        with self._lock:
+            if self._rows_key is None:
+                self._rows_key = (
+                    "(no rows)" if self._rows is None else _hash(self._rows)[0]
+                )
+            return self._rows_key
+
+    def take_slots(self, request_key: str, n: int) -> int:
+        """First of the next `n` slots for `request_key` in this op call."""
+        with self._lock:
+            first = self._next_slot.get(request_key, 0)
+            self._next_slot[request_key] = first + n
+            return first
+
+    def count(self, reused: int, total: int) -> None:
+        """Add one generate_batch call's reused and requested completions."""
+        with self._lock:
+            self.reused += reused
+            self.total += total
+
+
+# The op call running in this context, read by Model.generate_batch.
+_REQUEST_SCOPE: ContextVar[_RequestScope | None] = ContextVar(
+    "forger_request_scope", default=None
+)
+
+
+def _scope_value(value: Any) -> Any:
+    """An argument as the request scope sees it.
+
+    A Model contributes only what can change its output
+    (``request_scope_key()``), so changing its timeout, retries, or
+    max_concurrency keeps the request cache.
+    """
+    scope_key = getattr(value, "request_scope_key", None)
+    if callable(scope_key) and not isinstance(value, type):
+        return ["__request_scope__", scope_key()]
+    return value
+
+
+def _request_scope(
+    op_name: str,
+    body_key: Any,
+    normalized: dict[str, Any],
+    args: tuple[Any, ...],
+    samples_arg: str | None,
+    bound: bool,
+) -> _RequestScope:
+    """The request scope of one op call; the rows are the first list argument.
+
+    E.g. ``generate_from_context(rows, "Solve {q}", model)`` has scope
+    ``[op name, body, {"prompt_fn": "Solve {q}", "model": ..., ...}]`` and rows
+    ``rows``. Acquire ops take no rows, so all their arguments are in scope.
+    """
+    first = args[0] if args else None
+    has_rows = isinstance(first, list) and _tracking.category_of(op_name) != "acquire"
+    if not bound:  # normalized is {"args": [...], "kwargs": {...}}
+        positional = list(args[1:] if has_rows else args)
+        named: dict[str, Any] = {
+            "args": [_scope_value(v) for v in positional],
+            "kwargs": {k: _scope_value(v) for k, v in normalized["kwargs"].items()},
+        }
+    else:
+        names = list(normalized)
+        rows_name = names[0] if has_rows and names else None
+        named = {
+            name: _scope_value(value)
+            for name, value in normalized.items()
+            if name not in (rows_name, samples_arg)
+        }
+    return _RequestScope(
+        op_name, [op_name, body_key, named], first if has_rows else None
+    )
+
+
 def _maybe_warn_hash_cost(op_name: str, duration: float, size: int) -> None:
     if size <= _HASH_WARN_BYTES and duration <= _HASH_WARN_SECONDS:
         return
@@ -184,8 +295,13 @@ def op(
     *,
     name: str | None = None,
     cache: bool = True,
+    samples_arg: str | None = None,
 ) -> Any:
     """Decorator: cache output on disk, content-addressed by inputs.
+
+    ``samples_arg`` names the argument that only sets how many samples to
+    draw (e.g. ``"n"``). It is left out of the request-cache scope, so raising
+    it reuses the samples already drawn and requests only the extra ones.
 
     Usage::
 
@@ -285,6 +401,7 @@ def op(
         ) -> tuple[Any, bool, Any, float]:
             """Run or load the op; return (result, cache_hit, first arg, seconds)."""
             start = time.time()
+            was_bound = False
             if sig is not None:
                 try:
                     # Attempt to normalize the op function's arguments before hashing.
@@ -294,6 +411,7 @@ def op(
                     args = bound.args
                     kwargs = bound.kwargs
                     normalized = dict(bound.arguments)
+                    was_bound = True
                 except TypeError:
                     if _cache_only:
                         raise
@@ -358,7 +476,21 @@ def op(
                     raise FileNotFoundError(
                         f"No cached result for {op_name} with these arguments"
                     )
-                result = fn(*args, **kwargs)
+                scope = _request_scope(
+                    op_name, body_key, normalized, args, samples_arg, was_bound
+                )
+                scope_token = _REQUEST_SCOPE.set(scope)
+                try:
+                    result = fn(*args, **kwargs)
+                finally:
+                    _REQUEST_SCOPE.reset(scope_token)
+                    if scope.reused:
+                        logger.info(
+                            "request cache: %d of %d completions reused in %s",
+                            scope.reused,
+                            scope.total,
+                            op_name,
+                        )
                 meta = None
                 if is_step:
                     # Raises before caching when a @step breaks its contract.
