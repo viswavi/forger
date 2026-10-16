@@ -84,6 +84,7 @@ them with `@op` to memoize their results.
 
 | Name | Location | Description |
 |---|---|---|
+| `pyforger.pipeline.map_pipeline` | `src/pyforger/pipeline.py` | Map independent inputs in bounded spawned processes. |
 | `pyforger.op` | `src/pyforger/op.py` | Decorator for caching operations. |
 | `pyforger.acquire` | `src/pyforger/acquire/` | Generate or retrieve rows. |
 | `pyforger.alter` | `src/pyforger/alter/` | Transform rows without removing items. |
@@ -342,6 +343,44 @@ def run_pipeline(seeds, model, rounds=5):
 ```
 
 Module import time should not execute work. LLM calls, file I/O, and any `@op`-decorated call belong inside a function body.
+
+### Mapping independent pipeline work
+
+Import `map_pipeline` from `pyforger.pipeline` to run a trusted, importable,
+picklable callable once per input in separate spawned processes:
+
+```python
+from pyforger.pipeline import map_pipeline
+
+
+def process_seed(seed):
+    return {"text": seed["text"].upper()}
+
+
+if __name__ == "__main__":
+    results = map_pipeline(
+        process_seed, [{"text": "hello"}, {"text": "world"}],
+        concurrency=2, timeout_s=30,
+    )
+```
+
+Define the callable in an importable module and guard the entry point for spawn.
+Inputs and return values must be picklable; tuple inputs are not unpacked.
+`concurrency` is a positive integer bounding both active children and in-flight
+inputs. Iterables are consumed incrementally, but the returned list stores every
+result and therefore still requires memory proportional to the input count.
+Results preserve input order: success is `{"status": "completed", "value": ...}`;
+errors use `{"status": "failed", "error": "ExceptionType"}`, and timeouts use
+`{"status": "timed_out", "error": "TimeoutError"}`. Exception messages are omitted,
+but callable logs and returned values are not redacted.
+
+`timeout_s` defaults to no deadline; otherwise it must be finite and positive.
+Each item's deadline starts when its worker slot becomes available and includes
+startup and shutdown. Worker errors do not stop other inputs. Caller interruptions
+and iterable errors instead propagate after active direct children are stopped
+and reaped. Timeouts and cancellation retain filesystem side effects already
+written. Only direct children are killed, not subprocesses created by the callable.
+This is trusted-code process execution, not a sandbox or a shared cost budget.
 
 ### Data Generation Patterns
 

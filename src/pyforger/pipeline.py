@@ -1,10 +1,14 @@
 """Pipeline-as-function API (approach #6).
 
-A pipeline is a regular Python function. Two things you can do with it:
+A pipeline is a regular Python function. Three things you can do with it:
 
   run(pipeline, *args, **kwargs) -> Any
       Equivalent to pipeline(*args, **kwargs). The wrapper exists as a
       hook for trace setup and instrumentation.
+
+  map_pipeline(fn, items, *, concurrency=4, timeout_s=None) -> list[dict]
+      Run independent inputs in bounded spawned processes, returning ordered
+      completion, failure, or timeout records.
 
   optimize(pipeline, transforms) -> pipeline
       Apply each transform in order. A transform is
@@ -19,7 +23,7 @@ logging, fixture substitution, kwarg rewriting) are straightforward
 function rewriters anyway.
 
 This intentionally collides with no other pyforger.* module; users
-import explicitly: ``from pyforger.pipeline import run, optimize``.
+import explicitly: ``from pyforger.pipeline import run, optimize, map_pipeline``.
 """
 from __future__ import annotations
 
@@ -28,8 +32,9 @@ import multiprocessing
 import pickle
 import time
 from collections.abc import Callable, Iterable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from queue import Empty
+from threading import Event
 from typing import Any, TypeVar
 
 P = TypeVar("P", bound=Callable[..., Any])
@@ -76,7 +81,9 @@ def map_pipeline(
 
     Args:
         fn: Importable, picklable callable invoked as ``fn(item)``.
-        items: Iterable of picklable inputs; tuples are not unpacked.
+        items: Iterable of picklable inputs; tuples are not unpacked. At most
+            concurrency inputs are in flight; the returned list still grows
+            with the total input count.
         concurrency: Positive maximum number of simultaneous child processes.
         timeout_s: Optional finite positive per-item budget, including startup
             and shutdown, measured once a worker slot becomes available.
@@ -90,6 +97,9 @@ def map_pipeline(
 
     Raises:
         ValueError: If concurrency or timeout_s is invalid.
+
+    Caller interruptions and input iteration errors stop and reap active direct
+    children before propagating. Completed filesystem side effects remain.
     """
     if (
         isinstance(concurrency, bool)
@@ -105,14 +115,17 @@ def map_pipeline(
     ):
         raise ValueError("timeout_s must be finite and positive")
     context = multiprocessing.get_context("spawn")
+    cancelled = Event()
 
     def execute(item: Any) -> dict[str, Any]:
         queue = context.Queue(maxsize=1)
         process = context.Process(target=_map_child, args=(fn, item, queue))
         deadline = None if timeout_s is None else time.monotonic() + timeout_s
         try:
+            if cancelled.is_set():
+                return {"status": "failed", "error": "CancelledError"}
             process.start()
-            while True:
+            while not cancelled.is_set():
                 remaining = None if deadline is None else deadline - time.monotonic()
                 if remaining is not None and remaining <= 0:
                     return {"status": "timed_out", "error": "TimeoutError"}
@@ -120,13 +133,15 @@ def map_pipeline(
                     payload = queue.get(
                         timeout=0.05 if remaining is None else min(0.05, remaining)
                     )
-                    process.join(
-                        None
-                        if deadline is None
-                        else max(0, deadline - time.monotonic())
-                    )
-                    if process.is_alive():
-                        return {"status": "timed_out", "error": "TimeoutError"}
+                    while process.is_alive() and not cancelled.is_set():
+                        remaining = (
+                            None if deadline is None else deadline - time.monotonic()
+                        )
+                        if remaining is not None and remaining <= 0:
+                            return {"status": "timed_out", "error": "TimeoutError"}
+                        process.join(
+                            0.05 if remaining is None else min(0.05, remaining)
+                        )
                     record: dict[str, Any] = pickle.loads(payload)
                     return record
                 except Empty:
@@ -136,6 +151,7 @@ def map_pipeline(
                             return record
                         except Empty:
                             return {"status": "failed", "error": "ChildProcessError"}
+            return {"status": "failed", "error": "CancelledError"}
         except Exception as exc:
             return {"status": "failed", "error": type(exc).__name__}
         finally:
@@ -146,5 +162,26 @@ def map_pipeline(
             process.close()
             queue.close()
 
-    with ThreadPoolExecutor(max_workers=concurrency) as pool:
-        return list(pool.map(execute, items))
+    pool = ThreadPoolExecutor(max_workers=concurrency)
+    pending: dict[Future[dict[str, Any]], int] = {}
+    records: list[dict[str, Any]] = []
+    try:
+        iterator = iter(items)
+        exhausted = False
+        while pending or not exhausted:
+            while len(pending) < concurrency and not exhausted:
+                try:
+                    item = next(iterator)
+                except StopIteration:
+                    exhausted = True
+                    break
+                pending[pool.submit(execute, item)] = len(records)
+                records.append({})
+            if pending:
+                done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                for future in done:
+                    records[pending.pop(future)] = future.result()
+        return records
+    finally:
+        cancelled.set()
+        pool.shutdown(wait=True, cancel_futures=True)
