@@ -8,12 +8,13 @@ import re
 import pytest
 
 from pyforger import _tracking
-from pyforger.filter import by_comparative_judge, by_exact_match, by_llm_score
+from pyforger.filter import by_exact_match, by_llm_score
 from pyforger.filter.judge import (
-    _borda_points,
+    DEFAULT_RUBRIC,
     _label,
-    _parse_ranking_response,
+    _parse_group_response,
     _parse_score_response,
+    _rubric_text,
 )
 from pyforger.op import trace
 from pyforger.steps import pipeline, step
@@ -609,18 +610,6 @@ _ROWS = [
 class TestByLlmScorePromptTemplate:
     """prompt_template replaces the default judge prompt."""
 
-    def test_default_prompt_unchanged(self):
-        """Without a template the prompt is the original fixed text."""
-        judge = _FakeJudge()
-        by_llm_score(_ROWS[:1], model=judge, input_field="q", output_field="a")
-        assert judge.prompts == [
-            "Rate the quality of the following output on a scale of 1 to 5.\n"
-            "Criteria: overall quality, relevance, and correctness\n\n"
-            "Input: What is 2+2?\n\n"
-            "Output: 4\n\n"
-            'Respond with JSON: {"score": <integer>, "explanation": "<text>"}'
-        ]
-
     def test_string_template_fills_placeholders_and_appends_format(self):
         """Placeholders and row fields are filled; the JSON instruction is added."""
         judge = _FakeJudge()
@@ -637,8 +626,12 @@ class TestByLlmScorePromptTemplate:
         )
         assert judge.prompts == [
             "[math] Grade 4 for What is 2+2? by accuracy out of 10.\n\n"
-            'Respond with JSON: {"score": <integer from 1 to 10>, '
-            '"explanation": "<text>"}'
+            "First write feedback: list every mistake or shortcoming of the output "
+            "against the criteria, or say that there are none. Then give the score "
+            "whose rubric description matches the output; the score must follow "
+            "from your feedback and the rubric.\n"
+            'Respond with JSON, feedback before score: {"feedback": "<text>", '
+            '"score": <integer from 1 to 10>}'
         ]
 
     def test_string_template_with_score_key_is_left_alone(self):
@@ -654,7 +647,7 @@ class TestByLlmScorePromptTemplate:
         assert judge.prompts == ['Grade 4. Answer {"score": N}.']
 
     def test_callable_template_gets_row_and_placeholders(self):
-        """A callable receives the row plus input/output/criteria/max_score."""
+        """A callable receives the row plus input/output/criteria/max_score/rubric."""
         seen = []
 
         def template(row):
@@ -678,11 +671,11 @@ class TestByLlmScorePromptTemplate:
         )
         assert seen == [
             {**_ROWS[0], "input": "What is 2+2?", "output": "4", "criteria": "c"}
-            | {"max_score": 5}
+            | {"max_score": 5, "rubric": _rubric_text(None, 5)}
         ]
         messages = judge.prompts[-1]
         assert messages[0] == {"role": "system", "content": "You are strict."}
-        assert messages[1]["content"].startswith("Grade 4\n\nRespond with JSON:")
+        assert messages[1]["content"].startswith("Grade 4\n\nFirst write feedback:")
 
     def test_template_changes_the_cache_key(self):
         """A different template re-asks the judge."""
@@ -839,286 +832,375 @@ class TestScoreAndExplanationFields:
         assert kept == [{**_THRESHOLD_DATA[1], "s": 5.0}]
 
 
-# ---------------------------------------------------------- comparative judge
+# ------------------------------------------------------------ default rubric
+
+
+class TestRubricPrompt:
+    """The default prompt shows every rubric level and asks for feedback first."""
+
+    def test_default_prompt_has_every_level_and_feedback_first(self):
+        """Each of the five levels is described; feedback comes before the score."""
+        judge = _FakeJudge()
+        by_llm_score(_ROWS[:1], model=judge, input_field="q", output_field="a")
+        (prompt,) = judge.prompts
+        for level, description in DEFAULT_RUBRIC.items():
+            assert f"Score {level}: {description}" in prompt
+        assert "Criteria: overall quality, relevance, and correctness" in prompt
+        assert "Input: What is 2+2?\n\nOutput: 4\n\n" in prompt
+        assert "list every mistake or shortcoming" in prompt
+        assert "the score must follow from your feedback and the rubric" in prompt
+        assert prompt.index('"feedback"') < prompt.index('"score"')
+        assert prompt.endswith('"score": <integer from 1 to 5>}')
+
+    def test_custom_rubric_replaces_the_descriptions(self):
+        """A rubric covering 1..max_score is shown instead of the default."""
+        judge = _FakeJudge()
+        rubric = {1: "wrong", 2: "partly right", 3: "right and explained"}
+        by_llm_score(
+            _ROWS[:1],
+            model=judge,
+            input_field="q",
+            output_field="a",
+            max_score=3,
+            score_threshold=2,
+            rubric=rubric,
+        )
+        (prompt,) = judge.prompts
+        assert (
+            "Score rubric:\nScore 1: wrong\nScore 2: partly right\n"
+            "Score 3: right and explained\n\n"
+        ) in prompt
+        assert DEFAULT_RUBRIC[5] not in prompt
+        assert "integer from 1 to 3" in prompt
+
+    @pytest.mark.parametrize(
+        "rubric, message",
+        [
+            ({1: "a", 2: "b", 3: "c", 4: "d"}, r"missing \[5\]"),
+            ({1: "a", 2: "b", 3: "c", 4: "d", 5: "e", 6: "f"}, r"unexpected \[6\]"),
+            ({"1": "a", 2: "b", 3: "c", 4: "d", 5: "e"}, r"missing \[1\]"),
+            ({1: "a", 2: "b", 3: " ", 4: "d", 5: "e"}, r"levels \[3\] are empty"),
+        ],
+    )
+    def test_rubric_must_cover_exactly_the_levels(self, rubric, message):
+        """A rubric with missing, extra, or empty levels raises ValueError."""
+        with pytest.raises(ValueError, match=message):
+            by_llm_score(
+                _ROWS,
+                model=_FakeJudge(),
+                input_field="q",
+                output_field="a",
+                rubric=rubric,
+            )
+
+    def test_other_max_score_needs_a_rubric(self):
+        """There is no default rubric for max_score=10."""
+        with pytest.raises(ValueError, match="no default rubric for max_score=10"):
+            by_llm_score(
+                _ROWS,
+                model=_FakeJudge(),
+                input_field="q",
+                output_field="a",
+                max_score=10,
+            )
+        with pytest.raises(ValueError, match="no default rubric for max_score=10"):
+            by_llm_score(
+                _ROWS,
+                model=_FakeJudge(),
+                input_field="q",
+                output_field="a",
+                max_score=10,
+                prompt_template="Grade {output}.\n{rubric}",
+            )
+
+    def test_rubric_placeholder(self):
+        """{rubric} renders the level descriptions in a custom template."""
+        judge = _FakeJudge()
+        rubric = {1: "bad", 2: "good"}
+        by_llm_score(
+            _ROWS[:1],
+            model=judge,
+            input_field="q",
+            output_field="a",
+            max_score=2,
+            score_threshold=1,
+            rubric=rubric,
+            prompt_template="Grade {output}.\n{rubric}",
+        )
+        (prompt,) = judge.prompts
+        assert prompt.startswith("Grade 4.\nScore 1: bad\nScore 2: good\n\n")
+
+    def test_rubric_changes_the_cache_key(self):
+        """A new rubric re-asks the judge."""
+        judge = _KeyedJudge()
+        kwargs = dict(model=judge, input_field="q", output_field="a")
+        by_llm_score(_ROWS, **kwargs)
+        by_llm_score(_ROWS, rubric={**DEFAULT_RUBRIC, 5: "flawless"}, **kwargs)
+        assert judge.call_count == 2 * len(_ROWS)
+
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            ('{"feedback": "misses units", "score": 3}', (3, "misses units")),
+            (
+                '{"score": 3, "feedback": "order does not matter"}',
+                (3, "order does not matter"),
+            ),
+            ('{"explanation": "legacy key", "score": 4}', (4, "legacy key")),
+            ('{"feedback": "f", "explanation": "e", "score": 4}', (4, "f")),
+            ('{"feedback": "cut off", "score": 2', (2, "cut off")),
+            ('{"feedback": "None.", "score": "5/5"}', (5, "None.")),
+        ],
+    )
+    def test_parse_feedback_and_score(self, raw, expected):
+        """Feedback is read from "feedback", else the legacy "explanation" key."""
+        assert _parse_score_response(raw, 5) == expected
+
+    def test_explanation_field_stores_feedback(self):
+        """explanation_field holds the judges' feedback."""
+        judge = _BadJudge(['{"feedback": "states 4 without working", "score": 4}'])
+        kept = by_llm_score(
+            _ROWS[:1],
+            model=judge,
+            input_field="q",
+            output_field="a",
+            explanation_field="feedback",
+            score_field="score",
+        )
+        assert kept == [
+            {**_ROWS[0], "feedback": ["states 4 without working"], "score": 4}
+        ]
+
+
+# ------------------------------------------------------------------ group_by
 
 _CANDIDATE_RE = re.compile(r"Candidate ([A-Z]+):\n(.*?)(?=\n\n|$)", re.S)
 
 
 def _shown(prompt):
-    """Return ``{label: candidate text}`` as shown in a comparative prompt."""
+    """Return ``{label: candidate text}`` as shown in a group prompt."""
     return dict(_CANDIDATE_RE.findall(prompt))
 
 
-class _RankingJudge:
-    """Comparative judge that ranks candidates by a preference list.
+class _GroupJudge:
+    """Scores each candidate by a table of its text; stable cache key.
 
-    ``preferences[k]`` orders candidate texts best first for the k-th request
-    (cycling); by default it prefers longer texts. Stable cache key.
+    ``scores`` maps candidate text to its score (default: its length, capped at
+    5). Group prompts get a ``candidates`` answer, single prompts a plain one.
+    ``drop`` names texts whose entry is left out of group answers.
     """
 
-    def __init__(self, preferences=None, wrap="{}"):
-        """Store the preference lists and the response wrapper."""
-        self.preferences = preferences
-        self.wrap = wrap
+    def __init__(self, scores=None, drop=()):
+        """Store the score table and the texts to leave out."""
+        self.scores = scores or {}
+        self.drop = set(drop)
         self.prompts = []
         self.batch_calls = 0
         self.last_n = None
 
     def cache_key(self):
         """Exclude mutable call records from the @op cache key."""
-        return ("_RankingJudge", repr(self.preferences), self.wrap)
+        return ("_GroupJudge", sorted(self.scores.items()), sorted(self.drop))
+
+    def _score(self, text):
+        return self.scores.get(text, min(5, len(text)))
 
     def generate_batch(self, prompts, *, n=1, temperature=None, max_tokens=None):
-        """Answer each prompt with a JSON ranking of its labels."""
+        """Answer each prompt with feedback and a score per candidate."""
         self.batch_calls += 1
         self.last_n = n
         results = []
         for prompt in prompts:
-            k = len(self.prompts)
             self.prompts.append(prompt)
             shown = _shown(prompt)
-            if self.preferences is None:
-                order = sorted(shown, key=lambda lab: -len(shown[lab]))
+            if not shown:
+                text = prompt.split("Output: ")[1].split("\n\n")[0]
+                body = {"feedback": f"on {text}", "score": self._score(text)}
             else:
-                pref = self.preferences[k % len(self.preferences)]
-                order = sorted(shown, key=lambda lab: pref.index(shown[lab]))
-            body = json.dumps({"ranking": order, "explanation": "because"})
-            results.append([self.wrap.format(body)] * n)
+                body = {
+                    "candidates": [
+                        {
+                            "label": label,
+                            "feedback": f"on {text}",
+                            "score": self._score(text),
+                        }
+                        for label, text in shown.items()
+                        if text not in self.drop
+                    ]
+                }
+            results.append([json.dumps(body)] * n)
         return results
 
 
 _GROUPED = [
-    {"q": "q1", "a": "short"},
+    {"q": "q1", "a": "x"},
     {"q": "q1", "a": "a much longer answer"},
     {"q": "q2", "a": "only one"},
-    {"q": "q1", "a": "medium answer"},
-    {"q": "q3", "a": "x"},
-    {"q": "q3", "a": "xyz"},
+    {"q": "q1", "a": "medium"},
+    {"q": "q3", "a": "xy"},
+    {"q": "q3", "a": "xyzw"},
 ]
 
 
-def _comparative(rows, judge, **kwargs):
-    kwargs.setdefault("keep", 1)
+def _grouped(rows, judge, **kwargs):
     if kwargs.get("num_judges", 1) > 1:
         kwargs.setdefault("temperature", 0.7)
-    return by_comparative_judge(
+    return by_llm_score(
         rows, group_by="q", model=judge, input_field="q", output_field="a", **kwargs
     )
 
 
-class TestByComparativeJudge:
-    """by_comparative_judge keeps the best candidates of each group."""
+class TestGroupBy:
+    """group_by scores the candidates for one input together, each on the rubric."""
 
-    def test_keeps_best_per_group_in_input_order(self):
-        """The judge's favorite of each group survives; singletons are kept."""
-        judge = _RankingJudge()
-        kept = _comparative(_GROUPED, judge)
-        assert kept == [_GROUPED[1], _GROUPED[2], _GROUPED[5]]
-
-    def test_keep_two(self):
-        """keep=2 keeps the top two of each group."""
-        kept = _comparative(_GROUPED, _RankingJudge(), keep=2)
+    def test_per_candidate_threshold_and_input_order(self):
+        """Every candidate scoring >= score_threshold is kept, in input order."""
+        kept = _grouped(_GROUPED, _GroupJudge(), score_threshold=4)
+        assert kept == [_GROUPED[1], _GROUPED[2], _GROUPED[3], _GROUPED[5]]
+        kept = _grouped(_GROUPED, _GroupJudge(), score_threshold=2)
         assert kept == [_GROUPED[1], _GROUPED[2], _GROUPED[3], _GROUPED[4], _GROUPED[5]]
 
-    def test_one_batch_one_prompt_per_group_and_judge(self):
-        """Groups larger than keep get num_judges n=1 prompts in one batch."""
-        judge = _RankingJudge()
-        _comparative(_GROUPED, judge, num_judges=3)
-        assert (judge.batch_calls, len(judge.prompts), judge.last_n) == (1, 6, 1)
-        q1_prompts = [p for p in judge.prompts if "Input: q1" in p]
-        assert len(q1_prompts) == 3
-        assert all("Input: q1" in p and p.count("Input:") == 1 for p in q1_prompts)
-        assert all(set(_shown(p)) == {"A", "B", "C"} for p in q1_prompts)
-
-    def test_only_single_rows_skip_the_call(self):
-        """Groups of two or more are judged even when keep covers them."""
-        judge = _RankingJudge()
-        kept = _comparative(_GROUPED, judge, keep=3)
-        assert kept == _GROUPED
-        assert [p.split("Input: ")[1].split("\n")[0] for p in judge.prompts] == [
-            "q1",
-            "q3",
-        ]
-
-    def test_all_single_rows_make_no_calls(self):
-        """Rows with distinct group values are kept without any judge call."""
-        judge = _RankingJudge()
-        rows = [{"q": f"q{i}", "a": "x"} for i in range(3)]
-        assert _comparative(rows, judge) == rows
-        assert judge.prompts == []
-
-    def test_borda_combines_judges(self):
-        """Borda points: x 2+1+0, y 1+2+2, z 0+0+1, so y then x."""
+    def test_no_best_of_n(self):
+        """A group whose candidates all score low keeps none of them."""
         rows = [{"q": "q", "a": t} for t in ("x", "y", "z")]
-        prefs = [["x", "y", "z"], ["y", "x", "z"], ["y", "z", "x"]]
-        assert _comparative(rows, _RankingJudge(prefs), num_judges=3) == [rows[1]]
-        kept = _comparative(rows, _RankingJudge(prefs), num_judges=3, keep=2)
-        assert kept == [rows[0], rows[1]]
+        assert _grouped(rows, _GroupJudge(), score_threshold=3) == []
 
-    def test_ties_go_to_the_earlier_row(self):
-        """Two judges with opposite rankings tie; the first row wins."""
-        rows = [{"q": "q", "a": t} for t in ("x", "y")]
-        prefs = [["y", "x"], ["x", "y"]]
-        assert _comparative(rows, _RankingJudge(prefs), num_judges=2) == [rows[0]]
-
-    def test_shuffle_is_seeded(self):
-        """The same seed shows the same orders; judges and seeds differ."""
-        rows = [{"q": "q", "a": f"answer {i}"} for i in range(6)]
-
-        def orders(seed):
-            judge = _RankingJudge()
-            _comparative(rows, judge, num_judges=3, seed=seed, _no_cache=True)
-            return [list(_shown(p).values()) for p in judge.prompts]
-
-        first = orders(0)
-        assert orders(0) == first
-        assert len({tuple(o) for o in first}) > 1  # judges see different orders
-        assert orders(1) != first
-        assert all(sorted(o) == sorted(r["a"] for r in rows) for o in first)
-
-    def test_position_bias_is_spread_by_shuffling(self):
-        """A judge that always prefers label A no longer always picks row 0."""
-        rows = [
-            {"q": f"q{g}", "a": f"g{g} answer {i}"} for g in range(8) for i in range(3)
-        ]
-
-        class _FirstLabelJudge(_RankingJudge):
-            def generate_batch(self, prompts, *, n=1, **kwargs):
-                body = json.dumps({"ranking": ["A", "B", "C"]})
-                return [[body] * n for _ in prompts]
-
-        kept = _comparative(rows, _FirstLabelJudge())
-        assert len(kept) == 8
-        assert any(not r["a"].endswith("answer 0") for r in kept)
-
-    def test_changing_keep_reuses_judge_calls(self):
-        """A new keep makes no new calls."""
-        rows = [{"q": f"q{g}", "a": "a" * (i + 1)} for g in range(3) for i in range(4)]
-        judge = _RankingJudge()
-        one = _comparative(rows, judge, keep=1)
-        assert len(judge.prompts) == 3
-        two = _comparative(rows, judge, keep=2)
-        assert len(judge.prompts) == 3
-        assert len(one) == 3 and len(two) == 6
-        hits = [r.cache_hit for r in trace() if r.op_name.endswith(".rankings")]
-        assert hits == [False, True]
-
-    def test_changing_keep_with_mixed_group_sizes_reuses_judge_calls(self):
-        """Groups of 2, 3, and 4 rows: keep 1, 2, 3, 4 all reuse the first calls."""
-        rows = [
-            {"q": f"q{size}", "a": "a" * (i + 1)}
-            for size in (2, 3, 4)
-            for i in range(size)
-        ]
-        judge = _RankingJudge()
-        kept = [len(_comparative(rows, judge, keep=keep)) for keep in (1, 2, 3, 4)]
-        assert kept == [3, 6, 8, 9]
-        assert len(judge.prompts) == 3
-        hits = [r.cache_hit for r in trace() if r.op_name.endswith(".rankings")]
-        assert hits == [False, True, True, True]
-
-    def test_rank_and_explanation_fields(self):
-        """Kept rows carry their rank and the group's judge explanations."""
-        judge = _RankingJudge()
-        kept = _comparative(
-            _GROUPED,
-            judge,
-            keep=2,
-            num_judges=2,
-            rank_field="rank",
-            explanation_field="why",
+    def test_group_prompt_shows_input_once_and_every_candidate(self):
+        """One prompt per group: the input once, candidates labelled, the rubric."""
+        judge = _GroupJudge()
+        _grouped(_GROUPED, judge)
+        assert (judge.batch_calls, len(judge.prompts), judge.last_n) == (1, 3, 1)
+        q1 = next(p for p in judge.prompts if "Input: q1" in p)
+        assert q1.count("Input:") == 1
+        assert sorted(_shown(q1).values()) == sorted(
+            ["x", "a much longer answer", "medium"]
         )
-        assert kept == [
-            {**_GROUPED[1], "rank": 1, "why": ["because", "because"]},
-            {**_GROUPED[2], "rank": 1, "why": []},
-            {**_GROUPED[3], "rank": 2, "why": ["because", "because"]},
-            {**_GROUPED[4], "rank": 2, "why": ["because", "because"]},
-            {**_GROUPED[5], "rank": 1, "why": ["because", "because"]},
-        ]
+        for level in DEFAULT_RUBRIC:
+            assert f"Score {level}: " in q1
+        assert '"candidates"' in q1 and "(A, B, C)" in q1
+        assert q1.index('"feedback"') < q1.index('"score"')
 
-    def test_explanations_skip_unparsed_judges(self):
-        """Only judges whose ranking parsed contribute an explanation."""
-        rows = [{"q": "q", "a": t} for t in ("x", "y")]
-        judge = _BadJudge(
-            ['{"ranking": ["B", "A"], "explanation": "B is right"}', "garbage"]
-        )
-        kept = _comparative(rows, judge, num_judges=2, explanation_field="why")
-        assert len(kept) == 1 and kept[0]["why"] == ["B is right"]
+    def test_singleton_groups_use_the_single_prompt(self):
+        """A group of one row gets the ordinary single-output prompt."""
+        judge = _GroupJudge()
+        _grouped(_GROUPED, judge)
+        q2 = next(p for p in judge.prompts if "Input: q2" in p)
+        assert "Output: only one\n\n" in q2 and "Candidate" not in q2
+        assert '"candidates"' not in q2
 
-    def test_default_rows_unchanged(self):
-        """Without rank_field or explanation_field, kept rows are input rows."""
-        kept = _comparative(_GROUPED, _RankingJudge())
-        assert all(any(row is k for row in _GROUPED) for k in kept)
-
-    def test_unparseable_group_is_dropped(self):
-        """A group whose judges all answer garbage is dropped and recorded None."""
-        rows = [{"q": "q", "a": t} for t in ("x", "y")]
-        assert _comparative(rows, _BadJudge(["no idea"])) == []
-
-    def test_lenient_ranking_response(self):
-        """Rankings in fences with label variants are understood."""
-        rows = [{"q": "q", "a": t} for t in ("a", "bbb", "cc")]
-        judge = _RankingJudge(wrap="Ranking below.\n```json\n{}\n```")
-        assert _comparative(rows, judge) == [rows[1]]
-
-    def test_custom_prompt_template(self):
-        """A template gets input/candidates/labels; the format line is appended."""
-        judge = _RankingJudge()
-        rows = [{"q": "q", "a": t, "lang": "en"} for t in ("x", "yy")]
-        _comparative(
+    def test_rotation_across_judges_maps_labels_back(self):
+        """Each judge sees another order; scores still land on the right rows."""
+        rows = [{"q": "q", "a": t} for t in ("c0", "c1", "c2")]
+        scores = {"c0": 1, "c1": 5, "c2": 3}
+        judge = _GroupJudge(scores)
+        kept = _grouped(
             rows,
             judge,
-            prompt_template="[{lang}] Which of {labels} answers {input} best?\n\n"
+            num_judges=3,
+            score_threshold=4,
+            score_field="s",
+            explanation_field="why",
+        )
+        orders = [list(_shown(p).values()) for p in judge.prompts]
+        assert len(set(map(tuple, orders))) == 3
+        for position in range(3):
+            assert sorted(o[position] for o in orders) == ["c0", "c1", "c2"]
+        assert kept == [{**rows[1], "s": 5.0, "why": ["on c1"] * 3}]
+
+    @pytest.mark.parametrize("size", [2, 3, 4])
+    def test_rotations_balance_positions(self, size):
+        """With size judges, every candidate is shown once in every position."""
+        rows = [{"q": "q", "a": f"c{i}"} for i in range(size)]
+        judge = _GroupJudge()
+        _grouped(rows, judge, num_judges=size)
+        orders = [list(_shown(p).values()) for p in judge.prompts]
+        assert len(set(map(tuple, orders))) == size
+        for position in range(size):
+            assert sorted(o[position] for o in orders) == sorted(r["a"] for r in rows)
+
+    def test_missing_candidate_score_is_no_vote_for_that_candidate(self, monkeypatch):
+        """A candidate left out of the answer is dropped; the others keep scores."""
+        monkeypatch.setenv("FORGER_STEP_REPORT", "0")
+        rows = [{"q": "q", "a": t} for t in ("good", "great", "gone")]
+        judge = _GroupJudge({"good": 4, "great": 5, "gone": 5}, drop=["gone"])
+
+        @step
+        def graded(rows):
+            return _grouped(rows, judge, score_threshold=4)
+
+        assert graded(rows) == rows[:2]
+        scores = _tracking.step_records()["graded"].ops[0].scores
+        assert scores is not None and scores.values == [4, 5, None]
+
+    def test_agreement_threshold_per_candidate(self):
+        """Approval fractions are computed per candidate across judges."""
+        rows = [{"q": "q", "a": t} for t in ("x", "y")]
+        # Judge 1 approves only x, judge 2 approves both.
+        judge = _BadJudge(
+            [
+                '{"candidates": [{"label": "A", "score": 5},'
+                ' {"label": "B", "score": 5}]}',
+                '{"candidates": [{"label": "A", "score": 1},'
+                ' {"label": "B", "score": 5}]}',
+            ]
+        )
+        kept = _grouped(
+            rows, judge, num_judges=2, agreement_threshold=1.0, score_threshold=4
+        )
+        orders = [list(_shown(p).values()) for p in judge.prompts]
+        # The candidate shown as B by the second judge is the one both approve.
+        assert kept == [r for r in rows if r["a"] == orders[1][1]]
+        kept = _grouped(
+            rows, judge, num_judges=2, agreement_threshold=0.5, score_threshold=4
+        )
+        assert kept == rows
+
+    def test_threshold_change_makes_no_calls(self):
+        """Judge responses are cached apart from the thresholds."""
+        judge = _GroupJudge()
+        _grouped(_GROUPED, judge, score_threshold=2)
+        _grouped(_GROUPED, judge, score_threshold=5)
+        _grouped(_GROUPED, judge, num_judges=1, agreement_threshold=0.5)
+        assert len(judge.prompts) == 3
+        hits = [
+            r.cache_hit for r in trace() if r.op_name == "filter.by_llm_score.judge"
+        ]
+        assert hits == [False, True, True]
+
+    def test_rows_without_group_by_are_scored_alone(self):
+        """Without group_by the same rows get one single prompt each."""
+        judge = _GroupJudge()
+        by_llm_score(_GROUPED, model=judge, input_field="q", output_field="a")
+        assert len(judge.prompts) == len(_GROUPED)
+        assert not any("Candidate" in p for p in judge.prompts)
+
+    def test_custom_template_for_groups(self):
+        """Group templates get candidates/labels; the candidates format is appended."""
+        judge = _GroupJudge()
+        rows = [{"q": "q", "a": t, "lang": "en"} for t in ("x", "yy")]
+        _grouped(
+            rows,
+            judge,
+            prompt_template="[{lang}] Grade {labels} ({num_candidates}) "
+            "for {input}.\n\n"
             "{candidates}",
         )
         (prompt,) = judge.prompts
-        assert prompt.startswith("[en] Which of A, B answers q best?\n\nCandidate ")
-        assert prompt.endswith('"explanation": "<text>"}')
-        assert '"ranking"' in prompt
+        assert prompt.startswith("[en] Grade A, B (2) for q.\n\nCandidate A:\n")
+        assert '"candidates": [{"label": "A", "feedback"' in prompt
 
-    def test_callable_prompt_template(self):
-        """A callable receives the first row plus the placeholders."""
-        seen = []
-
-        def template(ctx):
-            seen.append(ctx)
-            return (
-                f'Rank {ctx["labels"]}; reply {{"ranking": [...]}}\n{ctx["candidates"]}'
-            )
-
-        rows = [{"q": "q", "a": t} for t in ("x", "yy")]
-        judge = _RankingJudge()
-        assert _comparative(rows, judge, prompt_template=template) == [rows[1]]
-        assert seen[0]["num_candidates"] == 2 and seen[0]["input"] == "q"
-        assert "Respond with JSON" not in judge.prompts[0]
-
-    def test_records_rank_scores_in_step(self, monkeypatch):
-        """The step report gets each row's rank, kept when at most keep."""
-        monkeypatch.setenv("FORGER_STEP_REPORT", "0")
-
-        @step
-        def best(rows):
-            return _comparative(rows, _RankingJudge(), keep=1, min_yield=0.1)
-
-        kept = best(_GROUPED)
-        record = _tracking.step_records()["best"].ops[0]
-        assert record.op_name == "filter.by_comparative_judge"
-        assert record.scores is not None
-        assert (record.scores.label, record.scores.keep, record.scores.threshold) == (
-            "rank in group",
-            "le",
-            1.0,
-        )
-        assert record.scores.values == [3, 1, 1, 2, 2, 1]
-        assert len(kept) == 3
+    def test_missing_group_field_raises(self):
+        """A row without the group_by field raises a KeyError."""
+        with pytest.raises(KeyError, match="missing required field 'q'"):
+            _grouped([{"a": "x"}], _GroupJudge())
 
     def test_counts_as_quality_filter(self, monkeypatch):
-        """A pipeline using it gets no "no quality filter" warning."""
+        """A pipeline using group_by gets no "no quality filter" warning."""
         monkeypatch.setenv("FORGER_STEP_REPORT", "0")
 
         @step
         def best(rows):
-            return _comparative(rows, _RankingJudge())
+            return _grouped(rows, _GroupJudge(), score_threshold=2)
 
         @step
         def dedupe(rows):
@@ -1133,47 +1215,59 @@ class TestByComparativeJudge:
         assert rec is not None
         assert not any("quality filter" in w for w in rec.warnings)
 
-    def test_invalid_arguments(self):
-        """Both keep and num_judges must be at least 1."""
-        with pytest.raises(ValueError, match="keep"):
-            _comparative(_GROUPED, _RankingJudge(), keep=0)
-        with pytest.raises(ValueError, match="num_judges"):
-            _comparative(_GROUPED, _RankingJudge(), num_judges=0)
 
-    def test_missing_group_field_raises(self):
-        """A row without the group_by field raises a KeyError."""
-        with pytest.raises(KeyError, match="missing required field 'q'"):
-            _comparative([{"a": "x"}], _RankingJudge())
-
-
-class TestRankingHelpers:
-    """Ranking parsing, Borda points, and labels."""
+class TestGroupParsing:
+    """Group answers map labels back to candidates, one vote each."""
 
     @pytest.mark.parametrize(
         "raw, expected",
         [
-            ('{"ranking": ["B", "A", "C"]}', [1, 0, 2]),
-            ('{"ranking": ["Candidate C", "(a)", "b."]}', [2, 0, 1]),
-            ('{"ranking": "B > C > A"}', [1, 2, 0]),
-            ('{"ranking": ["B", "B", "A"]}', [1, 0]),
-            ('{"ranking": ["B", "Z", "A"]}', None),
-            ('{"explanation": "x", "ranking": ["C", "A"', [2, 0]),
-            ('{"ranking": []}', None),
-            ("B is best", None),
+            (
+                '{"candidates": [{"label": "A", "feedback": "fa", "score": 4},'
+                ' {"label": "B", "feedback": "fb", "score": 2},'
+                ' {"label": "C", "feedback": "fc", "score": 5}]}',
+                [(2, "fb"), (5, "fc"), (4, "fa")],
+            ),
+            (
+                '```json\n{"candidates": [{"label": "Candidate B", '
+                '"score": "3/5"}]}\n```',
+                [(3, None), (None, None), (None, None)],
+            ),
+            (
+                '{"candidates": {"A": {"feedback": "ok", "score": 4}, "C": 2}}',
+                [(None, None), (2, None), (4, "ok")],
+            ),
+            (
+                '{"candidates": [{"label": "A", "score": 9},'
+                ' {"label": "Z", "score": 3},'
+                ' {"label": "B", "score": "high"}, {"label": "C", "score": 1}]}',
+                [(None, None), (1, None), (None, None)],
+            ),
+            (
+                '{"candidates": [{"label": "A", "explanation": "legacy", "score": 4},'
+                ' {"label": "A", "score": 1}]}',
+                [(None, None), (None, None), (4, "legacy")],
+            ),
+            (
+                '{"candidates": [{"label": "A", "feedback": "fine", "score": 4}, '
+                '{"label": "B", "feedback": "cut',
+                [(None, None), (None, None), (4, "fine")],
+            ),
+            ('<think>{"candidates": [{"label": "A", "score": 5}]}', [(None, None)] * 3),
+            ("no idea", [(None, None)] * 3),
         ],
     )
-    def test_parse_ranking(self, raw, expected):
-        """Labels map to candidates; unknown and repeated labels are skipped."""
-        assert _parse_ranking_response(raw, [0, 1, 2]) == expected
+    def test_parse_group_response(self, raw, expected):
+        """With order [2, 0, 1], label A is candidate 2, B is 0, C is 1."""
+        assert _parse_group_response(raw, [2, 0, 1], 5) == expected
 
-    def test_parse_ranking_follows_the_shown_order(self):
-        """Label k means the candidate shown k-th, not the k-th row."""
-        assert _parse_ranking_response('{"ranking": ["A", "B"]}', [1, 0]) == [1, 0]
-
-    def test_borda_points(self):
-        """Full rankings score m-1-p; left-out candidates share the rest."""
-        assert _borda_points([1, 0, 2], 3) == {1: 2.0, 0: 1.0, 2: 0.0}
-        assert _borda_points([2], 3) == {2: 2.0, 0: 0.5, 1: 0.5}
+    def test_draft_in_think_is_ignored(self):
+        """Only the answer after </think> counts."""
+        raw = (
+            '<think>{"candidates": [{"label": "A", "score": 1}]}</think>'
+            '{"candidates": [{"label": "A", "score": 5}]}'
+        )
+        assert _parse_group_response(raw, [1, 0], 5) == [(None, None), (5, None)]
 
     def test_labels(self):
         """Labels run A..Z then AA, AB."""
@@ -1183,68 +1277,13 @@ class TestRankingHelpers:
 # ------------------------------------------------------- review regressions
 
 
-class _AnnotatingJudge(_RankingJudge):
-    """Ranks the candidate "BEST" first, labelled with an annotation."""
-
-    def __init__(self, annotation):
-        """Store the annotation format, e.g. ``"{} (best)"``."""
-        super().__init__()
-        self.annotation = annotation
-
-    def cache_key(self):
-        """Stable key per annotation."""
-        return ("_AnnotatingJudge", self.annotation)
-
-    def generate_batch(self, prompts, *, n=1, temperature=None, max_tokens=None):
-        """Put BEST first with an annotated label, then the rest bare."""
-        results = []
-        for prompt in prompts:
-            self.prompts.append(prompt)
-            shown = _shown(prompt)
-            best = next(lab for lab, text in shown.items() if text == "BEST")
-            rest = [lab for lab in shown if lab != best]
-            ranking = [self.annotation.format(best), *rest]
-            results.append([json.dumps({"ranking": ranking})] * n)
-        return results
-
-
-class TestAnnotatedLabels:
-    """#20: labels with words after them map to their label."""
-
-    @pytest.mark.parametrize(
-        "entry", ["A (best)", "Candidate A:", "A - clearest", "a) most accurate"]
-    )
-    def test_annotated_label_maps(self, entry):
-        """The annotated first entry still names candidate A."""
-        raw = json.dumps({"ranking": [entry, "C", "B"]})
-        assert _parse_ranking_response(raw, [2, 0, 1]) == [2, 1, 0]
-
-    @pytest.mark.parametrize(
-        "annotation", ["{} (best)", "Candidate {}:", "{} - clearest"]
-    )
-    def test_top_pick_is_kept(self, annotation):
-        """The judge's annotated top pick wins its group."""
-        rows = [{"q": "q", "a": t} for t in ("meh-1", "BEST", "meh-2")]
-        kept = _comparative(rows, _AnnotatingJudge(annotation), rank_field="rank")
-        assert kept == [{"q": "q", "a": "BEST", "rank": 1}]
-
-    def test_unmappable_entry_makes_the_answer_unparseable(self):
-        """An entry naming no label never demotes the top pick; it voids the answer."""
-        raw = json.dumps({"ranking": ["the first one", "C", "B"]})
-        assert _parse_ranking_response(raw, [2, 0, 1]) is None
-        rows = [{"q": "q", "a": t} for t in ("x", "y")]
-        assert _comparative(rows, _BadJudge([raw])) == []
-
-
 class TestThinkBlocks:
-    """#21: only the text after a closed </think> block is parsed."""
+    """Only the text after a closed </think> block is parsed."""
 
     def test_score_draft_in_think_is_ignored(self):
         """A draft score inside <think> does not count, in either parsing path."""
-        raw = '<think>Draft: {"score": 2, "explanation": "first"}</think>\n'
-        assert _parse_score_response(
-            raw + '{"score": 5, "explanation": "final"}', 5
-        ) == (
+        raw = '<think>Draft: {"score": 2, "feedback": "first"}</think>\n'
+        assert _parse_score_response(raw + '{"feedback": "final", "score": 5}', 5) == (
             5,
             "final",
         )
@@ -1256,14 +1295,8 @@ class TestThinkBlocks:
         )
 
     def test_unclosed_think_is_unparseable(self):
-        """An unclosed <think> block gives no score and no ranking."""
+        """An unclosed <think> block gives no score."""
         assert _parse_score_response('<think>{"score": 5}', 5) == (None, None)
-        assert _parse_ranking_response('<think>{"ranking": ["A"]}', [0, 1]) is None
-
-    def test_ranking_draft_in_think_is_ignored(self):
-        """The final ranking after </think> is used, not the draft."""
-        raw = '<think>{"ranking": ["C","B","A"]}</think>{"ranking": ["A","B","C"]}'
-        assert _parse_ranking_response(raw, [2, 0, 1]) == [2, 0, 1]
 
     def test_last_json_object_wins(self):
         """Outside think blocks the last object with the key counts, like the regex."""
@@ -1274,8 +1307,8 @@ class TestThinkBlocks:
         """The repro: final score 5 after a draft of 1 keeps the row."""
         judge = _BadJudge(
             [
-                '<think>A first guess would be {"score": 1, "explanation": "x"}'
-                '</think>\n{"score": 5, "explanation": "final"}'
+                '<think>A first guess would be {"feedback": "x", "score": 1}'
+                '</think>\n{"feedback": "final", "score": 5}'
             ]
         )
         kept = by_llm_score(
@@ -1287,39 +1320,6 @@ class TestThinkBlocks:
             explanation_field="why",
         )
         assert kept == [{**_THRESHOLD_DATA[0], "why": ["final"]}]
-
-    def test_comparative_unclosed_think_drops_the_group(self):
-        """A comparative answer with an unclosed <think> counts as unparseable."""
-        rows = [{"q": "q", "a": t} for t in ("x", "y")]
-        assert _comparative(rows, _BadJudge(['<think>{"ranking": ["A", "B"]}'])) == []
-
-
-class TestComparativeJudgesDiffer:
-    """#37: several comparative judges never get identical prompts at temperature 0."""
-
-    def test_several_judges_need_temperature(self):
-        """num_judges > 1 at temperature 0 raises, like by_llm_score."""
-        rows = [{"q": "q", "a": t} for t in ("x", "y")]
-        with pytest.raises(ValueError, match="temperature must be > 0.0"):
-            by_comparative_judge(
-                rows,
-                group_by="q",
-                model=_RankingJudge(),
-                input_field="q",
-                output_field="a",
-                num_judges=3,
-            )
-
-    @pytest.mark.parametrize("size", [2, 3, 4])
-    def test_rotations_balance_positions(self, size):
-        """With size judges, every candidate is shown once in every position."""
-        rows = [{"q": "q", "a": f"c{i}"} for i in range(size)]
-        judge = _RankingJudge()
-        _comparative(rows, judge, num_judges=size)
-        orders = [list(_shown(p).values()) for p in judge.prompts]
-        assert len(set(map(tuple, orders))) == size
-        for position in range(size):
-            assert sorted(o[position] for o in orders) == sorted(r["a"] for r in rows)
 
 
 class TestScoreValues:
