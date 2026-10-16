@@ -14,7 +14,7 @@ from pyforger._render import render_scores
 from pyforger.acquire.model import GenerateResult, Model
 from pyforger.filter import by_comparative_difficulty, by_pass_at_k, program_verifier
 from pyforger.filter.model_difficulty import answer_segment
-from pyforger.op import op
+from pyforger.op import op, trace
 from pyforger.steps import pipeline, step
 
 # An independent copy of the outcomes contract, rate math, and selection rule,
@@ -667,6 +667,21 @@ class _ConcurrencyProbe:
         return prediction == row["answer"]
 
 
+class _CountingVerifier:
+    """Exact-match verifier recording each prediction it grades."""
+
+    def __init__(self) -> None:
+        self.graded: list[str] = []
+
+    def cache_key(self) -> tuple:
+        """Leave the call log out of the cache key."""
+        return ("counting",)
+
+    def __call__(self, prediction: str, row: dict) -> bool:
+        self.graded.append(prediction)
+        return prediction == row["answer"]
+
+
 class TestCompletionsAndVerifiers:
     """completions_field, optional ground truth, and concurrent verifiers."""
 
@@ -755,6 +770,23 @@ class TestCompletionsAndVerifiers:
         verify = _ConcurrencyProbe()
         _pass_at_k(self.ROWS, model, metric=verify, verifier_workers=1, max_rate=1.0)
         assert verify.peak == 1
+
+    def test_verifier_workers_not_in_cache_key(self):
+        """A new verifier_workers is a cache hit: no new samples or grades."""
+        verify = _CountingVerifier()
+        model = ScriptedModel("m", self.SCRIPT)
+        first = _pass_at_k(self.ROWS, model, metric=verify, verifier_workers=1)
+        again = _pass_at_k(self.ROWS, model, metric=verify, verifier_workers=4)
+        assert again == first
+        assert len(verify.graded) == 16 and len(model.calls) == 1
+        hits = [r.cache_hit for r in trace() if r.op_name == "filter.by_pass_at_k"]
+        assert hits == [False, True]
+        weak, strong = ScriptedModel("weak", WEAK), ScriptedModel("strong", STRONG)
+        for workers in (1, 3):
+            _comparative(
+                weak=weak, strong=strong, metric=verify, verifier_workers=workers
+            )
+        assert len(weak.calls) == len(strong.calls) == 1
 
     def test_verifier_error_propagates(self):
         """An exception in one verifier call fails the filter."""

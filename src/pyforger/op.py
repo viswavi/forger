@@ -184,6 +184,7 @@ def op(
     *,
     name: str | None = None,
     cache: bool = True,
+    unkeyed: tuple[str, ...] = (),
 ) -> Any:
     """Decorator: cache output on disk, content-addressed by inputs.
 
@@ -194,6 +195,13 @@ def op(
 
         @op(name="custom", cache=False)
         def debug_op(x): ...
+
+        @op(unkeyed=("max_workers",))
+        def run_all(items, *, max_workers=8): ...
+
+    ``unkeyed`` names parameters left out of the cache key: knobs that change
+    how the op runs but not what it returns, e.g. a worker count. So
+    ``run_all(rows, max_workers=2)`` is a cache hit after ``run_all(rows)``.
 
     Pass ``_no_cache=True`` at call time to bypass the cache for one call,
     including the ops that call makes. Pass ``_cache_only=True`` to return only
@@ -213,6 +221,8 @@ def op(
         except (TypeError, ValueError) as exc:
             # Built-in functions and some callables don't have inspectable signatures.
             logger.debug("inspect.signature failed for %s: %s", fn, exc)
+            if unkeyed:
+                raise TypeError("unkeyed needs a function with a signature") from exc
             sig = None
         else:
             # These names are reserved for per-call cache controls and yield checks.
@@ -223,6 +233,9 @@ def op(
                         "Forger functions decorated with @op cannot use the reserved "
                         + f"argument name '{reserved}'."
                     )
+            for param in unkeyed:
+                if param not in sig.parameters:
+                    raise TypeError(f"unkeyed names {param!r}, not a parameter")
 
         op_name = name or f"{fn.__module__}.{fn.__qualname__}"
         # Sanitize op_name to be a safe directory name
@@ -294,6 +307,8 @@ def op(
                     args = bound.args
                     kwargs = bound.kwargs
                     normalized = dict(bound.arguments)
+                    for param in unkeyed:
+                        normalized.pop(param, None)
                 except TypeError:
                     if _cache_only:
                         raise

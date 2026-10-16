@@ -64,7 +64,7 @@ def answer_segment(text: str) -> str | None:
     return text.strip() or None
 
 
-@op(name="filter.by_comparative_difficulty")
+@op(name="filter.by_comparative_difficulty", unkeyed=("verifier_workers",))
 def by_comparative_difficulty(
     items: list[dict],
     *,
@@ -207,7 +207,7 @@ def by_comparative_difficulty(
     return kept
 
 
-@op(name="filter.by_pass_at_k")
+@op(name="filter.by_pass_at_k", unkeyed=("verifier_workers",))
 def by_pass_at_k(
     items: list[dict],
     *,
@@ -391,7 +391,7 @@ def _predictions(
     return completions
 
 
-@op(name="filter.model_difficulty.grades")
+@op(name="filter.model_difficulty.grades", unkeyed=("verifier_workers",))
 def _grades(
     items: list[dict],
     completions: list[list[str | None]],

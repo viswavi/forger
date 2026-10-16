@@ -25,7 +25,7 @@ from pyforger.op import op
 from pyforger.utils import get_field
 
 
-@op(name="filter.by_tests")
+@op(name="filter.by_tests", unkeyed=("max_workers",))
 def by_tests(
     items: list[dict],
     *,
@@ -63,7 +63,8 @@ def by_tests(
         checker: ``(stdout, expected) -> bool``; default equal up to
             whitespace.
         timeout_s: Wall-clock limit per run, in seconds.
-        memory_mb: Address-space limit per run (Linux only; None for none).
+        memory_mb: Address-space limit per run (None for none; not enforced
+            on macOS).
         command: Interpreter command with ``{file}`` for non-Python programs.
         suffix: File name suffix for the program.
         max_workers: Runs at a time (default ``min(8, cpu count)``).
@@ -138,7 +139,8 @@ def program_verifier(
             whitespace.
         timeout_s: Wall-clock limit per test run, in seconds (a test's own
             ``"timeout_s"`` overrides it).
-        memory_mb: Address-space limit per run (Linux only; None for none).
+        memory_mb: Address-space limit per run (None for none; not enforced
+            on macOS).
         command: Interpreter command with ``{file}`` for non-Python programs.
         suffix: File name suffix for the program.
 

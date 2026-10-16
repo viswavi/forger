@@ -251,6 +251,31 @@ def test_no_cache_applies_to_nested_ops() -> None:
     assert calls == [1, 1]
 
 
+def test_unkeyed_args_are_left_out_of_the_cache_key() -> None:
+    """Changing an unkeyed argument, given or defaulted, is a cache hit."""
+    calls = []
+
+    @op(name="test.unkeyed", unkeyed=("workers",))
+    def double(xs, *, workers=1):
+        calls.append(workers)
+        return [x * 2 for x in xs]
+
+    assert double([1, 2]) == [2, 4]
+    assert double([1, 2], workers=8) == [2, 4]
+    assert double([1, 2], workers=8, _cache_only=True) == [2, 4]
+    assert double([3]) == [6]
+    assert calls == [1, 1]
+
+
+def test_unkeyed_must_name_a_parameter() -> None:
+    """A misspelled unkeyed name fails at decoration time."""
+    with pytest.raises(TypeError, match="'max_wokers', not a parameter"):
+
+        @op(unkeyed=("max_wokers",))
+        def _sample(x: int, *, max_workers: int = 1) -> int:
+            return x
+
+
 def test_cache_written_under_the_old_key_is_still_found(monkeypatch) -> None:
     """Entries cached under the memoized-pickle key are adopted, not recomputed."""
     calls = []

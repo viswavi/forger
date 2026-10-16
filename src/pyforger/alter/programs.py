@@ -12,7 +12,7 @@ op's ``timeout_s`` for that test).
 
 Each run is its own process, started with an empty environment except
 ``PATH`` and the locale (so no API keys), in a fresh temporary directory,
-with a wall-clock timeout and limits on memory (Linux only) and output size.
+with a wall-clock timeout and limits on memory (not on macOS) and output size.
 Runs use threads and no signals, so the ops work from any thread.
 
 This is NOT a security sandbox. The program runs as your user, with your
@@ -40,8 +40,9 @@ from pyforger.utils import get_field, get_formatted_logger
 Checker = Callable[[str, str], bool]
 
 # The child sets its own limits and then execs the program, so no preexec_fn
-# (unsafe with threads) is needed. Limits survive exec. macOS rejects
-# RLIMIT_AS, so the memory limit is skipped there.
+# (unsafe with threads) is needed. Limits survive exec. A limit of 0 is not
+# set, and one the system rejects is skipped (macOS rejects RLIMIT_AS, so
+# run_program passes 0 there).
 _BOOTSTRAP = """\
 import os, sys
 try:
@@ -124,9 +125,14 @@ def run_program(
     """
     if os.name != "posix":
         raise OSError("run_program needs a POSIX system (Linux or macOS)")
-    if memory_mb and sys.platform == "darwin" and not _MAC_MEMORY_WARNED.is_set():
-        _MAC_MEMORY_WARNED.set()
-        _logger().warning("memory_mb is not enforced on macOS (no RLIMIT_AS)")
+    memory_bytes = (memory_mb or 0) << 20
+    if memory_bytes and sys.platform == "darwin":
+        # macOS has no working RLIMIT_AS (setrlimit fails), so runs are not
+        # memory-limited there; warn once per process.
+        memory_bytes = 0
+        if not _MAC_MEMORY_WARNED.is_set():
+            _MAC_MEMORY_WARNED.set()
+            _logger().warning("memory_mb is not enforced on macOS (no RLIMIT_AS)")
     workdir = tempfile.mkdtemp(prefix="forger_run_")
     try:
         program = os.path.join(workdir, "main" + suffix)
@@ -139,7 +145,7 @@ def run_program(
             "-I",
             "-c",
             _BOOTSTRAP,
-            str((memory_mb or 0) << 20),
+            str(memory_bytes),
             str(output_limit),
             *target,
         ]
@@ -289,7 +295,7 @@ def _default_workers() -> int:
     return min(8, os.cpu_count() or 1)
 
 
-@op(name="alter.run_programs")
+@op(name="alter.run_programs", unkeyed=("max_workers",))
 def run_programs(
     items: list[dict],
     *,
@@ -327,7 +333,8 @@ def run_programs(
         checker: ``(stdout, expected) -> bool``; default ``outputs_match``
             (equal up to whitespace).
         timeout_s: Wall-clock limit per run, in seconds.
-        memory_mb: Address-space limit per run (Linux only; None for none).
+        memory_mb: Address-space limit per run (None for none). Not enforced
+            on macOS, which has no working ``RLIMIT_AS``.
         max_output_mb: Stdout size at which a run stops with ``output_limit``.
         max_chars: Characters of stdout (first) and stderr (last) kept per
             result. None keeps them whole, e.g. to use a reference program's

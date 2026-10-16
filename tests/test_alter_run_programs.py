@@ -92,6 +92,13 @@ class TestRunProgram:
         assert result["status"] == "runtime_error"
         assert "MemoryError" in result["stderr"]
 
+    @pytest.mark.skipif(sys.platform != "darwin", reason="macOS behavior")
+    def test_memory_limit_skipped_on_macos(self):
+        """On macOS, which has no working RLIMIT_AS, memory_mb is skipped."""
+        result = run_program("x = bytearray(1 << 29)\nprint(len(x))", memory_mb=64)
+        assert result["status"] == "ok"
+        assert result["stdout"].strip() == str(1 << 29)
+
     def test_other_interpreter(self):
         """A command runs non-Python programs, with {file} for the program."""
         result = run_program(
@@ -213,6 +220,25 @@ class TestRunProgramsOp:
         run_programs(self.ROWS, code_field="code")
         hits = [r.cache_hit for r in trace() if r.op_name == "alter.run_programs"]
         assert hits == [False, True]
+
+    def test_max_workers_not_in_cache_key(self):
+        """A new worker count is a cache hit, for run_programs and by_tests."""
+        run_programs(self.ROWS, code_field="code", max_workers=1)
+        run_programs(self.ROWS, code_field="code", max_workers=4)
+        by_tests(self.ROWS, code_field="code", max_workers=1)
+        by_tests(self.ROWS, code_field="code", max_workers=4)
+        hits = [
+            (r.op_name, r.cache_hit)
+            for r in trace()
+            if r.op_name in ("alter.run_programs", "filter.by_tests")
+        ]
+        assert hits == [
+            ("alter.run_programs", False),
+            ("alter.run_programs", True),
+            ("alter.run_programs", False),  # by_tests runs only code and tests
+            ("filter.by_tests", False),
+            ("filter.by_tests", True),
+        ]
 
     def test_max_workers_validated(self):
         """max_workers must be positive."""
