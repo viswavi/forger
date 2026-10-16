@@ -48,7 +48,7 @@ T = TypeVar("T")
 
 # Part of every cache key. Bump it when what goes into keys changes, so entries
 # written under the old layout are never read as hits. 2: plain-data globals
-# are hashed by value; functions no longer carry their __module__.
+# are hashed by value; functions no longer carry their __module__ or docstrings.
 _CACHE_KEY_VERSION = 2
 
 

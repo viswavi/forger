@@ -304,6 +304,8 @@ and tuples, lists, dicts, and sets of those, read anywhere in the body, includin
 functions. Editing a `PROMPT = "..."` constant or a config dict therefore invalidates the steps that read it. Globals
 are read at each call; closure values are fixed when the function is decorated. The module name is not part of the
 key, so a step run as `python pipeline.py` (`__main__`) and the same step imported from `pipeline` share cache entries.
+Docstrings (of the function and of functions nested in it) are not part of the key either, so editing a step's
+description keeps its cache.
 
 Not in the key: the bodies of helper functions and classes the op calls (only their names), files read from disk,
 environment variables, other objects held in globals (e.g. a model or client, or an object mutated at runtime), and

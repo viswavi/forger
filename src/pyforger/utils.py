@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import inspect
 import logging
 import pickle
 from typing import Any
@@ -56,12 +57,42 @@ def get_field(item: dict, field: str, caller: str) -> Any:
 
 _CODE_T = type((lambda: None).__code__)
 
+# Python 3.14+ flags code whose co_consts[0] is its docstring.
+_CO_HAS_DOCSTRING = getattr(inspect, "CO_HAS_DOCSTRING", None)
+# Their co_consts[0] is an ordinary constant, e.g. "pre" in ("pre" + s for s in x).
+_NO_DOCSTRING_NAMES = ("<genexpr>", "<listcomp>", "<setcomp>", "<dictcomp>")
+
+
+def _has_docstring(code: Any) -> bool:
+    """True when ``code.co_consts[0]`` is the function's docstring.
+
+    In 3.12 and 3.13 the compiler puts a function's docstring, or None when it
+    has none, first in co_consts, so ``def f(): return "x"`` has consts
+    ``(None, "x")``. Class bodies (no CO_OPTIMIZED) and generator expressions
+    do not reserve that slot.
+    """
+    if not code.co_consts:
+        return False
+    if _CO_HAS_DOCSTRING is not None:
+        return bool(code.co_flags & _CO_HAS_DOCSTRING)
+    return (
+        bool(code.co_flags & inspect.CO_OPTIMIZED)
+        and code.co_name not in _NO_DOCSTRING_NAMES
+        and isinstance(code.co_consts[0], str)
+    )
+
 
 def _code_key(code: Any) -> list[Any]:
-    """Behavior-only key for a code object (to avoid repeating code execution)."""
+    """Behavior-only key for a code object (to avoid repeating code execution).
+
+    Docstrings are left out (keyed as None, like a function without one), so
+    fixing a typo in a step's description keeps its cache.
+    """
     consts = [
         _code_key(c) if isinstance(c, _CODE_T) else canonical(c) for c in code.co_consts
     ]
+    if _has_docstring(code):
+        consts[0] = None
     return [
         code.co_code,
         consts,

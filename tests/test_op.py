@@ -369,6 +369,51 @@ def test_main_and_imported_function_share_a_key() -> None:
     assert not trace()[-1].cache_hit
 
 
+def test_docstrings_are_not_in_the_key() -> None:
+    """Editing a step's description keeps its cache; its code still counts."""
+    documented, _ = _module_fn(
+        'def f(rows):\n    """Keep the short rows."""\n    return rows'
+    )
+    retyped, _ = _module_fn(
+        'def f(rows):\n    """Keep the short rows (fixed typo)."""\n    return rows'
+    )
+    undocumented, _ = _module_fn("def f(rows):\n    return rows")
+    assert canonical(documented) == canonical(retyped) == canonical(undocumented)
+
+    op(documented, name="step.described")(["q"])
+    op(retyped, name="step.described")(["q"])
+    assert trace()[-1].cache_hit
+
+
+def test_a_first_string_constant_is_not_taken_for_a_docstring() -> None:
+    """Without a docstring, a string the body starts with is still keyed."""
+    first, _ = _module_fn('def f(rows):\n    "Answer: " + rows[0]\n    return rows')
+    second, _ = _module_fn('def f(rows):\n    "Reply: " + rows[0]\n    return rows')
+    assert first.__doc__ is None
+    assert canonical(first) != canonical(second)
+    genexpr = "def f(rows):\n    return list({!r} + r for r in rows)"
+    assert canonical(_module_fn(genexpr.format("a"))[0]) != canonical(
+        _module_fn(genexpr.format("b"))[0]
+    )
+
+
+def test_nested_docstrings_are_not_in_the_key() -> None:
+    """An inner function's docstring is ignored; its string constants are not."""
+    source = (
+        "def f(rows):\n"
+        "    def fmt(r):\n"
+        '        """{doc}"""\n'
+        "        return {prefix!r} + r\n"
+        "    return [fmt(r) for r in rows]"
+    )
+
+    def key(doc: str, prefix: str) -> object:
+        return canonical(_module_fn(source.format(doc=doc, prefix=prefix))[0])
+
+    assert key("Prefix a row.", "Q: ") == key("Prefix one row.", "Q: ")
+    assert key("Prefix a row.", "Q: ") != key("Prefix a row.", "A: ")
+
+
 def test_builtins_keep_their_module_in_the_key() -> None:
     """Code-less callables are told apart by module, e.g. math.sqrt and cmath.sqrt."""
     import cmath
