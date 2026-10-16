@@ -8,6 +8,7 @@ from pyforger.filter.agreement import (
     by_group_agreement,
     by_rouge_l_agreement,
 )
+from pyforger.filter.difficulty import by_judged_difficulty
 from pyforger.filter.diversity import by_exact_match, by_n_gram_overlap, by_rouge_l
 from pyforger.filter.format import by_invalid_response, by_keyword_blocklist, by_length
 from pyforger.filter.judge import by_comparative_judge, by_llm_score
@@ -23,6 +24,7 @@ __all__ = [
     "by_exact_match",
     "by_group_agreement",
     "by_invalid_response",
+    "by_judged_difficulty",
     "by_keyword_blocklist",
     "by_length",
     "by_llm_score",
