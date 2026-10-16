@@ -195,6 +195,7 @@ Remove rows by criterion. If a filter empties the list, downstream operations re
 | `by_invalid_response` | Drop empty, identical, or near-identical responses to the instruction. |
 | `by_keyword_blocklist` | Drop responses with certain keywords; default blocklist targets common refusal phrases. |
 | `by_llm_score` | LLM-as-judge with optional multi-judge consensus. |
+| `by_comparative_judge` | LLM judge ranks the candidates for one input side by side; keeps the top `keep` per group. |
 | `by_syntax` | Validate JSON, YAML, Python, or XML, optionally against required keys or a JSON schema. |
 
 These are important for assuring quality and diversity in generated data, and one should experiment with their parameters
@@ -213,6 +214,45 @@ fraction of judges scoring at least `score_threshold`, which is what `agreement_
 `by_llm_score` caches the judge scores separately from its thresholds, so re-running it with a different
 `score_threshold` or `agreement_threshold` makes no new judge calls (`_no_cache=True` re-asks the judges;
 `_cache_only=True` finds only thresholds that were run before).
+
+##### LLM judges
+
+Both judges send all their calls (rows × `num_judges`) in one `model.generate_batch` call, one `n=1` request each,
+so they run concurrently. Judge answers are read leniently: the first JSON object with the expected key, also inside
+code fences or prose, else a `"score": <number>` (or `"ranking": [...]`) pattern. Unparseable answers count as no
+vote.
+
+- **Absolute (`by_llm_score`)** rates each row alone on 1 to `max_score`. Absolute judges tend to score nearly
+  everything at the top of the scale, so check the step report's histogram; if it is piled up at the top, the
+  threshold is not separating anything. Use it for a pass/fail floor (refusals, wrong format, off-topic).
+- **Comparative (`by_comparative_judge`)** ranks the candidates for the same input against each other, which
+  discriminates far better. Use it whenever there are several candidates per input (e.g. `n=4` samples per prompt,
+  grouped by `group_by="prompt"`). The judge sees the input once and the candidates labelled A, B, C, ..., answers
+  `{"ranking": ["C", "A", "B"], "explanation": "..."}`, and the top `keep` per group survive. With `num_judges > 1`
+  each judge sees its own shuffled order (seeded by `seed`) to spread position bias, and rankings combine by Borda
+  count; ties go to the earlier row. Groups of at most `keep` rows are kept without a call. The report histogram
+  shows each row's rank in its group. Judge answers are cached apart from `keep`.
+
+`prompt_template` replaces either judge's prompt: a format string or a callable taking a dict. The placeholders are
+the row's fields (for the comparative judge, the group's first row) plus `{input}`, `{criteria}`, and for
+`by_llm_score` `{output}` and `{max_score}`, for `by_comparative_judge` `{candidates}` (the labelled outputs),
+`{labels}` (`"A, B, C"`), and `{num_candidates}`. Write literal braces as `{{ }}`. If the prompt does not contain the
+JSON key in double quotes (`"score"` or `"ranking"`), the answer-format line is appended for you.
+`by_llm_score(..., score_field="judge_score", explanation_field="judge_why")` adds the judges' mean score and their
+list of explanations to kept rows.
+
+```python
+best = filter.by_comparative_judge(
+    rows,                       # 4 candidate answers per question
+    group_by="question",
+    model=judge,
+    input_field="question",
+    output_field="answer",
+    criteria="correctness, then clarity",
+    keep=1,
+    num_judges=3,
+)
+```
 
 #### `pyforger.inspect`
 

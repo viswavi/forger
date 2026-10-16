@@ -76,7 +76,10 @@ class _StableJudge:
     def cache_key(self) -> tuple:
         return ("_StableJudge",)
 
-    def generate(self, prompt, *, n=1, temperature=None, max_tokens=None):
+    def generate_batch(self, prompts, *, n=1, temperature=None, max_tokens=None):
+        return [self._generate(prompt, n) for prompt in prompts]
+
+    def _generate(self, prompt, n):
         self.call_count += 1
         output = prompt.split("Output: ")[1].split("\n")[0]
         if output == "garbled":
