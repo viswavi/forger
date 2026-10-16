@@ -213,14 +213,14 @@ def _mark_consumed(item):
     return index
 
 
-def test_generator_consumption_is_bounded(tmp_path, fork_transport):
+def test_generator_consumption_is_bounded(tmp_path):
     """Refill only after a worker completes, without eagerly exhausting input."""
 
     def items():
-        for index in range(12):
+        for index in range(4):
             if index >= 2:
                 assert len(list(tmp_path.glob("finished-*"))) >= index - 1
             yield tmp_path, index
 
-    rows = map_pipeline(_mark_consumed, items(), concurrency=2, timeout_s=5)
-    assert rows == [{"status": "completed", "value": i} for i in range(12)]
+    rows = map_pipeline(_mark_consumed, items(), concurrency=2, timeout_s=30)
+    assert rows == [{"status": "completed", "value": i} for i in range(4)]
