@@ -5,6 +5,7 @@ construct the appropriate source for a backend (web, wiki, HF, arXiv, S2).
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from pyforger.acquire.sources import (
@@ -41,11 +42,44 @@ def retrieve(
     )
     all_rows: list[dict[str, Any]] = []
     for q in resolved_queries:
-        rows = source.fetch(mode, query=q, n=n, seed=seed, **kwargs)
-        for row in rows:
-            row["query"] = q
-        all_rows.extend(rows)
+        all_rows.extend(_fetch(source, mode, q, n, seed, kwargs))
     return all_rows
+
+
+def _fetch(
+    source: RetrievalSource,
+    mode: RetrieveMode,
+    query: str | None,
+    n: int,
+    seed: int | None,
+    kwargs: dict[str, Any],
+) -> list[dict]:
+    """One ``source.fetch`` call, each row stamped with its ``"query"``."""
+    rows = source.fetch(mode, query=query, n=n, seed=seed, **kwargs)
+    for row in rows:
+        row["query"] = query
+    return rows
+
+
+@tracked("acquire.retrieve")
+def _retrieve_concurrently(
+    source: S2RetrievalSource,
+    mode: RetrieveMode,
+    *,
+    queries: list[str],
+    n: int,
+    seed: int | None,
+    max_workers: int,
+    **kwargs: Any,
+) -> list[dict]:
+    """``retrieve`` with up to ``max_workers`` queries in flight; rows keep order."""
+    source._get_client()  # one shared client, created before the threads start
+
+    def fetch(query: str) -> list[dict]:
+        return _fetch(source, mode, query, n, seed, kwargs)
+
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(queries))) as pool:
+        return [row for rows in pool.map(fetch, queries) for row in rows]
 
 
 def retrieve_from_web(
@@ -123,8 +157,32 @@ def retrieve_from_s2(
     queries: list[str] | None = None,
     n: int = 10,
     seed: int | None = None,
+    max_workers: int = 1,
     **kwargs: Any,
 ) -> list[dict]:
-    """Fetch papers from Semantic Scholar."""
+    """Fetch papers from Semantic Scholar.
+
+    Each row has ``text`` (title and abstract), ``id``, ``title``, ``summary``
+    (the abstract), and ``query``. A query asks for only ``n`` results.
+
+    ``max_workers`` queries run at a time; rows keep the order of
+    ``queries``. The default is one at a time, because an API key is usually
+    limited to 1 request per second and keyless requests share a throttled
+    pool; the client retries a rate-limited request after 5 to 60 seconds,
+    so more workers than the limit allows are slower, not faster. Raise it
+    when your key's limit allows, e.g. ``max_workers=3``.
+    """
+    if max_workers < 1:
+        raise ValueError("max_workers must be at least 1")
     source = S2RetrievalSource(**kwargs)
-    return retrieve(source, mode=mode, queries=queries, n=n, seed=seed, **kwargs)
+    if max_workers == 1 or queries is None or len(queries) <= 1:
+        return retrieve(source, mode=mode, queries=queries, n=n, seed=seed, **kwargs)
+    return _retrieve_concurrently(
+        source,
+        mode,
+        queries=list(queries),
+        n=n,
+        seed=seed,
+        max_workers=max_workers,
+        **kwargs,
+    )

@@ -57,7 +57,7 @@ class TestS2RetrievalSourceFetch:
         mock_client.search_paper.assert_called_once()
         call_args, call_kw = mock_client.search_paper.call_args
         assert call_args[0] == "quantum"
-        assert call_kw.get("limit") == 100
+        assert call_kw.get("limit") == 2  # only as many as requested
 
     @patch("pyforger.acquire.sources.SemanticScholar")
     def test_query_mode_empty_query_uses_default(
@@ -102,7 +102,7 @@ class TestS2RetrievalSourceFetch:
         assert [it["id"] for it in items1] == [it["id"] for it in items2]
         call_args, call_kw = mock_client.search_paper.call_args
         assert call_args[0] == "Computer Science"
-        assert call_kw.get("limit") == 100
+        assert call_kw.get("limit") == 30  # the pool of n * 10
 
     def test_result_to_item_normalization(self) -> None:
         """_result_to_item produces text, id, title, summary; normalized whitespace."""
@@ -154,6 +154,17 @@ class TestS2RetrievalSourceFetch:
 
         assert len(items) == 250
         assert next_page_calls[0] >= 2
+        assert mock_client.search_paper.call_args[1].get("limit") == 100
+
+    @patch("pyforger.acquire.sources.SemanticScholar")
+    def test_query_mode_n_zero_makes_no_request(
+        self, mock_scholar_cls: MagicMock
+    ) -> None:
+        """n=0 returns no rows without calling the API (limit 0 is invalid)."""
+        mock_client = MagicMock()
+        mock_scholar_cls.return_value = mock_client
+        assert S2RetrievalSource().fetch(RetrieveMode.QUERY, query="x", n=0) == []
+        mock_client.search_paper.assert_not_called()
 
     @patch("pyforger.acquire.sources.SemanticScholar")
     def test_random_mode_uses_bulk_when_pool_exceeds_1000(
