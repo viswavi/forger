@@ -183,7 +183,7 @@ Generate or retrieve new rows.
 | `retrieve_from_wiki` | no | Wikipedia backend (QUERY or RANDOM). |
 | `retrieve_from_hf` | no | Hugging Face datasets backend. |
 | `retrieve_from_arxiv` | no | arXiv backend. |
-| `retrieve_from_s2` | no | Semantic Scholar backend. |
+| `retrieve_from_s2` | no | Semantic Scholar backend; `max_workers` runs queries concurrently. |
 | `RetrievalSource`, `RetrieveMode` |   | Abstract base class and mode enum (`QUERY`, `RANDOM`). |
 | `WebRetrievalSource`, `WikiRetrievalSource`, `HFRetrievalSource`, ... |   | Per-backend source classes. |
 | `ArxivRetrievalSource`, `S2RetrievalSource` |   |Per-backend source classes. |
@@ -196,6 +196,12 @@ validation, making this a superior choice to calling `Model` directly. Any reaso
 contained in the output dict under a `thinking_trace` key. Inline traces are not extracted: `LocalModel` leaves `<think>`
 blocks in the completion text and supplies `None` for that metadata; use `split_reasoning` to separate them out.
 
+`n` is per query, so three queries with `n=5` return up to 15 rows. A Semantic Scholar query asks the API for only `n`
+results. `retrieve_from_s2` runs one query at a time by default, because an API key is usually limited to 1 request
+per second and keyless requests share a throttled pool; a rate-limited request is retried after 5 to 60 seconds, so
+workers beyond the limit are slower, not faster. With a higher limit, e.g.
+`retrieve_from_s2(queries=queries, n=4, max_workers=3)` runs three queries at a time and keeps rows in query order.
+
 #### `pyforger.alter`
 
 Transform rows without removing items.
@@ -205,7 +211,8 @@ Transform rows without removing items.
 | `generate_from_context` |  LLM-based generation given upstream data (sample_from_LLM with wrapped dependencies) |
 | `translate.to_language` | LLM translation of selected fields into a target natural language. |
 | `translate.to_code` | LLM conversion of fields into code in a target programming language. Strips markdown fences. |
-| `execute_code` | Execute Python code in a sandboxed environment and return the result. |
+| `execute_code` | Call the last function in each row's code with one argument, in-process (RestrictedPython). |
+| `run_programs` | Run each row's stdin/stdout program on its tests in subprocesses; record per-test results. |
 | `dynamic_step` | Run dynamic input-specific sub-pipelines that return a string list per input. |
 | `dynamic_step_source` | Generate or inspect sub-pipeline generated for a single input. |
 
@@ -237,6 +244,66 @@ student = LocalModel("Qwen/Qwen3-4B", max_model_len=40960)
 rows = self_taught_reasoner(problems, solver_prompt, student, n=8, reference_field="final_answer")
 ```
 
+##### Running programs against tests
+
+`execute_code` runs a function, not a program: it calls the last function defined in `code_field` with the value of
+`arg_field`, in-process. For programs that read stdin and write stdout, use `alter.run_programs`, which runs each
+row's program on each of its tests and records what happened. A test is a dict: `{"input": "3\n1 2 3\n", "output":
+"6"}`. `"output"` is optional: without it the run is recorded but not graded, e.g. to collect a brute-force
+solution's answers as expected outputs (pass `max_chars=None` to keep whole outputs). `"args"` gives command-line
+arguments (e.g. `["7", "small"]` for a test generator) and `"timeout_s"` overrides the op's timeout for that test.
+
+Each row gets `test_results` (`result_field`), one result per test: `{"status", "passed", "exit_code", "timed_out",
+"stdout", "stderr", "seconds"}`. `status` is `"ok"`, `"wrong_answer"`, `"runtime_error"` (non-zero exit or a signal;
+running out of memory usually shows up here as a `MemoryError`), `"timeout"`, or `"output_limit"` (see below).
+`passed` is `True`, `False`, or `None` for an ungraded test. A test whose `"input"` is missing or `None` gets empty
+stdin. Output is compared with
+`outputs_match`, equality up to whitespace (`"1 2\n3"` matches `"1 2 3"`); pass `checker=(stdout, expected) -> bool`
+to change it. A row whose code is missing or empty gets `None`. Programs run in Python (this interpreter, with `-I`)
+unless `command` names another interpreter, e.g. `command=["node", "{file}"], suffix=".js"`.
+
+```python
+from pyforger import alter, filter
+from pyforger.alter.programs import last_code_block
+
+rows = [{"statement": "Read two integers and print their sum.",
+         "solution": "a, b = map(int, input().split())\nprint(a + b)",
+         "tests": [{"input": "1 2\n", "output": "3"}, {"input": "5 5\n", "output": "10"}]}]
+rows = alter.run_programs(rows, code_field="solution")
+# rows[0]["test_results"][0] == {"status": "ok", "passed": True, "exit_code": 0, "timed_out": False,
+#                                "stdout": "3\n", "stderr": "", "seconds": 0.04}
+
+# Keep reference solutions that pass their statement's examples.
+verified = filter.by_tests(rows, code_field="solution", tests_field="tests")
+
+# Grade a student's sampled programs with the same tests.
+hard = filter.by_pass_at_k(verified, model=student, input_field="statement",
+                           metric=filter.program_verifier("tests"), completions_field="samples")
+```
+
+`filter.by_tests` keeps rows whose program passes at least `min_pass_rate` (default 1.0) of its graded tests; the runs
+are cached apart from `min_pass_rate`, so a new bound runs nothing. `filter.program_verifier` takes the last fenced
+Python block from each sampled answer (`last_code_block`), runs it on the row's tests until one fails, and grades it
+`True` only if all pass (`None` when the row has no graded tests). `extract_code=last_code_block` does the same for
+`run_programs` and `by_tests` when a field holds a model's answer.
+
+Every run is its own process, so the ops are safe to call from threads and run up to `max_workers` (default
+`min(8, cpu count)`) programs at a time. `timeout_s` is wall-clock time, so too many workers on a loaded machine
+turn slow passing runs into `"timeout"`; `max_workers` is part of the cache key, so lowering it and rerunning runs
+the programs again. Each process starts with an empty environment except `PATH` and the locale, so API keys are not
+visible to it, in a fresh temporary directory that is removed afterwards. A run that exceeds `timeout_s` is killed
+with its process group, which holds every process it started unless one left the group (`setsid`, a daemon); such a
+process keeps running. `max_output_mb` (default 64, 0 for none) caps the size of every file a run writes (stdout,
+stderr, and scratch files), and a write past it fails. The status is `"output_limit"` when stdout reached the cap,
+or when the run failed after stderr or a file in its working directory reached it. `memory_mb` (default 2048) caps
+the address space with `RLIMIT_AS` on Linux; macOS has no working `RLIMIT_AS`, so there the limit is skipped and a
+warning says so once. Interpreters that reserve a large address space at startup (e.g. `node`, `java`) may need
+`memory_mb=None` on Linux.
+
+Neither `run_programs` nor `execute_code` is a security sandbox. `execute_code`'s RestrictedPython is a guardrail
+against accidental damage from machine-generated code, not a boundary against adversarial code, and `run_programs`
+runs each program as your user, with your files and network. Run untrusted code at scale in a container or VM.
+
 #### `pyforger.filter`
 
 Remove rows by criterion. If a filter empties the list, downstream operations receive `[]` and return `[]`.
@@ -256,6 +323,10 @@ Remove rows by criterion. If a filter empties the list, downstream operations re
 | `by_comparative_judge` | LLM judge ranks the candidates for one input side by side; keeps the top `keep` per group. |
 | `by_syntax` | Validate JSON, YAML, Python, or XML, optionally against required keys or a JSON schema. |
 | `by_predicate` | Keep rows where `fn(row)` is truthy: a plain Python check that shows in the step report. Not cached. |
+| `by_tests` | Run each row's stdin/stdout program on its tests; keep rows passing at least `min_pass_rate`. |
+| `by_comparative_difficulty` | Keep rows a strong model answers correctly and a weak model does not. |
+| `by_pass_at_k` | Sample `k` answers per row; keep rows whose pass rate is within `[min_rate, max_rate]`. |
+| `program_verifier` | Not an op: a `metric` for the difficulty filters that runs sampled programs on the row's tests. |
 
 These are important for assuring quality and diversity in generated data, and one should experiment with their parameters
 and thresholds to find the right balance for a given use case. For example, `by_rouge_l` with a very low threshold
@@ -327,6 +398,60 @@ best = filter.by_comparative_judge(
     num_judges=3,
     temperature=0.7,            # required with several judges
 )
+```
+
+##### Difficulty filters
+
+`filter.by_comparative_difficulty` and `filter.by_pass_at_k` ask models to solve the task in `input_field` and grade
+each answer against `ground_truth_field` or with a verifier. `by_comparative_difficulty` is the medium-cost filter in
+both cost and reliability: one prediction per row from `weak_model` and from `strong_model`, keeping rows only the
+strong model gets right. `by_pass_at_k` is the most expensive but most reliable difficulty filter: `k` samples per
+row in one `n=k` call, keeping rows whose pass rate (passed / valid grades) is in `[min_rate, max_rate]` (default
+`[0.1, 0.9]`, inclusive).
+`by_judged_difficulty` (least expensive, least reliable) only asks a judge how hard a task looks.
+
+No answer format is imposed. The prompt is the task text itself (`prompt_template` replaces it, e.g. to ask for a
+final `ANSWER: ...` line), and each completion is graded on what `extract_answer` takes from it. The default,
+`pyforger.filter.model_difficulty.answer_segment`, is the text after the completion's closed `<think>` block, stripped
+of surrounding whitespace. `metric` is `"exact_match"` (normalized equality with the reference), `"rouge_l"` (F1 at
+least `rouge_l_threshold`), or a verifier `(prediction, row) -> bool | None`, e.g. `filter.program_verifier("tests")`,
+which runs generated programs on the row's tests (see [Running programs against tests](#running-programs-against-tests)).
+`ground_truth_field` is needed only for `exact_match` and `rouge_l`; a verifier reads the row itself. Verifiers run
+`verifier_workers` (default 8) calls at a time, so one must be safe to call from several threads. It is part of the
+cache key, since a verifier with wall-clock timeouts (e.g. `program_verifier`) can grade differently under load.
+
+By default the whole answer segment is compared, so for `exact_match` the task or `prompt_template` should ask for a
+bare answer, or pass your own `extract_answer(completion) -> str | None`. It replaces the default and sees the raw
+completion, thinking included; e.g. `lambda t: t.rsplit("ANSWER:", 1)[-1].strip()` keeps what follows the last
+`ANSWER:`. By default an empty answer segment or an unclosed `<think>` block grades `None`, as does
+`extract_answer` or a verifier returning `None`: excluded, not failed. A model that does not return exactly `n`
+completions per prompt raises `ValueError`; missing samples are never padded.
+`by_pass_at_k` needs all `k` grades valid unless `min_valid` allows fewer, and a row needs both comparative grades.
+With `outcomes_field` set, kept rows carry their grades as `{group: [True | False | None, ...]}`, one grade per
+sample: `{"model": [...]}` for `by_pass_at_k`, `{"weak": [...], "strong": [...]}` for `by_comparative_difficulty`.
+With `completions_field` set, they carry the raw completions in the same shape and order (`None` for an empty one),
+e.g. to keep a student's passing samples as STaR targets without sampling again. Predictions are cached apart from
+grades, so changing the rate bounds or adding `completions_field` makes no model calls, and changing the metric
+regrades the cached predictions.
+
+```python
+hard = filter.by_pass_at_k(
+    rows,
+    model=student,
+    input_field="problem",
+    ground_truth_field="final_answer",
+    k=8,
+    min_rate=0.125,
+    max_rate=0.5,
+    outcomes_field="evaluations",  # kept rows get e.g. {"model": [True, False, ...]}
+    completions_field="samples",  # and {"model": ["<think>...</think>42", ...]}, in the same order
+)
+targets = [
+    {**row, "response": text}
+    for row in hard
+    for text, ok in zip(row["samples"]["model"], row["evaluations"]["model"])
+    if ok
+]
 ```
 
 #### `pyforger.inspect`
@@ -522,6 +647,11 @@ change an argument such as the seed, or turn the cache off with `Model(..., requ
 `usage["cached_completions"]`, and each op call with hits logs
 `request cache: 57 of 64 completions reused in alter.generate_from_context`. `LocalModel` is not request-cached (local
 inference is free), nor are requests that ask for tools or logprobs, since a replay has only the text.
+
+**Arguments left out of the key.** `@op(unkeyed=("show_progress",))` leaves the named parameters out of the cache
+key. Use it only for knobs that cannot change what the op returns, e.g. a progress bar: `score_all(rows,
+show_progress=False)` is then a cache hit after `score_all(rows)`. A worker count is not such a knob when the op has
+wall-clock timeouts (more workers, more contention, more timeouts), so Forger's own worker counts are keyed.
 
 **Trace.** Import the trace helpers from the module:
 
