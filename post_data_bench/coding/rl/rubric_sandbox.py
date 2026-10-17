@@ -64,14 +64,19 @@ DEFAULT_ALLOWED_IMPORTS = frozenset(
     }
 )
 
+# Default for the guarded hasattr: tells "missing" apart from a None attribute.
+_MISSING = object()
+
 _SAFE_BUILTIN_NAMES = (
     "abs",
     "all",
     "any",
     "bin",
     "bool",
+    "bytearray",
     "bytes",
     "callable",
+    "classmethod",
     "chr",
     "complex",
     "dict",
@@ -93,10 +98,12 @@ _SAFE_BUILTIN_NAMES = (
     "max",
     "min",
     "next",
+    "object",
     "oct",
     "ord",
     "pow",
     "print",
+    "property",
     "range",
     "repr",
     "reversed",
@@ -104,8 +111,10 @@ _SAFE_BUILTIN_NAMES = (
     "set",
     "slice",
     "sorted",
+    "staticmethod",
     "str",
     "sum",
+    "super",
     "tuple",
     "type",
     "zip",
@@ -396,6 +405,16 @@ def _build_globals(
             safe_builtins[n] = getattr(builtins, n)
     safe_builtins["__import__"] = _restricted_import
     safe_builtins["input"] = _input
+    # The builtins would bypass the attribute guard; these go through it.
+    safe_builtins["getattr"] = _getattr_
+
+    def _hasattr(obj: Any, name: str) -> bool:
+        try:
+            return _getattr_(obj, name, _MISSING) is not _MISSING
+        except AttributeError:  # e.g. a refused "_private" name
+            return False
+
+    safe_builtins["hasattr"] = _hasattr
 
     g = dict(safe_globals)
     g["__builtins__"] = safe_builtins
@@ -405,6 +424,8 @@ def _build_globals(
     g["_getattr_"] = _getattr_
     g["_getitem_"] = lambda obj, key: obj[key]
     g["_getiter_"] = iter
+    # Calls with *args / **kwargs, e.g. print(*row) or call_method(code, c, m, *args).
+    g["_apply_"] = lambda fn, *args, **kwargs: fn(*args, **kwargs)
     g["_iter_unpack_sequence_"] = guarded_iter_unpack_sequence
     g["_unpack_sequence_"] = guarded_unpack_sequence
     g["_inplacevar_"] = _inplacevar
@@ -594,7 +615,10 @@ class Sandbox:
         """Call ``fn`` with a SIGALRM wall-clock timeout. Main thread only."""
         global _timer_thread
         if _timer_thread == threading.get_ident():  # Nested call: use active timer.
-            return fn(*args, **kwargs)
+            try:
+                return fn(*args, **kwargs)
+            except SystemExit as exc:  # e.g. sys.exit() in run_program's code
+                raise SandboxExit(exc.code) from None
         budget = timeout_s if timeout_s is not None else self._default_timeout_s
         sigalrm = getattr(signal, "SIGALRM", None)
         itimer_real = getattr(signal, "ITIMER_REAL", None)

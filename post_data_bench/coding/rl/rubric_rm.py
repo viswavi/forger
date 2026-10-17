@@ -115,24 +115,31 @@ def record_quota_stop():
 def _limit():
     loop = asyncio.get_running_loop()
     if loop not in _LIMITS:
-        # 16 suits Slime's many reward workers; one Tinker RL process scores whole batches.
+        # 16 suits Slime's many reward workers; one Tinker RL process scores
+        # whole batches.
         _LIMITS[loop] = asyncio.Semaphore(
             int(os.environ.get("RUBRIC_SCORE_CONCURRENCY", "16"))
         )
     return _LIMITS[loop]
 
 
-def code_score(code, prompt, response, ground_truth):
-    # Missing dependencies are infrastructure failures, not zero rewards.
-    """Run one code criterion in a disposable RestrictedPython worker."""
-    import RestrictedPython  # noqa: F401
+# One BLAS thread: under the worker's 512MB address-space limit, OpenBLAS's
+# per-core buffers fail to allocate and it exits the process, e.g. when a
+# response does `import numpy` on a 64-core node.
+_WORKER_ENV = {
+    "LANG": "C.UTF-8",
+    "OMP_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+}
+_HEALTHY_WORKER: list[bool] = []  # [True] once a trivial criterion has run
 
-    payload = json.dumps(
-        dict(code=code, prompt=prompt, response=response, ground_truth=ground_truth)
-    )
+
+def _run_worker(payload):
+    """Run rubric_worker.py on one JSON payload; None when it times out."""
     with tempfile.TemporaryDirectory(prefix="rubric-") as directory:
         try:
-            result = subprocess.run(
+            return subprocess.run(
                 [
                     sys.executable,
                     "-I",
@@ -143,15 +150,50 @@ def code_score(code, prompt, response, ground_truth):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 cwd=directory,
-                env={"LANG": "C.UTF-8"},
+                env=_WORKER_ENV,
                 timeout=30,  # rubric_worker.GRADE_TIMEOUT_S plus startup
             )
         except subprocess.TimeoutExpired:
-            return 0.0
+            return None
+
+
+def _worker_healthy():
+    """True when the worker scores a trivial criterion (checked once per process)."""
+    if not _HEALTHY_WORKER:
+        probe = json.dumps(
+            dict(
+                code="def grade(prompt, response, ground_truth):\n    return 1.0",
+                prompt=[],
+                response="",
+                ground_truth="",
+            )
+        )
+        result = _run_worker(probe)
+        ok = result is not None and result.returncode == 0
+        if ok:
+            _HEALTHY_WORKER.append(True)
+        return ok
+    return True
+
+
+def code_score(code, prompt, response, ground_truth):
+    # Missing dependencies are infrastructure failures, not zero rewards.
+    """Run one code criterion in a disposable RestrictedPython worker."""
+    import RestrictedPython  # noqa: F401
+
+    payload = json.dumps(
+        dict(code=code, prompt=prompt, response=response, ground_truth=ground_truth)
+    )
+    result = _run_worker(payload)
+    if result is None:
+        return 0.0
     if result.returncode:
-        # Resource-limit termination is a failed criterion. Import failures must
-        # stop the run rather than turn every completion into a zero reward.
-        if result.returncode < 0:
+        # Resource-limit termination is a failed criterion, and so is a crash a
+        # trivial criterion does not reproduce (the response's code took the
+        # worker down, e.g. a C extension aborting). A worker that cannot run
+        # at all must stop the run rather than turn every completion into a
+        # zero reward.
+        if result.returncode < 0 or _worker_healthy():
             return 0.0
         raise RuntimeError(f"rubric worker failed: {result.stderr[-1000:]}")
     result = json.loads(result.stdout)

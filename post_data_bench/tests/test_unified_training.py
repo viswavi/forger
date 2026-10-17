@@ -151,7 +151,8 @@ class SolutionExecutionTests(unittest.TestCase):
         "import re\n"
         "TESTS = [('1 2\\n', '3'), ('5 7\\n', '12')]\n"
         "def grade(prompt, response, ground_truth):\n"
-        "    blocks = re.findall(r'```python\\n(.*?)```', response.split('</think>')[-1], re.S)\n"
+        "    answer = response.split('</think>')[-1]\n"
+        "    blocks = re.findall(r'```python\\n(.*?)```', answer, re.S)\n"
         "    if not blocks:\n"
         "        return 0.0\n"
         "    passed = 0\n"
@@ -162,6 +163,7 @@ class SolutionExecutionTests(unittest.TestCase):
     )
 
     def response(self, code):
+        """A thinking-mode response whose answer is code in a python fence."""
         return "<think>add</think>```python\n" + code + "\n```"
 
     def test_runs_stdin_programs_and_scores_tests(self):
@@ -179,19 +181,87 @@ class SolutionExecutionTests(unittest.TestCase):
                     expected,
                 )
 
+    def test_common_solution_idioms_pass(self):
+        """Star-args, sys.exit, bytearray, and class helpers are valid solutions."""
+        for code in (
+            "a, b = map(int, input().split())\nprint(*[a + b])",
+            "import sys\na, b = map(int, input().split())\nprint(a + b)\nsys.exit(0)",
+            "import sys\na, b = map(int, input().split())\nprint(a + b)\nsys.exit()",
+            "buf = bytearray(input(), 'ascii')\n"
+            "print(sum(map(int, bytes(buf).split())))",
+            (
+                "class S:\n    @staticmethod\n"
+                "    def add(a, b):\n        return a + b\n"
+                "print(S.add(*map(int, input().split())))"
+            ),
+            "a, b = map(int, input().split())\n"
+            "print(a + b if hasattr(a, 'real') else 0)",
+        ):
+            with self.subTest(code=code):
+                self.assertEqual(
+                    rm.code_score(self.STDIN_GRADER, [], self.response(code), ""),
+                    1.0,
+                )
+
+    def test_grade_can_pass_star_args_to_call_method(self):
+        """call_method(code, cls, method, *args) works from inside grade()."""
+        grader = (
+            "CODE = ('class Solution:\\n    def add(self, a, b):\\n'\n"
+            "        '        return a + b\\n')\n"
+            "def grade(prompt, response, ground_truth):\n"
+            "    args = [2, 3]\n"
+            "    ok, result = call_method(CODE, 'Solution', 'add', *args)\n"
+            "    return float(ok and result == 5)\n"
+        )
+        self.assertEqual(rm.code_score(grader, [], "", ""), 1.0)
+
+    def test_guarded_getattr_still_refuses_private_names(self):
+        """getattr/hasattr go through the attribute guard."""
+        grader = (
+            "def grade(prompt, response, ground_truth):\n"
+            "    return float(not hasattr(response, '__class__'))\n"
+        )
+        self.assertEqual(rm.code_score(grader, [], "", ""), 1.0)
+        leak = (
+            "def grade(prompt, response, ground_truth):\n"
+            "    return float(getattr(response, '__class__') is str)\n"
+        )
+        self.assertEqual(rm.code_score(leak, [], "", ""), 0.0)
+
+    def test_worker_gets_single_threaded_blas(self):
+        """The worker env pins BLAS to one thread (numpy under the 512MB limit)."""
+        for name in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+            self.assertEqual(rm._WORKER_ENV[name], "1")
+
+    def test_response_crash_scores_zero_but_broken_worker_raises(self):
+        """A worker crash the trivial probe does not reproduce is a 0, not a crash."""
+        crashed = SimpleNamespace(returncode=1, stdout="", stderr="OpenBLAS error")
+        healthy = SimpleNamespace(returncode=0, stdout='{"score": 1.0}', stderr="")
+        with patch.object(rm, "_HEALTHY_WORKER", []), patch.object(
+            rm, "_run_worker", side_effect=[crashed, healthy]
+        ):
+            self.assertEqual(rm.code_score(self.STDIN_GRADER, [], "x", ""), 0.0)
+        with patch.object(rm, "_HEALTHY_WORKER", []), patch.object(
+            rm, "_run_worker", side_effect=[crashed, crashed]
+        ):
+            with self.assertRaisesRegex(RuntimeError, "rubric worker failed"):
+                rm.code_score(self.STDIN_GRADER, [], "x", "")
+
     def test_timeout_is_per_run(self):
         """One looping test fails alone; later runs still get their own budget."""
         grader = (
             "def grade(prompt, response, ground_truth):\n"
             "    slow = run_program('while True:\\n    pass')\n"
             "    fast = run_program('print(2 + 2)')\n"
-            "    return float(slow == (False, 'SandboxTimeout') and fast == (True, '4\\n'))\n"
+            "    return float(\n"
+            "        slow == (False, 'SandboxTimeout') and fast == (True, '4\\n')\n"
+            "    )\n"
         )
         self.assertEqual(rm.code_score(grader, [], "", ""), 1.0)
 
     def test_response_cannot_forge_scores(self):
         """Printing a score, or returning an always-equal object, earns nothing."""
-        forged_output = 'import sys\nprint(\'{"score": 1.0}\')\nsys.exit(0)'
+        forged_output = "import sys\nprint('{\"score\": 1.0}')\nsys.exit(0)"
         self.assertEqual(
             rm.code_score(self.STDIN_GRADER, [], self.response(forged_output), ""), 0.0
         )
@@ -203,7 +273,11 @@ class SolutionExecutionTests(unittest.TestCase):
             "    def add(self, a, b):\n"
             "        return Anything()\n"
         )
-        honest = "class Solution:\n    def add(self, a, b):\n        return [a + b, (a, b)]\n"
+        honest = (
+            "class Solution:\n"
+            "    def add(self, a, b):\n"
+            "        return [a + b, (a, b)]\n"
+        )
         grader = (
             "CODE = %r\n"
             "def grade(prompt, response, ground_truth):\n"
@@ -555,8 +629,13 @@ class TinkerBudgetTests(unittest.TestCase):
             await asyncio.gather(
                 *[
                     training_module.sample_group(
-                        Sampler(), tokenizer, [], budget,
-                        num_samples=1, max_tokens=4, temperature=1.0,
+                        Sampler(),
+                        tokenizer,
+                        [],
+                        budget,
+                        num_samples=1,
+                        max_tokens=4,
+                        temperature=1.0,
                     )
                     for _ in range(20)
                 ]
@@ -584,7 +663,12 @@ class TinkerBudgetTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             data = Path(tmp) / "sft.jsonl"
-            row = {"messages": [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}]}
+            row = {
+                "messages": [
+                    {"role": "user", "content": "q"},
+                    {"role": "assistant", "content": "a"},
+                ]
+            }
             data.write_text(json.dumps(row) + "\n")
             budget = TinkerBudget(Path(tmp) / "sft_usage.json", 200, name="sft")
             budget.record({"train": 454_000_000})  # $199.76 spent
