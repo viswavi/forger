@@ -111,6 +111,26 @@ checked faithfully in code are dropped rather than approximated. An input left
 without a positive-weight code criterion raises `ValueError`. The same flag exists
 on `generate_custom_rubric_criteria` and `convert_rubric_criteria`.
 
+Pass `code_guidelines` when your grading environment differs from the default, e.g.
+`grade()` can call a helper that runs the response's program, or that program runs in
+a sandbox that rejects some syntax. The text is added to the system prompt of both
+stages: the criteria stage keeps code-checked criteria within it, and the conversion
+stage follows it over the general rules where they conflict. It cannot widen the
+static checks: the import allowlist and banned builtins still apply.
+
+```python
+rubrics = generate_custom_rubric(
+    tasks,
+    model=model,
+    code_criteria_only=True,
+    code_guidelines=(
+        "grade() may call run_program(code, stdin), which returns (True, stdout) or "
+        "(False, error type). The program it runs cannot use names starting with '_' "
+        "(e.g. __slots__, self._x), annotated assignments, str.format, or open()."
+    ),
+)
+```
+
 To inspect or reuse stages independently, keep using the textual generator below
 and then call `convert_rubric_criteria(text_rubrics, model, inputs=task_strings)`.
 The optional aligned `inputs` and shared `meta_description` provide context.

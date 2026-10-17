@@ -241,6 +241,7 @@ generate_custom_rubric(
     max_retries: int = 3,
     batch_size: int = 10,
     code_criteria_only: bool = False,
+    code_guidelines: str | None = None,
     _no_cache: bool = False,
     _cache_only: bool = False,
 ) -> list[list[list[dict[str, str] | float]]]
@@ -263,6 +264,7 @@ convert_rubric_criteria(
     max_retries: int = 3,
     batch_size: int = 10,
     code_criteria_only: bool = False,
+    code_guidelines: str | None = None,
 ) -> list[list[list[dict[str, str] | float]]]
 ```
 
@@ -283,6 +285,7 @@ generate_custom_rubric_criteria(
     max_retries: int = 3,
     batch_size: int = 10,
     code_criteria_only: bool = False,
+    code_guidelines: str | None = None,
 ) -> list[list[tuple[str, float]]]
 ```
 

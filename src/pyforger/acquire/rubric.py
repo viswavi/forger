@@ -28,8 +28,42 @@ Otherwise return kind "omit" with an empty source; omitted criteria are dropped.
 The rules above still apply: never approximate a semantic requirement with code.
 Omitting an uncertain criterion is a successful decision."""
 
+# Headers for the caller's code_guidelines, e.g. which functions grade() may call.
+_GUIDELINES_CRITERIA = """
 
-def _rubric_prompt(item: dict, code_criteria_only: bool = False) -> Prompt:
+What grading code can check in this environment, from the caller. Criteria meant
+to be checked in code must stay within these limits:
+"""
+
+_GUIDELINES_CONVERSION = """
+
+Grading environment rules from the caller. They take precedence over the general
+rules above where they conflict, e.g. extra functions grade() may call, or limits
+on what code those functions run. The import allowlist and banned builtins above
+still apply:
+"""
+
+
+def _guidelines(header: str, code_guidelines: str | None) -> str:
+    """The header plus guidelines, or "" so prompts without them are unchanged."""
+    if code_guidelines is None or not code_guidelines.strip():
+        return ""
+    return header + code_guidelines.strip()
+
+
+def _prompt_builder(build: Any, code_criteria_only: bool, code_guidelines: str | None):
+    """``build`` with only the options that are set, e.g. bare when none are."""
+    options: dict[str, Any] = {}
+    if code_criteria_only:
+        options["code_criteria_only"] = True
+    if code_guidelines is not None:
+        options["code_guidelines"] = code_guidelines
+    return functools.partial(build, **options) if options else build
+
+
+def _rubric_prompt(
+    item: dict, code_criteria_only: bool = False, code_guidelines: str | None = None
+) -> Prompt:
     return [
         {
             "role": "system",
@@ -61,7 +95,8 @@ Return only a JSON object with a "rubric" array of [criterion, weight] pairs.
 Example: {"rubric": [["Does the response address the stated audience?", 100],
 ["Does the response explain unfamiliar terminology?", 75]]}.
 Do not include reasoning, scores for candidate responses, or executable code."""
-            + (_CODE_ONLY_CRITERIA if code_criteria_only else ""),
+            + (_CODE_ONLY_CRITERIA if code_criteria_only else "")
+            + _guidelines(_GUIDELINES_CRITERIA, code_guidelines),
         },
         {"role": "user", "content": json.dumps(item, ensure_ascii=False)},
     ]
@@ -102,6 +137,7 @@ def generate_custom_rubric_criteria(
     max_retries: int = 3,
     batch_size: int = 10,
     code_criteria_only: bool = False,
+    code_guidelines: str | None = None,
 ) -> list[list[tuple[str, float]]]:
     """Generate one textual rubric per input, preserving input order.
 
@@ -118,6 +154,9 @@ def generate_custom_rubric_criteria(
 
     ``code_criteria_only=True`` asks only for criteria that code can check
     deterministically, e.g. an exact final answer rather than clarity.
+
+    ``code_guidelines`` says what grading code can check in your environment,
+    e.g. "grade() may call run_program(code, stdin), which returns (True, stdout)".
 
     ``batch_size`` limits prompts per model batch; ``temperature`` controls
     sampling. Invalid outputs receive up to ``max_retries`` additional attempts.
@@ -137,6 +176,8 @@ def generate_custom_rubric_criteria(
         raise TypeError("inputs must be a list of strings")
     if meta_description is not None and not isinstance(meta_description, str):
         raise TypeError("meta_description must be a string or None")
+    if code_guidelines is not None and not isinstance(code_guidelines, str):
+        raise TypeError("code_guidelines must be a string or None")
     if candidate_responses is not None:
         if not isinstance(candidate_responses, list) or any(
             not isinstance(group, list) or any(not isinstance(x, str) for x in group)
@@ -161,11 +202,7 @@ def generate_custom_rubric_criteria(
             item["candidate_responses"] = candidate_responses[i]
         items.append(item)
 
-    prompt = (
-        functools.partial(_rubric_prompt, code_criteria_only=True)
-        if code_criteria_only
-        else _rubric_prompt
-    )
+    prompt = _prompt_builder(_rubric_prompt, code_criteria_only, code_guidelines)
     results: list[list[tuple[str, float]]] = [[] for _ in inputs]
     pending = list(range(len(inputs)))
     for _ in range(max_retries + 1):
@@ -199,7 +236,9 @@ def generate_custom_rubric_criteria(
     return results
 
 
-def _conversion_prompt(item: dict, code_criteria_only: bool = False) -> Prompt:
+def _conversion_prompt(
+    item: dict, code_criteria_only: bool = False, code_guidelines: str | None = None
+) -> Prompt:
     return [
         {
             "role": "system",
@@ -256,7 +295,8 @@ def grade(prompt, response, ground_truth):
         return 0.0
     return 1.0 if isinstance(value, dict) else 0.0
 """
-            + (_CODE_ONLY_CONVERSION if code_criteria_only else ""),
+            + (_CODE_ONLY_CONVERSION if code_criteria_only else "")
+            + _guidelines(_GUIDELINES_CONVERSION, code_guidelines),
         },
         {"role": "user", "content": json.dumps(item, ensure_ascii=False)},
     ]
@@ -334,6 +374,7 @@ def convert_rubric_criteria(
     max_retries: int = 3,
     batch_size: int = 10,
     code_criteria_only: bool = False,
+    code_guidelines: str | None = None,
 ) -> list[list[list[dict[str, str] | float]]]:
     """Convert text rubrics to RL-format ``[{code|prompt: source}, weight]`` pairs.
 
@@ -351,6 +392,11 @@ def convert_rubric_criteria(
     ``code_criteria_only=True`` never keeps a prompted judge: criteria that
     cannot be checked faithfully in code are dropped, so rubrics may shrink or
     become empty.
+
+    ``code_guidelines`` adds your grading environment's rules to the system prompt,
+    e.g. "grade() may call run_program(code, stdin), which returns (True, stdout)
+    or (False, error type); code it runs cannot use names starting with '_' or
+    str.format." They cannot widen the import allowlist or the banned builtins.
     """
     from pyforger.alter.generate import generate_from_context
 
@@ -364,6 +410,8 @@ def convert_rubric_criteria(
         raise ValueError("inputs must contain one string per rubric")
     if meta_description is not None and not isinstance(meta_description, str):
         raise TypeError("meta_description must be a string or None")
+    if code_guidelines is not None and not isinstance(code_guidelines, str):
+        raise TypeError("code_guidelines must be a string or None")
     for name, value, minimum in (
         ("batch_size", batch_size, 1),
         ("max_retries", max_retries, 0),
@@ -395,11 +443,7 @@ def convert_rubric_criteria(
             items.append(item)
             positions.append((i, j))
     kinds = {"code", "omit"} if code_criteria_only else {"code", "prompt"}
-    prompt = (
-        functools.partial(_conversion_prompt, code_criteria_only=True)
-        if code_criteria_only
-        else _conversion_prompt
-    )
+    prompt = _prompt_builder(_conversion_prompt, code_criteria_only, code_guidelines)
     omitted: set[tuple[int, int]] = set()
     pending = list(range(len(items)))
     for _ in range(max_retries + 1):
@@ -458,6 +502,7 @@ def generate_custom_rubric(
     max_retries: int = 3,
     batch_size: int = 10,
     code_criteria_only: bool = False,
+    code_guidelines: str | None = None,
     _no_cache: bool = False,
     _cache_only: bool = False,
 ) -> list[list[list[dict[str, str] | float]]]:
@@ -473,6 +518,8 @@ def generate_custom_rubric(
     ``code_criteria_only=True`` returns only ``{"code": ...}`` criteria, e.g.
     for tasks with exact answers where a judge only adds cost and noise. An
     input left without a positive-weight code criterion raises ValueError.
+
+    ``code_guidelines`` reaches both stages; see ``convert_rubric_criteria``.
     """
     rubrics = generate_custom_rubric_criteria(
         inputs,
@@ -483,6 +530,7 @@ def generate_custom_rubric(
         max_retries=max_retries,
         batch_size=batch_size,
         code_criteria_only=code_criteria_only,
+        code_guidelines=code_guidelines,
         _no_cache=_no_cache,
         _cache_only=_cache_only,
     )
@@ -500,6 +548,7 @@ def generate_custom_rubric(
         max_retries=max_retries,
         batch_size=batch_size,
         code_criteria_only=code_criteria_only,
+        code_guidelines=code_guidelines,
         _no_cache=_no_cache,
         _cache_only=_cache_only,
     )

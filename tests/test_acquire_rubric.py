@@ -7,7 +7,11 @@ import json
 import pytest
 from fixtures import RecordingMockModel
 
-from pyforger.acquire import generate_custom_rubric, generate_custom_rubric_criteria
+from pyforger.acquire import (
+    convert_rubric_criteria,
+    generate_custom_rubric,
+    generate_custom_rubric_criteria,
+)
 from pyforger.op import trace
 
 
@@ -246,3 +250,80 @@ def test_default_mode_keeps_prompted_judges():
     result = generate_custom_rubric(["Comfort a friend."], model, max_retries=1)
     assert result == [[[{"prompt": "Is it kind?"}, 100.0]]]
     assert "Code-only mode" not in model.recorded_prompts[0][0][0]["content"]
+
+
+GUIDELINES = "grade() may call run_program(code, stdin); no names starting with '_'."
+
+
+def test_code_guidelines_reach_both_stages_system_prompts():
+    """generate_custom_rubric forwards the guidelines to both stages, retries too."""
+    model = ScriptedModel(
+        [
+            [[encoded(["  ", 100])]],  # malformed, so the criteria stage retries
+            [[encoded(["Does the program print 42?", 100])]],
+            [[converted("code", "x = 1")]],  # no grade(), so conversion retries
+            [[converted("code", CODE)]],
+        ]
+    )
+    result = generate_custom_rubric(
+        ["Print 42."],
+        model,
+        code_criteria_only=True,
+        code_guidelines=GUIDELINES,
+        max_retries=1,
+    )
+    assert result == [[[{"code": CODE}, 100.0]]]
+    systems = [batch[0][0]["content"] for batch in model.recorded_prompts]
+    assert len(systems) == 4
+    assert all(system.endswith(GUIDELINES) for system in systems)
+    assert all(
+        "What grading code can check in this environment" in s for s in systems[:2]
+    )
+    assert all("take precedence over the general" in s for s in systems[2:])
+    # The guidelines are instructions, not part of the per-row user data.
+    assert all(
+        GUIDELINES not in batch[0][1]["content"] for batch in model.recorded_prompts
+    )
+
+
+def test_prompts_unchanged_without_code_guidelines():
+    """Leaving out the guidelines, or passing None, sends the default prompts."""
+    script = [[[encoded(["Is it kind?", 100])]], [[converted("prompt", "Is it kind?")]]]
+    default, explicit = ScriptedModel(script), ScriptedModel(script)
+    generate_custom_rubric(["Comfort a friend."], default)
+    generate_custom_rubric(
+        ["Comfort a friend."], explicit, code_guidelines=None, _no_cache=True
+    )
+    assert len(default.recorded_prompts) == 2
+    assert default.recorded_prompts == explicit.recorded_prompts
+    assert all(
+        "from the caller" not in batch[0][0]["content"]
+        for batch in default.recorded_prompts
+    )
+
+
+def test_convert_rubric_criteria_takes_code_guidelines():
+    """The conversion stage alone also accepts guidelines."""
+    model = ScriptedModel([[[converted("code", CODE)]]])
+    result = convert_rubric_criteria(
+        [[("Does it print 42?", 100.0)]], model, code_guidelines=GUIDELINES
+    )
+    assert result == [[[{"code": CODE}, 100.0]]]
+    assert model.recorded_prompts[0][0][0]["content"].endswith(GUIDELINES)
+
+
+@pytest.mark.parametrize("bad", [["no _"], 3, {"rule": "no _"}])
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda m, kw: generate_custom_rubric_criteria(["x"], m, **kw),
+        lambda m, kw: convert_rubric_criteria([[("x?", 1.0)]], m, **kw),
+        lambda m, kw: generate_custom_rubric(["x"], m, **kw),
+    ],
+)
+def test_non_string_code_guidelines_raise_type_error(call, bad):
+    """Reject non-string guidelines before any model request."""
+    model = RecordingMockModel(responses=[])
+    with pytest.raises(TypeError, match="code_guidelines"):
+        call(model, {"code_guidelines": bad})
+    assert model._call_count == 0
