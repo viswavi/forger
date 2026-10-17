@@ -393,6 +393,18 @@ class HostEvaluationTests(unittest.TestCase):
             "tinker://run/sampler_weights/final",
         )
 
+    def test_secret_test_evaluation_uses_this_interpreter(self):
+        """eval_launcher.sh's bare `python` is this interpreter, not the shell's."""
+        from coding.rl import agent_training
+
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            os.environ, {"PATH": "/usr/bin"}
+        ), patch.object(agent_training, "run") as run:
+            out = Path(directory) / "final/rl/.hidden/final_eval"
+            agent_training.final_evaluation("tinker://run/sampler_weights/final", out)
+        path = run.call_args.kwargs["env"]["PATH"].split(os.pathsep)
+        self.assertEqual(path, [str(Path(sys.executable).parent), "/usr/bin"])
+
     def test_local_checkpoint_callers_name_their_backend(self):
         """Every caller that evaluates a local checkpoint names a local backend."""
         callers = {

@@ -380,6 +380,11 @@ def final_evaluation(sampler_path, out_dir):
     """Secret-test evaluation of the final RL weights; charged to the eval ledger."""
     # Pin Tinker as the agent sandbox does, whatever the host shell exported.
     env = {**os.environ, "TINKER_EVAL_BUDGET": "eval", "PDB_EVAL_BACKEND": "tinker"}
+    # eval_launcher.sh runs a bare `python`; without this it can find the login
+    # shell's older interpreter (e.g. Python 3.9) instead of this environment's.
+    env["PATH"] = os.pathsep.join(
+        [str(Path(sys.executable).parent), env.get("PATH", "")]
+    )
     env.setdefault(
         "TINKER_EVAL_USAGE_FILE",
         str(Path(out_dir).resolve().parents[2] / "tinker_eval_usage.json"),
