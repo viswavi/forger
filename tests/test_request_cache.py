@@ -24,6 +24,12 @@ from pyforger.inspect import cluster
 from pyforger.inspect.cluster import _assign_topics, _chat
 
 
+class GatewayTimeout(RuntimeError):
+    """A gateway 504: transient, like litellm's errors with a 5xx status_code."""
+
+    status_code = 504
+
+
 class Killed(BaseException):
     """Stands in for a kill: not an Exception, so nothing catches it."""
 
@@ -70,7 +76,7 @@ class Completions:
             time.sleep(self.delay)
             raise Killed(text)
         if failing:
-            raise RuntimeError(f"504 for {text}")
+            raise GatewayTimeout(f"504 for {text}")
         choices = [
             SimpleNamespace(
                 message=SimpleNamespace(

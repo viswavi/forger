@@ -36,7 +36,9 @@ checks of a checkpoint. It works with every op that takes a `Model` (`sample_fro
 `self_taught_reasoner`, `filter.by_llm_score`, `filter.by_pass_at_k`, ...); see [models.md](models.md#tinkermodel) for
 its request cache, errors, and spend accounting. Prompts are rendered with the model's chat template and stop at its
 eos tokens, as a vLLM chat server would; defaults are Qwen3's thinking-mode settings (`temperature=0.6`, `top_p=0.95`,
-`top_k=20`), and `enable_thinking=False` turns thinking off. The `n` samples of one prompt are a single request, so
+`top_k=20`), which the evaluator also uses, and `enable_thinking=False` turns thinking off. `sample_from_LLM`,
+`generate_from_context`, `self_taught_reasoner`, and `by_pass_at_k` default to `temperature=None`, which keeps the
+model's default; pass `temperature=` to override it. The `n` samples of one prompt are a single request, so
 they share one prefill: the prompt is billed once and its other `n - 1` copies at the cheaper cached rate. Prompts run
 concurrently, at most `TINKER_MAX_CONCURRENT_SAMPLES` (default 600) requests at a time.
 

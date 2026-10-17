@@ -43,7 +43,9 @@ terminal, otherwise a log line at most every 30 seconds (`LLM calls (<model>): 1
 
 `model.generate_batch(prompts, return_exceptions=True)` keeps finished results when a request still fails after
 `num_retries` (e.g. a gateway 504): the list has one entry per prompt, a prompt whose requests all failed holds the
-exception, and a prompt where only some fan-out copies failed holds the completions that arrived (fewer than `n`).
+exception, and a prompt where only some fan-out copies failed holds the completions that arrived (fewer than `n`)
+when those failures were transient. A spending cap, the token-unit quota, or a bad request puts its exception in the
+prompt's slot even so (what arrived is charged and request-cached, so a rerun replays it).
 Usage of finished requests is recorded. The default (`False`) raises the first failure. On `LocalModel` an engine
 error fills every slot, since vLLM runs the batch as one call.
 
@@ -71,8 +73,8 @@ requests come back short too, or a response has more than `n`, it raises a `Valu
 `TinkerModel.generate_batch` follows `Model`'s contract, with these differences:
 
 - `n` is native: the `n` samples of a prompt are one request (one prefill), never fanned out.
-- Concurrency is capped per process, not per instance: `max_concurrent` (default `TINKER_MAX_CONCURRENT_SAMPLES`, else
-  600) requests in flight across all `TinkerModel`s. `max_concurrency` does not apply.
+- Concurrency: all `TinkerModel`s in a process share one cap of `TINKER_MAX_CONCURRENT_SAMPLES` (default 600)
+  requests in flight; `max_concurrent` caps one instance lower. `max_concurrency` does not apply.
 - The request cache works as for `Model`: inside an op, each sample is keyed on the op call, the row, the messages,
   the checkpoint (`model_id`), the sampling settings (`temperature`, `max_tokens`, `top_p`, `top_k`, `seed`, stop
   strings) and the chat-template kwargs. A rerun asks Tinker only for the missing samples, still one request per
@@ -80,11 +82,14 @@ requests come back short too, or a response has more than `n`, it raises a `Valu
   so it never reuses an old checkpoint's samples. Turn it off with `TinkerModel(..., request_cache=False)` or
   `FORGER_REQUEST_CACHE=0`.
 - `return_exceptions=True` puts a failed prompt's exception (after Tinker's retries, or a budget refusal) in its slot
-  and keeps the others; the default raises the first failure in prompt order.
+  and keeps the others; the default raises the first failure in prompt order. Ctrl-C also stops requests waiting for
+  a slot, for budget room, or for a retry.
 - Spend: each request is charged as it finishes to the Tinker dollar ledger (`FORGER_TINKER_USAGE_FILE`), the
   instance totals, the step report, and the spend ledger, in dollars from Tinker's rate card. It adds no token units
   and is exempt from the token-unit quota. `max_cost_usd` / `FORGER_MAX_COST_USD` are checked before each request,
-  next to the Tinker ledger's worst-case reservation.
+  next to the worst-case reservations on the Tinker ledger and on `budget=`, which count the requests in flight. If
+  writing a ledger fails after Tinker sampled, the spend still reaches the totals and the samples the request
+  cache, then the error is raised.
 
 ## Prompt types
 

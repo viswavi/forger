@@ -11,7 +11,7 @@ from collections.abc import Callable
 from typing import Any
 
 from pyforger import _tracking
-from pyforger.acquire.model import Prompt
+from pyforger.acquire.model import Prompt, _is_transient  # noqa: F401 (re-export)
 from pyforger.op import skip_cache_write
 from pyforger.utils import get_formatted_logger
 
@@ -87,41 +87,6 @@ def _parse_output(
         else:
             parsed["thinking_trace"] = reasoning
     return parsed
-
-
-# Status codes worth asking again: request timeout, conflict, too early, rate
-# limit. Every 5xx is too.
-_TRANSIENT_STATUS = frozenset({408, 409, 425, 429})
-
-
-def _is_transient(exc: BaseException) -> bool:
-    """True for provider errors a retry can fix: timeouts, 429s, 5xx, lost connections.
-
-    litellm's and openai's ``Timeout`` / ``APIConnectionError`` and builtin
-    ``TimeoutError`` / ``ConnectionError`` are transient; other errors are judged
-    by their ``status_code``. A bad key (401), unknown model (404), or bad
-    request (400, e.g. context length) is not, nor is an error with no status.
-    """
-    if isinstance(exc, (TimeoutError, ConnectionError)):
-        return True
-    try:
-        import openai
-    except ImportError:  # pragma: no cover - openai ships with litellm
-        pass
-    else:
-        if isinstance(exc, (openai.APITimeoutError, openai.APIConnectionError)):
-            return True
-    # Tinker's SDK has its own copies of these (TinkerModel raises them once its
-    # retries run out); its rate-limit and server errors carry a status_code.
-    if type(exc).__module__.split(".")[0] == "tinker" and type(exc).__name__ in (
-        "APITimeoutError",
-        "APIConnectionError",
-    ):
-        return True
-    status = getattr(exc, "status_code", None)
-    if isinstance(status, int):
-        return status in _TRANSIENT_STATUS or status >= 500
-    return False
 
 
 def _accepts_kwarg(fn: Callable[..., Any] | None, name: str) -> bool:

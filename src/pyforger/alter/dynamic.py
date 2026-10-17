@@ -24,6 +24,7 @@ from pyforger.acquire.model import LocalModel, Model, _units_or_nan
 from pyforger.acquire.tinker_model import TinkerModel
 from pyforger.alter._dynamic_resources import prepare_input
 from pyforger.op import op
+from pyforger.token_units import token_units
 
 _SOURCE_VERSION = (
     "resource-v4-record"  # Bump when the agent or output contract changes.
@@ -143,19 +144,33 @@ class _AgentUsage:
     """Adds an OpenHands conversation's LLM usage to Forger's totals as it grows.
 
     The agent calls LiteLLM through OpenHands, not ``Model.generate_batch``, so
-    its usage only reaches ``@step`` reports, the spend ledger, and the spending
-    caps through this hook. ``on_event`` is an OpenHands callback: after each
-    event it records the usage added since the last record and checks the caps,
-    raising ``BudgetExceededError`` (once) to stop the run when one is reached.
+    its usage only reaches ``@step`` reports, the spend ledger, the spending
+    caps, and the shared token-unit quota (``budget``, the Model's
+    ``FORGER_TOKEN_USAGE_FILE`` ledger) through this hook. ``on_event`` is an
+    OpenHands callback: after each event it records the usage added since the
+    last record and checks the caps and quota, raising (once) to stop the run
+    when one is reached.
     """
 
-    def __init__(self, model_id: str | None) -> None:
+    def __init__(self, model_id: str | None, budget: Any = None) -> None:
         """Start with nothing recorded, in a copy of the caller's context."""
         self.model_id = model_id
+        self.budget = budget
         self.conversation: Any = None
-        self.error: _tracking.BudgetExceededError | None = None
+        self.error: Exception | None = None
         self._recorded = (0, 0, 0.0)
         self._context = contextvars.copy_context()
+
+    def check(self) -> None:
+        """Raise at a spending cap or when the token-unit quota is used up.
+
+        With a quota, a model without fixed token-unit weights is refused
+        (ValueError), as ``Model`` refuses it: its usage could not be charged.
+        """
+        _tracking.check_budget()
+        if self.budget is not None:
+            token_units(self.model_id or "", 0, 0)
+            self.budget.check()
 
     def record(self, conversation: Any = None) -> None:
         """Record the conversation's usage since the last call; never raises."""
@@ -177,6 +192,13 @@ class _AgentUsage:
                 _tracking.add_usage(
                     prompt, completion, cost, units, model_id=self.model_id
                 )
+                if self.budget is not None:
+                    if usage is None:  # paid, but no token counts: fail closed
+                        self.budget.mark_unmetered()
+                    else:
+                        self.budget.record(
+                            self.model_id, prompt, completion, cost_usd=cost
+                        )
         except Exception:  # usage is reporting only; never fail the agent on it
             return
 
@@ -189,8 +211,8 @@ class _AgentUsage:
         self.record()
         if self.error is None:
             try:
-                _tracking.check_budget()
-            except _tracking.BudgetExceededError as exc:
+                self.check()
+            except Exception as exc:
                 self.error = exc
                 raise
 
@@ -220,8 +242,10 @@ def _generate(goal, item, model, max_iterations, execution_timeout_s):
     executor = PythonExecutor(item, execution_timeout_s)
     # Surface bad URLs before constructing an agent or spending LLM calls.
     executor.prepared_input()
-    _tracking.check_budget()  # raises BudgetExceededError at a spending cap
-    agent_usage = _AgentUsage(getattr(model, "_model_id", None))
+    agent_usage = _AgentUsage(
+        getattr(model, "_model_id", None), getattr(model, "_token_budget", None)
+    )
+    agent_usage.check()  # a spending cap or the token-unit quota stops it here
     session_id = register_executor(executor)
 
     try:
@@ -270,7 +294,7 @@ def _generate(goal, item, model, max_iterations, execution_timeout_s):
                 remaining = max_iterations
                 seen_responses = set()
                 while remaining:
-                    _tracking.check_budget()
+                    agent_usage.check()
                     conversation.max_iteration_per_run = remaining
                     try:
                         conversation.run()

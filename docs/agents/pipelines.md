@@ -84,7 +84,8 @@ cached it, marked `cached`, with that run's warnings.
   `dynamic_step` before starting an agent and during its run. Requests already in flight finish and are recorded, so
   spend can pass a cap by what they cost (or by one agent step). These caps are separate from the shared quotas,
   which also apply: the token-unit quota (`FORGER_TOKEN_USAGE_FILE` / `FORGER_TOKEN_UNIT_LIMIT`, which raises
-  `TokenUnitQuotaExceeded`) and `TinkerModel`'s dollar ledger (`FORGER_TINKER_USAGE_FILE`, which raises
+  `TokenUnitQuotaExceeded`; `dynamic_step` agents are charged to it and checked against it like `Model` requests)
+  and `TinkerModel`'s dollar ledger (`FORGER_TINKER_USAGE_FILE`, which raises
   `TinkerBudgetExceeded`). The caps count this process's spend; the quotas count every process sharing the file.
 
 ## Composing a pipeline

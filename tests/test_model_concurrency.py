@@ -39,6 +39,12 @@ def make_response(text, prompt_tokens=10, completion_tokens=20, cost=0.001):
     return response
 
 
+class GatewayTimeout(RuntimeError):
+    """A gateway 504: transient, like litellm's errors with a 5xx status_code."""
+
+    status_code = 504
+
+
 class InFlight:
     """Fake completion that sleeps and records the most requests in flight."""
 
@@ -68,7 +74,7 @@ class InFlight:
         try:
             time.sleep(self.delay)
             if text in self.fail or f"{text}@{k}" in self.fail:
-                raise RuntimeError(f"504 for {text}")
+                raise GatewayTimeout(f"504 for {text}")
             return make_response(text)
         finally:
             with self.lock:
@@ -489,7 +495,7 @@ class Numbered:
             start = self.next.get(text, 0)
             self.next[text] = start + n
         if f"{text}@{k}" in self.fail:
-            raise RuntimeError(f"504 for {text}@{k}")
+            raise GatewayTimeout(f"504 for {text}@{k}")
         response = make_response(text)
         response.choices = [
             SimpleNamespace(

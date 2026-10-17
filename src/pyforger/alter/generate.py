@@ -63,7 +63,7 @@ def generate_from_context(
     *,
     samples_per_item: int = 1,
     output_schema: dict[str, Any] | None = None,
-    temperature: float = 1.0,
+    temperature: float | None = None,
     max_retries: int = 3,
     batch_size: int | None = None,
     merge: bool = False,
@@ -86,7 +86,9 @@ def generate_from_context(
         output_schema: Optional dict of expected keys. When set, responses are
             JSON-parsed and validated; failures are retried. When None, each
             response is stored as ``{"text": ...}``.
-        temperature: Sampling temperature passed to the model.
+        temperature: Sampling temperature passed to the model; None (default)
+            uses the model's own default (1.0 for ``Model``, Qwen3's 0.6 for
+            ``TinkerModel``).
         max_retries: Additional attempts for prompts whose output fails to parse
             or whose request fails at the provider (e.g. a 504).
         batch_size: Number of prompts per ``model.generate_batch()`` call. None
@@ -333,7 +335,7 @@ def self_taught_reasoner(
     answer_field: str = "answer",
     student_answer_field: str = "student_final_answer",
     split_thinking: bool = True,
-    temperature: float = 1.0,
+    temperature: float | None = None,
     max_tokens: int | None = None,
     batch_size: int | None = None,
 ) -> list[dict]:
@@ -388,7 +390,9 @@ def self_taught_reasoner(
             or by splitting an inline ``<think>`` block when there is none.
             When False, the whole response is stored in ``answer_field`` and
             ``thinking_field`` is left empty.
-        temperature: Sampling temperature passed to the model.
+        temperature: Sampling temperature passed to the model; None (default)
+            uses the model's own default (1.0 for ``Model``, Qwen3's 0.6 for
+            ``TinkerModel``).
         max_tokens: Max tokens per response (model default when None).
         batch_size: Number of items per ``model.generate_batch()`` call. None
             (default) sends all items in one call.

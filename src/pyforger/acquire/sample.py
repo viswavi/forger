@@ -28,7 +28,7 @@ def _generation_loop(
     model: Model,
     n: int,
     output_schema: dict[str, Any] | None,
-    temperature: float,
+    temperature: float | None,
     max_retries: int,
     batch_size: int | None,
     errors: list[str] | None = None,
@@ -130,7 +130,7 @@ def sample_from_LLM(
     model: Model,
     n: int = 100,
     output_schema: dict[str, Any] | None = None,
-    temperature: float = 1.0,
+    temperature: float | None = None,
     max_retries: int = 3,
     batch_size: int | None = None,
     name: str = "sample_from_LLM",
@@ -142,7 +142,8 @@ def sample_from_LLM(
         model: Model to call.
         n: Target number of accepted samples.
         output_schema: Optional dict of expected keys; triggers JSON parse + validation.
-        temperature: Sampling temperature.
+        temperature: Sampling temperature; None (default) uses the model's own
+            default (1.0 for ``Model``, Qwen3's 0.6 for ``TinkerModel``).
         max_retries: Consecutive zero-acceptance rounds before stopping. A round
             whose request fails at the provider (e.g. a 504) counts as one; when
             failures leave fewer than ``n`` samples, the shorter list is

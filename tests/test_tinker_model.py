@@ -972,3 +972,103 @@ class TestModelContract:
         )
         assert kept[0]["grades"] == {"model": [True, False, True, False]}
         assert [c.num_samples for c in world.calls] == [4]
+
+
+class TestReviewFixes:
+    """Budget, concurrency, and interruption behaviour found in review."""
+
+    def test_budget_refusal_with_cached_samples_is_raised(self, world):
+        """A budget refusal is not a short result, even when some samples are cached."""
+
+        @op(name="test.tinker_more", samples_arg="n")
+        def ask(rows, model, n):
+            results = model.generate_batch(
+                [r["q"] for r in rows], n=n, cache_rows=rows, return_exceptions=True
+            )
+            return [r if isinstance(r, Exception) else list(r) for r in results]
+
+        rows = [{"q": "a"}]
+        ask(rows, TinkerModel(QWEN), n=2)
+        refused = ask(rows, TinkerModel(QWEN, budget=RecordingBudget(limit=0.0)), n=4)
+        assert isinstance(refused[0], TinkerBudgetExceeded)
+
+    def test_concurrency_cap_is_shared_across_instances(self, world, monkeypatch):
+        """Two TinkerModels with different max_concurrent share the process cap."""
+        monkeypatch.setenv("TINKER_MAX_CONCURRENT_SAMPLES", "3")
+        world.delay = 0.03
+        models = [
+            TinkerModel(QWEN, max_concurrent=2),
+            TinkerModel(QWEN, max_concurrent=3),
+        ]
+        threads = [
+            threading.Thread(
+                target=m.generate_batch, args=([str(i) for i in range(6)],)
+            )
+            for m in models
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert len(world.calls) == 12
+        assert world.max_active == 3
+
+    def test_extra_budget_reserves_in_flight_worst_cases(self, world):
+        """budget= counts requests in flight, so 8 at once cannot all pass one check."""
+        worst = (len(expected_prompt("x")) * 0.195 + 20 * 0.6) / 1e6
+        budget = RecordingBudget(limit=1.5 * worst)
+        world.delay = 0.05
+        world.respond = lambda call: ["y" * 19]  # the full 20-token worst case
+        model = TinkerModel(QWEN, max_tokens=20, max_concurrent=8, budget=budget)
+        with pytest.raises(TinkerBudgetExceeded):
+            model.generate_batch(["x"] * 8)
+        assert len(world.calls) == 1
+        assert budget.spent <= budget.limit
+
+    def test_failed_ledger_write_keeps_spend_and_samples(self, world, monkeypatch):
+        """Billed samples reach the totals and request cache if a ledger write fails."""
+
+        class BrokenBudget(RecordingBudget):
+            def record(self, tokens, session_id=None):
+                raise OSError("disk full")
+
+        @op(name="test.tinker_paid")
+        def ask(rows, model):
+            results = model.generate_batch([r["q"] for r in rows], cache_rows=rows)
+            return [list(r) for r in results]
+
+        model = TinkerModel(QWEN, budget=BrokenBudget())
+        with pytest.raises(OSError, match="disk full"):
+            ask([{"q": "a"}], model)
+        assert model.total_cost > 0
+        calls = len(world.calls)
+        assert ask([{"q": "a"}, {"q": "b"}], TinkerModel(QWEN))
+        assert len(world.calls) == calls + 1  # only b is sampled; a was cached
+
+    def test_interrupt_stops_workers_in_retry_backoff(self, world, monkeypatch):
+        """After an interrupt, a worker sleeping before its retry does not send it."""
+        monkeypatch.setattr(tinker_model_module, "_RETRY_DELAY_S", 0.3)
+        world.failures = [world.tinker.RateLimitError("slow down")]
+        model = TinkerModel(QWEN, max_concurrent=1)
+
+        def interrupt(*args, **kwargs):
+            time.sleep(0.05)  # let the worker fail once and start its backoff
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(tinker_model_module, "_log_progress", interrupt)
+        monkeypatch.setattr(tinker_model_module, "_progress_mode", lambda flag: "log")
+        with pytest.raises(KeyboardInterrupt):
+            model.generate_batch(["a", "b"])
+        time.sleep(0.5)  # past the backoff
+        assert len(world.calls) == 1
+
+    def test_tinker_and_local_usage_add_no_token_units(self, world):
+        """A weighted family name in a Tinker or local id still adds no units."""
+        from pyforger.acquire import LocalModel
+
+        for model in (
+            TinkerModel("deepseek-ai/DeepSeek-V4-Flash", prices=RATES),
+            LocalModel("zai-org/GLM-5.3"),
+        ):
+            assert math.isnan(model._calculate_token_units(10, 10))
+            assert math.isnan(model.total_token_units)

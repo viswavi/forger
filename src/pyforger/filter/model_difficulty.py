@@ -223,7 +223,7 @@ def by_pass_at_k(
     rouge_l_threshold: float = 0.7,
     extract_answer: Callable[[str], str | None] = answer_segment,
     prompt_template: PromptTemplate | None = None,
-    temperature: float = 1.0,
+    temperature: float | None = None,
     max_tokens: int | None = None,
     batch_size: int | None = None,
     outcomes_field: str | None = None,
@@ -272,7 +272,9 @@ def by_pass_at_k(
             (default ``answer_segment``); see ``by_comparative_difficulty``.
         prompt_template: Format string or ``(row) -> Prompt`` callable replacing
             the default prompt (the task text).
-        temperature: Sampling temperature; must be > 0 when ``k > 1``.
+        temperature: Sampling temperature; must be > 0 when ``k > 1``. None
+            (default) uses the model's own default (1.0 for ``Model``, Qwen3's
+            0.6 for ``TinkerModel``, which matches the evaluator).
         max_tokens: Max tokens per completion (the model's default when None).
         batch_size: Prompts per ``model.generate_batch()`` call; None (default)
             sends all of them in one call, up to the model's concurrency cap.
@@ -307,7 +309,11 @@ def by_pass_at_k(
     if min_valid is not None and not (1 <= min_valid <= k):
         # A row has only k grades, so min_valid > k would keep nothing.
         raise ValueError(f"min_valid must be between 1 and k ({k}), got {min_valid}")
-    if k > 1 and not temperature > 0.0:
+    # None samples at the model's default; duck-typed models may not have one.
+    effective = (
+        temperature if temperature is not None else getattr(model, "_temperature", None)
+    )
+    if k > 1 and effective is not None and not effective > 0.0:
         raise ValueError(
             "temperature must be > 0.0 when k > 1; identical samples make the "
             "pass rate 0 or 1"

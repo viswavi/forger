@@ -462,6 +462,41 @@ def _cache_kwargs(method: Callable[..., Any], **values: Any) -> dict[str, Any]:
     }
 
 
+# Status codes worth asking again: request timeout, conflict, too early, rate
+# limit. Every 5xx is too.
+_TRANSIENT_STATUS = frozenset({408, 409, 425, 429})
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """True for provider errors a retry can fix: timeouts, 429s, 5xx, lost connections.
+
+    litellm's and openai's ``Timeout`` / ``APIConnectionError`` and builtin
+    ``TimeoutError`` / ``ConnectionError`` are transient; other errors are judged
+    by their ``status_code``. A bad key (401), unknown model (404), or bad
+    request (400, e.g. context length) is not, nor is an error with no status.
+    """
+    if isinstance(exc, (TimeoutError, ConnectionError)):
+        return True
+    try:
+        import openai
+    except ImportError:  # pragma: no cover - openai ships with litellm
+        pass
+    else:
+        if isinstance(exc, (openai.APITimeoutError, openai.APIConnectionError)):
+            return True
+    # Tinker's SDK has its own copies of these (TinkerModel raises them once its
+    # retries run out); its rate-limit and server errors carry a status_code.
+    if type(exc).__module__.split(".")[0] == "tinker" and type(exc).__name__ in (
+        "APITimeoutError",
+        "APIConnectionError",
+    ):
+        return True
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        return status in _TRANSIENT_STATUS or status >= 500
+    return False
+
+
 def _check_completion_count(
     model_id: str,
     n: int,
@@ -1057,7 +1092,11 @@ class Model:
                 prompt whose requests all failed gets the exception in its
                 slot, and a prompt with only some failed requests (fan-out
                 copies or n > 16 parts) gets the completions that arrived
-                (fewer than n, not checked).
+                (fewer than n, not checked) when those failures are transient
+                (timeouts, 429, 5xx). A non-transient one (a spending cap, the
+                token-unit quota, a bad request) puts that exception in the
+                prompt's slot even so; the completions that arrived are
+                charged and request-cached.
                 When False (default), the first failure is raised.
             cache_salt: Part of the request-cache key. Pass a new value to get
                 fresh completions for a prompt asked before on purpose, e.g.
@@ -1250,8 +1289,12 @@ class Model:
         results: list[Any] = []
         partial: set[int] = set()
         for i in range(len(prompts)):
-            if errors[i] and not fresh[i] and not hits[i]:
-                results.append(errors[i][0])
+            # A cap, quota, or bad request is not a short result to retry: the
+            # prompt gets the exception even if some of its requests finished
+            # (they are charged and request-cached, so a rerun replays them).
+            fatal = next((e for e in errors[i] if not _is_transient(e)), None)
+            if fatal is not None or (errors[i] and not fresh[i] and not hits[i]):
+                results.append(fatal if fatal is not None else errors[i][0])
                 continue
             if errors[i]:
                 partial.add(i)
@@ -1484,6 +1527,12 @@ class LocalModel(Model):
     def _make_token_budget(self) -> None:
         """Local inference is exempt from the token-unit quota."""
         return None
+
+    def _calculate_token_units(
+        self, prompt_tokens: int, completion_tokens: int
+    ) -> float:
+        """NaN: local inference is free, even for a model family with weights."""
+        return math.nan
 
     def _engine(self) -> Any:
         """Lazily construct and cache the vLLM engine."""

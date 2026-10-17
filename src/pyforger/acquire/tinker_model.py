@@ -12,8 +12,8 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import logging
+import math
 import threading
-import time
 import warnings
 from collections.abc import Callable, Iterable
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
@@ -27,6 +27,7 @@ from pyforger.acquire.model import (
     GenerateResult,
     Model,
     Prompt,
+    _is_transient,
     _log_progress,
     _progress_mode,
     _to_messages,
@@ -49,18 +50,77 @@ _RETRY_DELAY_S = 1.0
 _TRANSIENT_ERRORS = ("APIConnectionError", "RateLimitError", "InternalServerError")
 _RATE_KINDS = ("prefill", "cached_prefill", "sample")
 
-# Process-wide caps on in-flight sample requests, one semaphore per limit, so
-# several TinkerModels (or threads) in one process share the same cap.
+# The process-wide cap on in-flight sample requests, shared by every
+# TinkerModel (and thread) in the process: TINKER_MAX_CONCURRENT_SAMPLES, read
+# when a request starts (one semaphore per value the variable has had).
 _SLOTS: dict[int, threading.BoundedSemaphore] = {}
 _SLOTS_LOCK = threading.Lock()
 _PRICE_WARNING_SEEN: set[str] = set()
 
 
-def _sample_slots(limit: int) -> threading.BoundedSemaphore:
+def _process_slots() -> threading.BoundedSemaphore:
+    limit = max_concurrent_samples()
     with _SLOTS_LOCK:
         if limit not in _SLOTS:
             _SLOTS[limit] = threading.BoundedSemaphore(limit)
         return _SLOTS[limit]
+
+
+class _Cancelled(RuntimeError):
+    """The generate_batch call was interrupted; this request is not sent."""
+
+
+@contextlib.contextmanager
+def _acquire(slots: threading.BoundedSemaphore, cancel: threading.Event):
+    """Hold a slot; give up waiting (raise `_Cancelled`) once `cancel` is set."""
+    while not slots.acquire(timeout=0.1):
+        if cancel.is_set():
+            raise _Cancelled("generate_batch was interrupted")
+    try:
+        yield
+    finally:
+        slots.release()
+
+
+# Worst-case dollars of this process's in-flight requests per extra `budget`
+# object (TinkerModel(budget=...)), as TinkerUsageLedger.reserve does per file.
+_BUDGET_RESERVED: dict[int, tuple[int, float]] = {}
+_BUDGET_CHANGED = threading.Condition()
+
+
+@contextlib.contextmanager
+def _reserve_on(budget: Any, estimate_usd: float, cancel: threading.Event):
+    """Hold a request's worst case against `budget` while it runs.
+
+    `budget.check(estimate)` must raise when spend plus the estimate would
+    cross its limit. The estimate checked includes this process's other
+    requests in flight on the same budget; a request that does not fit waits
+    for them to be recorded, and raises when none are in flight.
+    """
+    key = id(budget)
+    with _BUDGET_CHANGED:
+        while True:
+            count, reserved = _BUDGET_RESERVED.get(key, (0, 0.0))
+            try:
+                budget.check(reserved + estimate_usd)
+            except Exception as exc:
+                # PostDataBench's TinkerBudget raises its own TinkerBudgetExceeded.
+                if not count or not type(exc).__name__.endswith("BudgetExceeded"):
+                    raise
+                if cancel.is_set():
+                    raise _Cancelled("generate_batch was interrupted") from None
+                _BUDGET_CHANGED.wait(timeout=0.1)
+                continue
+            _BUDGET_RESERVED[key] = (count + 1, reserved + estimate_usd)
+            break
+    try:
+        yield
+    finally:
+        with _BUDGET_CHANGED:
+            count, reserved = _BUDGET_RESERVED.pop(key)
+            if count > 1:
+                _BUDGET_RESERVED[key] = (count - 1, reserved - estimate_usd)
+            _BUDGET_CHANGED.notify_all()
 
 
 def _import_tinker() -> Any:
@@ -192,6 +252,7 @@ class TinkerModel(Model):
         )
         if self._max_concurrent < 1:
             raise ValueError("max_concurrent must be positive")
+        self._instance_slots = threading.BoundedSemaphore(self._max_concurrent)
         self._prices = dict(prices) if prices is not None else None
         self._budget = budget
         # Read now so a half-configured environment fails before any call.
@@ -207,6 +268,7 @@ class TinkerModel(Model):
         """Omit clients and locks; they are recreated on the next call."""
         state = super().__getstate__()
         state.pop("_client_lock", None)
+        state.pop("_instance_slots", None)
         state["_runtime"] = None
         return state
 
@@ -214,6 +276,7 @@ class TinkerModel(Model):
         """Restore state with fresh locks."""
         super().__setstate__(state)
         self._client_lock = threading.Lock()
+        self._instance_slots = threading.BoundedSemaphore(self._max_concurrent)
 
     def cache_key(self) -> tuple:
         """Stable hash key for @op caching from the sampling configuration.
@@ -242,6 +305,12 @@ class TinkerModel(Model):
 
     def _check_params(self, **params: Any) -> None:
         """No-op: Tinker model ids are not in LiteLLM's parameter registry."""
+
+    def _calculate_token_units(
+        self, prompt_tokens: int, completion_tokens: int
+    ) -> float:
+        """NaN: Tinker spend is in dollars, even for a model family with weights."""
+        return math.nan
 
     def _make_token_budget(self) -> None:
         # Token units cover LiteLLM generation; Tinker spend is in dollars.
@@ -325,16 +394,27 @@ class TinkerModel(Model):
         return runtime.tokenizer.encode(text, add_special_tokens=False)
 
     @contextlib.contextmanager
-    def _budgeted(self, runtime: _Runtime, estimate: dict[str, int]):
-        """Check budgets for a request's worst case; hold it on the ledger meanwhile."""
-        if runtime.ledger is None:
-            reservation: Any = contextlib.nullcontext()
-        else:
-            reservation = runtime.ledger.reserve(runtime.ledger.cost(estimate))
-        with reservation:
+    def _budgeted(
+        self, runtime: _Runtime, estimate: dict[str, int], cancel: threading.Event
+    ):
+        """Check budgets for a request's worst case; hold it reserved meanwhile.
+
+        Both the environment ledger and `budget` hold the worst case of every
+        request in flight in this process, so concurrent requests cannot each
+        pass the check on the same spend.
+        """
+        with contextlib.ExitStack() as stack:
+            if runtime.ledger is not None:
+                stack.enter_context(
+                    runtime.ledger.reserve(runtime.ledger.cost(estimate))
+                )
             if self._budget is not None:
                 assert runtime.rates is not None
-                self._budget.check(tinker_cost_usd(estimate, runtime.rates))
+                stack.enter_context(
+                    _reserve_on(
+                        self._budget, tinker_cost_usd(estimate, runtime.rates), cancel
+                    )
+                )
             yield
 
     def _charge(self, runtime: _Runtime, tokens: dict[str, int]) -> None:
@@ -350,20 +430,28 @@ class TinkerModel(Model):
         n: int,
         params: Any,
         max_tokens: int,
-    ) -> tuple[Any, dict[str, int]]:
+        cancel: threading.Event,
+    ) -> tuple[Any, dict[str, int], Exception | None]:
         """One request for n samples: check budgets, sample, charge billed tokens.
 
         Runs in a worker thread with the caller's context, so the charge reaches
         the caller's step report and spend ledger as soon as the request ends.
+        Returns the response, its billed tokens, and the error from writing the
+        ledgers, if any: the samples are paid for either way, so the caller
+        caches them before raising it. Once `cancel` is set (the call was
+        interrupted), no further attempt is sent.
         """
         estimate = sample_tokens(len(prompt), n, 0, [max_tokens] * n)
-        slots = _sample_slots(self._max_concurrent)
         for attempt in range(self._num_retries + 1):
             try:
                 # Checked once a slot is free, before every attempt: neither a
                 # queued request nor a retry may start past the limit. The
-                # worst case stays reserved on the ledger until it is charged.
-                with slots, self._budgeted(runtime, estimate):
+                # worst case stays reserved on the ledgers until it is charged.
+                with _acquire(self._instance_slots, cancel), _acquire(
+                    _process_slots(), cancel
+                ), self._budgeted(runtime, estimate, cancel):
+                    if cancel.is_set():
+                        raise _Cancelled("generate_batch was interrupted")
                     _tracking.check_budget()  # max_cost_usd, FORGER_MAX_COST_USD
                     response = runtime.sampler.sample(
                         prompt=runtime.types.ModelInput.from_ints(prompt),
@@ -376,12 +464,18 @@ class TinkerModel(Model):
                         getattr(response, "prompt_cache_hit_tokens", 0) or 0,
                         [len(sequence.tokens) for sequence in response.sequences],
                     )
-                    self._charge(runtime, billed)
+                    # The step report and totals first: a ledger write that
+                    # fails must not hide spend that Tinker already billed.
                     self._account(
                         len(prompt),
                         sum(len(seq.tokens) for seq in response.sequences),
                         self._cost(runtime, billed),
                     )
+                    charge_error: Exception | None = None
+                    try:
+                        self._charge(runtime, billed)
+                    except Exception as exc:
+                        charge_error = exc
             except runtime.transient as exc:
                 if attempt == self._num_retries:
                     raise
@@ -393,9 +487,10 @@ class TinkerModel(Model):
                     self._num_retries,
                     delay,
                 )
-                time.sleep(delay)
+                if cancel.wait(delay):
+                    raise _Cancelled("generate_batch was interrupted") from exc
                 continue
-            return response, billed
+            return response, billed, charge_error
         raise AssertionError("unreachable")
 
     def _account(
@@ -578,15 +673,19 @@ class TinkerModel(Model):
                 )
                 jobs[i] = (rendered, limit, sampling)
 
+        cancel = threading.Event()
+
         def run(i: int) -> tuple[Any, dict[str, int]]:
             """Sample prompt i's missing slots; cache them as soon as they arrive."""
             assert runtime is not None  # mypy hint
             rendered, limit, sampling = jobs[i]
-            outcome = self._sample(runtime, rendered, len(missing[i]), sampling, limit)
+            response, billed, charge_error = self._sample(
+                runtime, rendered, len(missing[i]), sampling, limit, cancel
+            )
             key = keys[i]
             if key is not None:
                 try:
-                    for slot, sequence in zip(missing[i], outcome[0].sequences):
+                    for slot, sequence in zip(missing[i], response.sequences):
                         text = self._decode(runtime, sequence, stop_strings)
                         if text:
                             _request_cache.write_slot(
@@ -600,7 +699,9 @@ class TinkerModel(Model):
                             )
                 except Exception as exc:  # a full disk must not fail the request
                     logger.warning("request cache write failed: %s", exc)
-            return outcome
+            if charge_error is not None:
+                raise charge_error  # after caching: the samples are paid for
+            return response, billed
 
         progress = _progress_mode(
             self._show_progress if show_progress is None else show_progress
@@ -633,6 +734,7 @@ class TinkerModel(Model):
                     except Exception as exc:
                         errors[i] = exc
             except BaseException:
+                cancel.set()  # workers waiting for a slot, budget, or retry give up
                 # Ctrl-C (or any error here): send no queued request; requests in
                 # flight finish in the background and are still charged.
                 executor.shutdown(wait=False, cancel_futures=True)
@@ -641,7 +743,9 @@ class TinkerModel(Model):
 
         results: list[Any] = []
         for i in range(len(prompts)):
-            if i in errors and not hits[i]:
+            # A budget refusal or bad request is not a short result to retry:
+            # the prompt gets the exception even when some samples were cached.
+            if i in errors and (not hits[i] or not _is_transient(errors[i])):
                 results.append(errors[i])
                 continue
             results.append(

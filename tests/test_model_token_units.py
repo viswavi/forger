@@ -458,3 +458,61 @@ def test_agent_usage_gets_token_units(monkeypatch):
     )
     dynamic._record_agent_usage(conversation, DEEPSEEK)
     assert seen == [((10, 20, 0.5, 70.0), {"model_id": DEEPSEEK})]
+
+
+def test_cap_on_part_of_a_fan_out_is_raised_not_short(monkeypatch):
+    """A cap that refuses one fan-out copy fails the prompt, not a short result."""
+    from pyforger import BudgetExceededError, pipeline, step
+    from pyforger.alter import generate_from_context
+
+    monkeypatch.setenv("FORGER_STEP_REPORT", "0")
+
+    def priced(**kwargs):
+        raw = response()
+        raw._hidden_params = {"response_cost": 1.0}
+        return raw
+
+    monkeypatch.setattr("pyforger.acquire.model.litellm.completion", priced)
+    model = Model("azure_ai/gpt-5.6-terra", max_concurrency=1)  # fans out n
+
+    @step
+    def write(rows, model):
+        return generate_from_context(
+            rows, "Say {q}.", model, samples_per_item=3, max_retries=0
+        )
+
+    @pipeline(max_cost_usd=1.5)
+    def main(rows, model):
+        return write(rows, model)
+
+    with pytest.raises(BudgetExceededError):
+        main([{"q": "a"}], model)
+    assert model.total_cost == 2.0
+
+
+def test_dynamic_step_agents_use_the_token_unit_quota(monkeypatch, tmp_path):
+    """Agent usage is charged to the shared quota, which then stops new agents."""
+    from pyforger.alter import dynamic
+
+    enable_budget(monkeypatch, tmp_path, limit=100)
+    model = Model(DEEPSEEK)
+    usage = dynamic._AgentUsage(DEEPSEEK, model._token_budget)
+    usage.check()  # 0 of 100 units: fine
+    counts = SimpleNamespace(prompt_tokens=10, completion_tokens=20)  # 70 units
+    metrics = SimpleNamespace(accumulated_token_usage=counts, accumulated_cost=0.01)
+    usage.record(
+        SimpleNamespace(
+            conversation_stats=SimpleNamespace(get_combined_metrics=lambda: metrics)
+        )
+    )
+    assert model._token_budget.snapshot()["token_units"] == 70
+    counts.prompt_tokens, counts.completion_tokens = 20, 40  # 140 units in all
+    usage.record(
+        SimpleNamespace(
+            conversation_stats=SimpleNamespace(get_combined_metrics=lambda: metrics)
+        )
+    )
+    with pytest.raises(TokenUnitQuotaExceeded):
+        usage.check()
+    with pytest.raises(ValueError):
+        dynamic._AgentUsage("gpt-5.6-luna", model._token_budget).check()
