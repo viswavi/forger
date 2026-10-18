@@ -7,9 +7,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from rouge_score import rouge_scorer
-
 from pyforger import _tracking
+from pyforger.filter._rouge import rouge_l
 from pyforger.op import op
 from pyforger.utils import canonical, get_field
 
@@ -77,12 +76,11 @@ def by_rouge_l_agreement(
         A filtered list of data items where the specified fields all agree (or disagree
             if `disagree=True`) by ROUGE-L F1.
     """
-    scorer = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=False)
     scores = [
-        scorer.score(
+        rouge_l(
             get_field(item, field_a, "by_rouge_l_agreement"),
             get_field(item, field_b, "by_rouge_l_agreement"),
-        )["rougeL"].fmeasure
+        )
         for item in items
     ]
     _tracking.record_scores(
