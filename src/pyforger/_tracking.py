@@ -1,7 +1,7 @@
 """Shared run-time state for ``@op`` calls, ``@step`` reports, and filter scores.
 
-This module imports nothing from the rest of pyforger but ``_spend`` and
-``_rowflow`` (which import nothing), so ``op.py``, ``steps.py``,
+This module imports nothing from the rest of pyforger but ``_spend``,
+``_rowflow``, and ``_phrases`` (which import nothing), so ``op.py``, ``steps.py``,
 ``acquire/model.py``, and the filters can all use it without circular imports.
 
 Context variables do not propagate into ``ThreadPoolExecutor`` workers. Ops
@@ -37,6 +37,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from pyforger import _spend
+from pyforger._phrases import Repeat
 from pyforger._rowflow import PipelineFlow, PythonGap, StepFlow
 
 _CATEGORIES = frozenset({"acquire", "alter", "filter", "inspect"})
@@ -146,6 +147,7 @@ class RowStream(BaseModel):
     sample: list[Any] = Field(default_factory=list)
     sample_summaries: list[dict[int, FieldSummary]] = Field(default_factory=list)
     row_type: str | None = None
+    repeated: list[Repeat] = Field(default_factory=list)
 
 
 class UsageTotals(BaseModel):
@@ -182,6 +184,8 @@ class StepRecord(BaseModel):
     those are dicts too. ``show`` names fields whose sample values print in full.
     ``python_gaps`` are rows that changed in plain Python between ops (see
     ``pyforger._rowflow``); a cached step keeps those of the run that cached it.
+    ``repeated`` are phrases and names in a large share of the output rows of
+    a field the step added or changed (see ``pyforger._phrases``).
 
     ``n_in`` sums every rows argument; ``inputs`` names them when there are
     several (``solvable 111 + refusals 42``). A step that returned a dict of
@@ -215,6 +219,7 @@ class StepRecord(BaseModel):
     token_units: float = 0.0
     original: UsageTotals | None = None
     python_gaps: list[PythonGap] = Field(default_factory=list)
+    repeated: list[Repeat] = Field(default_factory=list)
 
 
 class PipelineRecord(BaseModel):
