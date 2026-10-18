@@ -6,15 +6,17 @@ completions from any supported LLM provider.
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import os
+import statistics
 import sys
 import threading
 import time
 import warnings
 from collections.abc import Callable, Iterable, Iterator
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from typing import Any, Union
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from typing import Any, Literal, Union
 
 import litellm
 
@@ -31,8 +33,18 @@ _DEFAULT_MAX_WORKERS = 100
 # requests, e.g. n=40 on gpt-4o sends n=14, 13 and 13.
 _MAX_N_PER_REQUEST = 16
 # Without a terminal (stderr redirected to a log file), progress is a plain log
-# line at most this often instead of a redrawn bar.
+# line this often instead of a redrawn bar, also while nothing finishes.
 _PROGRESS_LOG_INTERVAL_S = 30.0
+# A request in flight longer than both of these (seconds, and times the median
+# duration of the batch's finished requests) gets one warning, e.g. at 9
+# minutes when the others took 41s.
+_STRAGGLER_MIN_S = 120.0
+_STRAGGLER_FACTOR = 5.0
+# Model(timeout="auto"): each request attempt may take this long, or longer
+# when max_tokens at this slow a rate needs it (max_tokens=32768 gets 1311s).
+# LiteLLM's own default is 6000s, so a stuck request blocks for 100 minutes.
+_DEFAULT_TIMEOUT_S = 600.0
+_SLOW_TOKENS_PER_S = 25.0
 
 _logger = get_formatted_logger(__name__)
 
@@ -51,20 +63,138 @@ def _progress_mode(show_progress: bool | None) -> str:
     return "bar" if isatty is not None and isatty() else "log"
 
 
-def _log_progress(futures: Iterable[Future], total: int, desc: str) -> Iterator[Future]:
-    """Yield `futures` and log "<desc>: 120/500 done, 31s" at most every 30s.
+def _request_timeout(timeout: Any, max_tokens: int | None) -> Any:
+    """The `timeout` litellm gets per request attempt; "auto" picks one."""
+    if timeout != "auto":
+        return timeout
+    if max_tokens is None:
+        return _DEFAULT_TIMEOUT_S
+    return max(_DEFAULT_TIMEOUT_S, float(round(max_tokens / _SLOW_TOKENS_PER_S)))
 
-    A batch that finishes within the interval logs nothing.
+
+def _duration(seconds: float) -> str:
+    """Short duration, e.g. "41s", "9m 12s", "10m", "1h 5m"."""
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m {s % 60}s" if s % 60 else f"{s // 60}m"
+    return f"{s // 3600}h {s % 3600 // 60}m"
+
+
+class _RequestClock:
+    """When each request of one batch started and ended; warns about stragglers."""
+
+    def __init__(self, desc: str, timeout: Any) -> None:
+        """`timeout` is what litellm gets per attempt, named in the warning."""
+        self.desc = desc
+        self.timeout = timeout
+        self.lock = threading.Lock()
+        self.started: dict[int, float] = {}
+        self.ended: dict[int, float] = {}
+        self.warned: set[int] = set()
+
+    def run(
+        self,
+        i: int,
+        messages: list[Message],
+        n: int,
+        call_kwargs: dict[str, Any],
+        semaphore: threading.BoundedSemaphore | None,
+    ) -> Any:
+        """`_complete` for request `i`, timed from when it holds its slot."""
+
+        def start() -> None:
+            with self.lock:
+                self.started[i] = time.monotonic()
+
+        try:
+            return _complete(messages, n, call_kwargs, semaphore, on_start=start)
+        finally:
+            with self.lock:
+                self.ended[i] = time.monotonic()
+
+    def warn_stragglers(self, now: float) -> None:
+        """Warn once about requests in flight far longer than the finished ones.
+
+        Needs a finished request to compare with: a batch of long calls that
+        all run about equally long is not warned about.
+        """
+        with self.lock:
+            durations = [
+                end - self.started[i]
+                for i, end in self.ended.items()
+                if i in self.started
+            ]
+            in_flight = [
+                (i, now - t)
+                for i, t in self.started.items()
+                if i not in self.ended and i not in self.warned
+            ]
+        if not durations:
+            return
+        median = statistics.median(durations)
+        limit = max(_STRAGGLER_MIN_S, _STRAGGLER_FACTOR * median)
+        late = [(i, age) for i, age in in_flight if age > limit]
+        if not late:
+            return
+        self.warned.update(i for i, _ in late)
+        if isinstance(self.timeout, (int, float)):
+            # litellm retries a timed-out attempt (num_retries), so a request
+            # can stay in flight past its timeout.
+            limit_text = (
+                f"each attempt times out after {_duration(self.timeout)} "
+                "(Model(timeout=...)) and is retried"
+            )
+        elif self.timeout is None:
+            limit_text = "Model(timeout=None) leaves LiteLLM's default timeout"
+        else:  # e.g. an httpx.Timeout
+            limit_text = f"it times out per Model(timeout={self.timeout!r})"
+        _logger.warning(
+            "%s: %s in flight for %s (median of completed requests %s); %s",
+            self.desc,
+            "1 request" if len(late) == 1 else f"{len(late)} requests",
+            _duration(max(age for _, age in late)),
+            _duration(median),
+            limit_text,
+        )
+
+
+def _watch(
+    futures: Iterable[Future], total: int, desc: str, log: bool, clock: _RequestClock
+) -> Iterator[Future]:
+    """Yield `futures` as they finish, checking every 30s while any are in flight.
+
+    A check warns about stragglers and, with `log`, logs "<desc>: 120/500
+    done, 31s", also when nothing finished since the last line. A batch that
+    finishes within the interval logs nothing.
     """
-    start = last = time.monotonic()
+    start = time.monotonic()
+    next_check = start + _PROGRESS_LOG_INTERVAL_S
+    pending = set(futures)
     done = 0
-    for future in futures:
-        done += 1
+    logged = False
+    while pending:
+        # Sleep until a request finishes or the next check is due (at least
+        # 10ms, so a zero interval does not spin).
+        finished, pending = wait(
+            pending,
+            timeout=max(next_check - time.monotonic(), 0.01),
+            return_when=FIRST_COMPLETED,
+        )
+        done += len(finished)
+        yield from finished
         now = time.monotonic()
-        if now - last >= _PROGRESS_LOG_INTERVAL_S or (done == total and last > start):
-            _logger.info("%s: %d/%d done, %.0fs", desc, done, total, now - start)
-            last = now
-        yield future
+        if pending and now >= next_check:
+            if log:
+                _logger.info("%s: %d/%d done, %.0fs", desc, done, total, now - start)
+                logged = True
+            clock.warn_stragglers(now)
+            next_check = now + _PROGRESS_LOG_INTERVAL_S
+    if logged:
+        _logger.info(
+            "%s: %d/%d done, %.0fs", desc, done, total, time.monotonic() - start
+        )
 
 
 def _make_semaphore(max_concurrency: int | None) -> threading.BoundedSemaphore | None:
@@ -101,18 +231,21 @@ def _complete(
     n: int,
     call_kwargs: dict[str, Any],
     semaphore: threading.BoundedSemaphore | None,
+    on_start: Callable[[], None] | None = None,
 ) -> Any:
     """One litellm.completion call, holding a `max_concurrency` slot if any.
 
     The response's usage is recorded here, in the worker, before the caller
     sees it: a batch that later raises or is interrupted keeps every
-    finished request in the step report.
+    finished request in the step report. `on_start` runs once the request
+    holds its slot, just before it is sent.
     """
-    if semaphore is None:
+    with contextlib.ExitStack() as slot:
+        if semaphore is not None:
+            slot.enter_context(semaphore)
+        if on_start is not None:
+            on_start()
         response = litellm.completion(messages=messages, n=n, **call_kwargs)
-    else:
-        with semaphore:
-            response = litellm.completion(messages=messages, n=n, **call_kwargs)
     _add_response_usage(response, call_kwargs.get("model", "?"))
     return response
 
@@ -131,14 +264,16 @@ def _batch_completion_with_progress(
 
     A replacement for `litellm.batch_completion`, which retrieves
     `future.result()` in submission order, so the whole call looks frozen until
-    the *slowest* early-submitted item finishes. This reports progress via
-    `as_completed` as each call actually finishes: a tqdm bar (`progress="bar"`),
-    a log line every 30s (`"log"`), or nothing (`"off"`). Each request holds a
-    slot of `semaphore` (the Model's `max_concurrency`) while in flight.
+    the *slowest* early-submitted item finishes. This reports progress as each
+    call actually finishes: a tqdm bar (`progress="bar"`), a log line every 30s
+    (`"log"`), or nothing (`"off"`). Each request holds a slot of `semaphore`
+    (the Model's `max_concurrency`) while in flight. In every mode, a request
+    in flight far longer than the finished ones gets one warning.
     """
     results: list[Any] = [None] * len(requests)
     total = len(requests)
     desc = f"LLM calls ({call_kwargs.get('model', '?')})"
+    clock = _RequestClock(desc, call_kwargs.get("timeout"))
     executor = ThreadPoolExecutor(max_workers=min(max_workers, total))
     try:
         future_to_idx: dict[Future, int] = {}
@@ -146,15 +281,15 @@ def _batch_completion_with_progress(
             # One context copy per request, so add_usage in the worker sees the
             # caller's op / step / pipeline contextvars.
             run: Callable[..., Any] = contextvars.copy_context().run
-            future = executor.submit(run, _complete, msgs, n, call_kwargs, semaphore)
+            future = executor.submit(run, clock.run, i, msgs, n, call_kwargs, semaphore)
             future_to_idx[future] = i
-        finished: Iterable[Future] = as_completed(future_to_idx)
+        finished: Iterable[Future] = _watch(
+            future_to_idx, total, desc, progress == "log", clock
+        )
         if progress == "bar":
             from tqdm import tqdm
 
             finished = tqdm(finished, total=total, desc=desc, leave=False)
-        elif progress == "log":
-            finished = _log_progress(finished, total, desc)
         for future in finished:
             idx = future_to_idx[future]
             try:
@@ -485,6 +620,7 @@ class Model:
         num_retries: int = 2,
         show_progress: bool | None = None,
         max_concurrency: int | None = None,
+        timeout: float | Literal["auto"] | None = "auto",
         **kwargs: Any,
     ) -> None:
         """Create a Model instance.
@@ -507,8 +643,13 @@ class Model:
                 across all generate_batch() calls and threads (each n fan-out
                 copy counts). None (default) caps each call at 100 requests.
                 Not part of cache_key().
+            timeout: Seconds one request attempt may take before it fails
+                with a timeout, which litellm retries like other transient
+                errors (num_retries). "auto" (default) is 600, or
+                max_tokens / 25 when that is longer (32768 tokens get 1311).
+                None leaves LiteLLM's default (6000). Not part of cache_key().
             **kwargs: Passed through to litellm.completion()
-                (e.g. api_base, timeout, organization).
+                (e.g. api_base, organization).
         """
         if max_concurrency is not None and max_concurrency <= 0:
             raise ValueError("max_concurrency must be positive")
@@ -520,6 +661,7 @@ class Model:
         self._show_progress = show_progress
         self._max_concurrency = max_concurrency
         self._semaphore = _make_semaphore(max_concurrency)
+        self._timeout = timeout
         self._kwargs = kwargs
         self.history: list[GenerateResult] = []
         self._check_params(
@@ -542,6 +684,8 @@ class Model:
         """Restore, with a fresh semaphore of the same max_concurrency."""
         self.__dict__.update(state)
         self._semaphore = _make_semaphore(state.get("_max_concurrency"))
+        # A Model pickled before Model(timeout=) existed.
+        self.__dict__.setdefault("_timeout", "auto")
 
     def _check_params(self, **params: Any) -> None:
         """Validate params against LiteLLM's registry for this model id."""
@@ -694,6 +838,9 @@ class Model:
             num_retries=self._num_retries,
             **self._kwargs,
         )
+        timeout = _request_timeout(self._timeout, max_tokens)
+        if timeout is not None:
+            call_kwargs["timeout"] = timeout
         progress = _progress_mode(
             self._show_progress if show_progress is None else show_progress
         )

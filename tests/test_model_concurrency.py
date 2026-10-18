@@ -364,13 +364,13 @@ class TestProgress:
         assert [c.kwargs["progress"] for c in send.call_args_list] == ["log", "off"]
 
     def test_log_mode_logs_at_the_interval(self, mock_litellm, monkeypatch, caplog):
-        """With the interval at 0, each finished request logs a line."""
+        """With the interval at 0, every wake-up logs a line; the last says done."""
         monkeypatch.setattr(model_module, "_PROGRESS_LOG_INTERVAL_S", 0.0)
-        mock_litellm.completion.side_effect = InFlight(delay=0)
+        mock_litellm.completion.side_effect = InFlight(delay=0.05)
         with caplog.at_level(logging.INFO, logger="pyforger.acquire.model"):
             Model("gpt-4o", show_progress=True).generate_batch(["A", "B", "C"])
         lines = [r.getMessage() for r in caplog.records]
-        assert len(lines) == 3
+        assert len(lines) >= 2
         assert lines[-1].startswith("LLM calls (gpt-4o): 3/3 done, ")
 
     def test_fast_batch_logs_nothing(self, mock_litellm, caplog):
@@ -590,13 +590,15 @@ class TestInterrupt:
         fake = InFlight(delay=0.05)
         mock_litellm.completion.side_effect = fake
 
-        def interrupt_after_four(futures, total, desc):
-            for i, future in enumerate(futures):
+        watch = model_module._watch
+
+        def interrupt_after_four(*args):
+            for i, future in enumerate(watch(*args)):
                 if i == 4:
                     raise error("interrupted")
                 yield future
 
-        monkeypatch.setattr(model_module, "_log_progress", interrupt_after_four)
+        monkeypatch.setattr(model_module, "_watch", interrupt_after_four)
         model = Model("gpt-4o", max_concurrency=2, show_progress=True)
         start = time.monotonic()
         with patch("pyforger.acquire.model._tracking.add_usage") as add_usage:

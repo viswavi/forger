@@ -48,7 +48,7 @@ by default:
 Typically, the user should set LITELLM_API_KEY environment variable. If none is given, then LiteLLM will fall back to
 provider-specific environment variables (e.g. `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`). When instantiating a `Model` with
 such variables, do not look at or print the key; simply pass it to the client via `os.environ.get("LITELLM_API_KEY")`
-(or equivalent).  Additional `**kwargs` are forwarded to `litellm.completion` (`api_base`, `organization`, `timeout`).
+(or equivalent).  Additional `**kwargs` are forwarded to `litellm.completion` (`api_base`, `organization`).
 
 You can check whether the LITELLM_API_KEY environment variable is provided in Python with:
 
@@ -278,6 +278,20 @@ Progress is on by default for a `generate_batch` call that sends more than one r
 terminal, otherwise a log line at most every 30 seconds (`LLM calls (<model>): 120/500 done, 31s`). Turn it off with
 `Model(..., show_progress=False)` (or per call) or the environment variable `FORGER_PROGRESS=0`; an explicit
 `show_progress` wins over the variable. `LocalModel` keeps vLLM's own bar, off unless `show_progress=True`.
+The log line keeps coming every 30 seconds while requests are in flight, also when none finished since the last one.
+
+Each request attempt times out after `Model(timeout=...)` seconds. The default, `"auto"`, is 600 seconds (10 minutes),
+or `max_tokens / 25` when that is longer (`max_tokens=32768` gets 1311 s), so a long reasoning call at a slow 25
+tokens/s still finishes. A timed-out attempt is a transient error: LiteLLM retries it like a 429 or a 5xx
+(`num_retries`). Pass a number to change it (`Model(..., timeout=1800)`), or `timeout=None` for LiteLLM's own
+default (6000 s). The timeout is not part of the cache key, so changing it keeps cached results.
+
+When a request has been in flight much longer than the batch's finished ones (over 2 minutes and over 5 times their
+median), Forger logs one warning for it, in every progress mode:
+`LLM calls (<model>): 1 request in flight for 9m 12s (median of completed requests 41s); each attempt times out after
+10m (Model(timeout=...)) and is retried`. It means the provider is slow on that request or the request is stuck; the
+batch waits for it until it finishes or times out. If such warnings are common, lower `timeout`, or `max_tokens` if
+the long requests are runaway generations.
 
 `model.generate_batch(prompts, return_exceptions=True)` keeps finished results when a request still fails after
 `num_retries` (e.g. a gateway 504): the list has one entry per prompt, a prompt whose requests all failed holds the
