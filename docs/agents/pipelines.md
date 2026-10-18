@@ -58,7 +58,9 @@ cached it, marked `cached`, with that run's warnings.
   free. For a one-sentence LLM summary of each long value as well, call `pyforger.steps.set_report_model(model)` or
   set `FORGER_REPORT_MODEL=<litellm model id>` (key from `LITELLM_API_KEY`). That costs up to 8 LLM calls per printed
   report, cached on disk and left out of the step and pipeline totals (the spend ledger and `FORGER_MAX_COST_USD`
-  still count them); silenced reports make no calls.
+  still count them); silenced reports make no calls. A cheap model without reasoning is enough. Without a report
+  model, the first report with a long value logs how to set one; `set_report_model(None)` turns summaries off and
+  silences that.
 - Threads: ops called from `ThreadPoolExecutor` workers are not itemized in the step report (the step gets a warning
   instead of an error) unless submitted as `pool.submit(contextvars.copy_context().run, fn, arg)`. Steps called from
   workers still join the pipeline, and their spend counts toward it (and its cap) as it arrives. Each op, step, and

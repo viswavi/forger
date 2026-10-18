@@ -540,6 +540,12 @@ if os.path.basename(CUSTOM_SIF) == "openhands-forger.sif":
 # Persist each run’s @op cache inside its own mounted data directory
 # so agents cannot browse other runs’ cached calls.
 os.environ["FORGER_CACHE"] = f"{AGENT_DATA_DIR}/.forger_cache"
+# One-sentence LLM summaries of long values in Forger's step reports: at most 8
+# short calls per report, charged to the generation quota like any other call.
+if not args.hide_forger:
+    os.environ.setdefault(
+        "FORGER_REPORT_MODEL", "litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731"
+    )
 
 os.makedirs(AGENT_SCRATCH_DIR, exist_ok=True)
 os.makedirs(os.environ["FORGER_CACHE"], exist_ok=True)
@@ -1019,6 +1025,7 @@ try:
             "FORGER_TOKEN_UNIT_LIMIT",
             "PDB_TASK",
             "FORGER_CACHE",
+            "FORGER_REPORT_MODEL",
             # Tinker: SFT/RL/eval run remotely; ledgers enforce dollar limits.
             "TINKER_API_KEY",
             "TINKER_SFT_USAGE_FILE",
