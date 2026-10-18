@@ -442,17 +442,29 @@ class PipelineFlow:
             self._prev = _streams(rows_out)
             self._prev_index, self._prev_name = position, name
 
-    def close(self, result: Any) -> list[PythonGap]:
-        """The pipeline returned ``result``: the gaps that stand, in step order."""
+    def close(
+        self, result: Any, moved: dict[int, int] | None = None
+    ) -> list[PythonGap]:
+        """The pipeline returned ``result``: the gaps that stand, in step order.
+
+        ``moved`` maps a step's position when it joined to its position in the
+        summary (steps run with ``.submit`` join when they finish, but are
+        listed in the order they were submitted).
+        """
         returned = _returned_ids(result)
+
+        def at(position: int) -> int:
+            return moved.get(position, position) if moved else position
+
         with self._lock:
-            gaps = [
-                c.gap
-                for c in self._candidates
-                if c.gap.position is not None
+            gaps = []
+            for c in self._candidates:
+                if c.gap.position is None or c.missing & returned:
+                    continue
                 # Steps from worker threads may join out of order.
-                and c.after_index == c.gap.position - 1 and not c.missing & returned
-            ]
+                if at(c.after_index) == at(c.gap.position) - 1:
+                    c.gap.position = at(c.gap.position)
+                    gaps.append(c.gap)
             self._candidates.clear()
             self._prev = None
         return sorted(gaps, key=lambda g: g.position or 0)

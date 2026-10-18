@@ -504,6 +504,10 @@ class _Running:
     usage: Usage
     unattributed: Usage
     flow: PipelineFlow = field(default_factory=PipelineFlow)
+    # Each step's place in the summary (by ``id`` of its record): the order it
+    # was started or submitted in, not the order it finished in.
+    next_seq: int = 0
+    seqs: dict[int, int] = field(default_factory=dict)
 
 
 _RUNNING_PIPELINES: list[_Running] = []
@@ -597,10 +601,33 @@ def pipeline_for_step() -> PipelineRecord | None:
         return _RUNNING_PIPELINES[0].rec if len(_RUNNING_PIPELINES) == 1 else None
 
 
-def _flow_of(rec: PipelineRecord) -> PipelineFlow | None:
+def _running_of(rec: PipelineRecord) -> _Running | None:
     with _RUNNING_LOCK:
-        running = next((r for r in _RUNNING_PIPELINES if r.rec is rec), None)
-    return running.flow if running is not None else None
+        return next((r for r in _RUNNING_PIPELINES if r.rec is rec), None)
+
+
+# The summary place a step run with ``.submit`` reserved when it was submitted;
+# set in the step's copied context, read when the step starts.
+_RESERVED_SEQ: ContextVar[int | None] = ContextVar("forger_reserved_seq", default=None)
+
+
+def reserve_step_seq(rec: PipelineRecord) -> int | None:
+    """Reserve the next place in ``rec``'s summary for a step about to start."""
+    running = _running_of(rec)
+    if running is None:
+        return None
+    with _RUNNING_LOCK:
+        running.next_seq += 1
+        return running.next_seq - 1
+
+
+def run_reserved(seq: int | None, fn: Callable[..., Any], *args: Any) -> Any:
+    """Call ``fn(*args)``; a step it starts takes the place ``seq`` in the summary.
+
+    Run it in the step's own (copied) context.
+    """
+    _RESERVED_SEQ.set(seq)
+    return fn(*args)
 
 
 def step_starting(
@@ -612,8 +639,14 @@ def step_starting(
     the previous step's output (each stream of it, when it returned a dict).
     ``arg_lists`` are all its list arguments.
     """
-    flow = _flow_of(rec)
-    return flow.start(rows_in, arg_lists) if flow is not None else None
+    seq = _RESERVED_SEQ.get()
+    if seq is None:
+        seq = reserve_step_seq(rec)
+    else:
+        _RESERVED_SEQ.set(None)
+    running = _running_of(rec)
+    candidates = running.flow.start(rows_in, arg_lists) if running is not None else None
+    return seq, candidates
 
 
 def join_pipeline(
@@ -623,19 +656,35 @@ def join_pipeline(
 
     ``started`` is what ``step_starting`` returned for it.
     """
-    flow = _flow_of(rec)
+    seq, candidates = started if started is not None else (None, None)
+    running = _running_of(rec)
     with _RUNNING_LOCK:
         rec.steps.append(step)
         position = len(rec.steps) - 1
-    if flow is not None:
-        flow.finish(started, position, step.name, rows_out)
+        if running is not None and seq is not None:
+            running.seqs[id(step)] = seq
+    if running is not None:
+        running.flow.finish(candidates, position, step.name, rows_out)
 
 
 def close_pipeline_flow(rec: PipelineRecord, result: Any) -> None:
-    """Set ``rec.python_gaps`` once the pipeline returned ``result``."""
-    flow = _flow_of(rec)
-    if flow is not None:
-        rec.python_gaps = flow.close(result)
+    """Put ``rec.steps`` in start order; set ``rec.python_gaps`` for ``result``.
+
+    Steps join ``rec`` when they finish; with ``.submit`` that is not the
+    order they started in, so the summary would depend on timing.
+    """
+    running = _running_of(rec)
+    if running is None:
+        return
+    seqs = running.seqs
+    with _RUNNING_LOCK:
+        order = sorted(
+            range(len(rec.steps)),
+            key=lambda i: seqs.get(id(rec.steps[i]), math.inf),
+        )
+        rec.steps[:] = [rec.steps[i] for i in order]
+    moved = {old: new for new, old in enumerate(order) if old != new}
+    rec.python_gaps = running.flow.close(result, moved)
 
 
 _OPS_STARTED = [0]
