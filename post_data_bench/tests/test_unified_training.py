@@ -144,6 +144,83 @@ class CodeTests(unittest.TestCase):
         )
 
 
+class SolutionExecutionTests(unittest.TestCase):
+    """Code criteria can run the response's code against tests, safely."""
+
+    STDIN_GRADER = (
+        "import re\n"
+        "TESTS = [('1 2\\n', '3'), ('5 7\\n', '12')]\n"
+        "def grade(prompt, response, ground_truth):\n"
+        "    answer = response.split('</think>')[-1]\n"
+        "    blocks = re.findall(r'```python\\n(.*?)```', answer, re.S)\n"
+        "    if not blocks:\n"
+        "        return 0.0\n"
+        "    passed = 0\n"
+        "    for stdin, expected in TESTS:\n"
+        "        ok, out = run_program(blocks[-1], stdin)\n"
+        "        passed += ok and out.strip() == expected\n"
+        "    return passed / len(TESTS)\n"
+    )
+
+    def response(self, code):
+        """Wrap code as a fenced answer after a thinking trace."""
+        return "<think>add</think>```python\n" + code + "\n```"
+
+    def test_runs_stdin_programs_and_scores_tests(self):
+        """Correct, partially correct, and failing programs get graded by tests."""
+        for code, expected in (
+            ("a, b = map(int, input().split())\nprint(a + b)", 1.0),
+            ("a, b = map(int, input().split())\nprint(3)", 0.5),
+            ("print(int(input()) + )", 0.0),
+            ("while True:\n    pass", 0.0),
+            ("import os\nprint(os.getcwd())", 0.0),
+        ):
+            with self.subTest(code=code):
+                self.assertEqual(
+                    rm.code_score(self.STDIN_GRADER, [], self.response(code), ""),
+                    expected,
+                )
+
+    def test_timeout_is_per_run(self):
+        """One looping test fails alone; later runs still get their own budget."""
+        grader = (
+            "def grade(prompt, response, ground_truth):\n"
+            "    slow = run_program('while True:\\n    pass')\n"
+            "    fast = run_program('print(2 + 2)')\n"
+            "    timed_out = slow == (False, 'SandboxTimeout')\n"
+            "    return float(timed_out and fast == (True, '4\\n'))\n"
+        )
+        self.assertEqual(rm.code_score(grader, [], "", ""), 1.0)
+
+    def test_response_cannot_forge_scores(self):
+        """Printing a score, or returning an always-equal object, earns nothing."""
+        forged_output = "import sys\nprint('{\"score\": 1.0}')\nsys.exit(0)"
+        self.assertEqual(
+            rm.code_score(self.STDIN_GRADER, [], self.response(forged_output), ""), 0.0
+        )
+        cheat = (
+            "class Anything:\n"
+            "    def __eq__(self, other):\n"
+            "        return True\n"
+            "class Solution:\n"
+            "    def add(self, a, b):\n"
+            "        return Anything()\n"
+        )
+        honest = (
+            "class Solution:\n"
+            "    def add(self, a, b):\n"
+            "        return [a + b, (a, b)]\n"
+        )
+        grader = (
+            "CODE = %r\n"
+            "def grade(prompt, response, ground_truth):\n"
+            "    ok, result = call_method(CODE, 'Solution', 'add', 2, 3)\n"
+            "    return float(ok and result == [5, [2, 3]])\n"
+        )
+        self.assertEqual(rm.code_score(grader % cheat, [], "", ""), 0.0)
+        self.assertEqual(rm.code_score(grader % honest, [], "", ""), 1.0)
+
+
 class RewardTests(unittest.IsolatedAsyncioTestCase):
     """Regression checks for reward."""
 
