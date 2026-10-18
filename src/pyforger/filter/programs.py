@@ -48,7 +48,9 @@ def by_tests(
     test of every row runs (``alter.run_programs``, cached on its own, so a new
     ``min_pass_rate`` runs nothing). The pass rate counts only tests with an
     ``"output"``; a row with no code or no such test is dropped. In a
-    ``@step`` report the per-row score is the pass rate.
+    ``@step`` report the per-row score is the pass rate, and a few dropped
+    rows are shown with their first failing test, e.g. ``test 2 of 3:
+    wrong_answer, got '4', expected '5'``.
 
     Args:
         items: Input rows.
@@ -97,7 +99,14 @@ def by_tests(
         max_workers=max_workers,
     )
     rates = [_pass_rate(row["_by_tests_results"]) for row in ran]
-    _tracking.record_scores("pass rate", rates, keep="ge", threshold=min_pass_rate)
+    _tracking.record_scores(
+        "pass rate",
+        rates,
+        keep="ge",
+        threshold=min_pass_rate,
+        notes=[_first_failure(row["_by_tests_results"], row["tests"]) for row in ran],
+        previews=[row["code"] for row in ran],
+    )
     return [
         {**item, result_field: row["_by_tests_results"]}
         if result_field is not None
@@ -105,6 +114,33 @@ def by_tests(
         for item, row, rate in zip(items, ran, rates)
         if rate is not None and rate >= min_pass_rate
     ]
+
+
+def _first_failure(results: list[dict] | None, tests: Any) -> str:
+    """What went wrong first, for the step report.
+
+    E.g. ``"test 2 of 3: wrong_answer, got '4', expected '5'"``, or ``"no code"``.
+    """
+    if results is None:
+        return "no code"
+    graded = [(k, r) for k, r in enumerate(results) if r["passed"] is not None]
+    if not graded:
+        return "no test with an expected output"
+    failed = [(k, r) for k, r in graded if not r["passed"]]
+    if not failed:
+        return ""
+    k, result = failed[0]
+    note = f"test {k + 1} of {len(results)}: {result['status']}"
+    if result["status"] == "wrong_answer":
+        expected = tests[k].get("output") if isinstance(tests, list) else None
+        note += f", got {str(result.get('stdout', ''))[:60].strip()!r}"
+        if expected is not None:
+            note += f", expected {str(expected)[:60].strip()!r}"
+    elif result["status"] == "runtime_error":
+        lines = str(result.get("stderr") or "").strip().splitlines()
+        if lines:
+            note += f": {lines[-1][:120]}"
+    return note
 
 
 def _pass_rate(results: list[dict] | None) -> float | None:

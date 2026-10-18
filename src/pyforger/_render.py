@@ -34,6 +34,7 @@ from rich.text import Text
 from pyforger import _summaries
 from pyforger._rowflow import group_calls
 from pyforger._tracking import (
+    MAX_DROPPED_NOTES,
     FieldSummary,
     OpCall,
     PipelineRecord,
@@ -701,6 +702,26 @@ def _histogram_renderable(
     return Group(*parts)
 
 
+def _dropped_lines(scores: ScoreRecord) -> list[RenderableType]:
+    """A few dropped rows with the filter's note, under its histogram.
+
+    E.g. ``2 · "Paris is in Italy."`` then ``↳ The output puts Paris in Italy.``
+    """
+    if not scores.dropped:
+        return []
+    lines: list[RenderableType] = [
+        Padding(Text("dropped, with notes:", style="dim"), (0, 0, 0, 2))
+    ]
+    for row in scores.dropped:
+        head = Text()
+        if row.value is not None:
+            head.append(f"{_fmt_value_label(row.value)} · ", style="bold")
+        head.append(_clean(row.preview) or "(no preview)")
+        lines.append(Padding(head, (0, 0, 0, 4)))
+        lines.append(Padding(Text(f"↳ {_clean(row.note)}", style="dim"), (0, 0, 0, 6)))
+    return lines
+
+
 # --------------------------------------------------------------------------- #
 # Step report
 # --------------------------------------------------------------------------- #
@@ -854,8 +875,11 @@ def _merged_scores(calls: list[OpCall]) -> list[tuple[ScoreRecord, int]]:
         key = (sc.label, sc.keep, sc.threshold, sc.lower, sc.upper, sc.pooled)
         if key in merged:
             rec, n = merged[key]
+            dropped = (rec.dropped + sc.dropped)[:MAX_DROPPED_NOTES]
             merged[key] = (
-                rec.model_copy(update={"values": rec.values + sc.values}),
+                rec.model_copy(
+                    update={"values": rec.values + sc.values, "dropped": dropped}
+                ),
                 n + 1,
             )
         else:
@@ -1425,6 +1449,7 @@ def step_renderable(
             name = group.op_name + (f" ×{n}" if n > 1 else "")
             body.append(Text(""))
             body.append(_histogram_renderable(_histogram(scores), name, width - 2))
+            body.extend(_dropped_lines(scores))
         if group.n_cached and group.category == "filter":
             if group.cache_hit:
                 what = "no score histogram for a cached result"
@@ -1670,8 +1695,13 @@ def render_pipeline(rec: PipelineRecord) -> str:
 
 
 def render_scores(scores: ScoreRecord, op_name: str = "scores") -> str:
-    """Render one filter's score histogram as plain text."""
-    return _plain(_histogram_renderable(_histogram(scores), op_name, WIDTH))
+    """Render one filter's score histogram, and its dropped rows, as plain text."""
+    return _plain(
+        Group(
+            _histogram_renderable(_histogram(scores), op_name, WIDTH),
+            *_dropped_lines(scores),
+        )
+    )
 
 
 def _emit(renderable: RenderableType, console: Console) -> None:

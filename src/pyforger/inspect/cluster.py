@@ -12,6 +12,7 @@ from typing import Any
 
 import tiktoken
 
+from pyforger.acquire._model_utils import _catch_kwargs, _RequestFailures
 from pyforger.acquire.model import Message, Model, Prompt, _cache_kwargs
 from pyforger.op import op
 from pyforger.utils import get_field, get_formatted_logger
@@ -235,11 +236,24 @@ def _topic_based_clustering(
         summarize_truncation,
         seed,
     )
-    shard_topics = _summarize_shards(shards, model, context, num_clusters)
-    codebook = _build_codebook(shard_topics, model, context, num_clusters)
+    # A request that fails after the model's retries (a 504, a timeout) counts
+    # as an unparseable answer; one warning at the end names how many.
+    failures = _RequestFailures()
+    shard_topics = _summarize_shards(shards, model, context, num_clusters, failures)
+    codebook = _build_codebook(shard_topics, model, context, num_clusters, failures)
     logger.info("topic_based_clustering: codebook topics: %s", list(codebook))
     topic_of = _assign_topics(
-        unique_docs, model, context, codebook, assign_truncation, max_assign_retries
+        unique_docs,
+        model,
+        context,
+        codebook,
+        assign_truncation,
+        max_assign_retries,
+        failures,
+    )
+    failures.report(
+        f"inspect.topic_based_clustering: {len(failures)} requests failed after "
+        "retries and were treated as unparseable answers"
     )
     return [topic_of[doc] for doc in row_docs]
 
@@ -387,9 +401,14 @@ def _partition(
 
 
 def _summarize_shards(
-    shards: list[list[str]], model: Model, context: str, num_clusters: int
+    shards: list[list[str]],
+    model: Model,
+    context: str,
+    num_clusters: int,
+    failures: _RequestFailures | None = None,
 ) -> list[dict[str, str]]:
     """Step 2a: summarize each shard into candidate topics."""
+    failures = failures if failures is not None else _RequestFailures()
     prompts: list[Prompt] = [
         _chat(
             _SUMMARIZE_SYSTEM,
@@ -399,8 +418,11 @@ def _summarize_shards(
         )
         for shard in shards
     ]
-    responses = model.generate_batch(prompts, temperature=0.2)
-    shard_topics = [_parse_topics(shard_responses[0]) for shard_responses in responses]
+    responses = model.generate_batch(prompts, temperature=0.2, **_catch_kwargs(model))
+    shard_topics = [
+        {} if failures.failed(shard_responses) else _parse_topics(shard_responses[0])
+        for shard_responses in responses
+    ]
     kept = [topics for topics in shard_topics if topics]
     if not kept:
         raise RuntimeError(
@@ -420,8 +442,10 @@ def _build_codebook(
     model: Model,
     context: str,
     num_clusters: int,
+    failures: _RequestFailures | None = None,
 ) -> dict[str, str]:
     """Step 2b: aggregate candidate topics into a codebook of topics."""
+    failures = failures if failures is not None else _RequestFailures()
     candidates = "\n".join(
         f"- {name}: {description}"
         for topics in shard_topics
@@ -439,13 +463,17 @@ def _build_codebook(
     codebook: dict[str, str] = {}  # latest nonempty attempt
     for retry in range(3):  # retry on unparseable JSON or the wrong topic count
         # The salt gets a new answer, not the cached unparseable one.
-        response = model.generate(
-            messages,
-            temperature=0.0,
-            **_cache_kwargs(
-                model.generate, cache_salt=f"retry {retry}" if retry else None
-            ),
-        )[0]
+        try:
+            response = model.generate(
+                messages,
+                temperature=0.0,
+                **_cache_kwargs(
+                    model.generate, cache_salt=f"retry {retry}" if retry else None
+                ),
+            )[0]
+        except Exception as exc:
+            failures.failed(exc)  # raises unless transient; then try again
+            continue
         try:
             parsed = _parse_json(response)
         except ValueError:
@@ -488,8 +516,10 @@ def _assign_topics(
     codebook: dict[str, str],
     truncation: int,
     max_retries: int,
+    failures: _RequestFailures | None = None,
 ) -> dict[str, str]:
     """Step 3: classify every document into one codebook topic."""
+    failures = failures if failures is not None else _RequestFailures()
     topics_str = json.dumps(codebook, indent=2)
     prompt_of = {
         doc: _chat(
@@ -513,9 +543,13 @@ def _assign_topics(
                 cache_rows=pending,
                 cache_salt=f"retry {attempt}" if attempt else None,
             ),
+            **_catch_kwargs(model),
         )
         still_pending = []
         for doc, doc_responses in zip(pending, responses):
+            if failures.failed(doc_responses):
+                still_pending.append(doc)  # asked again on the next attempt
+                continue
             try:
                 label = str(_parse_json(doc_responses[0]).get("topic", "")).strip()
             except ValueError:
