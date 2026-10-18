@@ -372,10 +372,41 @@ def report_model() -> Any:
                 num_retries=1,
                 timeout=60,
             )
-        except Exception as exc:
-            logger.debug("FORGER_REPORT_MODEL=%s unusable: %s", model_id, exc)
+        except Exception as exc:  # logged once: the failure is cached
+            logger.warning(
+                "FORGER_REPORT_MODEL=%s is unusable, so step reports get no LLM "
+                "summaries: %s",
+                model_id,
+                exc,
+            )
             _ENV_MODELS[model_id] = None
     return _ENV_MODELS[model_id]
+
+
+_HINTED = [False]  # the "no report model" hint is logged once per process
+
+
+def _hint_report_model() -> None:
+    """Once per process: say how to get LLM summaries of long values.
+
+    Not when ``set_report_model(None)`` turned them off on purpose, nor when
+    ``FORGER_REPORT_MODEL`` names a model that failed (``report_model`` said so).
+    """
+    if (
+        _HINTED[0]
+        or _REPORT_MODEL[0] is None
+        or os.environ.get("FORGER_REPORT_MODEL", "").strip()
+    ):
+        return
+    _HINTED[0] = True
+    logger.info(
+        "step reports summarize long values by their shape only (e.g. "
+        "'def solve(n): … (312 lines, python)'). For a one-sentence summary of "
+        "what each says, call pyforger.steps.set_report_model(Model(...)) or set "
+        "FORGER_REPORT_MODEL=<litellm model id>, e.g. a cheap model with no "
+        "reasoning: at most 8 cached calls per report. set_report_model(None) "
+        "silences this."
+    )
 
 
 def summary_prompt(step: str, doc: str, field: str, shape: str, text: str) -> str:
@@ -421,13 +452,12 @@ def _summarize_one(model: Any, prompt: str) -> str:
 def add_llm_summaries(rec: StepRecord, rows: int) -> None:
     """Fill in ``llm`` for long values in the first ``rows`` sample rows.
 
-    Does nothing without a report model. Values summarized before (in this
-    record) are skipped; a failed summary is left empty and not retried.
+    Without a report model it does nothing, but the first time a report has a
+    value it could have summarized, it logs how to turn summaries on (unless
+    ``set_report_model(None)`` turned them off). Values summarized before (in
+    this record) are skipped; a failed summary is left empty and not retried.
     """
     try:
-        model = report_model()
-        if model is None:
-            return
         jobs: list[tuple[FieldSummary, str]] = []
         for row, fields in zip(rec.sample[: max(0, rows)], rec.sample_summaries):
             keys = list(row) if isinstance(row, dict) else []
@@ -440,6 +470,10 @@ def add_llm_summaries(rec: StepRecord, rows: int) -> None:
                 jobs.append((summary, prompt))
         jobs = jobs[:_MAX_SUMMARY_CALLS]
         if not jobs:
+            return
+        model = report_model()
+        if model is None:
+            _hint_report_model()
             return
 
         def run(prompt: str) -> str:

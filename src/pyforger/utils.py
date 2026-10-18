@@ -4,11 +4,59 @@ from __future__ import annotations
 
 import logging
 import pickle
+import sys
 from typing import Any
+
+
+class _ForgerStreamHandler(logging.StreamHandler):
+    """Forger's stderr handler; it stays quiet when another handler prints the record.
+
+    Forger loggers propagate, so a handler on the root logger (from
+    ``logging.basicConfig()``, or one a library adds) gets every Forger record too.
+    If that handler writes to the terminal, it prints the line in its own format and
+    this handler skips it, so the line appears once. Handlers that write elsewhere
+    (a log file, pytest's ``caplog``) do not count: this handler still prints.
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        """Print the record unless another terminal handler will."""
+        if not self._printed_elsewhere(record):
+            super().emit(record)
+
+    def _printed_elsewhere(self, record: logging.LogRecord) -> bool:
+        streams = (self.stream, sys.stdout, sys.stderr, sys.__stdout__, sys.__stderr__)
+        terminals = {id(s) for s in streams if s is not None}
+        logger: logging.Logger | None = logging.getLogger(record.name)
+        # the handlers Logger.callHandlers reaches: up the parents while they propagate
+        while logger is not None:
+            for handler in logger.handlers:
+                if isinstance(handler, _ForgerStreamHandler):
+                    continue
+                if not isinstance(handler, logging.StreamHandler):
+                    continue
+                if record.levelno < handler.level:
+                    continue
+                if id(handler.stream) in terminals or _isatty(handler.stream):
+                    return True
+            logger = logger.parent if logger.propagate else None
+        return False
+
+
+def _isatty(stream: Any) -> bool:
+    try:
+        return bool(stream.isatty())
+    except (AttributeError, ValueError, OSError):
+        # no isatty(), or a closed file
+        return False
 
 
 def get_formatted_logger(logger_name: str, level: int = logging.INFO) -> logging.Logger:
     """Create a formatted logger.
+
+    The logger prints to stderr through its own handler and also propagates, so
+    handlers the application adds to the root logger receive its records. When such
+    a handler already prints to the terminal, Forger's handler skips the record, so
+    each line appears once, in the application's format.
 
     Args:
         logger_name: The name of the logger, usually the name
@@ -24,7 +72,7 @@ def get_formatted_logger(logger_name: str, level: int = logging.INFO) -> logging
     if not any(
         isinstance(handler, logging.StreamHandler) for handler in logger.handlers
     ):
-        handler = logging.StreamHandler()
+        handler = _ForgerStreamHandler()
         formatter = logging.Formatter(
             "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
         )

@@ -93,7 +93,9 @@ the ops of the run that cached it, marked `(cached)`, with that run's warnings.
   `def solve(n): … (312 lines, 9.8k chars, python)`. By default these structural summaries are all you get; they are
   free. For a one-sentence LLM summary of each long value as well, call `pyforger.steps.set_report_model(model)` or
   set `FORGER_REPORT_MODEL=<litellm model id>` (key from `LITELLM_API_KEY`). That costs up to 8 LLM calls per printed
-  report, cached on disk and left out of the step and pipeline totals; silenced reports make no calls.
+  report, cached on disk and left out of the step and pipeline totals; silenced reports make no calls. A cheap model
+  without reasoning is enough. Without a report model, the first report with a long value logs (at INFO) how to set
+  one; `set_report_model(None)` turns summaries off and silences that.
 - Threads: ops called from `ThreadPoolExecutor` workers are not itemized in the step report (the step gets a warning
   instead of an error) unless submitted as `pool.submit(contextvars.copy_context().run, fn, arg)`. Steps called from
   workers still join the pipeline. Token and cost totals of steps running at the same time include each other's.
@@ -117,6 +119,10 @@ them with `@op` to memoize their results. Inside a `@step` they are listed as `a
 | `pyforger.filter` | `src/pyforger/filter/` | Remove rows by criterion. |
 | `pyforger.inspect` | `src/pyforger/inspect/` | Examine rows without modifying them; returns a report. |
 | `pyforger.utils` | `src/pyforger/utils.py` | `get_field`, `get_formatted_logger`, `canonical`. |
+
+Forger's loggers print to stderr themselves and also propagate to the root logger. Once the root logger has a handler
+that prints to the terminal (e.g. after `logging.basicConfig()`), Forger lines are printed by that handler, in its
+format, and not a second time by Forger's own.
 
 #### `pyforger.acquire`
 
@@ -267,6 +273,9 @@ model = Model(
 
 Use `Model(..., reasoning_effort="low")` where supported by the model/provider.
 `dynamic_step` forwards `reasoning_effort` and `extra_body` to OpenHands.
+
+Importing `pyforger.acquire` sets `litellm.suppress_debug_info = True`, so provider errors no longer print LiteLLM's
+"Give Feedback / Get Help" banner; the raised error is unchanged. Set it back to `False` to see the banner.
 
 #### Prompt types
 

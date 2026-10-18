@@ -321,6 +321,20 @@ class TestGenerate:
 class TestErrorHandling:
     """Model surfaces errors from litellm."""
 
+    def test_litellm_feedback_banner_suppressed(self, capsys):
+        """Mapping a provider error prints no "Give Feedback / Get Help" banner."""
+        import litellm
+        from litellm.utils import exception_type
+
+        assert litellm.suppress_debug_info is True
+        with pytest.raises(Exception):
+            exception_type(
+                model="gpt-4o",
+                original_exception=RuntimeError("upstream 504"),
+                custom_llm_provider="openai",
+            )
+        assert "Give Feedback" not in capsys.readouterr().out
+
     @patch("pyforger.acquire.model.litellm")
     def test_litellm_exception_propagates(self, mock_litellm):
         """Exceptions from litellm.completion propagate to the caller."""

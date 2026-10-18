@@ -14,6 +14,11 @@ import litellm
 
 from pyforger import _tracking
 
+# LiteLLM prints "Give Feedback / Get Help: <url>" and a debug hint to stdout before
+# raising each provider error; the raised error already says what went wrong.
+# Set it back to False to see them.
+litellm.suppress_debug_info = True
+
 # Type aliases
 Message = dict[str, str]
 Prompt = Union[str, list[Message]]
