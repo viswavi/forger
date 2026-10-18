@@ -124,6 +124,8 @@ def _legacy_hash(obj: Any) -> str:
 _NO_CACHE_SCOPE: ContextVar[bool] = ContextVar("forger_no_cache_scope", default=False)
 
 _STEP_META_SUFFIX = ".step.json"
+# A filter's per-row scores, so a cache hit still shows its histogram.
+_SCORES_SUFFIX = ".scores.json"
 
 
 def _maybe_warn_hash_cost(op_name: str, duration: float, size: int) -> None:
@@ -289,7 +291,9 @@ def op(
             _cache_only: bool,
         ) -> tuple[Any, bool, Any, float]:
             """Run or load the op; return (result, cache_hit, first arg, seconds)."""
-            start = time.time()
+            # perf_counter, like the step and pipeline times: time.time() also
+            # counts a laptop's sleep, so an op could outlast its step.
+            start = time.perf_counter()
             if sig is not None:
                 try:
                     # Attempt to normalize the op function's arguments before hashing.
@@ -323,6 +327,7 @@ def op(
             cache_hit = False
             is_step = op_name.startswith(_tracking.STEP_OP_PREFIX)
             meta_path = cache_path.with_name(input_hash + _STEP_META_SUFFIX)
+            scores_path = cache_path.with_name(input_hash + _SCORES_SUFFIX)
 
             if use_cache and not cache_path.exists():
                 _adopt_legacy_entry(cache_root / safe_op_name, key, cache_path)
@@ -343,6 +348,8 @@ def op(
                     cache_hit = True
                     if is_step and meta_path.exists():
                         _tracking.restore_step_meta(meta_path.read_text())
+                    elif not is_step and scores_path.exists():
+                        _tracking.restore_scores(scores_path.read_text())
                 except Exception as exc:
                     if _cache_only:
                         raise RuntimeError(
@@ -374,9 +381,15 @@ def op(
                     if meta is not None:
                         # Written first, so a cached step always has its ops.
                         _atomic_write(meta_path, meta.encode())
+                    if not is_step:
+                        scores = _tracking.scores_meta(_tracking.current_scores())
+                        if scores is not None:
+                            _atomic_write(scores_path, scores.encode())
+                        else:  # no stale scores from an earlier result
+                            scores_path.unlink(missing_ok=True)
                     _atomic_write(cache_path, pickle.dumps(result, protocol=4))
 
-            duration = time.time() - start
+            duration = time.perf_counter() - start
             # If tracing is enabled, record this call on the in-memory trace.
             if _TRACE.maxlen is not None and _TRACE.maxlen > 0:
                 with _TRACE_LOCK:
