@@ -61,6 +61,8 @@ class ScoreRecord(BaseModel):
     # by_rouge_l): another threshold would change the scores themselves, so the
     # report cannot say what it would keep.
     pooled: bool = False
+    # One line shown under the histogram, e.g. "3 of 12 samples truncated".
+    note: str | None = None
 
 
 class OpCall(BaseModel):
@@ -386,10 +388,12 @@ def record_scores(
     lower: float | None = None,
     upper: float | None = None,
     pooled: bool = False,
+    note: str | None = None,
 ) -> None:
     """Record one per-row score list for the active op; a no-op outside ops.
 
-    Pass ``pooled=True`` when each score depends on the rows kept so far.
+    Pass ``pooled=True`` when each score depends on the rows kept so far, and
+    ``note`` for a line the report shows under the histogram.
     """
     scores = _ACTIVE_SCORES.get()
     if scores is None:
@@ -403,6 +407,7 @@ def record_scores(
             lower=lower,
             upper=upper,
             pooled=pooled,
+            note=note,
         )
     )
 

@@ -414,7 +414,7 @@ def _histogram(scores: ScoreRecord) -> _Histogram:
     total = len(scores.values)
     good = _finite(scores.values)
     label = _clean(scores.label)
-    hist = _Histogram(label=label, title=label)
+    hist = _Histogram(label=label, title=label, note=_clean(scores.note or ""))
     hist.unparsed = total - len(good)
     if label.startswith("approval >="):
         hist.label = f"judges ≥{label.removeprefix('approval >=')}"
@@ -468,10 +468,11 @@ def _histogram(scores: ScoreRecord) -> _Histogram:
         )
     hist.mode = "pooled" if scores.pooled else "cut"
     if scores.pooled:
-        hist.note = (
+        pooled_note = (
             "No what-if columns: each score depends on the rows kept before it. "
             "Rerun to compare thresholds."
         )
+        hist.note = f"{hist.note}\n{pooled_note}" if hist.note else pooled_note
     for i, r in enumerate(raws):
         is_current = i == marked
         if is_current and current is not None:
@@ -511,6 +512,8 @@ def _histogram_renderable(
     heading.append(_clean(op_name), style="bold")
     heading.append(f" · {hist.title}")
     if hist.mode == "none" or not hist.bins:
+        if hist.note:
+            return Group(heading, Padding(Text(hist.note, style="dim"), (0, 0, 0, 2)))
         return heading
 
     def style_of(b: _Bin) -> str:
