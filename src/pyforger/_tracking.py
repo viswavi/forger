@@ -36,10 +36,34 @@ STEP_OP_PREFIX = "step."
 DYNAMIC_STEP_OP = "alter.dynamic_step"
 
 
+# Op name -> category, filled when ``@op`` decorates a function. The name does
+# not decide: a user's ``@op(name="filter.keep_all")`` is "other".
+_OP_CATEGORIES: dict[str, str] = {}
+
+
+def register_op(op_name: str, module: str, category: str | None = None) -> str:
+    """Record and return an op's category.
+
+    A function defined in a ``pyforger.<category>`` package gets that category,
+    e.g. ``pyforger.filter.format`` gives ``"filter"``; any other function gets
+    ``"other"``. An explicit ``category`` overrides both.
+    """
+    if category is None:
+        parts = module.split(".")
+        in_package = len(parts) > 1 and parts[0] == "pyforger"
+        category = parts[1] if in_package and parts[1] in _CATEGORIES else "other"
+    elif category not in _CATEGORIES | {"other"}:
+        raise ValueError(
+            f"unknown op category {category!r}; use one of "
+            f"{sorted(_CATEGORIES | {'other'})}"
+        )
+    _OP_CATEGORIES[op_name] = category
+    return category
+
+
 def category_of(op_name: str) -> str:
-    """Return the op category from its name prefix, e.g. ``filter.by_length``."""
-    head = op_name.split(".", 1)[0]
-    return head if head in _CATEGORIES else "other"
+    """Return the category an ``@op`` registered under ``op_name``, else "other"."""
+    return _OP_CATEGORIES.get(op_name, "other")
 
 
 class ScoreRecord(BaseModel):

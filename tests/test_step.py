@@ -46,23 +46,23 @@ def _rows(*texts: str) -> list[dict]:
     return [{"text": t} for t in texts]
 
 
-@op(name="alter.test_upper")
+@op(name="alter.test_upper", category="alter")
 def _upper(rows: list[dict]) -> list[dict]:
     return [{**r, "text": r["text"].upper()} for r in rows]
 
 
-@op(name="alter.test_costly")
+@op(name="alter.test_costly", category="alter")
 def _costly(rows: list[dict]) -> list[dict]:
     _tracking.add_usage(100, 50, 0.25)
     return list(rows)
 
 
-@op(name="alter.test_strings")
+@op(name="alter.test_strings", category="alter")
 def _strings(rows: list[dict]) -> list[str]:
     return [r["text"] for r in rows]
 
 
-@op(name="inspect.test_report")
+@op(name="inspect.test_report", category="inspect")
 def _report(rows: list[dict]) -> list[str]:
     return ["topic" for _ in rows]
 
@@ -142,7 +142,7 @@ def test_nan_cost_counts_as_zero_and_is_never_printed(capsys, monkeypatch):
     """A NaN cost adds nothing and no report prints NaN."""
     monkeypatch.delenv("FORGER_STEP_REPORT")
 
-    @op(name="alter.test_nan_cost")
+    @op(name="alter.test_nan_cost", category="alter")
     def nan_cost(rows):
         _tracking.add_usage(None, float("nan"), float("nan"))
         return list(rows)
@@ -212,7 +212,7 @@ def test_yield_bounds_on_acquire_ops_raise():
     """Acquire ops take no input rows, so yield bounds are rejected up front."""
     calls = []
 
-    @op(name="acquire.test_fake_gen")
+    @op(name="acquire.test_fake_gen", category="acquire")
     def fake_gen(prompt, n):
         calls.append(1)
         return [{"text": f"{prompt} {i}"} for i in range(n)]
@@ -225,7 +225,7 @@ def test_yield_bounds_on_acquire_ops_raise():
 def test_yield_bounds_with_no_input_rows_warn():
     """An empty input misses min_yield; a non-list op cannot be checked."""
 
-    @op(name="inspect.test_count")
+    @op(name="inspect.test_count", category="inspect")
     def count(rows):
         return {"n": len(rows)}
 
@@ -434,7 +434,7 @@ def test_cached_step_reports_its_ops_as_cached(capsys, monkeypatch):
     monkeypatch.delenv("FORGER_STEP_REPORT")
     calls = []
 
-    @op(name="alter.test_counted")
+    @op(name="alter.test_counted", category="alter")
     def counted(rows):
         calls.append(1)
         return list(rows)
@@ -621,6 +621,85 @@ def test_pipeline_of_cached_steps_keeps_its_warnings():
             twice(_rows(*TEXTS))
     rec = _tracking.last_pipeline()
     assert rec is not None and all(s.cache_hit for s in rec.steps)
+
+
+def test_user_op_named_like_a_filter_is_not_a_filter():
+    """A user op's name prefix gives it no category, so a no-op pipeline still warns."""
+
+    @op(name="filter.keep_all")
+    def keep_all(rows):
+        return rows
+
+    @op(name="inspect.nothing")
+    def look(rows):
+        return ["ok"] * len(rows)
+
+    @step
+    def make_rows(seeds):
+        return keep_all([{"id": s, "text": f"row {s}"} for s in seeds])
+
+    @step
+    def finish(rows):
+        look(rows)
+        return filter.by_exact_match(rows, field="id", max_count=1)
+
+    @pipeline(strict=True)
+    def gamed(seeds):
+        return finish(make_rows(seeds))
+
+    with pytest.raises(PipelineContractError) as err:
+        gamed(list(range(5)))
+    assert "no quality filter ran" in str(err.value)
+    assert "no inspect op ran" in str(err.value)
+    assert "no diversity filter ran" not in str(err.value)
+    rec = _tracking.last_pipeline()
+    assert rec is not None
+    assert [c.category for s in rec.steps for c in s.ops] == [
+        "other",
+        "other",
+        "filter",
+    ]
+    assert "ends without a filter" in rec.steps[0].warnings
+
+
+def test_user_op_with_declared_category_counts():
+    """@op(category=...) is a deliberate declaration, so it satisfies the checks."""
+
+    @op(name="my_judge", category="filter")
+    def my_judge(rows):
+        return rows[:-1]
+
+    @op(category="inspect")
+    def my_report(rows):
+        return len(rows)
+
+    @step
+    def judge(rows):
+        return my_judge(rows)
+
+    @step
+    def report_and_dedupe(rows):
+        my_report(rows)
+        return filter.by_exact_match(rows, field="text")
+
+    @pipeline
+    def declared(rows):
+        return report_and_dedupe(judge(rows))
+
+    declared(_rows("a", "b", "c"))
+    rec = _tracking.last_pipeline()
+    assert rec is not None and rec.warnings == []
+
+
+def test_op_categories_come_from_the_registry():
+    """Library ops get their package's category; unknown categories are rejected."""
+    assert _tracking.category_of("filter.by_length") == "filter"
+    assert _tracking.category_of("acquire.retrieve") == "acquire"
+    assert _tracking.category_of("alter.generate_from_context") == "alter"
+    assert _tracking.category_of("inspect.topic_based_clustering") == "inspect"
+    assert _tracking.category_of("never.registered") == "other"
+    with pytest.raises(ValueError, match="unknown op category 'filters'"):
+        op(lambda rows: rows, name="typo", category="filters")
 
 
 def test_step_cached_without_op_record_skips_which_ops_ran_checks(tmp_path):
@@ -1008,7 +1087,7 @@ class _FakeConversation:
     conversation_stats = _FakeStats()
 
 
-@op(name="alter.test_agent")
+@op(name="alter.test_agent", category="alter")
 def _agent(rows):
     dynamic._record_agent_usage(_FakeConversation())
     dynamic._record_agent_usage(SimpleNamespace())  # no stats: ignored
@@ -1252,7 +1331,7 @@ def test_by_rouge_l_keeps_the_first_item_at_threshold_zero():
 def test_token_units_are_attributed_and_shown():
     """Token units recorded by a model land on the op, the step, and the reports."""
 
-    @op(name="alter.fake_generate")
+    @op(name="alter.fake_generate", category="alter")
     def fake_generate(rows):
         _tracking.add_usage(100, 50, 0.0, 250.0)
         return rows

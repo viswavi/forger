@@ -86,6 +86,9 @@ the ops of the run that cached it, marked `(cached)`, with that run's warnings.
 - Warnings: a step ends without a filter; an op misses its `min_yield` / `max_yield`; a step's type hints cannot be
   resolved; a pipeline has only one step; no quality filter, no diversity filter, or no inspect op ran anywhere; an op
   was called in the pipeline outside a step.
+- These checks use each op's category, not its name. Ops under `pyforger.acquire/alter/filter/inspect` have their
+  package's category; your own `@op` is `"other"` (even `@op(name="filter.x")`) unless it declares one, e.g.
+  `@op(category="filter")` for a custom quality filter.
 - `strict=True` on `@step` or `@pipeline` turns warnings into errors, also on cached runs; a step that fails strict
   mode is not cached. `prod=True` or the environment variable `FORGER_STEP_REPORT=0` silences the reports.
   `pyforger.inspect.inspect_step(name)` re-prints the full report of the latest run of a step, with more sample rows.
