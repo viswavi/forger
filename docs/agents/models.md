@@ -41,6 +41,9 @@ terminal, otherwise a log line at most every 30 seconds (`LLM calls (<model>): 1
 `Model(..., show_progress=False)` (or per call) or the environment variable `FORGER_PROGRESS=0`; an explicit
 `show_progress` wins over the variable. `LocalModel` keeps vLLM's own bar, off unless `show_progress=True`.
 
+Importing `pyforger.acquire` sets `litellm.suppress_debug_info = True`, so provider errors no longer print LiteLLM's
+"Give Feedback / Get Help" banner; the raised error is unchanged. Set it back to `False` to see the banner.
+
 `model.generate_batch(prompts, return_exceptions=True)` keeps finished results when a request still fails after
 `num_retries` (e.g. a gateway 504): the list has one entry per prompt, a prompt whose requests all failed holds the
 exception, and a prompt where only some fan-out copies failed holds the completions that arrived (fewer than `n`)
