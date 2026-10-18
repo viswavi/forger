@@ -85,7 +85,10 @@ def generate_from_context(
         samples_per_item: Number of responses to generate per input item.
         output_schema: Optional dict of expected keys. When set, responses are
             JSON-parsed and validated; failures are retried. When None, each
-            response is stored as ``{"text": ...}``.
+            response is stored as ``{"text": ...}``. Only the keys are checked:
+            a response needs every key, keys outside the schema are dropped, and
+            the values' types are shown to the model but not checked. A ```json
+            fence or prose around the object is tolerated.
         temperature: Sampling temperature passed to the model.
         max_retries: Additional attempts for prompts whose output fails to parse
             or whose request fails at the provider (e.g. a 504).

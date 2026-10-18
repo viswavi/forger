@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import litellm
 import pytest
+from fixtures import MockModel
 
 from pyforger import _tracking, op
 from pyforger.acquire import sample_from_LLM
@@ -160,13 +161,18 @@ class TestGenerateFromContext:
 
     def test_parse_failures_are_still_cached(self):
         """None slots from unparseable output are cached as before."""
-        model = FlakyModel()
+        # FlakyModel echoes the prompt, whose format example {"k": "<str>"} parses.
+        model = MockModel(responses=["not json"])
         rows = generate_from_context(
             [{"q": "A"}], "{q}", model, output_schema={"k": str}, max_retries=1
         )
         assert rows == [None]
         generate_from_context(
-            [{"q": "A"}], "{q}", FlakyModel(), output_schema={"k": str}, max_retries=1
+            [{"q": "A"}],
+            "{q}",
+            MockModel(responses=["not json"]),
+            output_schema={"k": str},
+            max_retries=1,
         )
         assert trace()[-1].cache_hit is True
 

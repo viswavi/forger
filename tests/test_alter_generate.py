@@ -270,6 +270,107 @@ class TestOutputSchemaHandling:
         assert result == [None]
 
 
+class TestTolerantSchemaParsing:
+    """A JSON object wrapped in a fence or prose parses; extra keys are dropped."""
+
+    @pytest.mark.parametrize(
+        "response",
+        [
+            '```json\n{"answer": "42"}\n```',
+            '```\n{"answer": "42"}\n```',
+            'Here is the JSON:\n```json\n{"answer": "42"}\n```\nHope this helps.',
+            'Sure! {"answer": "42"} Let me know if you need more.',
+            '<think>maybe {"answer": "41"}?</think>\n{"answer": "42"}',
+            # The first object lacks "answer"; the second has it.
+            'Draft: {"note": "x"} Final: {"answer": "42"} Also {"answer": "43"}',
+        ],
+    )
+    def test_object_is_found(self, response):
+        """The first object with every schema key is parsed, without a retry."""
+        model = MockModel(responses=[response])
+        result = generate_from_context(
+            [{"text": "a"}], "p: {text}", model, output_schema={"answer": str}
+        )
+        assert result == [{"answer": "42"}]
+        assert model._call_count == 1
+
+    def test_raw_newline_in_string(self):
+        """A value with unescaped newlines (multi-line code) parses."""
+        model = MockModel(
+            responses=['```json\n{"code": "def f():\n    return 1"}\n```']
+        )
+        result = generate_from_context(
+            [{"text": "a"}], "p: {text}", model, output_schema={"code": str}
+        )
+        assert result == [{"code": "def f():\n    return 1"}]
+
+    def test_nested_object_is_not_a_match(self):
+        """An object nested inside another is not taken as the answer."""
+        model = MockModel(responses=['{"result": {"answer": "42"}}'])
+        result = generate_from_context(
+            [{"text": "a"}],
+            "p: {text}",
+            model,
+            output_schema={"answer": str},
+            max_retries=0,
+        )
+        assert result == [None]
+
+    def test_extra_keys_are_dropped(self):
+        """Keys outside the schema do not reach the output."""
+        model = MockModel(responses=['{"answer": "42", "crafted_by": "me"}'])
+        result = generate_from_context(
+            [{"text": "a"}], "p: {text}", model, output_schema={"answer": str}
+        )
+        assert result == [{"answer": "42"}]
+
+    def test_extra_keys_are_dropped_with_merge(self):
+        """merge=True attaches only the schema's keys to the input row."""
+        model = MockModel(responses=['{"answer": "42", "crafted_by": "me"}'])
+        result = generate_from_context(
+            [{"text": "a"}],
+            "p: {text}",
+            model,
+            output_schema={"answer": str},
+            merge=True,
+        )
+        assert result == [{"text": "a", "answer": "42"}]
+
+    def test_value_types_are_not_checked(self):
+        """A value of another type than the schema names is kept as is."""
+        model = MockModel(responses=['{"answer": 42}'])
+        result = generate_from_context(
+            [{"text": "a"}], "p: {text}", model, output_schema={"answer": str}
+        )
+        assert result == [{"answer": 42}]
+
+    def test_missing_key_is_retried(self):
+        """An object without a schema key fails to parse and is asked again."""
+        model = MockModel(responses=['```json\n{"reason": "math"}\n```'])
+        result = generate_from_context(
+            [{"text": "a"}],
+            "p: {text}",
+            model,
+            output_schema={"answer": str},
+            max_retries=2,
+        )
+        assert result == [None]
+        assert model._call_count == 3
+
+    @pytest.mark.parametrize("response", ['[{"answer": "42"}]', '"42"', "42"])
+    def test_non_object_json_fails(self, response):
+        """JSON that is not an object (a list, a string, a number) fails."""
+        model = MockModel(responses=[response])
+        result = generate_from_context(
+            [{"text": "a"}],
+            "p: {text}",
+            model,
+            output_schema={"answer": str},
+            max_retries=0,
+        )
+        assert result == [None]
+
+
 # ---------------------------------------------------------------------------
 # Execution — retries
 # ---------------------------------------------------------------------------

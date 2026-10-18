@@ -142,6 +142,7 @@ def sample_from_LLM(
         model: Model to call.
         n: Target number of accepted samples.
         output_schema: Optional dict of expected keys; triggers JSON parse + validation.
+            Only the keys are checked, as in ``alter.generate_from_context``.
         temperature: Sampling temperature.
         max_retries: Consecutive zero-acceptance rounds before stopping. A round
             whose request fails at the provider (e.g. a 504) counts as one; when

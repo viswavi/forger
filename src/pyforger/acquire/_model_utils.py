@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 from collections import Counter
 from collections.abc import Callable
 from typing import Any
@@ -59,25 +60,70 @@ def _reasoning_for(completions: Any) -> list[str | None]:
     return reasoning if reasoning is not None else [None] * len(completions)
 
 
+# A ``` or ```json fence; group 1 is its content.
+_FENCE_RE = re.compile(r"```[\w-]*[^\S\n]*\n?(.*?)```", re.DOTALL)
+# An inline reasoning block before the answer, e.g. "<think>...</think>{...}".
+_THINK_RE = re.compile(r"^\s*<think>.*?</think>", re.DOTALL)
+
+
+def _find_json_object(text: str, keys: set[str]) -> dict[str, Any] | None:
+    """The JSON object in a completion that has all of ``keys``, else None.
+
+    Tries the whole text, then each ``` fence's content, then every object
+    embedded in the text (e.g. 'Here it is: {...} Hope this helps'), first
+    match wins. Text that is valid JSON but not an object (e.g. a list) fails.
+    Raw newlines inside strings are allowed (e.g. multi-line code in a value).
+    """
+    text = _THINK_RE.sub("", text, count=1)
+    decoder = json.JSONDecoder(strict=False)
+    try:
+        loaded = decoder.decode(text)
+    except json.JSONDecodeError:
+        pass
+    else:
+        return loaded if isinstance(loaded, dict) and keys <= loaded.keys() else None
+    for fence in _FENCE_RE.finditer(text):
+        try:
+            loaded = decoder.decode(fence.group(1))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(loaded, dict) and keys <= loaded.keys():
+            return loaded
+    start = text.find("{")
+    while start != -1:
+        try:
+            loaded, end = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            start = text.find("{", start + 1)
+            continue
+        if keys <= loaded.keys():
+            return loaded
+        # Skip the objects nested in this one: {"a": {"answer": 1}} is not a match.
+        start = text.find("{", end)
+    return None
+
+
 def _parse_output(
     raw_text: str,
     output_schema: dict[str, Any] | None,
     reasoning: str | None = None,
 ) -> dict[str, Any] | None:
-    """Parse a completion into a row dict, attaching reasoning trace if provided."""
+    """Parse a completion into a row dict, attaching reasoning trace if provided.
+
+    With ``output_schema``, the completion must hold a JSON object with every
+    schema key (see `_find_json_object`); keys outside the schema are dropped
+    and value types are not checked.
+    """
     if output_schema is None:
         parsed: dict[str, Any] = {"text": raw_text}
     else:
-        try:
-            loaded = json.loads(raw_text)
-        except (json.JSONDecodeError, TypeError):
+        if not isinstance(raw_text, str):
             return None
-        if not isinstance(loaded, dict):
+        loaded = _find_json_object(raw_text, set(output_schema))
+        if loaded is None:
             return None
-        required_keys = set(output_schema.keys())
-        if not required_keys.issubset(loaded.keys()):
-            return None
-        parsed = loaded
+        # e.g. a "crafted_by" key the model added would otherwise reach the rows.
+        parsed = {key: loaded[key] for key in output_schema}
     if reasoning:
         if "thinking_trace" in parsed:
             logger.warning(
