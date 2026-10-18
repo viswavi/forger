@@ -74,15 +74,20 @@ def solution_helpers():
     return {"run_program": run_program, "call_method": call_method}
 
 
-def main():
-    """Run the command-line utility described in the module documentation."""
+def apply_limits(cpu_seconds=GRADE_TIMEOUT_S + 5):
+    """The worker's resource limits (solution_worker.py applies the same ones)."""
     # Darwin cannot set this address-space limit; Linux training retains it.
     if sys.platform != "darwin":
         resource.setrlimit(resource.RLIMIT_AS, (512 * 1024**2, 512 * 1024**2))
-    resource.setrlimit(resource.RLIMIT_CPU, (GRADE_TIMEOUT_S + 5, GRADE_TIMEOUT_S + 5))
+    resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds))
     resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     resource.setrlimit(resource.RLIMIT_NPROC, (1, 1))
+
+
+def main():
+    """Run the command-line utility described in the module documentation."""
+    apply_limits()
     request = json.load(sys.stdin)
     sandbox = Sandbox(
         allowed_imports=(

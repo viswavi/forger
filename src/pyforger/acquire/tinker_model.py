@@ -29,6 +29,7 @@ from pyforger.acquire.model import (
     Prompt,
     _is_transient,
     _log_progress,
+    _note_truncation,
     _progress_mode,
     _to_messages,
 )
@@ -687,7 +688,9 @@ class TinkerModel(Model):
                 try:
                     for slot, sequence in zip(missing[i], response.sequences):
                         text = self._decode(runtime, sequence, stop_strings)
-                        if text:
+                        # Empty text is cached only when it ran out of tokens
+                        # (see model._cache_entry).
+                        if text or sequence.stop_reason == "length":
                             _request_cache.write_slot(
                                 key,
                                 slot,
@@ -765,6 +768,7 @@ class TinkerModel(Model):
         self._record(
             [r for r in results if isinstance(r, GenerateResult)], add_usage=False
         )
+        _note_truncation(results, self._model_id, max_tokens)
         return results
 
     def _decode(self, runtime: _Runtime, sequence: Any, stop: list[str]) -> str:
@@ -833,6 +837,7 @@ class TinkerModel(Model):
             reasoning=[None] * len(ordered),
             model_id=self._model_id,
             raw=None,
+            finish_reasons=[reason for _, reason in ordered],
         )
 
 

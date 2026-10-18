@@ -700,15 +700,16 @@ class TestOpScope:
         assert len(fake.calls) == 3  # only the new row's three judges
 
     def test_logs_once_per_op_call(self, fake, caplog):
-        """An op with several batches logs its reuse in one INFO line."""
+        """An op with several batches logs its reuse in one INFO line, even 0."""
         model = gpt()
         rows = [{"q": f"q{i}"} for i in range(4)]
-        generate_from_context(rows[:3], "{q}", model, batch_size=1)
         with caplog.at_level(logging.INFO, logger="forger.op"):
+            generate_from_context(rows[:3], "{q}", model, batch_size=1)
             generate_from_context(rows, "{q}", model, batch_size=1)
         lines = [r.message for r in caplog.records if "request cache" in r.message]
         assert lines == [
-            "request cache: 3 of 4 completions reused in alter.generate_from_context"
+            "request cache: 0 of 3 completions reused in alter.generate_from_context",
+            "request cache: 3 of 4 completions reused in alter.generate_from_context",
         ]
 
     def test_unsupported_keywords_are_dropped(self):

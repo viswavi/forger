@@ -52,14 +52,23 @@ from pyforger.inspect import eval_tree
 with open("val_predictions.jsonl") as f:  # one scored model output per row
     rows = [json.loads(line) for line in f]
 
+model = Model("litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731", reasoning_effort="none")
 report = eval_tree(rows, input_field="question", score_field="score", model=model,
                    threshold=0.5)
 # report["tree"] has descriptions, row indices, accuracy, and child nodes.
-# report["weaknesses"] lists the extracted capability groups.
+# report["weaknesses"] lists the capability groups significantly below threshold.
+# report["lowest"] lists the five subtrees with the lowest accuracy bounds.
 ```
 
-Inspect ops make one short LLM call per row (or per cluster), so run them with `reasoning_effort="low"` or
-`"none"`; higher efforts make a few calls reason for minutes and hit gateway timeouts, and both ops warn about it.
+With a few hundred rows a subtree's interval is rarely entirely below `threshold`, so `weaknesses` is often
+empty (the op warns); read `lowest` then. Each annotation is one phrase of at most 300 characters; answers that are
+not (empty after running out of tokens, or code) are asked again, and rows that still get none are left out of the
+tree and listed in `report["unannotated"]`.
+
+Inspect ops make one short LLM call per row (or per cluster). Run `eval_tree` with `reasoning_effort="none"`: on
+137 coding problems, `"low"` cost 15 times as much and 10% of its annotations ran out of tokens in reasoning
+loops. `topic_based_clustering` works with `"low"` or `"none"`; higher efforts make a few calls reason for
+minutes and hit gateway timeouts. Both ops warn about it.
 
 The `question` alone is used to infer the skill, avoiding leakage from an incorrect model output. If verified
 solutions are available, pass `reference_field` to include them in the capability annotation prompt. The

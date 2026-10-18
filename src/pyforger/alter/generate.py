@@ -1,9 +1,11 @@
 """Building block for conditional LM generation (conditioned on upstream input)."""
 from __future__ import annotations
 
+import contextvars
 import logging
 import re
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Union
 
 from pyforger import _tracking
@@ -68,6 +70,7 @@ def generate_from_context(
     batch_size: int | None = None,
     merge: bool = False,
     output_field: str | None = None,
+    retry_truncated: bool = False,
 ) -> list[dict | None] | list[dict]:
     r"""Generate LLM outputs conditioned on upstream input items.
 
@@ -90,7 +93,10 @@ def generate_from_context(
             uses the model's own default (1.0 for ``Model``, Qwen3's 0.6 for
             ``TinkerModel``).
         max_retries: Additional attempts for prompts whose output fails to parse
-            or whose request fails at the provider (e.g. a 504).
+            or whose request fails at the provider (e.g. a 504). A sample that
+            fails to parse because it stopped at the model's max_tokens is not
+            retried unless ``retry_truncated=True``: at the same max_tokens a
+            retry usually stops there again. The step report counts such samples.
         batch_size: Number of prompts per ``model.generate_batch()`` call. None
             (default) sends all prompts in one call; the model's
             ``max_concurrency`` bounds how many requests run at once.
@@ -100,6 +106,8 @@ def generate_from_context(
             ``samples_per_item > 1``. Failed slots are dropped.
         output_field: With ``merge=True``, nest the output under this key
             instead, e.g. ``"solution"`` gives ``{**item, "solution": parsed}``.
+        retry_truncated: Also retry samples that failed to parse after stopping
+            at max_tokens (see ``max_retries``).
 
     Returns:
         By default, a list of length ``len(items) * samples_per_item`` in input
@@ -150,6 +158,8 @@ def generate_from_context(
     # Item index -> type name of its latest provider failure, e.g.
     # "InternalServerError"; cleared when a later attempt gets a response.
     provider_errors: dict[int, str] = {}
+    # Slots whose output failed to parse after stopping at max_tokens.
+    cut_off: set[int] = set()
 
     for attempt in range(1 + max_retries):
         if not pending:
@@ -204,21 +214,39 @@ def generate_from_context(
                         # Fewer completions than asked: some of the prompt's
                         # requests failed (return_exceptions keeps the rest).
                         provider_errors[i] = "missing completions"
-                    for slot, raw_text, reasoning_text in zip(
-                        slots, completions, _reasoning_for(completions)
+                    reasons = getattr(completions, "finish_reasons", None) or []
+                    for k, (slot, raw_text, reasoning_text) in enumerate(
+                        zip(slots, completions, _reasoning_for(completions))
                     ):
                         parsed = _parse_output(
                             raw_text, output_schema, reasoning=reasoning_text
                         )
-                        if parsed is None:
-                            unfilled.append(slot)
-                        else:
+                        if parsed is not None:
                             results[slot] = parsed
+                            cut_off.discard(slot)
+                        elif k < len(reasons) and reasons[k] == "length":
+                            cut_off.add(slot)
+                            if retry_truncated:
+                                unfilled.append(slot)
+                        else:
+                            unfilled.append(slot)
                     if unfilled:
                         next_pending.append((i, unfilled))
         pending = next_pending
 
-    failed_parse = [slots for i, slots in pending if i not in provider_errors]
+    if cut_off:
+        log.warning(
+            "%d sample(s) stopped at max_tokens before any parseable output; %s"
+            "returning None for those slots",
+            len(cut_off),
+            "" if retry_truncated else "not retried (retry_truncated=False); ",
+        )
+    failed_parse = [
+        [slot for slot in slots if slot not in cut_off]
+        for i, slots in pending
+        if i not in provider_errors
+    ]
+    failed_parse = [slots for slots in failed_parse if slots]
     if failed_parse:
         log.warning(
             "%d sample(s) failed to parse after %d retries; "
@@ -330,6 +358,8 @@ def self_taught_reasoner(
     extract_answer: Callable[[str], Any] | None = None,
     match_fn: Callable[[Any, Any], bool] | None = None,
     filter_fn: Callable[[list[dict]], list[dict]] | None = None,
+    verifier: Callable[[str, dict], bool | None] | None = None,
+    max_workers: int | None = None,
     response_field: str = "response",
     thinking_field: str = "thinking",
     answer_field: str = "answer",
@@ -356,6 +386,11 @@ def self_taught_reasoner(
     * **Answer matching (default):**  A response is kept when
       ``match_fn(student_answer, item[reference_field])`` is true (default:
       string-normalized equality).
+    * **Verifier:** Pass ``verifier`` -- a ``(answer, row) -> bool | None``
+      callable that sees the whole row, e.g.
+      ``filter.program_verifier("tests")`` to run each answer's code on the
+      row's tests. A response is kept when it returns True. Calls run
+      ``max_workers`` at a time.
     * **Custom filter:** Pass ``filter_fn`` -- any ``list[dict] -> list[dict]``
       callable.
 
@@ -381,6 +416,11 @@ def self_taught_reasoner(
             Ignored when ``filter_fn`` is given.
         filter_fn: Optional ``list[dict] -> list[dict]`` acceptance filter over
             candidate rows. Overrides the default answer-matching path.
+        verifier: Optional ``(answer, row) -> bool | None`` acceptance check,
+            given ``answer_field`` (the response after its reasoning) and the
+            candidate row (the item's fields plus the response fields). With
+            it, ``reference_field`` is not needed and is left unchanged.
+        max_workers: Verifier calls at a time (default 8).
         response_field: Output key for the raw student response.
         thinking_field: Output key for the split-out reasoning trace.
         answer_field: Output key for the answer portion of the response.
@@ -408,6 +448,10 @@ def self_taught_reasoner(
         return []
 
     log = _get_logger()
+    if filter_fn is not None and verifier is not None:
+        raise ValueError("pass filter_fn or verifier, not both")
+    if max_workers is not None and max_workers < 1:
+        raise ValueError("max_workers must be at least 1")
     if extract_answer is not None and filter_fn is not None:
         log.warning(
             "self_taught_reasoner: extract_answer still runs when filter_fn is "
@@ -468,6 +512,8 @@ def self_taught_reasoner(
     # Decide which candidates to keep.
     if filter_fn is not None:
         kept = filter_fn(candidates)
+    elif verifier is not None:
+        kept = _verified(candidates, verifier, answer_field, max_workers or 8)
     else:
         kept = [
             candidate
@@ -480,7 +526,7 @@ def self_taught_reasoner(
         ]
 
     # The student-generated answer becomes the ground truth for kept rows.
-    for candidate in kept:
+    for candidate in kept if verifier is None else []:
         student_answer = candidate.get(student_answer_field)
         if student_answer is not None:
             candidate[reference_field] = student_answer
@@ -492,3 +538,35 @@ def self_taught_reasoner(
         len(items),
     )
     return kept
+
+
+def _context_run() -> Callable[..., Any]:
+    """A copy of this context's run, typed for Executor.submit (as in model.py)."""
+    run: Callable[..., Any] = contextvars.copy_context().run
+    return run
+
+
+def _verified(
+    candidates: list[dict],
+    verifier: Callable[[str, dict], bool | None],
+    answer_field: str,
+    workers: int,
+) -> list[dict]:
+    """The candidates ``verifier`` accepts, in order; ``workers`` calls at a time."""
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [
+            pool.submit(
+                _context_run(),
+                verifier,
+                candidate[answer_field],
+                candidate,
+            )
+            for candidate in candidates
+        ]
+        try:
+            verdicts = [f.result() for f in futures]
+        except BaseException:
+            for f in futures:
+                f.cancel()
+            raise
+    return [c for c, ok in zip(candidates, verdicts) if ok is True]

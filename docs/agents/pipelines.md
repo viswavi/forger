@@ -34,10 +34,12 @@ cached it, marked `cached`, with that run's warnings.
   `filter.by_predicate`: it gets its own row and a kept/dropped bar.
 
 - Hard errors (`StepContractError` / `PipelineContractError`): a step returns neither a list nor a dict of row lists,
-  a step calls no Forger ops (keep pure-Python helpers as plain functions), a step is called inside another step, a
-  pipeline calls no steps, or rows do not match a `list[X]` type hint where `X` is a pydantic model (rows stay dicts).
-- Warnings: an op misses its `min_yield` / `max_yield`; a step's type hints cannot be resolved; `show=` names a field
-  no output row has; a pipeline has only one step; no quality filter, no diversity filter, or no inspect op ran
+  a step is called inside another step, a pipeline calls no steps, or rows do not match a `list[X]` type hint where
+  `X` is a pydantic model (rows stay dicts).
+- Warnings: a step calls no Forger ops (its report cannot show what it kept or changed: write its checks as ops such
+  as `filter.by_predicate`, and never add a no-op filter only to quiet the warning); an op misses its `min_yield` /
+  `max_yield`; an op's model calls stopped at `max_tokens`; a step's type hints cannot be resolved; `show=` names a
+  field no output row has; a pipeline has only one step; no quality filter, no diversity filter, or no inspect op ran
   anywhere; an op was called in the pipeline outside a step.
 - Filter notes: the pipeline summary lists the steps that ran no filter and the filters that removed nothing (op, step,
   and rows seen). These are notes, not warnings, and `strict=True` does not raise on them: a generate-only step
@@ -46,7 +48,8 @@ cached it, marked `cached`, with that run's warnings.
 - `strict=True` on `@step` or `@pipeline` turns warnings into errors, also on cached runs; a step that fails strict
   mode is not cached. `prod=True` or the environment variable `FORGER_STEP_REPORT=0` silences the reports.
   `pyforger.inspect.inspect_step(name)` re-prints the full report of the latest run of a step, with up to 10 sample
-  rows.
+  rows. It also works from another process (e.g. a shell, while the pipeline runs under `nohup`): every step saves its
+  report under `$FORGER_CACHE/step_reports/`.
 - Sample rows: `@step(sample=3)` shows three output rows (of each stream) instead of one. `@step(show=["statement"])`
   prints those fields of each sample row in full, line breaks kept, as an indented block under the row (other values
   as JSON); the other fields stay in the table, cut or summarized.

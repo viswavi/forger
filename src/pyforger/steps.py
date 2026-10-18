@@ -34,14 +34,18 @@ summary of each; see ``pyforger._summaries``.
 
 from __future__ import annotations
 
+import hashlib
 import inspect
+import json
 import os
+import re
 import sys
 import time
 import typing
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import wraps
+from pathlib import Path
 from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError
@@ -65,9 +69,12 @@ from pyforger._tracking import (
     StepRecord,
     UsageTotals,
 )
-from pyforger.op import op
+from pyforger.op import _cache_dir, op
+from pyforger.utils import get_formatted_logger
 
 F = TypeVar("F", bound=Callable[..., Any])
+
+_logger = get_formatted_logger(__name__)
 
 _DIVERSITY_FILTERS = frozenset(
     {
@@ -92,7 +99,52 @@ _SCHEMA_ROWS = 5000  # the fields line reads at most this many rows, evenly spac
 
 
 class StepContractError(RuntimeError):
-    """A ``@step`` broke its contract (bad rows, no ops, nesting, or strict mode)."""
+    """A ``@step`` broke its contract (bad rows, nesting, or strict mode)."""
+
+
+def _saved_step_path(name: str) -> Path:
+    """Where the latest record of step ``name`` is saved, under ``FORGER_CACHE``."""
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", name)[:100]
+    digest = hashlib.sha256(name.encode()).hexdigest()[:8]
+    return _cache_dir() / "step_reports" / f"{safe}-{digest}.json"
+
+
+def _save_step(rec: StepRecord) -> None:
+    """Save ``rec`` as its step's latest run, for ``inspect_step`` in another process.
+
+    e.g. a pipeline run under nohup, inspected later from a shell. Values that
+    are not JSON (sample rows holding objects) are saved as their repr. Never
+    raises: a full disk must not fail the step.
+    """
+    path = _saved_step_path(rec.name)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(rec.model_dump(), default=repr))
+        os.replace(tmp, path)
+    except Exception as exc:
+        _logger.debug("could not save the report of step %s: %s", rec.name, exc)
+
+
+def saved_step_records() -> dict[str, StepRecord]:
+    """The saved latest record of every step under ``FORGER_CACHE``, oldest first.
+
+    Files another user wrote, or that do not parse, are skipped.
+    """
+    folder = _cache_dir() / "step_reports"
+    paths = sorted(folder.glob("*.json"), key=lambda p: p.stat().st_mtime)
+    records: dict[str, StepRecord] = {}
+    for path in paths:
+        try:
+            if hasattr(os, "getuid") and path.stat().st_uid != os.getuid():
+                continue
+            rec = StepRecord.model_validate_json(path.read_text())
+        except (OSError, ValueError) as exc:
+            _logger.debug("skipping saved step report %s: %s", path, exc)
+            continue
+        records.pop(rec.name, None)
+        records[rec.name] = rec
+    return records
 
 
 class PipelineContractError(RuntimeError):
@@ -335,9 +387,9 @@ def step(
     (those streams, each with its own row model).
 
     Errors (``StepContractError``): the result is neither a list nor a dict of
-    lists, the step called no Forger ops, rows do not match the annotated row
-    model (or the streams those a ``TypedDict`` names), or the step was called
-    inside another step. Warnings: an op missed its ``min_yield`` /
+    lists, rows do not match the annotated row model (or the streams those a
+    ``TypedDict`` names), or the step was called inside another step.
+    Warnings: the step called no Forger ops, an op missed its ``min_yield`` /
     ``max_yield``, the rows are not dicts, ``show`` names a field no output row
     has, or the type hints could not be resolved.
 
@@ -480,6 +532,7 @@ def step(
                     if not rec.cache_hit:  # a cached step prints one line
                         _summaries.add_llm_summaries(rec, rows=rec.sample_shown)
                     print_step(rec)
+                _save_step(rec)
 
             scope = _tracking.enter_step(rec, check, flow)
             try:
@@ -712,11 +765,15 @@ def _check_step_result(
                 "pool.submit(contextvars.copy_context().run, fn, arg) to list them"
             )
             return
-        raise StepContractError(
-            f"step {rec.name} called no Forger operations; build steps from "
-            "pyforger.acquire/alter/filter/inspect ops and keep pure-Python helpers "
-            "as plain functions"
+        # A warning, not an error: an error pushed agents to wrap pure-Python
+        # steps in no-op filters (by_predicate(rows, lambda r: True)).
+        rec.warnings.append(
+            "called no Forger operations, so this report cannot show what the step "
+            "kept or changed; write its checks as Forger ops where one fits (e.g. "
+            "filter.by_predicate with the real check, alter.run_programs, "
+            "filter.by_tests), and do not add a no-op filter only to quiet this"
         )
+        return
     for call in rec.ops:
         rec.warnings.extend(call.warnings)
 
@@ -791,6 +848,7 @@ def pipeline(
                 _tracking.store_step(step_rec)
                 if _reports_enabled(prod):
                     print_step(step_rec)
+                _save_step(step_rec)
 
             scope = _tracking.enter_pipeline(rec, on_dynamic_step)
             try:

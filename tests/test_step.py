@@ -300,18 +300,24 @@ def test_yield_names_are_reserved_at_decoration(reserved):
 # --------------------------------------------------------------------------- #
 
 
-def test_step_without_ops_raises():
-    """A step that calls no Forger op is an error."""
+def test_step_without_ops_warns():
+    """A step that calls no Forger op warns; strict=True makes it an error."""
 
     @step
     def plain(rows):
         return [r for r in rows if r["text"]]
 
+    assert plain(_rows(*TEXTS)) == _rows(*TEXTS)
+    assert (
+        "called no Forger operations" in _tracking.step_records()["plain"].warnings[0]
+    )
+
+    @step(strict=True)
+    def strict_plain(rows):
+        return list(rows)
+
     with pytest.raises(StepContractError, match="called no Forger operations"):
-        plain(_rows(*TEXTS))
-    # The failing result was not cached, so a second call fails the same way.
-    with pytest.raises(StepContractError, match="called no Forger operations"):
-        plain(_rows(*TEXTS))
+        strict_plain(_rows(*TEXTS))
 
 
 def test_nested_step_raises():
@@ -755,6 +761,37 @@ def test_inspect_step_unknown_name_lists_known_steps():
         inspect_step("known")
     known(_rows(*TEXTS))
     with pytest.raises(KeyError, match="known steps: known"):
+        inspect_step("missing")
+
+
+class Blob:
+    """A row value that is not JSON."""
+
+    def __repr__(self) -> str:
+        """Show as Blob()."""
+        return "Blob()"
+
+
+def test_inspect_step_reads_a_run_from_another_process(capsys):
+    """A step saved under FORGER_CACHE is found once this process forgets it."""
+
+    @step
+    def elsewhere(rows):
+        return _length_filter(rows)
+
+    elsewhere(_rows("alpha beta", "gamma") + [{"text": "one two", "obj": Blob()}])
+    ran = _tracking.step_records()["elsewhere"]
+    _tracking.clear_step_records()  # as in a new process
+    capsys.readouterr()
+    rec = inspect_step("elsewhere")
+    assert (rec.n_in, rec.n_out, rec.ops[0].op_name) == (
+        ran.n_in,
+        ran.n_out,
+        ran.ops[0].op_name,
+    )
+    assert inspect_step().name == "elsewhere"
+    assert "step elsewhere" in capsys.readouterr().out
+    with pytest.raises(KeyError, match="known steps: elsewhere"):
         inspect_step("missing")
 
 

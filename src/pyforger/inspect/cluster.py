@@ -19,19 +19,22 @@ from pyforger.utils import get_field, get_formatted_logger
 logger = get_formatted_logger("Inspect")
 
 
-def _warn_if_heavy_reasoning(model: Model, op_name: str) -> None:
+def _warn_if_heavy_reasoning(
+    model: Model, op_name: str, allowed: tuple[str, ...] = ("none", "low")
+) -> None:
     """Warn when an inspect op's many short calls would reason at length.
 
     Inspect ops send one short request per row; at a higher effort (e.g.
     "high"), a few calls reason for minutes and can hit gateway timeouts.
     """
     effort = getattr(model, "reasoning_effort", None)
-    if effort is not None and effort not in ("none", "low"):
+    if effort is not None and effort not in allowed:
         logger.warning(
             "%s makes many short LLM calls; reasoning_effort=%r makes them slow "
-            "and prone to timeouts. Use reasoning_effort='low' or 'none'.",
+            "and prone to timeouts, and some never finish. Use %s.",
             op_name,
             effort,
+            " or ".join(f"reasoning_effort={e!r}" for e in allowed),
         )
 
 

@@ -19,9 +19,15 @@ Runs use threads and no signals, so the ops work from any thread.
 
 This is NOT a security sandbox. The program runs as your user, with your
 files and network. Run untrusted code in a container or VM.
+
+``runner=`` replaces the subprocess with your own executor, e.g. the sandbox
+an RL reward will run the code in, so a solution that passes here also passes
+there. A runner takes ``(code, tests)`` and returns one result dict per test
+(see ``Runner``); it runs once per row, several rows at a time.
 """
 from __future__ import annotations
 
+import contextvars
 import os
 import re
 import shutil
@@ -40,6 +46,12 @@ from pyforger.utils import get_field, get_formatted_logger
 
 # (actual stdout, expected output) -> passed
 Checker = Callable[[str, str], bool]
+# (code, tests) -> one result per test, in order. Each result is a dict with
+# "status" ("ok", "runtime_error", "timeout", ...) and "stdout"; others
+# ("stderr", "seconds", "exit_code", "timed_out") are filled in when missing. A
+# runner that grades a test itself (e.g. comparing a returned value) sets
+# "passed"; otherwise the checker compares "stdout" with the test's "output".
+Runner = Callable[[str, list[dict]], list[dict]]
 
 # The child sets its own limits and then execs the program, so no preexec_fn
 # (unsafe with threads) is needed. Limits survive exec. A limit of 0 is not
@@ -256,6 +268,7 @@ def run_tests(
     checker: Checker = outputs_match,
     stop_on_failure: bool = False,
     max_chars: int | None = 10_000,
+    runner: Runner | None = None,
     **run_kwargs: Any,
 ) -> list[dict[str, Any]]:
     """Run ``code`` on each test in order; one result per test that ran.
@@ -265,8 +278,16 @@ def run_tests(
     wrong output gets status ``"wrong_answer"``. ``stop_on_failure`` stops
     after the first test that does not pass. ``max_chars`` cuts each kept
     stdout and stderr (None keeps them whole). ``run_kwargs`` go to
-    ``run_program``.
+    ``run_program``. ``runner`` runs every test in one call instead (see
+    ``Runner``); ``stop_on_failure`` then cuts the results after the first
+    failure.
     """
+    if runner is not None:
+        results = _run_with(runner, code, tests, checker, max_chars)
+        if stop_on_failure:
+            failed = [i for i, r in enumerate(results) if r["passed"] is not True]
+            results = results[: failed[0] + 1] if failed else results
+        return results
     results = []
     for test in tests:
         result = _run_test(code, test, checker, max_chars, run_kwargs)
@@ -283,23 +304,69 @@ def _run_test(
     max_chars: int | None,
     run_kwargs: dict[str, Any],
 ) -> dict[str, Any]:
-    if not isinstance(test, dict):
-        raise TypeError(f"a test must be a dict with an 'input' key, got {test!r}")
+    _check_test(test)
     kwargs = dict(run_kwargs)
     if test.get("timeout_s") is not None:
         kwargs["timeout_s"] = float(test["timeout_s"])
     result = run_program(
         code, _stdin_text(test.get("input")), args=test.get("args") or (), **kwargs
     )
+    return _graded(result, test, checker, max_chars)
+
+
+def _check_test(test: Any) -> None:
+    if not isinstance(test, dict):
+        raise TypeError(f"a test must be a dict with an 'input' key, got {test!r}")
+
+
+def _run_with(
+    runner: Runner,
+    code: str,
+    tests: list[dict],
+    checker: Checker,
+    max_chars: int | None,
+) -> list[dict[str, Any]]:
+    """Run all of one row's tests with ``runner``, then grade each result."""
+    for test in tests:
+        _check_test(test)
+    if not tests:
+        return []
+    raw = list(runner(code, tests))
+    if len(raw) != len(tests):
+        raise ValueError(
+            f"runner {runner!r} returned {len(raw)} results for {len(tests)} tests"
+        )
+    return [_graded(dict(r), t, checker, max_chars) for r, t in zip(raw, tests)]
+
+
+def _graded(
+    result: dict[str, Any],
+    test: dict,
+    checker: Checker,
+    max_chars: int | None,
+) -> dict[str, Any]:
+    """Fill in a run's missing keys and its ``"passed"`` / ``"wrong_answer"``."""
+    result = {
+        "exit_code": None,
+        "timed_out": result.get("status") == "timeout",
+        "stdout": "",
+        "stderr": "",
+        "seconds": 0.0,
+        **result,
+    }
+    result["stdout"] = str(result["stdout"])
+    result["stderr"] = str(result["stderr"])
     expected = test.get("output")
     if expected is None:
         result["passed"] = None
     elif result["status"] != "ok":
         result["passed"] = False
+    elif result.get("passed") is not None:  # the runner graded it
+        result["passed"] = bool(result["passed"])
     else:
         result["passed"] = bool(checker(result["stdout"], str(expected)))
-        if not result["passed"]:
-            result["status"] = "wrong_answer"
+    if result["passed"] is False and result["status"] == "ok":
+        result["status"] = "wrong_answer"
     if max_chars is not None:
         result["stdout"] = result["stdout"][:max_chars]
         # The end of stderr, where a traceback's error is.
@@ -344,6 +411,7 @@ def run_programs(
     command: list[str] | None = None,
     suffix: str = ".py",
     max_workers: int | None = None,
+    runner: Runner | None = None,
 ) -> list[dict]:
     r"""Run each row's stdin/stdout program on each of its tests.
 
@@ -381,6 +449,11 @@ def run_programs(
         max_workers: Runs at a time across all rows (default
             ``min(8, cpu count)``). Part of the cache key: timeouts are
             wall-clock, so fewer workers can turn timeouts into passes.
+        runner: Your own executor, called once per row with ``(code, tests)``
+            (see ``Runner``), ``max_workers`` rows at a time; the limits above
+            and ``command`` then do not apply. E.g. run solutions in the
+            sandbox that will score them, so what passes here passes there.
+            Part of the cache key: give it a ``cache_key()`` method.
 
     Returns:
         New rows (inputs are not mutated), in input order.
@@ -388,6 +461,18 @@ def run_programs(
     workers = max_workers or _default_workers()
     if workers < 1:
         raise ValueError("max_workers must be at least 1")
+    if runner is not None:
+        return _run_rows_with(
+            items,
+            runner,
+            code_field,
+            tests_field,
+            result_field,
+            extract_code,
+            checker,
+            max_chars,
+            workers,
+        )
     run_kwargs = dict(
         timeout_s=timeout_s,
         memory_mb=memory_mb,
@@ -422,3 +507,47 @@ def run_programs(
     for (i, _), result in zip(jobs, done):
         results[i].append(result)  # type: ignore[union-attr]
     return [{**item, result_field: res} for item, res in zip(items, results)]
+
+
+def _context_run() -> Callable[..., Any]:
+    """A copy of this context's run, typed for Executor.submit (as in model.py)."""
+    run: Callable[..., Any] = contextvars.copy_context().run
+    return run
+
+
+def _run_rows_with(
+    items: list[dict],
+    runner: Runner,
+    code_field: str,
+    tests_field: str,
+    result_field: str,
+    extract_code: Callable[[str], str | None] | None,
+    checker: Checker,
+    max_chars: int | None,
+    workers: int,
+) -> list[dict]:
+    """``run_programs`` with a runner: one runner call per row with code."""
+    codes = [_code_of(item, code_field, extract_code) for item in items]
+    tests = [list(get_field(item, tests_field, "run_programs") or []) for item in items]
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        # A copied context per call, so ops a runner calls stay attributed.
+        futures = {
+            i: pool.submit(
+                _context_run(),
+                _run_with,
+                runner,
+                code,
+                tests[i],
+                checker,
+                max_chars,
+            )
+            for i, code in enumerate(codes)
+            if code is not None
+        }
+        try:
+            done = {i: f.result() for i, f in futures.items()}
+        except BaseException:
+            for f in futures.values():
+                f.cancel()
+            raise
+    return [{**item, result_field: done.get(i)} for i, item in enumerate(items)]

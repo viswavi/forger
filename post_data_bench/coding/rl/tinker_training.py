@@ -19,6 +19,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 # Supports both `rl` CLI imports and `coding.rl` library imports.
+from .rubric_data import prompt_id  # noqa: ABS101
 from .tinker_budget import (  # noqa: ABS101
     BASE_MODEL,
     TinkerBudgetExceeded,
@@ -368,6 +369,36 @@ def run_rl(
     )
 
 
+_ANSWER_CHARS = 300  # of each response's final answer kept in rollouts.jsonl
+
+
+def _log_rollouts(stream, step, row, sequences, texts, rewards):
+    """Append one training group to rollouts.jsonl.
+
+    e.g. {"step": 3, "prompt_id": "9f2c...", "rewards": [1.0, 0.0, ...],
+    "truncated": [false, true, ...], "answers": ["This task is impossible...",
+    ...]}. prompt_id is rubric_data.prompt_id of the row, so groups join back to
+    the submitted rows; answers are the text after the last </think>, cut short.
+    """
+    stream.write(
+        json.dumps(
+            {
+                "step": step,
+                "prompt_id": prompt_id(row),
+                "rewards": rewards,
+                "truncated": [s.stop_reason == "length" for s in sequences],
+                "answers": [
+                    text.rsplit("</think>", 1)[-1].strip()[:_ANSWER_CHARS]
+                    for _, text in texts
+                ],
+            },
+            ensure_ascii=False,
+        )
+        + "\n"
+    )
+    stream.flush()
+
+
 def _group_datums(groups):
     """Importance-sampling data from (prompt, sequences, rewards) groups.
 
@@ -436,18 +467,23 @@ async def _run_rl(data_dir, init_checkpoint, output_dir, budget, **config):
             cursor += 1
         return batch
 
-    async def rollout(sampler, row, n):
+    rollout_log = (output / "rollouts.jsonl").open("a")
+
+    async def rollout(sampler, row, n, step=None):
         # Score each group as soon as it arrives, overlapping the sampling tail.
         prompt, sequences = await sample_group(
             sampler, tokenizer, row["prompt"], budget, num_samples=n, **sampling
         )
         texts = [(row, response_text(tokenizer, s.tokens)) for s in sequences]
-        return prompt, sequences, list(await _score(texts))
+        rewards = list(await _score(texts))
+        if step is not None:
+            _log_rollouts(rollout_log, step, row, sequences, texts, rewards)
+        return prompt, sequences, rewards
 
-    async def collect(rows, n):
+    async def collect(rows, n, step=None):
         sampler = await trainer.save_weights_and_get_sampling_client_async()
         started = time.time()
-        groups = await asyncio.gather(*[rollout(sampler, row, n) for row in rows])
+        groups = await asyncio.gather(*[rollout(sampler, row, n, step) for row in rows])
         return groups, time.time() - started
 
     async def heldout(step):
@@ -473,7 +509,8 @@ async def _run_rl(data_dir, init_checkpoint, output_dir, budget, **config):
     started = time.time()
     stop_reason, completed = "completed", 0
     n, total = config["n_samples_per_prompt"], config["num_rollout"]
-    pending = asyncio.create_task(collect(next_batch(), n))
+    # The step argument labels each batch's rollouts with the step it trains.
+    pending = asyncio.create_task(collect(next_batch(), n, 1))
     background = []
     try:
         for step in range(1, total + 1):
@@ -482,7 +519,7 @@ async def _run_rl(data_dir, init_checkpoint, output_dir, budget, **config):
             if step < total and config["max_steps_off_policy"] >= 1:
                 # Sample the next batch from these pre-update weights while this
                 # step trains.
-                pending = asyncio.create_task(collect(next_batch(), n))
+                pending = asyncio.create_task(collect(next_batch(), n, step + 1))
             data, kept = _group_datums(groups)
             train_started = time.time()
             if data:
@@ -505,7 +542,7 @@ async def _run_rl(data_dir, init_checkpoint, output_dir, budget, **config):
                     budget.record({"train": train_tokens}, session_id(service))
             completed = step
             if step < total and pending is None:
-                pending = asyncio.create_task(collect(next_batch(), n))
+                pending = asyncio.create_task(collect(next_batch(), n, step + 1))
             if step % config["eval_interval"] == 0 or step == total:
                 background.append(asyncio.create_task(heldout(step)))
             sequences = [s for _, seqs, _ in groups for s in seqs]
@@ -540,6 +577,7 @@ async def _run_rl(data_dir, init_checkpoint, output_dir, budget, **config):
         stop_reason, heldout_results = "judge_quota_exhausted", []
     finally:
         log.close()
+        rollout_log.close()
         # Stop sampling that would only spend budget, then let the tasks unwind.
         unfinished = [
             t for t in (pending, *background) if t is not None and not t.done()

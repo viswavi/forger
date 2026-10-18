@@ -608,7 +608,9 @@ def op(
                     result = fn(*args, **kwargs)
                 finally:
                     _REQUEST_SCOPE.reset(scope_token)
-                    if scope.reused:
+                    # Also "0 of N": a rerun that reuses nothing usually means
+                    # a key changed, e.g. a row holding id(row) or a timestamp.
+                    if scope.total:
                         logger.info(
                             "request cache: %d of %d completions reused in %s",
                             scope.reused,
@@ -866,6 +868,8 @@ def _op_call(
             call.warnings.append(
                 f"{op_name}: yield {yield_ratio:.2f} above max_yield {max_yield:.2f}"
             )
+    # Completions cut off at max_tokens, from any model call the op made.
+    call.warnings.extend(_tracking.truncation_warnings(op_name))
     if not _tracking.is_reporting():
         for warning in call.warnings:
             logger.warning(warning)

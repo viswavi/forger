@@ -54,6 +54,16 @@ student = TinkerModel("Qwen/Qwen3-8B", max_tokens=16384)  # n samples per proble
 rows = self_taught_reasoner(problems, solver_prompt, student, n=8, reference_field="final_answer")
 ```
 
+When a response is right because its code passes tests, not because its answer equals a reference, pass
+`verifier=`: a `(answer, row) -> bool | None` check that sees the candidate row (the input row's fields plus the
+response fields), run `max_workers` (default 8) at a time. A response is kept when it returns `True`, and
+`reference_field` is neither needed nor changed:
+
+```python
+rows = self_taught_reasoner(problems, solver_prompt, student, n=8,
+                            verifier=filter.program_verifier("tests"))
+```
+
 `LocalModel("Qwen/Qwen3-8B", max_model_len=40960)` samples the same student on a local GPU via vLLM instead.
 
 ## Running programs against tests
@@ -111,6 +121,13 @@ or when the run failed after stderr or a file in its working directory reached i
 the address space with `RLIMIT_AS` on Linux; macOS has no working `RLIMIT_AS`, so there the limit is skipped and a
 warning says so once. Interpreters that reserve a large address space at startup (e.g. `node`, `java`) may need
 `memory_mb=None` on Linux.
+
+`runner=` on `run_programs`, `by_tests`, and `program_verifier` replaces the subprocess with your own executor: a
+`(code, tests) -> results` callable returning one dict per test with `"status"` (`"ok"`, `"runtime_error"`,
+`"timeout"`) and `"stdout"`, or `"passed"` when it grades a test itself (e.g. comparing a returned value). Use it to
+check solutions in the environment that will score them, such as an RL reward's sandbox, so code that passes here
+also passes there. The runner is called once per row, `max_workers` rows at a time, and is part of the cache key
+(give it a `cache_key()` method).
 
 Neither `run_programs` nor `execute_code` is a security sandbox. `execute_code`'s RestrictedPython is a guardrail
 against accidental damage from machine-generated code, not a boundary against adversarial code, and `run_programs`

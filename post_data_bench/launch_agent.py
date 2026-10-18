@@ -564,6 +564,8 @@ if args.training_mode == "sft-rl":
             "rubric_rm.py",
             "rubric_worker.py",
             "rubric_sandbox.py",
+            "solution_runner.py",
+            "solution_worker.py",
             "tinker_budget.py",
             "tinker_training.py",
         )

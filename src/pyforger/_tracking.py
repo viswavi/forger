@@ -347,6 +347,11 @@ _ACTIVE_SCORES: ContextVar[list[ScoreRecord] | None] = ContextVar(
 _ACTIVE_WARNINGS: ContextVar[list[str] | None] = ContextVar(
     "forger_active_warnings", default=None
 )
+# Completions the innermost active op got that stopped at max_tokens, keyed by
+# (model_id, max_tokens): [truncated, total]. A nested op's counts go to its caller.
+_ACTIVE_TRUNCATION: ContextVar[
+    dict[tuple[str, int | None], list[int]] | None
+] = ContextVar("forger_active_truncation", default=None)
 # Set by the active step; ``op.py`` calls it on a step's fresh result before
 # caching it, so a result that breaks the step's contract (or, under
 # strict=True, has warnings) is never cached. It returns the step metadata that
@@ -664,6 +669,9 @@ class OpToken:
     usage: Usage | None = None
     usage_token: Token[tuple[Usage, ...]] | None = None
     warnings_token: Token[list[str] | None] | None = None
+    truncation_token: (
+        Token[dict[tuple[str, int | None], list[int]] | None] | None
+    ) = None
 
     def usage_totals(self) -> tuple[int, int, float, float]:
         """The op's own usage so far (zero for a step's cache wrapper)."""
@@ -688,6 +696,7 @@ def enter_op(op_name: str) -> OpToken:
         usage=usage,
         usage_token=usage_token,
         warnings_token=_ACTIVE_WARNINGS.set([]),
+        truncation_token=_ACTIVE_TRUNCATION.set({}),
     )
 
 
@@ -711,6 +720,50 @@ def add_op_warning(message: str) -> None:
 def current_warnings() -> list[str]:
     """Return the warnings the innermost active op has added so far."""
     return list(_ACTIVE_WARNINGS.get() or [])
+
+
+def truncation_message(
+    model_id: str, max_tokens: int | None, truncated: int, total: int
+) -> str:
+    """Say how many completions hit max_tokens, and what to change.
+
+    e.g. "349 of 768 completions from deepseek stopped at max_tokens=24000
+    (finish_reason=length) ...".
+    """
+    limit = f"max_tokens={max_tokens}" if max_tokens is not None else "max_tokens"
+    return (
+        f"{truncated} of {total} completions from {model_id} stopped at {limit} "
+        "(finish_reason=length), so their text is cut off (a reasoning model's is "
+        "often empty: the budget went to thinking); raise the Model's max_tokens or "
+        "lower its reasoning_effort"
+    )
+
+
+def add_truncation(
+    model_id: str, max_tokens: int | None, truncated: int, total: int
+) -> bool:
+    """Count one batch's completions toward the running op's truncation warning.
+
+    Returns False outside any op, where nothing will report it.
+    """
+    counts = _ACTIVE_TRUNCATION.get()
+    if counts is None:
+        return False
+    entry = counts.setdefault((model_id, max_tokens), [0, 0])
+    entry[0] += truncated
+    entry[1] += total
+    return True
+
+
+def truncation_warnings(op_name: str) -> list[str]:
+    """The running op's truncation warnings, one per (model, max_tokens) that hit it."""
+    return [
+        f"{op_name}: {truncation_message(model_id, max_tokens, truncated, total)}"
+        for (model_id, max_tokens), (truncated, total) in (
+            _ACTIVE_TRUNCATION.get() or {}
+        ).items()
+        if truncated
+    ]
 
 
 def exit_op(
@@ -742,6 +795,15 @@ def exit_op(
         parent = _ACTIVE_WARNINGS.get()
         if own and parent is not None and token.depth != 0:
             parent.extend(own)
+    if token.truncation_token is not None:
+        counts = _ACTIVE_TRUNCATION.get() or {}
+        _ACTIVE_TRUNCATION.reset(token.truncation_token)
+        outer = _ACTIVE_TRUNCATION.get()
+        if outer is not None:  # a nested op: its caller's warning covers it
+            for key, (truncated, total) in counts.items():
+                entry = outer.setdefault(key, [0, 0])
+                entry[0] += truncated
+                entry[1] += total
     if token.depth_token is not None:
         _OP_DEPTH.reset(token.depth_token)
     if call is None or token.depth != 0:

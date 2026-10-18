@@ -432,6 +432,7 @@ generate_from_context(
     batch_size: int | None = None,
     merge: bool = False,
     output_field: str | None = None,
+    retry_truncated: bool = False,
 ) -> list[dict | None] | list[dict]
 ```
 
@@ -466,6 +467,7 @@ run_programs(
     command: list[str] | None = None,
     suffix: str = ".py",
     max_workers: int | None = None,
+    runner: Runner | None = None,
 ) -> list[dict]
 ```
 
@@ -488,6 +490,8 @@ self_taught_reasoner(
     extract_answer: Callable[[str], Any] | None = None,
     match_fn: Callable[[Any, Any], bool] | None = None,
     filter_fn: Callable[[list[dict]], list[dict]] | None = None,
+    verifier: Callable[[str, dict], bool | None] | None = None,
+    max_workers: int | None = None,
     response_field: str = "response",
     thinking_field: str = "thinking",
     answer_field: str = "answer",
@@ -848,6 +852,7 @@ by_tests(
     command: list[str] | None = None,
     suffix: str = ".py",
     max_workers: int | None = None,
+    runner: Runner | None = None,
 ) -> list[dict]
 ```
 
@@ -893,6 +898,7 @@ program_verifier(
     memory_mb: int | None = 2048,
     command: list[str] | None = None,
     suffix: str = ".py",
+    runner: Runner | None = None,
 ) -> Callable[[str, dict], bool | None]
 ```
 

@@ -16,6 +16,7 @@ from typing import Any
 from pyforger import _tracking
 from pyforger.alter.programs import (
     Checker,
+    Runner,
     last_code_block,
     outputs_match,
     run_programs,
@@ -40,6 +41,7 @@ def by_tests(
     command: list[str] | None = None,
     suffix: str = ".py",
     max_workers: int | None = None,
+    runner: Runner | None = None,
 ) -> list[dict]:
     """Keep rows whose program passes at least ``min_pass_rate`` of its tests.
 
@@ -69,6 +71,8 @@ def by_tests(
         suffix: File name suffix for the program.
         max_workers: Runs at a time (default ``min(8, cpu count)``); part
             of the cache key, since wall-clock timeouts depend on load.
+        runner: Your own ``(code, tests) -> results`` executor, e.g. the
+            sandbox an RL reward runs code in (see ``alter.run_programs``).
 
     Returns:
         The kept rows, in input order.
@@ -95,6 +99,7 @@ def by_tests(
         command=command,
         suffix=suffix,
         max_workers=max_workers,
+        runner=runner,
     )
     rates = [_pass_rate(row["_by_tests_results"]) for row in ran]
     _tracking.record_scores("pass rate", rates, keep="ge", threshold=min_pass_rate)
@@ -121,6 +126,7 @@ def program_verifier(
     memory_mb: int | None = 2048,
     command: list[str] | None = None,
     suffix: str = ".py",
+    runner: Runner | None = None,
 ) -> Callable[[str, dict], bool | None]:
     """A ``metric`` for the difficulty filters that runs programs on tests.
 
@@ -144,6 +150,8 @@ def program_verifier(
             on macOS).
         command: Interpreter command with ``{file}`` for non-Python programs.
         suffix: File name suffix for the program.
+        runner: Your own ``(code, tests) -> results`` executor, e.g. the
+            sandbox an RL reward runs code in (see ``alter.run_programs``).
 
     Returns:
         A ``(prediction, row) -> bool | None`` verifier with a ``cache_key()``,
@@ -154,6 +162,7 @@ def program_verifier(
         extract_code,
         checker,
         dict(timeout_s=timeout_s, memory_mb=memory_mb, command=command, suffix=suffix),
+        runner,
     )
 
 
@@ -166,11 +175,13 @@ class _ProgramVerifier:
         extract_code: Callable[[str], str | None],
         checker: Checker,
         run_kwargs: dict[str, Any],
+        runner: Runner | None = None,
     ) -> None:
         self.tests_field = tests_field
         self.extract_code = extract_code
         self.checker = checker
         self.run_kwargs = run_kwargs
+        self.runner = runner
 
     def cache_key(self) -> tuple:
         """Settings only, so equal verifiers share cached grades."""
@@ -180,6 +191,7 @@ class _ProgramVerifier:
             self.extract_code,
             self.checker,
             sorted(self.run_kwargs.items()),
+            self.runner,
         )
 
     def __repr__(self) -> str:
@@ -204,6 +216,7 @@ class _ProgramVerifier:
             checker=self.checker,
             stop_on_failure=True,
             max_chars=0,
+            runner=self.runner,
             **self.run_kwargs,
         )
         return len(results) == len(tests) and all(r["passed"] for r in results)

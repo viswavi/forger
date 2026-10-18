@@ -242,12 +242,16 @@ class GenerateResult(list):
     separate requests, it is the list of those responses, in completions order.
     It holds only the requests actually sent: None when every completion came
     from the request cache.
+
+    `finish_reasons` holds each completion's stop reason, e.g. "stop", or
+    "length" when it hit max_tokens (None when the backend gave none).
     """
 
     usage: dict[str, Any]
     reasoning: list[str | None]
     model_id: str
     raw: Any
+    finish_reasons: list[str | None]
 
     def __init__(
         self,
@@ -257,6 +261,7 @@ class GenerateResult(list):
         reasoning: list[str | None],
         model_id: str,
         raw: Any,
+        finish_reasons: list[str | None] | None = None,
     ) -> None:
         """Wrap completions with per-call metadata."""
         super().__init__(completions)
@@ -264,12 +269,27 @@ class GenerateResult(list):
         self.reasoning = reasoning
         self.model_id = model_id
         self.raw = raw
+        self.finish_reasons = (
+            list(finish_reasons) if finish_reasons is not None else [None] * len(self)
+        )
+
+    @property
+    def truncated(self) -> int:
+        """How many completions stopped at max_tokens (finish reason "length")."""
+        return sum(1 for reason in self.finish_reasons if reason == "length")
 
     def __reduce__(self):
         """Pickle support."""
         return (
             _rebuild_generate_result,
-            (list(self), self.usage, self.reasoning, self.model_id, self.raw),
+            (
+                list(self),
+                self.usage,
+                self.reasoning,
+                self.model_id,
+                self.raw,
+                self.finish_reasons,
+            ),
         )
 
 
@@ -279,11 +299,33 @@ def _rebuild_generate_result(
     reasoning: list[str | None],
     model_id: str,
     raw: Any,
+    finish_reasons: list[str | None] | None = None,
 ) -> GenerateResult:
-    """Pickle helper for GenerateResult."""
+    """Pickle helper for GenerateResult (pickles from before finish_reasons too)."""
     return GenerateResult(
-        completions, usage=usage, reasoning=reasoning, model_id=model_id, raw=raw
+        completions,
+        usage=usage,
+        reasoning=reasoning,
+        model_id=model_id,
+        raw=raw,
+        finish_reasons=finish_reasons,
     )
+
+
+def _note_truncation(results: list[Any], model_id: str, max_tokens: int | None) -> None:
+    """Count completions that hit max_tokens toward the running op's report.
+
+    Outside any op the count is logged here, since no report will show it.
+    """
+    done = [r for r in results if isinstance(r, GenerateResult)]
+    truncated = sum(r.truncated for r in done)
+    total = sum(len(r) for r in done)
+    if not _tracking.add_truncation(model_id, max_tokens, truncated, total) and (
+        truncated
+    ):
+        _logger.warning(
+            _tracking.truncation_message(model_id, max_tokens, truncated, total)
+        )
 
 
 _VALUE_CONSTRAINTS: dict[str, dict[str, Any]] = {
@@ -376,10 +418,11 @@ def _merge_responses(
     come after the slotted ones, so the completion-count check still sees the
     mismatch.
     """
-    by_slot: dict[int, tuple[str, str | None]] = {
-        slot: (entry["text"], entry.get("reasoning")) for slot, entry in hits.items()
+    by_slot: dict[int, tuple[str, str | None, str | None]] = {
+        slot: (entry["text"], entry.get("reasoning"), entry.get("finish_reason"))
+        for slot, entry in hits.items()
     }
-    unslotted: list[tuple[str, str | None]] = []
+    unslotted: list[tuple[str, str | None, str | None]] = []
     usage: dict[str, Any] = {
         "prompt_tokens": 0,
         "completion_tokens": 0,
@@ -390,7 +433,8 @@ def _merge_responses(
     responses = [response for _, response in fresh]
     for asked, response in fresh:
         texts = [choice.message.content or "" for choice in response.choices]
-        pairs = list(zip(texts, _extract_reasoning(response, model_id)))
+        reasons = [_finish_reason(choice) for choice in response.choices]
+        pairs = list(zip(texts, _extract_reasoning(response, model_id), reasons))
         by_slot.update(zip(asked, pairs))
         unslotted.extend(pairs[len(asked) :])
         for key, value in _extract_usage(response).items():
@@ -406,9 +450,9 @@ def _merge_responses(
         usage["cached_completions"] = len(hits)
     ordered = [by_slot[slot] for slot in slots if slot in by_slot] + unslotted
     return GenerateResult(
-        [text for text, _ in ordered],
+        [text for text, _, _ in ordered],
         usage=usage,
-        reasoning=[reasoning for _, reasoning in ordered],
+        reasoning=[reasoning for _, reasoning, _ in ordered],
         model_id=model_id,
         raw=(
             None
@@ -417,7 +461,14 @@ def _merge_responses(
             if len(responses) == 1
             else responses
         ),
+        finish_reasons=[reason for _, _, reason in ordered],
     )
+
+
+def _finish_reason(choice: Any) -> str | None:
+    """A choice's finish reason as a string, e.g. "length", or None."""
+    reason = getattr(choice, "finish_reason", None)
+    return reason if isinstance(reason, str) else None
 
 
 def _cache_entry(choice: Any, reasoning: Any) -> dict[str, Any] | None:
@@ -426,11 +477,19 @@ def _cache_entry(choice: Any, reasoning: Any) -> dict[str, Any] | None:
     Only plain text is cached. Empty or missing text (often a transient glitch),
     a content-filter stop, and choices carrying tool calls, a function call, or
     a refusal are not: a replay could not rebuild them, so they are asked again.
+    Empty text that stopped at max_tokens is cached: a reasoning model that
+    spent the whole budget thinking does the same again at that budget.
     """
     message = choice.message
     text = message.content
-    finish_reason = getattr(choice, "finish_reason", None)
-    if not isinstance(text, str) or not text or finish_reason == "content_filter":
+    finish_reason = _finish_reason(choice)
+    if text is None and finish_reason == "length":
+        text = ""
+    if (
+        not isinstance(text, str)
+        or (not text and finish_reason != "length")
+        or finish_reason == "content_filter"
+    ):
         return None
     for extra in ("tool_calls", "function_call", "refusal"):
         if getattr(message, extra, None):
@@ -1306,6 +1365,7 @@ class Model:
         self._record(
             [r for r in results if isinstance(r, GenerateResult)], add_usage=False
         )
+        _note_truncation(results, self._model_id, max_tokens)
         if n != 1:
             _check_completion_count(
                 self._model_id,
@@ -1652,10 +1712,15 @@ class LocalModel(Model):
                 reasoning=[None] * len(completions),
                 model_id=self._model_id,
                 raw=None,
+                finish_reasons=[
+                    getattr(completion, "finish_reason", None)
+                    for completion in output.outputs
+                ],
             )
             results.append(result)
 
         self._record(results)
+        _note_truncation(results, self._model_id, max_tokens)
         if n != 1:
             _check_completion_count(self._model_id, n, results, fanned_out=False)
         return results
