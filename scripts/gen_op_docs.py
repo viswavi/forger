@@ -70,6 +70,9 @@ The call signature of every public op, generated from the code. Regenerate with
 `{REGENERATE}` after adding or changing an op. See [AGENTS.md](AGENTS.md)
 for how ops fit into steps and pipelines.
 
+Each op has a stable anchor: its module and name, lowercase, joined by `-`, e.g.
+`OPS.md#filter-by_llm_score` or `OPS.md#alter-translate-to_code`.
+
 Keywords left out of the signatures below:
 
 - `min_yield=` / `max_yield=`: the expected range of output rows over input rows,
@@ -253,9 +256,23 @@ def _returns_section(obj: Any) -> str | None:
     return "\n\n".join(_markdown(p) for p in paragraphs)
 
 
+def anchor(qualified: str) -> str:
+    """The stable anchor of an op or module, e.g. ``filter-by_llm_score``.
+
+    GitHub's own heading anchors drop the dots (``filterby_llm_score``), so
+    each heading gets an explicit ``<a name=...>`` instead.
+    """
+    return qualified.lower().replace(".", "-")
+
+
+def _anchor_tag(qualified: str) -> str:
+    return f'<a name="{anchor(qualified)}"></a>'
+
+
 def _entry(name: str, qualified: str, obj: Any) -> str:
     """Render one op: heading, caching status, signature, docstring summary."""
     parts = [
+        _anchor_tag(qualified),
         f"### `{qualified}`",
         _status(obj, qualified),
         f"```python\n{render_signature(name, obj)}\n```",
@@ -305,11 +322,9 @@ def _status(obj: Any, qualified: str) -> str:
     return f"`@op`{named} with caching off: listed in step reports, runs on every call."
 
 
-def _module_section(module_name: str) -> str:
-    """Render one ``## module`` section with an entry per documented export."""
-    module = importlib.import_module(module_name)
-    short = module_name.removeprefix("pyforger.")
-    entries: list[str] = []
+def _exports(module: ModuleType) -> tuple[list[tuple[str, Any]], list[str]]:
+    """Split a module's exports into documented ``(name, obj)`` and skipped names."""
+    documented: list[tuple[str, Any]] = []
     skipped: list[str] = []
     for name in _public_names(module):
         obj = getattr(module, name)
@@ -321,18 +336,61 @@ def _module_section(module_name: str) -> str:
         if not callable(obj):
             skipped.append(name)
             continue
-        qualified = f"{short}.{name}"
-        entries.append(_entry(name, qualified, obj))
-    section = f"## `{module_name}`\n\n{_first_paragraph(module)}\n"
+        documented.append((name, obj))
+    return documented, skipped
+
+
+def _module_section(module_name: str) -> str:
+    """Render one ``## module`` section with an entry per documented export."""
+    module = importlib.import_module(module_name)
+    short = module_name.removeprefix("pyforger.")
+    documented, skipped = _exports(module)
+    entries = [_entry(name, f"{short}.{name}", obj) for name, obj in documented]
+    section = (
+        f"{_anchor_tag(short)}\n\n## `{module_name}`\n\n{_first_paragraph(module)}\n"
+    )
     if skipped:
         names = ", ".join(f"`{n}`" for n in skipped)
         section += f"\nAlso exported, not documented here: {names}.\n"
     return "\n".join([section, *entries])
 
 
+def _toc_line(text: str, indent: str) -> str:
+    """One list item, wrapped at 120 chars with continuation lines indented."""
+    return textwrap.fill(
+        text,
+        width=MAX_WIDTH,
+        initial_indent=f"{indent}- ",
+        subsequent_indent=f"{indent}  ",
+        break_long_words=False,
+        break_on_hyphens=False,
+    )
+
+
+def render_toc() -> str:
+    """Return the ``## Contents`` list: each module, then its ops with a summary.
+
+    Example item: ``- [`by_length`](#filter-by_length): Keep items whose ...``.
+    """
+    lines = ["## Contents", ""]
+    seen = {anchor(m.removeprefix("pyforger.")) for m in MODULES}
+    for module_name in MODULES:
+        short = module_name.removeprefix("pyforger.")
+        documented, _ = _exports(importlib.import_module(module_name))
+        lines.append(f"- [`{module_name}`](#{anchor(short)})")
+        for name, obj in documented:
+            target = anchor(f"{short}.{name}")
+            if target in seen:  # e.g. ops `by_LLM` and `by_llm`
+                raise ValueError(f"two entries share the anchor {target!r}")
+            seen.add(target)
+            summary = _first_paragraph(obj).replace("\n", " ")
+            lines.append(_toc_line(f"[`{name}`](#{target}): {summary}", "  "))
+    return "\n".join(lines) + "\n"
+
+
 def render() -> str:
     """Return the full text of ``docs/OPS.md``."""
-    return "\n".join([HEADER, *(_module_section(m) for m in MODULES)])
+    return "\n".join([HEADER, render_toc(), *(_module_section(m) for m in MODULES)])
 
 
 def main(argv: list[str] | None = None) -> int:

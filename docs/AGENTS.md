@@ -101,7 +101,8 @@ are cached on disk and traced. The retrieval functions (`retrieve`, `retrieve_fr
 them with `@op` to memoize their results. Inside a `@step` they are listed as `acquire.retrieve`.
 
 For the full call signature of every op (parameter names, defaults, field parameters, caching), see
-[OPS.md](OPS.md), which is generated from the code.
+[OPS.md](OPS.md), which is generated from the code. It starts with a table of contents, and each op can be linked as
+`OPS.md#<module>-<op>` in lowercase, e.g. [`OPS.md#filter-by_llm_score`](OPS.md#filter-by_llm_score).
 
 ### Public API summary
 

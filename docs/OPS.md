@@ -6,6 +6,9 @@ The call signature of every public op, generated from the code. Regenerate with
 `python scripts/gen_op_docs.py` after adding or changing an op. See [AGENTS.md](AGENTS.md)
 for how ops fit into steps and pipelines.
 
+Each op has a stable anchor: its module and name, lowercase, joined by `-`, e.g.
+`OPS.md#filter-by_llm_score` or `OPS.md#alter-translate-to_code`.
+
 Keywords left out of the signatures below:
 
 - `min_yield=` / `max_yield=`: the expected range of output rows over input rows,
@@ -15,11 +18,72 @@ Keywords left out of the signatures below:
   `_cache_only=True` (return a cached result or raise `FileNotFoundError`): every
   op marked disk-cached.
 
+## Contents
+
+- [`pyforger.acquire`](#acquire)
+  - [`Model`](#acquire-model): Thin LiteLLM wrapper for generating LLM completions.
+  - [`LocalModel`](#acquire-localmodel): On-GPU model served locally via vLLM, with the same interface as `Model`.
+  - [`split_reasoning`](#acquire-split_reasoning): Split a reasoning-model completion into (thinking, answer).
+  - [`retrieve`](#acquire-retrieve): Call source.fetch() once per query and concatenate results.
+  - [`retrieve_from_web`](#acquire-retrieve_from_web): Search the web via Brave's LLM Context API. QUERY mode only.
+  - [`retrieve_from_wiki`](#acquire-retrieve_from_wiki): Fetch Wikipedia articles. QUERY (full-text) or RANDOM (random
+    article).
+  - [`retrieve_from_hf`](#acquire-retrieve_from_hf): Load rows from a Hugging Face dataset.
+  - [`retrieve_from_arxiv`](#acquire-retrieve_from_arxiv): Fetch arXiv papers. QUERY (text search) or RANDOM (sample
+    from category).
+  - [`retrieve_from_s2`](#acquire-retrieve_from_s2): Fetch papers from Semantic Scholar.
+  - [`sample_from_LLM`](#acquire-sample_from_llm): Generate from `model` until `n` samples are generated.
+  - [`WebRetrievalSource`](#acquire-webretrievalsource): Retrieval source that searches the web via Brave's LLM Context
+    API.
+  - [`WikiRetrievalSource`](#acquire-wikiretrievalsource): Retrieval source that fetches articles from Wikipedia via the
+    MediaWiki API.
+  - [`HFRetrievalSource`](#acquire-hfretrievalsource): Hugging Face dataset discovery and retrieval.
+  - [`ArxivRetrievalSource`](#acquire-arxivretrievalsource): Retrieval source that fetches papers from arXiv via the
+    API.
+  - [`S2RetrievalSource`](#acquire-s2retrievalsource): Retrieval source that fetches papers from Semantic Scholar via
+    the API.
+- [`pyforger.alter`](#alter)
+  - [`dynamic_step`](#alter-dynamic_step): Build source per unique input and return one string list per input.
+  - [`dynamic_step_source`](#alter-dynamic_step_source): Generate Python source once per input through Forger's standard
+    @op cache.
+  - [`execute_code`](#alter-execute_code): Compile each item's code and call it with `arg_field`'s value.
+  - [`generate_from_context`](#alter-generate_from_context): Generate LLM outputs conditioned on upstream input items.
+  - [`self_taught_reasoner`](#alter-self_taught_reasoner): Self-Taught Reasoner (STaR): keep a student model's own
+    correct solutions.
+- [`pyforger.alter.translate`](#alter-translate)
+  - [`to_code`](#alter-translate-to_code): Translate text fields on each item into code in `target_language`.
+  - [`to_language`](#alter-translate-to_language): Translate text fields on each item into `target_language` using a
+    Model.
+- [`pyforger.filter`](#filter)
+  - [`by_exact_agreement`](#filter-by_exact_agreement): Keep items where two fields agree or disagree, by exact match.
+  - [`by_exact_match`](#filter-by_exact_match): Keep up to `max_count` occurrences of each unique `field` value.
+  - [`by_group_agreement`](#filter-by_group_agreement): Keep only groups of items whose outputs all agree.
+  - [`by_invalid_response`](#filter-by_invalid_response): Filter items with invalid responses (copies of instruction or
+    empty).
+  - [`by_keyword_blocklist`](#filter-by_keyword_blocklist): Drop items whose `response_field` contains any blocklisted
+    phrase.
+  - [`by_length`](#filter-by_length): Keep items whose `instruction_field` word count is in [min_len, max_len].
+  - [`by_llm_score`](#filter-by_llm_score): Keep items where `num_judges` LLM judges sufficiently agree on quality.
+  - [`by_n_gram_overlap`](#filter-by_n_gram_overlap): Drop items whose word n-gram overlap with the kept pool exceeds
+    threshold.
+  - [`by_rouge_l`](#filter-by_rouge_l): Drop items whose ROUGE-L F1 against any kept item exceeds threshold.
+  - [`by_rouge_l_agreement`](#filter-by_rouge_l_agreement): Keep items where ROUGE-L F1 between two fields meets or
+    misses threshold.
+  - [`by_syntax`](#filter-by_syntax): Keep items whose `field` parses as valid `lang`.
+- [`pyforger.inspect`](#inspect)
+  - [`inspect_step`](#inspect-inspect_step): Print the full report of the latest run of step `name` and return it.
+  - [`topic_based_clustering`](#inspect-topic_based_clustering): Cluster rows into `num_clusters` LLM-named topics by
+    one field.
+
+<a name="acquire"></a>
+
 ## `pyforger.acquire`
 
 Acquire operations: generate or retrieve new data.
 
 Also exported, not documented here: `GenerateResult`, `RetrievalSource`, `RetrieveMode`.
+
+<a name="acquire-model"></a>
 
 ### `acquire.Model`
 
@@ -39,6 +103,8 @@ Model(
 ```
 
 Thin LiteLLM wrapper for generating LLM completions.
+
+<a name="acquire-localmodel"></a>
 
 ### `acquire.LocalModel`
 
@@ -64,6 +130,8 @@ LocalModel(
 
 On-GPU model served locally via vLLM, with the same interface as `Model`.
 
+<a name="acquire-split_reasoning"></a>
+
 ### `acquire.split_reasoning`
 
 Not cached: a plain function.
@@ -75,6 +143,8 @@ split_reasoning(text: str) -> tuple[str, str]
 Split a reasoning-model completion into (thinking, answer).
 
 **Returns:** `(thinking, answer)` with surrounding whitespace stripped.
+
+<a name="acquire-retrieve"></a>
 
 ### `acquire.retrieve`
 
@@ -96,6 +166,8 @@ Call source.fetch() once per query and concatenate results.
 
 **Returns:** The source's rows for each query in turn, each with a `query` field added (`None` when `queries` is None).
 
+<a name="acquire-retrieve_from_web"></a>
+
 ### `acquire.retrieve_from_web`
 
 Not cached (wrap it with `@op` to memoize); listed in step reports as `acquire.retrieve`.
@@ -116,6 +188,8 @@ Search the web via Brave's LLM Context API. QUERY mode only.
 
 **Returns:** Rows with `text`, `id` (the page URL), `title`, `url`, and `query`.
 
+<a name="acquire-retrieve_from_wiki"></a>
+
 ### `acquire.retrieve_from_wiki`
 
 Not cached (wrap it with `@op` to memoize); listed in step reports as `acquire.retrieve`.
@@ -135,6 +209,8 @@ retrieve_from_wiki(
 Fetch Wikipedia articles. QUERY (full-text) or RANDOM (random article).
 
 **Returns:** Rows with `text` (the intro extract), `id` (the page ID), `title`, `summary` (same as `text`), and `query`.
+
+<a name="acquire-retrieve_from_hf"></a>
 
 ### `acquire.retrieve_from_hf`
 
@@ -160,6 +236,8 @@ Load rows from a Hugging Face dataset.
 **Returns:** Rows with `row_idx`, `dataset_id`, the dataset's column values, and `query`, which overwrites a dataset
 column of that name (`None` when `queries` is None).
 
+<a name="acquire-retrieve_from_arxiv"></a>
+
 ### `acquire.retrieve_from_arxiv`
 
 Not cached (wrap it with `@op` to memoize); listed in step reports as `acquire.retrieve`.
@@ -179,6 +257,8 @@ Fetch arXiv papers. QUERY (text search) or RANDOM (sample from category).
 
 **Returns:** Rows with `text` (title and abstract), `id` (the arXiv id), `title`, `summary` (the abstract), and `query`.
 
+<a name="acquire-retrieve_from_s2"></a>
+
 ### `acquire.retrieve_from_s2`
 
 Not cached (wrap it with `@op` to memoize); listed in step reports as `acquire.retrieve`.
@@ -197,6 +277,8 @@ retrieve_from_s2(
 Fetch papers from Semantic Scholar.
 
 **Returns:** Rows with `text` (title and abstract), `id` (the paper id), `title`, `summary` (the abstract), and `query`.
+
+<a name="acquire-sample_from_llm"></a>
 
 ### `acquire.sample_from_LLM`
 
@@ -222,6 +304,8 @@ the model returns a reasoning trace separately in `GenerateResult.reasoning`, it
 key. Inline `<think>` traces (e.g. from `LocalModel`, which supplies `None` for that metadata) are not extracted; use
 `split_reasoning` to separate them out as needed.
 
+<a name="acquire-webretrievalsource"></a>
+
 ### `acquire.WebRetrievalSource`
 
 Class: construct it and pass it to ops.
@@ -232,6 +316,8 @@ WebRetrievalSource(base_url: str | None = None, *, api_key: str | None = None, *
 
 Retrieval source that searches the web via Brave's LLM Context API.
 
+<a name="acquire-wikiretrievalsource"></a>
+
 ### `acquire.WikiRetrievalSource`
 
 Class: construct it and pass it to ops.
@@ -241,6 +327,8 @@ WikiRetrievalSource(language: str = "en", **kwargs: Any)
 ```
 
 Retrieval source that fetches articles from Wikipedia via the MediaWiki API.
+
+<a name="acquire-hfretrievalsource"></a>
 
 ### `acquire.HFRetrievalSource`
 
@@ -259,6 +347,8 @@ HFRetrievalSource(
 
 Hugging Face dataset discovery and retrieval.
 
+<a name="acquire-arxivretrievalsource"></a>
+
 ### `acquire.ArxivRetrievalSource`
 
 Class: construct it and pass it to ops.
@@ -268,6 +358,8 @@ ArxivRetrievalSource(**kwargs: Any)
 ```
 
 Retrieval source that fetches papers from arXiv via the API.
+
+<a name="acquire-s2retrievalsource"></a>
 
 ### `acquire.S2RetrievalSource`
 
@@ -279,9 +371,13 @@ S2RetrievalSource(api_key: str | None = None, **kwargs: Any)
 
 Retrieval source that fetches papers from Semantic Scholar via the API.
 
+<a name="alter"></a>
+
 ## `pyforger.alter`
 
 Alter operations for Forger.
+
+<a name="alter-dynamic_step"></a>
 
 ### `alter.dynamic_step`
 
@@ -304,6 +400,8 @@ Build source per unique input and return one string list per input.
 
 **Returns:** One list of strings per input, aligned with `inputs`; a list may be empty. Equal inputs get equal lists.
 
+<a name="alter-dynamic_step_source"></a>
+
 ### `alter.dynamic_step_source`
 
 Disk-cached (`@op`).
@@ -323,6 +421,8 @@ dynamic_step_source(
 Generate Python source once per input through Forger's standard @op cache.
 
 **Returns:** The accepted Python source. Its last defined function takes one dict and returns a list of strings.
+
+<a name="alter-execute_code"></a>
 
 ### `alter.execute_code`
 
@@ -345,6 +445,8 @@ Compile each item's code and call it with `arg_field`'s value.
 
 **Returns:** Copies of the rows, in input order, with `output_field` set to the call's return value (`None` on error)
 and `error_field` set to `"ExcType: message"` or `None`.
+
+<a name="alter-generate_from_context"></a>
 
 ### `alter.generate_from_context`
 
@@ -372,6 +474,8 @@ prompt failed to parse after `max_retries`. When the model returns a reasoning t
 `GenerateResult.reasoning`, it is included under the `thinking_trace` key. Inline `<think>` traces (e.g. from
 `LocalModel`, which supplies `None` for that metadata) are not extracted; use `split_reasoning` to separate them out as
 needed.
+
+<a name="alter-self_taught_reasoner"></a>
 
 ### `alter.self_taught_reasoner`
 
@@ -403,9 +507,13 @@ Self-Taught Reasoner (STaR): keep a student model's own correct solutions.
 
 **Returns:** Output rows, in item order, one per accepted response.
 
+<a name="alter-translate"></a>
+
 ## `pyforger.alter.translate`
 
 Translation alter operations.
+
+<a name="alter-translate-to_code"></a>
 
 ### `alter.translate.to_code`
 
@@ -428,6 +536,8 @@ Translate text fields on each item into code in `target_language`.
 **Returns:** New list of dicts with generated code written to `target_fields` (or back into `fields` when
 `target_fields` is None).
 
+<a name="alter-translate-to_language"></a>
+
 ### `alter.translate.to_language`
 
 Disk-cached (`@op`).
@@ -448,9 +558,13 @@ Translate text fields on each item into `target_language` using a Model.
 **Returns:** New list of dicts with translations written to `target_fields` (or back into `fields` when `target_fields`
 is None).
 
+<a name="filter"></a>
+
 ## `pyforger.filter`
 
 Filter operations for Forger.
+
+<a name="filter-by_exact_agreement"></a>
 
 ### `filter.by_exact_agreement`
 
@@ -465,6 +579,8 @@ Keep items where two fields agree or disagree, by exact match.
 **Returns:** A filtered list of data items where the specified fields all agree (or disagree if `disagree=True`) by
 exact match.
 
+<a name="filter-by_exact_match"></a>
+
 ### `filter.by_exact_match`
 
 Disk-cached (`@op`).
@@ -476,6 +592,8 @@ by_exact_match(items: list[dict], *, field: str, max_count: int = 1) -> list[dic
 Keep up to `max_count` occurrences of each unique `field` value.
 
 **Returns:** The kept rows, in input order and unchanged.
+
+<a name="filter-by_group_agreement"></a>
 
 ### `filter.by_group_agreement`
 
@@ -495,6 +613,8 @@ Keep only groups of items whose outputs all agree.
 
 **Returns:** Items from agreeing groups, in their original order.
 
+<a name="filter-by_invalid_response"></a>
+
 ### `filter.by_invalid_response`
 
 Disk-cached (`@op`).
@@ -512,6 +632,8 @@ by_invalid_response(
 Filter items with invalid responses (copies of instruction or empty).
 
 **Returns:** The kept rows, in input order and unchanged.
+
+<a name="filter-by_keyword_blocklist"></a>
 
 ### `filter.by_keyword_blocklist`
 
@@ -531,6 +653,8 @@ Drop items whose `response_field` contains any blocklisted phrase.
 
 **Returns:** The kept rows, in input order and unchanged.
 
+<a name="filter-by_length"></a>
+
 ### `filter.by_length`
 
 Disk-cached (`@op`).
@@ -542,6 +666,8 @@ by_length(items: list[dict], *, instruction_field: str, min_len: int = 10, max_l
 Keep items whose `instruction_field` word count is in [min_len, max_len].
 
 **Returns:** The kept rows, in input order and unchanged.
+
+<a name="filter-by_llm_score"></a>
 
 ### `filter.by_llm_score`
 
@@ -567,6 +693,8 @@ Keep items where `num_judges` LLM judges sufficiently agree on quality.
 
 **Returns:** The kept rows, in input order and unchanged by default.
 
+<a name="filter-by_n_gram_overlap"></a>
+
 ### `filter.by_n_gram_overlap`
 
 Disk-cached (`@op`).
@@ -579,6 +707,8 @@ Drop items whose word n-gram overlap with the kept pool exceeds threshold.
 
 **Returns:** The kept rows, in input order and unchanged.
 
+<a name="filter-by_rouge_l"></a>
+
 ### `filter.by_rouge_l`
 
 Disk-cached (`@op`).
@@ -590,6 +720,8 @@ by_rouge_l(items: list[dict], *, field: str, threshold: float = 0.7) -> list[dic
 Drop items whose ROUGE-L F1 against any kept item exceeds threshold.
 
 **Returns:** The kept rows, in input order and unchanged.
+
+<a name="filter-by_rouge_l_agreement"></a>
 
 ### `filter.by_rouge_l_agreement`
 
@@ -611,6 +743,8 @@ Keep items where ROUGE-L F1 between two fields meets or misses threshold.
 **Returns:** A filtered list of data items where the specified fields all agree (or disagree if `disagree=True`) by
 ROUGE-L F1.
 
+<a name="filter-by_syntax"></a>
+
 ### `filter.by_syntax`
 
 Disk-cached (`@op`).
@@ -630,9 +764,13 @@ Keep items whose `field` parses as valid `lang`.
 
 **Returns:** The kept rows, in input order and unchanged.
 
+<a name="inspect"></a>
+
 ## `pyforger.inspect`
 
 Inspect operations: analyze existing data.
+
+<a name="inspect-inspect_step"></a>
 
 ### `inspect.inspect_step`
 
@@ -645,6 +783,8 @@ inspect_step(name: str | None = None) -> StepRecord
 Print the full report of the latest run of step `name` and return it.
 
 **Returns:** The step's `StepRecord`, as printed.
+
+<a name="inspect-topic_based_clustering"></a>
 
 ### `inspect.topic_based_clustering`
 
