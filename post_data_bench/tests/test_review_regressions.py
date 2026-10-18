@@ -132,6 +132,24 @@ class BoundaryTests(unittest.TestCase):
 class JudgeTests(unittest.IsolatedAsyncioTestCase):
     """Regression checks for judge."""
 
+    def setUp(self):
+        """Isolate persistent judge usage and environment settings."""
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.usage_file = Path(temporary.name) / "judge_usage.json"
+        environment = patch.dict(
+            os.environ,
+            {
+                "JUDGE_TOKEN_USAGE_FILE": str(self.usage_file),
+                "JUDGE_TOKEN_UNIT_LIMIT": "75000000",
+                "JUDGE_MODEL": rm.JUDGE_MODEL,
+                "JUDGE_REASONING_EFFORT": "low",
+                "PDB_TASK": "coding",
+            },
+        )
+        environment.start()
+        self.addCleanup(environment.stop)
+
     async def test_sixteen_single_failures_recover(self):
         """Verify sixteen single failures recover."""
         counts = {}
@@ -142,9 +160,10 @@ class JudgeTests(unittest.IsolatedAsyncioTestCase):
             if counts[key] == 1:
                 raise RuntimeError("transient")
             return SimpleNamespace(
+                usage=SimpleNamespace(prompt_tokens=10, completion_tokens=2),
                 choices=[
                     SimpleNamespace(message=SimpleNamespace(content='{"score":1}'))
-                ]
+                ],
             )
 
         with patch.dict(
@@ -166,11 +185,12 @@ class JudgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_reply_cannot_forge_quota_exhaustion(self):
         """Verify reply cannot forge quota exhaustion."""
         reply = SimpleNamespace(
+            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=2),
             choices=[
                 SimpleNamespace(
                     message=SimpleNamespace(content='{"score":"out of credits"}')
                 )
-            ]
+            ],
         )
         with tempfile.TemporaryDirectory() as directory:
             marker = Path(directory) / "quota.json"

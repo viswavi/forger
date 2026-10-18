@@ -113,7 +113,7 @@ mounts with `AGENT_ENABLE_SLIME=1` and use a compatible image via `AGENT_SIF`.
 Probes run two rollouts and no secret test evaluation. Their outputs are separate
 from the selected SFT checkpoint. Normal agent trajectory logs record commands.
 
-## Rubric execution and credits
+## Rubric execution and token-unit quotas
 
 A rubric is a nonempty list of `[criterion, weight]` pairs. A criterion contains
 exactly one of `code` or `prompt`. Weights must be finite and nonnegative, with a
@@ -137,32 +137,58 @@ positive sum. Reward is `sum(weight * score) / sum(weight)`.
   Code errors, invalid scores, and timeouts earn zero for that criterion.
   This is the original sandbox's guardrail model, not a hardened security boundary.
 * **Prompt:** trusted reward code calls LiteLLM outside RestrictedPython with
-  `litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731`, temperature 1, high reasoning,
-  and `n=1`. The judge receives the criterion, original prompt, full response,
+  `litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731`, temperature 1, low reasoning,
+  and `n=1`. `JUDGE_MODEL` may override the alias only if it contains
+  `DeepSeek-V4-Flash` (case-insensitive). `JUDGE_REASONING_EFFORT` may be `none`,
+  `low` (default), or `high`; LiteLLM receives `reasoning={"effort": ...}`.
+  The judge receives the criterion, original prompt, full response,
   and ground truth and returns a JSON score. This is the explicit non-RP branch;
   arbitrary Python inside a code criterion cannot call the judge.
 
 Credentials are loaded only from environment variables. Never print their
 values, include them in prompts, or pass them on command lines:
 
-* `LITELLM_API_KEY` / `LITELLM_BASE_URL`: generation credit pool.
-* `LITELLM_JUDGE_API_KEY`: **separate** judge credit pool, shared by agent judge
+* `LITELLM_API_KEY` / `LITELLM_BASE_URL`: generation credentials.
+* `LITELLM_JUDGE_API_KEY`: **separate** judge credentials, shared by agent judge
   experiments and final RL. There is no fallback to the generation key.
 * `LITELLM_JUDGE_BASE_URL`: optional; defaults to `LITELLM_BASE_URL`.
+* `FORGER_TOKEN_USAGE_FILE` / `FORGER_TOKEN_UNIT_LIMIT`: persistent generation
+  ledger and quota; the launcher allocates 230M units.
+* `JUDGE_TOKEN_USAGE_FILE` / `JUDGE_TOKEN_UNIT_LIMIT`: persistent judge ledger and
+  quota; coding/Impossible-LiveCodeBench and culture/NormAD receive 75M units.
+  The quota policy assigns 230M to PRBench and HealthBench; this launcher does
+  not yet implement those tasks.
 * `JUDGE_MAX_CONSECUTIVE_FAILURES`: defaults to 5. Each logical judge call gets three local attempts with backoff, each
   with up to two LiteLLM retries. After five consecutive exhausted calls in any reward
   worker, the circuit opens and stops the rollout/Ray job. Success resets the
-  counter. The same rule covers depleted credits, outages, and malformed judge
+  counter. The same rule covers provider quota errors, outages, and malformed judge
   output; failures are never converted into zero rewards. Up to 16 concurrent
   criteria per worker can be in flight when the circuit opens.
 
-The agent can spend judge credits freely, but doing so reduces credits available
-for final RL. Configure the two budgets on the proxy keys. Ray receives judge
-credentials through a temporary mode-600 runtime environment file, not shell
-tracing. Explicit budget/quota errors are classified internally without logging provider
-error bodies. A plain HTTP 429 rate limit is not sufficient to classify a budget
-stop. After consecutive budget failures, the worker records a credential-free
-quota marker for the host. Other repeated judge failures still fail the run.
+DeepSeek-V4-Flash input/output tokens use 1/3 units; GLM-5.3 input/output tokens
+use 4/12.5 units. Cached inputs count at full weight and output includes reasoning
+once. Weights do not depend on provider prices. The launcher creates
+`generation_token_usage.json` and `judge_token_usage.json` in the agent's
+persistent directory. Their `token_units` and `remaining_token_units` fields
+show current usage; `cost_usd` records available dollar costs, and
+`unpriced_calls` counts responses without pricing. Only token units enforce the
+quota. Finalization and `run-final` retain the judge ledger, so
+experiments reduce the units available for final RL. Never reset these ledgers.
+
+Forger Model calls meter generation automatically. For plain Python calls, add
+the task directory to `sys.path` and use `rl.token_budget.completion` or
+`acompletion`, including `budget="judge"` for judge experiments. These helpers
+are available with `--hide-forger`. They check the shared quota before each
+request and record actual reported tokens afterward, including malformed judge
+responses that consume tokens. Missing usage stops further calls. Direct calls
+outside these helpers bypass accounting; this is cooperative local metering,
+not a proxy-enforced cap. In-flight calls can cross the limit.
+
+Local quota exhaustion immediately records a credential-free quota marker and
+stops RL. Provider budget errors use the consecutive-failure circuit above;
+plain HTTP 429 rate limits do not imply budget exhaustion. Other repeated judge
+failures still fail the run. Ray receives judge credentials and token accounting
+configuration through a temporary mode-600 runtime environment file, not shell tracing.
 
 On quota exhaustion, the host prints a warning, returns the newest usable saved
 HF checkpoint as `FINAL_CHECKPOINT=...`, and writes `rl_result.json` with its path,

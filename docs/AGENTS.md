@@ -63,8 +63,30 @@ if "LITELLM_API_KEY" not in os.environ:
 
 ### Cost
 
-LLM calls and external API calls may incur costs. For LLM calls, the cost is based on the number of input/output
-tokens and the model used. For example, gpt-5.4-nano is generally much cheaper than gpt-5.4-pro or gpt-5.5.
+Benchmark LLM quotas use fixed token units, independent of provider prices:
+DeepSeek-V4-Flash input/output tokens weigh 1/3 units; GLM-5.3 tokens weigh 4/12.5.
+Cached input tokens count at full weight. Completion tokens already include reasoning;
+do not add reasoning tokens again. Other model families have no defined unit weight.
+
+`Model` exposes per-call `result.usage["token_units"]` and `result.usage["cost_usd"]`,
+plus cumulative `model.total_token_units`, `model.total_cost`, and raw `model.total_usage`.
+Unknown model weights or missing usage produce `NaN` token units, including in the
+cumulative total. Local GPU inference has zero API cost and is exempt from quotas;
+models outside the fixed list still report `NaN` units.
+INFO logs show both totals after the first call and every million units (raw tokens
+when weights are unknown). Dollar costs use provider metadata or LiteLLM pricing;
+unavailable prices warn and contribute zero to `total_cost`.
+`reset_history()` resets the model's view, but never resets a configured shared quota.
+Cached `@op` results do not make API calls and do not consume the quota again.
+
+Set `FORGER_TOKEN_USAGE_FILE` to a persistent JSON ledger and
+`FORGER_TOKEN_UNIT_LIMIT` to share a quota across model instances and processes.
+Ledgers retain `cost_usd` and count missing prices in `unpriced_calls`.
+New calls stop once the recorded total reaches the quota; in-flight calls can overshoot it.
+Unknown model weights or missing token counts stop budgeted calls instead of counting as free.
+The benchmark launcher sets a 230M-unit generation quota and a separate judge quota:
+75M for Impossible-LiveCodeBench/NormAD, 230M for PRBench/HealthBench.
+Direct API calls must use the launcher's `rl.token_budget` helpers to participate in accounting.
 
 ### Execution model
 

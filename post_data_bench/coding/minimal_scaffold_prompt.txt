@@ -15,38 +15,30 @@ Note that this the output described here must include long-form "thinking" trace
 
 # LLM API Usage
 
-You have a total LLM API budget of ${GENERATION_BUDGET} (token ID `{LITELLM_TOKEN_ID}`) – you don't have direct API access to check your own spend, since that's tracked for you outside this sandbox. To get a fresh number, create the file `{AGENT_DATA_DIR}/check_llm_spend` (e.g. `touch {AGENT_DATA_DIR}/check_llm_spend`), then a few seconds later read `{AGENT_DATA_DIR}/llm_spend.txt` for the result (right now it says 0.0, so make sure this never exceeds {GENERATION_BUDGET} – note that checks are rate-limited to at most once per 30 seconds, and the file auto-refreshes at least every 10 minutes even if you don't ask).  You are welcome to generate small amounts of data (e.g. 2-3 examples) as you iterate many times (perhaps up to a dozen iterations) before launching your final dataset generation.
+Generation has a shared quota of {GENERATION_TOKEN_UNIT_LIMIT} token units. DeepSeek-V4-Flash input/output tokens cost 1/3 units; GLM-5.3 input/output tokens cost 4/12.5 units. Count cached inputs at full weight and include reasoning in output tokens. Use `litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731` or `litellm_proxy/azure_ai/FW-GLM-5.3`; other model families have no defined unit weights for this run.
 
-LLMs will almost always be accessed via LiteLLM, via a LITELLM_API_KEY environment variable and a model identifier in the prompt. The model identifier typically includes both account/routing info and a model name, and within that structure you can try other models in the same account if the user-provided one is undesirable or unavailable. We strongly prefer using gemini models, because we have ample API credits for those models. Gemini model identifiers:  "gemini/gemini-3.1-flash-lite" (fast, cheap), "gemini/gemini-3.5-flash" (most capable, more expensive), "azure_ai/text-embedding-3-large" (text embeddings). With LiteLLM, you will need to prefix these model identifiers with "litellm_proxy/"
+Read `{GENERATION_USAGE_PATH}` for cumulative `token_units`, `remaining_token_units`, and `cost_usd`. `unpriced_calls` counts responses without dollar pricing; only token units enforce the quota. The quota spans all pipeline iterations and processes. Calls check the shared ledger before starting and record usage when completed; in-flight calls may cross the limit, so leave headroom for batches. Do not delete/reset the ledger or change its environment settings. The OpenHands model driving your agent turns is accounted separately.
 
-If these don't work, you can use other models: "azure_ai/gpt-5.6-terra" (fast), "azure_ai/gpt-5.6-luna" (medium speed/cost),"azure_ai/gpt-5.6-sol" (strongest/most expensive), "azure_ai/DeepSeek-R1".
+Credentials are provided as `LITELLM_API_KEY` and `LITELLM_BASE_URL`; load them from the environment without printing them. Use the public accounting helpers below for every API call, instead of calling LiteLLM directly. These standalone helpers are permitted in this baseline and do not require importing the Forger library.
 
-You can use this API Key and Base URL:
-export LITELLM_API_KEY={LITELLM_API_KEY}
-export LITELLM_BASE_URL="{LITELLM_BASE_URL}".
-
-Here is an example for using the LiteLLM API (using gemini-3.1-flash-lite here):
-```
+```python
 import os
-import litellm
+import sys
+sys.path.insert(0, "{TASK_DIR}")
+from rl.token_budget import completion  # acompletion is available for async calls
 
-client = litellm.completion(
-  api_key=os.environ.get("LITELLM_API_KEY"),
-  base_url=os.environ.get("LITELLM_BASE_URL"),
-  model="litellm_proxy/gemini/gemini-3.1-flash-lite",
-  messages=[
-    {{"role": "system", "content": "You are a helpful assistant."}},
-    {{"role": "user", "content": "Who won the world series in 2020?"}},
-    {{"role": "assistant", "content": "The Los Angeles Dodgers won the World Series in 2020."}},
-    {{"role": "user", "content": "Where was it played?"}}
-  ]
+response = completion(
+    model="litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731",
+    messages=[{{"role": "user", "content": "What is 273 * 149?"}}],
+    api_key=os.environ["LITELLM_API_KEY"],
+    api_base=os.environ["LITELLM_BASE_URL"],
+    temperature=1.0,
+    reasoning={{"effort": "low"}},
+    n=1,
 )
 ```
 
-
-Use the model `litellm_proxy/gemini/gemini-3.1-flash-lite` for LLM-based generation ($0.25/1M input tokens or $1.50/1M output tokens), or its larger variant `litellm_proxy/gemini/gemini-3.5-flash` when greater capability is needed ($1.50/1M input tokens or $9.00/1M output tokens). Note that Gemini, Claude, and OpenAI models, if you use them, require temperature=1.0. Gemini and OpenAI disallow the n>1 argument – here, if necessary, use sample_from_LLM cleverly to manually get around this limitation.
-
-You can also access web search via the retrieve_from_web API using the BRAVE_API_KEY environment variable and Semantic Scholar using the following API key: the S2_API_KEY environment variable. The other retrieval sources (e.g. Wikipedia, Semantic Scholar) do not require API keys.
+Iterate with small batches before your final generation run. Web search uses `BRAVE_API_KEY`; Semantic Scholar uses `S2_API_KEY`.
 
 # Local GPU Access
 
