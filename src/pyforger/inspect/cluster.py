@@ -23,6 +23,8 @@ _DEFAULT_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 _TFIDF_EMBEDDING = "tfidf"
 _TFIDF_MAX_DIM = 256
 _TFIDF_MAX_FEATURES = 50_000
+# With one unique value, the topic is that value cut to this many characters.
+_SINGLE_TOPIC_CHARS = 80
 
 _SUMMARIZE_SYSTEM = (
     "You are an intelligent assistant skilled in summarizing and extracting insights."
@@ -121,7 +123,10 @@ def topic_based_clustering(
     "competition math problems. Topics should describe the technique,
     NOT the numeric answer.". If the LLM still misses ``num_clusters``
     topics after being corrected, a warning is logged and its last
-    codebook is used.
+    codebook is used. With fewer unique values than ``num_clusters``, it
+    uses one cluster per unique value and logs a warning; with a single
+    unique value, every row gets that value (cut to 80 characters) as its
+    topic and the LLM is not called.
 
     Embeddings only guide which rows the LLM summarizes together. They come
     from, in order of precedence:
@@ -216,11 +221,19 @@ def _topic_based_clustering(
     # Perform topic-based clustering.
     row_docs = [str(get_field(item, field, "topic_based_clustering")) for item in items]
     unique_docs = list(dict.fromkeys(row_docs))
-    if len(unique_docs) <= num_clusters:
-        raise ValueError(
-            f"topic_based_clustering: need more than num_clusters "
-            f"({num_clusters}) unique '{field}' values, got {len(unique_docs)}"
+    if len(unique_docs) == 1:
+        # every row says the same thing: one topic, named by the value itself
+        return [_clip(unique_docs[0], _SINGLE_TOPIC_CHARS)] * len(row_docs)
+    if len(unique_docs) < num_clusters:
+        logger.warning(
+            "topic_based_clustering: only %d unique '%s' values, so using %d "
+            "clusters instead of num_clusters=%d",
+            len(unique_docs),
+            field,
+            len(unique_docs),
+            num_clusters,
         )
+        num_clusters = len(unique_docs)
 
     embeddings = _embed(unique_docs, embed_fn, embedding_model, seed)
     shards = _partition(

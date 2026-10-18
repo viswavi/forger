@@ -208,6 +208,10 @@ clusters = topic_based_clustering(
 # clusters[i] is the topic name of rows[i]
 ```
 
+With fewer unique `field` values than `num_clusters` (e.g. 6 for `num_clusters=20`), the op uses one cluster per
+unique value and logs a warning, so there is no need to shrink `num_clusters` for small inputs yourself. With a single
+unique value, every row gets that value (cut to 80 characters) as its topic, without calling the LLM.
+
 Embeddings only decide which rows the LLM summarizes together. By default they come from the sentence-transformers
 model `embedding_model` (`pip install "pyforger[clustering]"`, GPU when available). `embedding_model="tfidf"` uses a
 built-in TF-IDF + SVD embedder on the CPU (scikit-learn only); if sentence-transformers cannot be imported, the op
