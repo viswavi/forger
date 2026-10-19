@@ -849,6 +849,8 @@ result is still returned, and the next call runs again. An op in a worker thread
 `pool.map` cannot see which op or step started the thread, so every op and step running in the process at that moment
 is left uncached instead, and a step that is skipped this way gets the warning `not cached: an op in a worker thread
 kept its result out of the cache`. Submit with `contextvars.copy_context().run` to limit it to the enclosing calls.
+`my_step.submit(...)` already runs the step in a copy of the context, so a failure in it or elsewhere in the
+pipeline leaves the other submitted steps cached.
 
 **Custom hash keys for objects.** If an argument defines `cache_key() -> Any`, this is used in place of the argument's
 canonical form. This is useful for objects that are expensive to serialize or contain ever-changing state. Here is

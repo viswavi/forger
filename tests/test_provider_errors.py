@@ -21,7 +21,7 @@ from pyforger.acquire._model_utils import _is_transient
 from pyforger.acquire.model import GenerateResult, Model
 from pyforger.alter import generate_from_context
 from pyforger.op import skip_cache_write, trace
-from pyforger.steps import step
+from pyforger.steps import pipeline, step
 
 
 class InternalServerError(Exception):
@@ -673,6 +673,56 @@ def test_plain_thread_pool_step_is_not_cached(monkeypatch):
     cached = FlakyModel()
     assert answer(ITEMS, cached) == second
     assert cached.calls == []
+
+
+class _Event(threading.Event):
+    def cache_key(self) -> str:
+        return "event"
+
+
+@pytest.mark.parametrize("where", ["step", "submitted step", "bare op"])
+def test_failure_elsewhere_does_not_uncache_a_submitted_step(monkeypatch, where):
+    """A provider failure outside a submitted step leaves that step cached."""
+    monkeypatch.setenv("FORGER_STEP_REPORT", "0")
+    _tracking.clear_step_records()
+    started, failed = _Event(), _Event()
+    runs: list[int] = []
+
+    @op(name="alter.test_wait_for_failure", category="alter")
+    def wait_for_failure(rows):
+        runs.append(1)
+        started.set()
+        failed.wait(10)  # still running when the other op skips its write
+        return list(rows)
+
+    @step
+    def slow(rows):
+        return filter_none(wait_for_failure(rows))
+
+    @step
+    def flaky(rows, model):
+        return filter_none(generate_from_context(rows, "{q}", model))
+
+    @pipeline
+    def main(rows):
+        future = slow.submit(rows)
+        started.wait(10)
+        model = FlakyModel(fail={"A": 1})
+        if where == "step":
+            flaky(rows, model)
+        elif where == "submitted step":
+            flaky.submit(rows, model).result()
+        else:
+            generate_from_context(rows, "{q}", model)
+        failed.set()
+        return future.result()
+
+    main(ITEMS)
+    rec = _tracking.step_records()["slow"]
+    assert rec.warnings == [] and not rec.cache_hit
+    main(ITEMS)  # both events stay set: slow is a cache hit, nothing waits
+    assert _tracking.step_records()["slow"].cache_hit
+    assert runs == [1]
 
 
 @op(name="filter.test_drop_none", category="filter")

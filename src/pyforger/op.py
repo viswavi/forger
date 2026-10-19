@@ -288,6 +288,18 @@ def _skip_running_calls(origin: _CallState) -> None:
                 state.from_thread = True
 
 
+def _lost_context() -> bool:
+    """True in a worker thread that did not copy the context (plain ``pool.submit``).
+
+    Only there can an op with no enclosing call in its context have one. The
+    main thread, a pipeline, and a step (one run with ``.submit`` too) keep
+    their context, so an op there with no enclosing call has none.
+    """
+    if threading.current_thread() is threading.main_thread():
+        return False
+    return not _tracking.is_reporting()
+
+
 def skip_cache_write() -> None:
     """Do not cache the result of the running op or of any op or step enclosing it.
 
@@ -639,7 +651,7 @@ def op(
                 # op's (and step's) result stale too.
                 if state.skip_write and parent_state is not None:
                     parent_state.skip_write = True
-                elif state.skip_write and not state.from_thread:
+                elif state.skip_write and not state.from_thread and _lost_context():
                     _skip_running_calls(state)
                 if scope_token is not None:
                     _NO_CACHE_SCOPE.reset(scope_token)
