@@ -552,8 +552,6 @@ mechanism, not an agent-function layer.
 trial artifacts, and asynchronous execution. It is deliberately not an agent
 function or backend; `HarborBackend` builds on it internally.
 
-
-
 ### Task and command execution
 
 `agent_tasks.run_task` runs a `TaskSpec` (instruction, workspace files,
