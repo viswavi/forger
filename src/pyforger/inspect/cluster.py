@@ -94,6 +94,15 @@ _ASSIGN_USER = (
 )
 
 
+def _default_context(field: str) -> str:
+    """Describe the corpus from the field, e.g. "'problem' values from a dataset".
+
+    It fills every ``{context}`` slot above: "reviewing records related to ...",
+    "a corpus of ...", and "Following record is about ...".
+    """
+    return f"{field!r} values from a dataset"
+
+
 def _chat(system: str, user: str) -> list[Message]:
     """A system + user message prompt."""
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
@@ -109,7 +118,7 @@ def topic_based_clustering(
     *,
     field: str,
     model: Model,
-    context: str,
+    context: str | None = None,
     num_clusters: int = 10,
     embed_fn: Callable[[list[str]], Any] | None = None,
     embedding_model: str = _DEFAULT_EMBEDDING_MODEL,
@@ -123,15 +132,16 @@ def topic_based_clustering(
 ) -> list[str]:
     """Cluster rows into ``num_clusters`` LLM-named topics by one field.
 
-    Returns one topic name per row, aligned with ``items``. ``context``
-    describes the corpus and what topics should capture, e.g.
-    "competition math problems. Topics should describe the technique,
-    NOT the numeric answer.". If the LLM still misses ``num_clusters``
-    topics after being corrected, a warning is logged and its last
-    codebook is used. With fewer unique values than ``num_clusters``, it
-    uses one cluster per unique value and logs a warning; with a single
-    unique value, every row gets that value (cut to 80 characters) as its
-    topic and the LLM is not called.
+    Returns one topic name per row, aligned with ``items``. ``context`` is
+    an optional hint that describes the corpus and what topics should
+    capture, e.g. "competition math problems. Topics should describe the
+    technique, NOT the numeric answer."; it improves topic names. Without
+    it the prompts call the corpus "'<field>' values from a dataset". If
+    the LLM still misses ``num_clusters`` topics after being corrected, a
+    warning is logged and its last codebook is used. With fewer unique
+    values than ``num_clusters``, it uses one cluster per unique value and
+    logs a warning; with a single unique value, every row gets that value
+    (cut to 80 characters) as its topic and the LLM is not called.
 
     Embeddings only guide which rows the LLM summarizes together. They come
     from, in order of precedence:
@@ -166,6 +176,9 @@ def topic_based_clustering(
             _TFIDF_EMBEDDING,
         )
         embedding_model = _TFIDF_EMBEDDING
+    # Resolved outside the cached op, so its code and cache keys stay as before.
+    if context is None:
+        context = _default_context(field)
     return _topic_based_clustering(
         items,
         field=field,
