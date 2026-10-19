@@ -521,8 +521,6 @@ all grades must be present unless `min_valid` explicitly permits exclusions.
 Inspect retains reports for rejected rows. Domain-specific attribution, audit,
 replay, and admission policy belong to the caller.
 
-
-
 ### Harbor agent execution
 
 `HarborBackend` implements the same `AgentBackend` protocol as `LocalBackend`,
