@@ -426,8 +426,9 @@ _ACTIVE_WARNINGS: ContextVar[list[str] | None] = ContextVar(
     "forger_active_warnings", default=None
 )
 # Completions the innermost active op got that stopped at max_tokens, keyed by
-# (model_id, max_tokens, advice): [truncated, total]. A nested op's counts go to
-# its caller.
+# (model_id, max_tokens, advice): [truncated, total, mid_thought], where
+# mid_thought counts the truncated ones whose <think> never closed. A nested
+# op's counts go to its caller.
 _ACTIVE_TRUNCATION: ContextVar[
     dict[tuple[str, int | None, str | None], list[int]] | None
 ] = ContextVar("forger_active_truncation", default=None)
@@ -437,7 +438,7 @@ _ACTIVE_TRUNCATION_OUTCOME: ContextVar[list[str] | None] = ContextVar(
     "forger_active_truncation_outcome", default=None
 )
 # True while an op reports completions cut off mid-thought (an unclosed
-# <think>) itself, e.g. by_pass_at_k's "3 of 8 samples truncated" note.
+# <think>) itself, e.g. by_llm_score's "2 stopped mid-thought" warning.
 _REPORTS_UNCLOSED_THINK: ContextVar[bool] = ContextVar(
     "forger_reports_unclosed_think", default=False
 )
@@ -893,7 +894,9 @@ def truncation_message(
     truncated: int,
     total: int,
     advice: str | None = None,
+    *,
     outcome: str | None = None,
+    mid_thought: int = 0,
 ) -> str:
     """Say how many completions hit max_tokens, and what to change.
 
@@ -902,6 +905,8 @@ def truncation_message(
     is for a ``Model`` (e.g. "; raise the TinkerModel's max_tokens").
     ``outcome`` says what that did to the op's rows and leads the message:
     "20 rows dropped (no parseable output), because 34 of 120 completions ...".
+    ``mid_thought`` of them never closed their ``<think>``, e.g.
+    "(finish_reason=length; 72 of them mid-thought, <think> never closed)".
     """
     limit = f"max_tokens={max_tokens}" if max_tokens is not None else "max_tokens"
     if advice is None:
@@ -909,9 +914,12 @@ def truncation_message(
             " (a reasoning model's is often empty: the budget went to thinking); "
             "raise the Model's max_tokens or lower its reasoning_effort"
         )
+    reason = "finish_reason=length"
+    if mid_thought:
+        reason += f"; {mid_thought} of them mid-thought, <think> never closed"
     stopped = (
         f"{truncated} of {total} completions from {model_id} stopped at {limit} "
-        "(finish_reason=length)"
+        f"({reason})"
     )
     if outcome:
         return f"{outcome}, because {stopped}{advice}"
@@ -937,6 +945,7 @@ def add_truncation(
     truncated: int,
     total: int,
     advice: str | None = None,
+    mid_thought: int = 0,
 ) -> bool:
     """Count one batch's completions toward the running op's truncation warning.
 
@@ -945,9 +954,10 @@ def add_truncation(
     counts = _ACTIVE_TRUNCATION.get()
     if counts is None:
         return False
-    entry = counts.setdefault((model_id, max_tokens, advice), [0, 0])
+    entry = counts.setdefault((model_id, max_tokens, advice), [0, 0, 0])
     entry[0] += truncated
     entry[1] += total
+    entry[2] += mid_thought
     return True
 
 
@@ -956,8 +966,16 @@ def truncation_warnings(op_name: str) -> list[str]:
     outcome = "; ".join(_ACTIVE_TRUNCATION_OUTCOME.get() or []) or None
     return [
         f"{op_name}: "
-        + truncation_message(model_id, max_tokens, truncated, total, advice, outcome)
-        for (model_id, max_tokens, advice), (truncated, total) in (
+        + truncation_message(
+            model_id,
+            max_tokens,
+            truncated,
+            total,
+            advice,
+            outcome=outcome,
+            mid_thought=mid,
+        )
+        for (model_id, max_tokens, advice), (truncated, total, mid) in (
             _ACTIVE_TRUNCATION.get() or {}
         ).items()
         if truncated
@@ -968,10 +986,11 @@ def truncation_warnings(op_name: str) -> list[str]:
 def reporting_unclosed_think() -> Iterator[None]:
     """Leave completions cut off mid-thought out of the max_tokens warning.
 
-    For an op that reports them itself: by_pass_at_k's histogram note says
-    "4 of 8 samples truncated (<think> never closed), graded failed", so a
-    warning about the same samples would say it twice. A completion cut off
-    after its ``</think>`` (or with no ``<think>``) still counts.
+    For an op that reports them itself in a warning: by_llm_score's says
+    "2 of 10 judge calls gave no score (2 stopped mid-thought ...)", so a
+    second warning about the same calls would say it twice. A completion cut
+    off after its ``</think>`` (or with no ``<think>``) still counts. A note
+    under a histogram is not enough: a bare op's note is never shown.
     """
     token = _REPORTS_UNCLOSED_THINK.set(True)
     try:
@@ -1045,10 +1064,11 @@ def exit_op(
         _ACTIVE_TRUNCATION.reset(token.truncation_token)
         outer = _ACTIVE_TRUNCATION.get()
         if outer is not None:  # a nested op: its caller's warning covers it
-            for key, (truncated, total) in counts.items():
-                entry = outer.setdefault(key, [0, 0])
+            for key, (truncated, total, mid_thought) in counts.items():
+                entry = outer.setdefault(key, [0, 0, 0])
                 entry[0] += truncated
                 entry[1] += total
+                entry[2] += mid_thought
     if token.outcome_token is not None:
         # A nested op's outcome describes its own rows, not its caller's.
         _ACTIVE_TRUNCATION_OUTCOME.reset(token.outcome_token)

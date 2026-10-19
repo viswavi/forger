@@ -257,6 +257,47 @@ class TestRowOutcomes:
             "kept with cut-off text, because 2 of 2 completions"
         )
 
+    def test_outcome_leads_and_mid_thought_is_counted(self, fake, monkeypatch):
+        """With an outcome the warning leads with it and counts mid-thought cuts."""
+        monkeypatch.setenv("FORGER_STEP_REPORT", "0")
+        fake.script = {"Q": [("<think>still thinking", "length")]}
+
+        @step
+        def gen(rows: list[dict]) -> list[dict]:
+            return generate_from_context(
+                rows, "{q}", gpt(), output_schema={"x": "int"}, merge=True
+            )
+
+        assert gen([{"q": "Q"}]) == []
+        warning = _tracking.step_records()["gen"].ops[0].warnings[0]
+        assert warning.startswith(
+            "alter.generate_from_context: 1 row dropped (no parseable output), "
+            "because 1 of 1 completions from gpt-4o stopped at max_tokens=100 "
+            "(finish_reason=length; 1 of them mid-thought, <think> never closed) "
+            "(a reasoning model's is often empty"
+        )
+
+    def test_message_takes_outcome_and_mid_thought(self):
+        """truncation_message puts the outcome first, then the counts, then advice."""
+        message = _tracking.truncation_message(
+            "qwen",
+            16384,
+            78,
+            264,
+            "; raise the TinkerModel's max_tokens",
+            outcome="20 rows dropped",
+            mid_thought=72,
+        )
+        assert message == (
+            "20 rows dropped, because 78 of 264 completions from qwen stopped at "
+            "max_tokens=16384 (finish_reason=length; 72 of them mid-thought, <think> "
+            "never closed); raise the TinkerModel's max_tokens"
+        )
+        plain = _tracking.truncation_message("qwen", 16384, 78, 264, "; raise it")
+        assert plain.endswith(
+            "(finish_reason=length), so their text is cut off; raise it"
+        )
+
     def test_parse_failures_reach_the_report(self, fake, monkeypatch):
         """A sample that never parses is a data problem in the report, not a log."""
         monkeypatch.setenv("FORGER_STEP_REPORT", "0")
