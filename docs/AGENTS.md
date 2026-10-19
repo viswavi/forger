@@ -141,14 +141,20 @@ A round whose request fails at the provider with a transient error counts as a f
 failures leave fewer than `n` samples, it returns the shorter list with a warning and is not cached. Other errors raise.
 
 `output_schema` (here and in `alter.generate_from_context`) is a dict of keys, e.g. `{"question": str, "answer": str}`,
-and the prompt asks for a JSON object with those keys. Only the keys are checked:
+and the prompt gets an instruction to end the response with a JSON object with those keys. Only the keys are checked:
 
 - A response must contain a JSON object with every schema key; one without them fails to parse and is retried.
 - Keys outside the schema are dropped, so a key the model invents (`"crafted_by"`) never reaches your rows.
 - Value types are shown to the model as a format example but not checked: `{"answer": 42}` passes `{"answer": str}`.
   Check types or values yourself, e.g. `[r for r in rows if isinstance(r["answer"], str)]`.
-- A ```` ```json ```` fence, prose around the object, or a leading `<think>...</think>` block is tolerated. The first
-  object with every schema key wins; JSON that is not an object (a list, a number) fails.
+- A ```` ```json ```` fence, prose around the object, or a leading `<think>...</think>` block is tolerated. The last
+  object with every schema key wins, so an example object quoted in earlier reasoning is skipped; JSON that is not an
+  object (a list, a number) fails.
+
+The instruction allows text before the object, but a reasoning model may still spend its reasoning reconciling it with
+your prompt's own format instructions (e.g. "answer with one code block"). If you will train on the model's reasoning,
+don't combine `output_schema` with format instructions in the prompt, or generate without `output_schema` and parse
+the answer yourself.
 
 #### `pyforger.alter`
 
