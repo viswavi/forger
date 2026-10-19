@@ -26,6 +26,7 @@ from pyforger.sail_backend import SailBackend
 
 @pytest.mark.parametrize("scheme", ["Basic", "basic", "BASIC", "Bearer"])
 def test_authorization_redacts_entire_credential(scheme):
+    """Authorization credentials are fully redacted for each scheme."""
     result = trajectory(
         [{"text": f'curl -H "Authorization: {scheme} dXNlcjpwYXNz"'}],
         AgentSpec(kind="nop"),
@@ -35,6 +36,7 @@ def test_authorization_redacts_entire_credential(scheme):
 
 @pytest.mark.parametrize("first", ["true", "printf '\\377' > program.py"])
 def test_source_artifact_rejection_retries(tmp_path, first):
+    """Rejected source artifacts are retried with a fresh generation."""
     marker = tmp_path / "calls"
     source = "def entry(item):\n    return ['ok']\n"
     solution = (
@@ -50,6 +52,7 @@ def test_source_artifact_rejection_retries(tmp_path, first):
 
 
 def test_source_backend_failure_not_retried(tmp_path):
+    """Backend infrastructure failures are not retried as validation."""
     marker = tmp_path / "calls"
     with pytest.raises(RuntimeError):
         generate_source(
@@ -61,6 +64,7 @@ def test_source_backend_failure_not_retried(tmp_path):
 
 
 def test_exited_shell_leader_children_are_killed(tmp_path):
+    """Children of an exited shell leader are killed on timeout."""
     marker = tmp_path / "late"
     with pytest.raises(TimeoutError):
         LocalBackend().run_agent_validated(
@@ -75,6 +79,7 @@ def test_exited_shell_leader_children_are_killed(tmp_path):
 
 
 def test_hostile_proc_name_cannot_evade_verifier_cleanup(tmp_path):
+    """A hostile process name cannot evade verifier cleanup."""
     tree = ast.parse(Path(sail_backend.__file__).read_text())
     script = next(
         node.value
@@ -110,6 +115,8 @@ def test_hostile_proc_name_cannot_evade_verifier_cleanup(tmp_path):
 
 @pytest.fixture
 def offline_sail(tmp_path, monkeypatch):
+    """Offline Sail fixture using a local Sailbox substitute."""
+
     # Substitute only provisioning/UIDs and absolute VM paths. Commands, file
     # transport, validation, and verifier lifecycle are production code.
     class Box(LocalSailbox):
@@ -154,12 +161,16 @@ def offline_sail(tmp_path, monkeypatch):
 
 
 def test_sail_oracle_feedback_is_literal_and_same_workspace(offline_sail, tmp_path):
+    """Sail repair feedback is literal and stays in the same workspace."""
     reason = 'expected-content "quotes"\n$(touch injected); `touch injected2`'
     result = offline_sail.run_agent_validated(
         WorkspaceTask("write output", outputs=("x",)),
         AgentSpec(
             kind="oracle",
-            solution='if test -f marker; then printf "%s" "$FORGER_FEEDBACK" > x; else touch marker; echo bad > x; fi',
+            solution=(
+                'if test -f marker; then printf "%s" "$FORGER_FEEDBACK" > x; '
+                "else touch marker; echo bad > x; fi"
+            ),
         ),
         validate=lambda files: Measurement(
             passed=reason.encode() in files["x"], reason=reason
@@ -173,6 +184,7 @@ def test_sail_oracle_feedback_is_literal_and_same_workspace(offline_sail, tmp_pa
 
 @pytest.mark.parametrize("validated", [False, True])
 def test_sail_verifier_outputs_and_accepted_snapshot(offline_sail, validated):
+    """Sail collects verifier outputs and the accepted snapshot."""
     task = WorkspaceTask(
         "write", outputs=("x",), verifier="echo verified > x; echo 1 > reward.txt"
     )
@@ -189,6 +201,8 @@ def test_sail_verifier_outputs_and_accepted_snapshot(offline_sail, validated):
 
 @pytest.fixture
 def offline_harbor(tmp_path, monkeypatch):
+    """Offline Harbor fixture executing the replay worker locally."""
+
     # No Harbor service is required: execute the packaged replay worker in a
     # real subprocess, retaining the real request and collection protocol.
     def execute(task, scripts, output, **kwargs):
@@ -229,17 +243,20 @@ def offline_harbor(tmp_path, monkeypatch):
     ],
 )
 def test_harbor_program_failure_is_validation(offline_harbor, code):
+    """Harbor program failures are classified as validation errors."""
     with pytest.raises(ProgramValidationError):
         offline_harbor.execute_program(code, {}, 2)
 
 
 def test_harbor_valid_program_compatibility(offline_harbor):
+    """Valid Harbor programs keep their compatibility behavior."""
     assert offline_harbor.execute_program("def entry(item): return ['ok']", {}, 2) == [
         "ok"
     ]
 
 
 def test_harbor_infrastructure_failure_not_validation(offline_harbor, monkeypatch):
+    """Harbor infrastructure failures are not validation errors."""
     monkeypatch.setattr(
         harbor, "trial_outcome", lambda _: {"status": "failed", "passed": False}
     )
@@ -249,6 +266,7 @@ def test_harbor_infrastructure_failure_not_validation(offline_harbor, monkeypatc
 
 @pytest.mark.parametrize("backend_name", ["local", "sail", "harbor"])
 def test_validation_exception_contract(backend_name, offline_sail, offline_harbor):
+    """Validation errors keep the ProgramValidationError contract."""
     backend = {"local": LocalBackend(), "sail": offline_sail, "harbor": offline_harbor}[
         backend_name
     ]
@@ -258,6 +276,8 @@ def test_validation_exception_contract(backend_name, offline_sail, offline_harbo
 
 
 def test_harbor_source_retries_program_validation(offline_harbor, tmp_path):
+    """Harbor source generation retries program validation failures."""
+
     class Backend(HarborBackend):
         def run_agent(self, task, agent):
             return LocalBackend().run_agent(task, agent)
@@ -268,7 +288,8 @@ def test_harbor_source_retries_program_validation(offline_harbor, tmp_path):
         kind="oracle",
         solution=(
             f"echo call >> {marker}; if test $(wc -l < {marker}) = 1; "
-            f'then echo "def broken(:" > program.py; else printf %s {shlex.quote(source)} > program.py; fi'
+            'then echo "def broken(:" > program.py; '
+            f"else printf %s {shlex.quote(source)} > program.py; fi"
         ),
     )
     assert generate_source("test", {}, agent=spec, backend=Backend()) == source
@@ -277,6 +298,7 @@ def test_harbor_source_retries_program_validation(offline_harbor, tmp_path):
 
 @pytest.mark.parametrize("first", ["true", "printf '\\377' > program.py"])
 def test_invalid_source_exhaustion_is_bounded(tmp_path, first):
+    """Invalid source exhaustion is bounded by the attempt limit."""
     marker = tmp_path / "calls"
     with pytest.raises(RuntimeError, match="did not produce a working program"):
         generate_source(
@@ -289,6 +311,7 @@ def test_invalid_source_exhaustion_is_bounded(tmp_path, first):
 
 
 def test_sail_collects_new_verifier_report_and_reward(offline_sail):
+    """Sail collects new verifier report and reward files."""
     result = offline_sail.run_agent(
         WorkspaceTask(
             "write",
@@ -303,6 +326,8 @@ def test_sail_collects_new_verifier_report_and_reward(offline_sail):
 def test_harbor_replay_infrastructure_failure_aborts_generation(
     offline_harbor, monkeypatch, tmp_path
 ):
+    """Harbor replay infrastructure failure aborts generation."""
+
     class Backend(HarborBackend):
         def run_agent(self, task, agent):
             return LocalBackend().run_agent(task, agent)
@@ -318,7 +343,10 @@ def test_harbor_replay_infrastructure_failure_aborts_generation(
             backend=Backend(),
             agent=AgentSpec(
                 kind="oracle",
-                solution=f'echo call >> {marker}; echo "def entry(item): return []" > program.py',
+                solution=(
+                    f"echo call >> {marker}; "
+                    'echo "def entry(item): return []" > program.py'
+                ),
             ),
         )
     assert marker.read_text() == "call\n"
