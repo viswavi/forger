@@ -16,6 +16,7 @@ filtering passes) get cached at the @op layer.
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import inspect
 import os
@@ -416,7 +417,7 @@ def _request_scope(
     """
     first = args[0] if args else None
     has_rows = isinstance(first, list) and _tracking.category_of(op_name) != "acquire"
-    if not bound:  # normalized is {"args": [...], "kwargs": {...}}
+    if not bound:  # no signature, e.g. a built-in: {"args": [...], "kwargs": {...}}
         positional = list(args[1:] if has_rows else args)
         named: dict[str, Any] = {
             "args": [_scope_value(v) for v in positional],
@@ -669,24 +670,23 @@ def op(
             # perf_counter, like the step and pipeline times: time.time() also
             # counts a laptop's sleep, so an op could outlast its step.
             start = time.perf_counter()
-            was_bound = False
             if sig is not None:
                 try:
                     # Attempt to normalize the op function's arguments before hashing.
                     bound = sig.bind(*args, **kwargs)
-                    bound.apply_defaults()
-                    # Normalize the different ways of stating the same arguments.
-                    args = bound.args
-                    kwargs = bound.kwargs
-                    normalized = dict(bound.arguments)
-                    was_bound = True
-                    for param in unkeyed:
-                        normalized.pop(param, None)
-                except TypeError:
-                    if _cache_only:
-                        raise
-                    # If the arguments don't match the signature, use them directly.
-                    normalized = {"args": list(args), "kwargs": dict(kwargs)}
+                except TypeError as exc:
+                    # fn would raise anyway; name the op and the likely fix. The
+                    # "_" is stripped since e.g. topic_based_clustering passes its
+                    # extra keywords on to the inner op _topic_based_clustering.
+                    display = fn.__name__.lstrip("_")
+                    raise _bind_error(display, sig, args, kwargs, exc) from None
+                bound.apply_defaults()
+                # Normalize the different ways of stating the same arguments.
+                args = bound.args
+                kwargs = bound.kwargs
+                normalized = dict(bound.arguments)
+                for param in unkeyed:
+                    normalized.pop(param, None)
             else:
                 normalized = {"args": list(args), "kwargs": dict(kwargs)}
             # E.g. a PROMPT constant edited since the last run changes the key.
@@ -751,7 +751,7 @@ def op(
                         f"No cached result for {op_name} with these arguments"
                     )
                 scope = _request_scope(
-                    op_name, body_key, normalized, args, samples_arg, was_bound
+                    op_name, body_key, normalized, args, samples_arg, sig is not None
                 )
                 scope_token = _REQUEST_SCOPE.set(scope)
                 try:
@@ -824,6 +824,84 @@ def op(
     if _fn is not None:
         return decorate(_fn)
     return decorate
+
+
+# Keywords every @op call accepts on top of the function's own parameters.
+_CALL_KEYWORDS = ("min_yield", "max_yield", "_no_cache", "_cache_only")
+
+
+def _suggest(key: str, candidates: list[str]) -> list[str]:
+    """Return likely intended names, e.g. 'max_workers' -> ['verifier_workers']."""
+    close = difflib.get_close_matches(key, candidates, n=3)
+    # Same last word, which difflib scores low for long prefixes.
+    last = key.rsplit("_", 1)[-1]
+    if len(last) >= 4:
+        close += [c for c in candidates if c.rsplit("_", 1)[-1] == last]
+    return list(dict.fromkeys(close))[:3]
+
+
+def _bind_error(
+    display: str,
+    sig: inspect.Signature,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    exc: TypeError,
+) -> TypeError:
+    """Explain a call that does not match the op's signature.
+
+    E.g. ``by_pass_at_k() got an unexpected keyword argument 'max_workers'; did
+    you mean 'verifier_workers'? Accepted keywords: rows, model, ...``.
+    """
+    params = list(sig.parameters.values())
+    keywords = [
+        p.name for p in params if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)
+    ]
+    accepted = (
+        f" Accepted keywords: {', '.join(keywords) or '(none)'} "
+        f"(plus {', '.join(_CALL_KEYWORDS)})."
+    )
+    candidates = keywords + list(_CALL_KEYWORDS)
+    takes_any = any(p.kind == p.VAR_KEYWORD for p in params)
+    unknown = [] if takes_any else [k for k in kwargs if k not in candidates]
+    if len(unknown) == 1:
+        message = f"{display}() got an unexpected keyword argument {unknown[0]!r}"
+        close = _suggest(unknown[0], candidates)
+        if close:
+            message += f"; did you mean {' or '.join(map(repr, close))}?"
+        else:
+            message += "."
+        return TypeError(message + accepted)
+    if unknown:
+        message = (
+            f"{display}() got unexpected keyword arguments "
+            f"{', '.join(map(repr, unknown))}."
+        )
+        for key in unknown:
+            close = _suggest(key, candidates)
+            if close:
+                message += (
+                    f" For {key!r}, did you mean {' or '.join(map(repr, close))}?"
+                )
+        return TypeError(message + accepted)
+    try:
+        bound = sig.bind_partial(*args, **kwargs)
+    except TypeError:
+        return TypeError(f"{display}(): {exc}." + accepted)
+    missing = [
+        p
+        for p in params
+        if p.name not in bound.arguments
+        and p.default is p.empty
+        and p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD)
+    ]
+    if not missing:
+        return TypeError(f"{display}(): {exc}." + accepted)
+    names = ", ".join(
+        repr(p.name) + (" (keyword-only)" if p.kind == p.KEYWORD_ONLY else "")
+        for p in missing
+    )
+    noun = "argument" if len(missing) == 1 else "arguments"
+    return TypeError(f"{display}() missing required {noun}: {names}." + accepted)
 
 
 def _atomic_write(path: Path, data: bytes) -> None:

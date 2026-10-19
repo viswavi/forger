@@ -608,3 +608,19 @@ def test_cache_only_is_forwarded():
         _cluster_with(
             _rows(COOKING_DOCS + SPACE_DOCS), embedding_model="tfidf", _cache_only=True
         )
+
+
+def test_misspelled_keyword_names_the_public_op():
+    """A wrong keyword reaches the inner op but is reported under the public name."""
+    with pytest.raises(
+        TypeError,
+        match=r"^topic_based_clustering\(\) got an unexpected keyword argument "
+        r"'num_cluster'; did you mean 'num_clusters'",
+    ):
+        topic_based_clustering(
+            _rows(COOKING_DOCS),
+            field="text",
+            model=_FakeClusterModel(),
+            embed_fn=_fake_embed,
+            num_cluster=2,
+        )
