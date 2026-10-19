@@ -56,13 +56,17 @@ _RETRY_AFTER_MAX_S = 60.0
 # limit. Every 5xx is too.
 _TRANSIENT_STATUS = frozenset({408, 409, 425, 429})
 # A 429 (or other error) that means the account is out of quota or budget,
-# which no retry fixes, e.g. OpenAI's "insufficient_quota".
+# which no retry fixes: OpenAI's "insufficient_quota" or "billing_hard_limit_
+# reached" code, Anthropic's "credit balance is too low", LiteLLM's
+# BudgetExceededError, Forger's spending caps (TokenUnitQuotaExceeded). Not
+# "You exceeded your current quota ... billing details" alone: Gemini says
+# that for a per-minute rate limit, which a retry does fix.
 _QUOTA_MARKERS = (
     "insufficient_quota",
-    "exceeded your current quota",
-    "budget",
+    "billing_",
     "credit balance",
-    "billing",
+    "budget",
+    "quotaexceeded",
 )
 
 _logger = get_formatted_logger(__name__)

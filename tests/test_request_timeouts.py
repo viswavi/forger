@@ -149,6 +149,20 @@ class TestDefaultTimeout:
         assert attempts == [0.01] * (num_retries + 1)
 
 
+# Gemini's per-minute rate limit: a retry fixes it.
+GEMINI_RPM = (
+    'VertexAIException - {"error": {"code": 429, "message": "You exceeded your '
+    "current quota, please check your plan and billing details. Please retry in "
+    '10s.", "status": "RESOURCE_EXHAUSTED"}}'
+)
+# OpenAI's hard quota: no retry fixes it.
+OPENAI_QUOTA = (
+    "You exceeded your current quota, please check your plan and billing "
+    "details. {'error': {'type': 'insufficient_quota', 'code': "
+    "'insufficient_quota'}}"
+)
+
+
 def rate_limit(message="slow down", retry_after=None):
     """A litellm 429, optionally with a Retry-After header."""
     headers = {} if retry_after is None else {"retry-after": retry_after}
@@ -241,7 +255,7 @@ class TestRetries:
                 model="m",
                 response=httpx.Response(403, request=httpx.Request("POST", "http://t")),
             ),
-            rate_limit("You exceeded your current quota (insufficient_quota)"),
+            rate_limit(OPENAI_QUOTA),
             litellm.BudgetExceededError(current_cost=2.0, max_budget=1.0),
         ],
         ids=["400", "401", "404", "403", "quota-429", "budget"],
@@ -254,6 +268,14 @@ class TestRetries:
             Model("gpt-4o").generate_batch(["A"])
         assert fake.calls == 1
         assert sleeps == []
+
+    def test_gemini_rate_limit_is_retried(self, mock_litellm, sleeps):
+        """Gemini's per-minute 429 says "exceeded your current quota" but is retried."""
+        fake = Failing(rate_limit(GEMINI_RPM))
+        mock_litellm.completion.side_effect = fake
+        assert Model("gemini/gemini-2.5-pro").generate_batch(["A"]) == [["A"]]
+        assert fake.calls == 2
+        assert len(sleeps) == 1
 
     def test_retried_inside_a_batch(self, mock_litellm, sleeps):
         """In a batch, only the failing request is asked again."""
@@ -284,7 +306,12 @@ class TestRetries:
         (TimeoutError(), True),
         (ConnectionResetError(), True),
         (rate_limit(), True),
-        (rate_limit("insufficient_quota"), False),
+        (rate_limit(GEMINI_RPM), True),
+        (rate_limit(OPENAI_QUOTA), False),
+        (rate_limit("You have hit billing_hard_limit_reached"), False),
+        (rate_limit("Your credit balance is too low"), False),
+        (litellm.BudgetExceededError(current_cost=2.0, max_budget=1.0), False),
+        (type("TokenUnitQuotaExceeded", (RuntimeError,), {})("230M units"), False),
         (RuntimeError("no status"), False),
     ],
 )

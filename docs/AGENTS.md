@@ -288,7 +288,9 @@ own default (6000 s). The timeout is not part of the cache key, so changing it k
 `Model` retries each request itself, up to `num_retries` times (default 2), and only on transient errors: a timeout,
 a lost connection, a 408/409/425/429, or a 5xx. It waits about 1 s, then 2 s, 4 s, ... between attempts (a 429's
 `Retry-After` header instead, up to 60 s), and logs each retry at INFO. A 400 (e.g. an over-long prompt), 401, 403,
-404, or an exhausted quota or budget (`insufficient_quota`) raises at once. LiteLLM is sent `num_retries=0`, so
+404, or an exhausted quota, credit balance, or budget (OpenAI's `insufficient_quota`, LiteLLM's or Forger's budget
+errors) raises at once; a per-minute rate limit is retried, also Gemini's "You exceeded your current quota" 429.
+LiteLLM is sent `num_retries=0`, so
 neither it nor the openai client retries on top: a request makes at most `num_retries + 1` attempts on every
 provider, and one that hangs on every attempt waits at most `timeout × (num_retries + 1)` (30 minutes with the
 defaults). Lower `num_retries` or `timeout` to bound it. Passing `max_retries=` to `Model` turns the openai client's
