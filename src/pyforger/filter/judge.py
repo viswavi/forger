@@ -310,8 +310,10 @@ def _judge_responses(
     """Return one raw judge response per prompt (prompts repeat per judge).
 
     A request that still fails after the model's retries with a transient
-    error (a 504, a timeout) gives ``None``, one warning names the count and
-    the last error, and the result is not cached; any other error raises.
+    error (a 504, a timeout), or that hits a row error (the content filter, an
+    over-long prompt), gives ``None``, one warning names the count and the
+    last error, and the result is not cached; any other error raises, as does
+    a row error on every prompt.
     """
     if not prompts:
         return []
@@ -331,6 +333,7 @@ def _judge_responses(
         None if failures.failed(result) else (result[0] if result else "")
         for result in results
     ]
+    failures.raise_if_systemic(len(prompts))
     failures.report(
         f"filter.by_llm_score: {len(failures)} of {len(prompts)} judge requests "
         "failed after retries; their votes are missing"

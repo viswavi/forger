@@ -16,8 +16,8 @@ import pytest
 from fixtures import MockModel
 
 from pyforger import _tracking, op
-from pyforger.acquire import sample_from_LLM
-from pyforger.acquire._model_utils import _is_transient
+from pyforger.acquire import PromptTooLongError, sample_from_LLM
+from pyforger.acquire._model_utils import _is_row_error, _is_transient
 from pyforger.acquire.model import GenerateResult, Model
 from pyforger.alter import generate_from_context
 from pyforger.op import skip_cache_write, trace
@@ -729,3 +729,164 @@ def test_failure_elsewhere_does_not_uncache_a_submitted_step(monkeypatch, where)
 def filter_none(rows):
     """Drop None slots (a filter, so the step ends with one)."""
     return [row for row in rows if row is not None]
+
+
+def _content_filter(prompt):
+    """Azure's content-filter 400, as litellm raises it."""
+    return litellm.BadRequestError(
+        message=(
+            "AzureException BadRequestError - {'error': {'code': 'content_filter', "
+            f"'message': 'Response content blocked for {prompt}'}}}}"
+        ),
+        llm_provider="azure",
+        model="m",
+    )
+
+
+def _context_window(prompt):
+    """The error litellm raises for a prompt over the context window."""
+    return litellm.ContextWindowExceededError(
+        message=f"{prompt} is too long", llm_provider="openai", model="m"
+    )
+
+
+class TestRowErrors:
+    """A content-filter block or an over-long prompt fails only its own row."""
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            _litellm_error(litellm.ContentPolicyViolationError)("p"),
+            _content_filter("p"),
+            litellm.BadRequestError(
+                message="violates content_policy", llm_provider="openai", model="m"
+            ),
+            _context_window("p"),
+            PromptTooLongError(
+                "Prompt 17 has 69685 tokens; the context window is 32768"
+            ),
+        ],
+    )
+    def test_row_errors(self, error):
+        """Each is a row error, and so never transient."""
+        assert _is_row_error(error)
+        assert not _is_transient(error)
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            _litellm_error(litellm.BadRequestError)("unsupported parameter"),
+            _litellm_error(litellm.AuthenticationError)("p"),
+            _litellm_error(litellm.InternalServerError)("p"),
+            ValueError("content_filter"),  # not a provider error
+        ],
+    )
+    def test_not_row_errors(self, error):
+        """Other 400s, auth errors, 5xx, and plain errors are not."""
+        assert not _is_row_error(error)
+
+    @pytest.mark.parametrize(
+        ("error", "reason"),
+        [
+            (_content_filter, "1 prompt blocked by the provider's content filter"),
+            (_context_window, "1 prompt longer than the model's context window"),
+        ],
+    )
+    def test_generate_from_context_leaves_row_none(self, error, reason, caplog):
+        """The op returns, the row's slot is None, and the warning names why."""
+        model = FlakyModel(fail={"B": 9}, error=error)
+        with caplog.at_level(logging.WARNING):
+            rows = generate_from_context(ITEMS, "{q}", model, max_retries=3)
+        assert rows == [{"text": "A#0"}, None, {"text": "C#0"}]
+        assert [c[0] for c in model.calls] == ["A", "B", "C"]  # B not asked again
+        assert (
+            "alter.generate_from_context: 1 of 3 prompts failed after the model's "
+            f"retries; their slots are None: {reason} (result not cached)"
+        ) in caplog.text
+        assert trace()[-1].cache_hit is False
+
+    def test_reasons_and_types_are_counted_together(self, monkeypatch):
+        """The step report counts row errors by reason next to other failures."""
+        monkeypatch.setenv("FORGER_STEP_REPORT", "0")
+        _tracking.clear_step_records()
+
+        def error(prompt):
+            if prompt in ("A", "B"):
+                return _content_filter(prompt)
+            return InternalServerError("504")
+
+        @step
+        def answer(rows, model):
+            return generate_from_context(rows, "{q}", model)
+
+        items = [*ITEMS, {"q": "D"}]
+        answer(items, FlakyModel(fail={"A": 1, "B": 1, "C": 1}, error=error))
+        assert _tracking.step_records()["answer"].ops[0].warnings == [
+            "alter.generate_from_context: 3 of 4 prompts failed after the model's "
+            "retries; their slots are None: 2 prompts blocked by the provider's "
+            "content filter, InternalServerError ×1 (result not cached)"
+        ]
+
+    def test_every_prompt_row_error_raises(self):
+        """All prompts blocked points at the template: the first error raises."""
+        model = FlakyModel(fail={"A": 1, "B": 1, "C": 1}, error=_content_filter)
+        with pytest.raises(litellm.BadRequestError, match="blocked for A"):
+            generate_from_context(ITEMS, "{q}", model)
+
+    def test_single_prompt_row_error_does_not_raise(self):
+        """With one prompt, a row error is that row's problem."""
+        model = FlakyModel(fail={"A": 1}, error=_context_window)
+        assert generate_from_context([{"q": "A"}], "{q}", model) == [None]
+
+    def test_bad_request_without_content_filter_raises(self):
+        """A 400 that is not a content-filter block still fails the op."""
+
+        def unsupported(prompt):
+            return litellm.BadRequestError(
+                message="Unsupported value: 'temperature'",
+                llm_provider="openai",
+                model="m",
+            )
+
+        model = FlakyModel(fail={"B": 1}, error=unsupported)
+        with pytest.raises(litellm.BadRequestError):
+            generate_from_context(ITEMS, "{q}", model)
+
+    def test_model_does_not_retry_a_row_error(self, monkeypatch):
+        """Through Model and litellm, a blocked request is sent once."""
+        sleeps: list[float] = []
+        monkeypatch.setattr("pyforger.acquire.model._sleep", sleeps.append)
+        completions = FailingCompletions(fail={})
+
+        def blocked(messages, n=1, **kwargs):
+            if messages[-1]["content"] == "B":
+                completions.calls.append("B")
+                raise _litellm_error(litellm.ContentPolicyViolationError)("B")
+            return completions(messages, n=n, **kwargs)
+
+        model = Model("gpt-4o", show_progress=False, num_retries=2)
+        with patch("pyforger.acquire.model.litellm") as mock:
+            mock.get_supported_openai_params.return_value = None
+            mock.completion.side_effect = blocked
+            rows = generate_from_context(ITEMS, "{q}", model, max_retries=2)
+        assert rows == [{"text": "A!"}, None, {"text": "C!"}]
+        assert completions.calls.count("B") == 1
+        assert sleeps == []
+
+    def test_sample_from_llm_raises_when_its_prompt_is_blocked(self):
+        """sample_from_LLM's one prompt is the template: no samples, so it raises."""
+        model = FlakyModel(fail={"Write.": 9}, error=_content_filter)
+        with pytest.raises(litellm.BadRequestError):
+            sample_from_LLM("Write.", model, n=2)
+        assert len(model.calls) == 1
+
+    def test_sample_from_llm_keeps_other_rounds(self, caplog):
+        """One blocked round drops its samples; the others are returned."""
+        model = FlakyModel(fail={"Write.": 1}, error=_content_filter)
+        with caplog.at_level(logging.WARNING):
+            rows = sample_from_LLM("Write.", model, n=3, batch_size=1)
+        assert len(rows) == 2
+        assert (
+            "acquire.sample_from_LLM: 2 of 3 samples; 1 request(s) failed: "
+            "1 prompt blocked by the provider's content filter (result not cached)"
+        ) in caplog.text

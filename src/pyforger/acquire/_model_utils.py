@@ -13,7 +13,12 @@ from collections.abc import Callable
 from typing import Any
 
 from pyforger import _tracking
-from pyforger.acquire.model import Prompt, _is_transient
+from pyforger.acquire.model import (
+    Prompt,
+    _is_row_error,
+    _is_transient,
+    _row_error_reason,
+)
 from pyforger.op import skip_cache_write
 from pyforger.utils import get_formatted_logger
 
@@ -150,19 +155,57 @@ def _accepts_kwarg(fn: Callable[..., Any] | None, name: str) -> bool:
         return False
 
 
+# How a warning counts row errors by reason (see _failure_label), e.g. "2
+# prompts blocked by the provider's content filter".
+_ROW_ERROR_PHRASES = {
+    "content filter": "blocked by the provider's content filter",
+    "context window": "longer than the model's context window",
+}
+
+
+def _failure_label(exc: BaseException) -> str:
+    """A failed request's label in a warning: its row-error reason, else its type."""
+    return _row_error_reason(exc) or type(exc).__name__
+
+
+def _count_text(label: str, count: int) -> str:
+    """``"InternalServerError ×2"``, or by reason ``"2 prompts blocked by ..."``."""
+    if label in _ROW_ERROR_PHRASES:
+        noun = "prompt" if count == 1 else "prompts"
+        return f"{count} {noun} {_ROW_ERROR_PHRASES[label]}"
+    return f"{label} ×{count}"
+
+
+def _raise_if_systemic(results: list[Any], total: int) -> None:
+    """Raise the first row error if all ``total`` (at least 2) prompts hit one.
+
+    One prompt blocked by the content filter is that row's problem; all of
+    them blocked points at the template or the model (e.g. a system prompt
+    that trips the filter), so the op fails instead of returning only Nones.
+    Only the row errors in ``results`` count.
+    """
+    row_errors = [
+        r for r in results if isinstance(r, BaseException) and _is_row_error(r)
+    ]
+    if total >= 2 and len(row_errors) >= total:
+        raise row_errors[0]
+
+
 def _report_provider_failures(
     message: str, error_types: list[str], last_error: BaseException | None = None
 ) -> None:
     """Warn about requests that failed at the provider; keep the op out of the cache.
 
-    ``error_types`` has one exception type name per failure, e.g. three 504s
-    give "...: InternalServerError ×3", and ``last_error`` adds the last one's
-    message. The warning is logged and shown in the
-    step report, and the op (and its step) is not cached, so a rerun asks
-    again; the request cache replays the completions that did arrive.
+    ``error_types`` has one label per failure (`_failure_label`): an exception
+    type name, e.g. three 504s give "...: InternalServerError ×3", or a row
+    error's reason, e.g. "...: 2 prompts blocked by the provider's content
+    filter". ``last_error`` adds the last one's message. The warning is logged
+    and shown in the step report, and the op (and its step) is not cached, so
+    a rerun asks again; the request cache replays the completions that did
+    arrive.
     """
     counts = Counter(error_types)
-    summary = ", ".join(f"{name} ×{count}" for name, count in counts.most_common())
+    summary = ", ".join(_count_text(name, n) for name, n in counts.most_common())
     if last_error is not None:
         detail = " ".join(str(last_error).split())
         if len(detail) > 200:
@@ -187,8 +230,9 @@ def _catch_kwargs(model: Any) -> dict[str, Any]:
 class _RequestFailures:
     """The failed requests an LLM filter tolerates, reported in one warning.
 
-    ``failed(result)`` is True for a transient error (a 504, a timeout) left in
-    a ``generate_batch`` slot by ``return_exceptions=True``; the filter then
+    ``failed(result)`` is True for a transient error (a 504, a timeout) or a
+    row error (a content-filter block, an over-long prompt) left in a
+    ``generate_batch`` slot by ``return_exceptions=True``; the filter then
     treats it as a missing vote or sample. Any other error (a bad key, a
     spending cap, a token-unit quota) is raised.
     """
@@ -197,20 +241,27 @@ class _RequestFailures:
         """Start with no failures."""
         self.types: list[str] = []
         self.last: BaseException | None = None
+        self.row_errors: list[BaseException] = []
 
     def __len__(self) -> int:
         """Number of failed requests (or missing completions) so far."""
         return len(self.types)
 
     def failed(self, result: Any) -> bool:
-        """True (and counted) when ``result`` is a transient error; raise others."""
+        """True (and counted) for a transient or row error; raise other errors."""
         if not isinstance(result, BaseException):
             return False
-        if not _is_transient(result):
+        if _is_row_error(result):
+            self.row_errors.append(result)
+        elif not _is_transient(result):
             raise result
-        self.types.append(type(result).__name__)
+        self.types.append(_failure_label(result))
         self.last = result
         return True
+
+    def raise_if_systemic(self, total: int) -> None:
+        """Raise the first row error if all ``total`` (at least 2) requests hit one."""
+        _raise_if_systemic(self.row_errors, total)
 
     def missing(self, count: int) -> None:
         """Count completions that partly failed requests did not return."""

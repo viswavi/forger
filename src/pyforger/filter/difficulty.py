@@ -137,9 +137,10 @@ def _difficulty_scores(
     """Return each prompt's ``num_judges`` parsed ratings (None when unparseable).
 
     A prompt whose request still fails after the model's retries with a
-    transient error (a 504, a timeout) gets ``None`` ratings, one warning names
-    the count and the last error, and the result is not cached; any other
-    error raises.
+    transient error (a 504, a timeout), or that hits a row error (the content
+    filter, an over-long prompt), gets ``None`` ratings, one warning names the
+    count and the last error, and the result is not cached; any other error
+    raises, as does a row error on every prompt.
     """
     failures = _RequestFailures()
     ratings: list[list[int | float | None]] = []
@@ -154,10 +155,11 @@ def _difficulty_scores(
                 **_cache_kwargs(model.generate, cache_row=prompt),
             )
         except Exception as exc:
-            failures.failed(exc)  # raises unless transient
+            failures.failed(exc)  # raises unless transient or a row error
             ratings.append([None] * num_judges)
             continue
         ratings.append([_parse_score_response(raw, MAX_DIFFICULTY)[0] for raw in raws])
+    failures.raise_if_systemic(len(prompts))
     failures.report(
         f"filter.by_judged_difficulty: {len(failures)} of {len(prompts)} judge "
         "requests failed after retries; those rows are unrated"

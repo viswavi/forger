@@ -94,7 +94,7 @@ Keywords left out of the signatures below:
 
 Acquire operations: generate or retrieve new data.
 
-Also exported, not documented here: `GenerateResult`, `RetrievalSource`, `RetrieveMode`.
+Also exported, not documented here: `GenerateResult`, `PromptTooLongError`, `RetrievalSource`, `RetrieveMode`.
 
 <a name="acquire-model"></a>
 
@@ -487,12 +487,14 @@ Generate LLM outputs conditioned on upstream input items.
 
 **Returns:** By default, a list of length `len(items) * samples_per_item` in input order, grouped by item (item `i`'s
 samples occupy slots `i * samples_per_item` to `(i + 1) * samples_per_item`). Each slot holds the parsed output dict, or
-`None` if the prompt failed to parse after `max_retries` or failed at the provider after the model's own retries; when
-any slot failed at the provider, the result is not cached, so a rerun asks again (the request cache replays the
-completions that arrived). With `merge=True`, the merged rows of the slots that succeeded. When the model returns a
-reasoning trace separately in `GenerateResult.reasoning`, it is included under the `thinking_trace` key. Inline
-`<think>` traces (e.g. from `LocalModel`, which supplies `None` for that metadata) are not extracted; use
-`split_reasoning` to separate them out as needed.
+`None` if the prompt failed to parse after `max_retries` or failed at the provider after the model's own retries. A row
+error (the provider's content filter blocked it, or the prompt is longer than the context window) also gives `None`,
+unless every prompt (at least 2) hit one: then the first is raised. When any slot failed at the provider, the result is
+not cached, so a rerun asks again (the request cache replays the completions that arrived). With `merge=True`, the
+merged rows of the slots that succeeded. When the model returns a reasoning trace separately in
+`GenerateResult.reasoning`, it is included under the `thinking_trace` key. Inline `<think>` traces (e.g. from
+`LocalModel`, which supplies `None` for that metadata) are not extracted; use `split_reasoning` to separate them out as
+needed.
 
 <a name="alter-run_programs"></a>
 

@@ -12,7 +12,11 @@ from typing import Any
 
 import tiktoken
 
-from pyforger.acquire._model_utils import _catch_kwargs, _RequestFailures
+from pyforger.acquire._model_utils import (
+    _catch_kwargs,
+    _raise_if_systemic,
+    _RequestFailures,
+)
 from pyforger.acquire.model import Message, Model, Prompt, _cache_kwargs
 from pyforger.op import op
 from pyforger.utils import get_field, get_formatted_logger
@@ -436,6 +440,8 @@ def _summarize_shards(
         for shard in shards
     ]
     responses = model.generate_batch(prompts, temperature=0.2, **_catch_kwargs(model))
+    # Every shard blocked by the content filter (or too long) is systemic.
+    _raise_if_systemic(responses, len(responses))
     shard_topics = [
         {} if failures.failed(shard_responses) else _parse_topics(shard_responses[0])
         for shard_responses in responses
@@ -489,7 +495,7 @@ def _build_codebook(
                 ),
             )[0]
         except Exception as exc:
-            failures.failed(exc)  # raises unless transient
+            failures.failed(exc)  # raises unless transient or a row error
             # Model already retried the request (num_retries): do not ask again.
             if not codebook:
                 raise RuntimeError(
@@ -571,6 +577,8 @@ def _assign_topics(
             ),
             **_catch_kwargs(model),
         )
+        if attempt == 0:  # every document blocked or too long: the template
+            _raise_if_systemic(responses, len(responses))
         still_pending = []
         for doc, doc_responses in zip(pending, responses):
             if failures.failed(doc_responses):
