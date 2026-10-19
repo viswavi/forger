@@ -52,6 +52,25 @@ def category_of(op_name: str) -> str:
     return head if head in _CATEGORIES else "other"
 
 
+# Dropped rows a score record keeps with their notes, for the step report.
+MAX_DROPPED_NOTES = 3
+# Characters kept of a dropped row's preview and of its note.
+PREVIEW_CHARS = 200
+NOTE_CHARS = 300
+
+
+class DroppedRow(BaseModel):
+    """A row a filter dropped, with the filter's note on why.
+
+    E.g. ``DroppedRow(value=2, preview="Paris is in Italy.", note="The output
+    puts Paris in Italy.")`` for a judge's feedback.
+    """
+
+    value: float | int | bool | None
+    preview: str
+    note: str
+
+
 class ScoreRecord(BaseModel):
     """Per-row scores a filter computed, and how it used them to keep rows.
 
@@ -71,6 +90,8 @@ class ScoreRecord(BaseModel):
     # by_rouge_l): another threshold would change the scores themselves, so the
     # report cannot say what it would keep.
     pooled: bool = False
+    # The first few dropped rows that have a note (see ``record_scores``).
+    dropped: list[DroppedRow] = Field(default_factory=list)
 
 
 class OpCall(BaseModel):
@@ -800,14 +821,35 @@ def record_scores(
     lower: float | None = None,
     upper: float | None = None,
     pooled: bool = False,
+    notes: list[str | None] | None = None,
+    previews: list[Any] | None = None,
 ) -> None:
     """Record one per-row score list for the active op; a no-op outside ops.
 
     Pass ``pooled=True`` when each score depends on the rows kept so far.
+    ``notes`` (aligned with ``values``) says why each row scored as it did,
+    e.g. a judge's feedback; the report shows the first ``MAX_DROPPED_NOTES``
+    dropped rows that have one, each with its ``previews`` entry (e.g. the
+    judged output), both cut short.
     """
     scores = _ACTIVE_SCORES.get()
     if scores is None:
         return
+    dropped: list[DroppedRow] = []
+    for i, note in enumerate(notes or []):
+        if len(dropped) == MAX_DROPPED_NOTES:
+            break
+        value = values[i]
+        if not note or _is_kept(value, keep, threshold, lower, upper):
+            continue
+        preview = previews[i] if previews is not None else ""
+        dropped.append(
+            DroppedRow(
+                value=value if isinstance(value, (int, float)) else None,
+                preview=_cut(preview, PREVIEW_CHARS),
+                note=_cut(note, NOTE_CHARS),
+            )
+        )
     scores.append(
         ScoreRecord(
             label=label,
@@ -817,8 +859,38 @@ def record_scores(
             lower=lower,
             upper=upper,
             pooled=pooled,
+            dropped=dropped,
         )
     )
+
+
+def _is_kept(
+    value: Any,
+    keep: str,
+    threshold: float | None,
+    lower: float | None,
+    upper: float | None,
+) -> bool:
+    """Whether ``value`` passes a score record's rule; None never does."""
+    if keep == "true":
+        return value is True
+    if not isinstance(value, (int, float)) or value != value:  # None or nan
+        return False
+    if keep == "between":
+        return (lower is None or value >= lower) and (upper is None or value <= upper)
+    if threshold is None:
+        return True
+    if keep == "ge":
+        return value >= threshold
+    if keep == "le":
+        return value <= threshold
+    return value < threshold
+
+
+def _cut(value: Any, limit: int) -> str:
+    """``value`` as one line of at most ``limit`` characters, e.g. ``"abc…"``."""
+    text = " ".join(str(value).split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def keep_where(items: list[Any], keep: list[bool]) -> list[Any]:

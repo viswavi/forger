@@ -1,6 +1,7 @@
 """Shared helpers for prompt construction and output parsing.
 
-Internal to ``pyforger``; used by ``acquire.sample`` and ``alter.generate``.
+Internal to ``pyforger``; used by ``acquire.sample``, ``alter.generate``, and
+the LLM filters.
 """
 from __future__ import annotations
 
@@ -131,17 +132,73 @@ def _accepts_kwarg(fn: Callable[..., Any] | None, name: str) -> bool:
         return False
 
 
-def _report_provider_failures(message: str, error_types: list[str]) -> None:
+def _report_provider_failures(
+    message: str, error_types: list[str], last_error: BaseException | None = None
+) -> None:
     """Warn about requests that failed at the provider; keep the op out of the cache.
 
     ``error_types`` has one exception type name per failure, e.g. three 504s
-    give "...: InternalServerError ×3". The warning is logged and shown in the
+    give "...: InternalServerError ×3", and ``last_error`` adds the last one's
+    message. The warning is logged and shown in the
     step report, and the op (and its step) is not cached, so a rerun asks
     again; the request cache replays the completions that did arrive.
     """
     counts = Counter(error_types)
     summary = ", ".join(f"{name} ×{count}" for name, count in counts.most_common())
+    if last_error is not None:
+        detail = " ".join(str(last_error).split())
+        if len(detail) > 200:
+            detail = detail[:199] + "…"
+        summary += f"; last error: {type(last_error).__name__}: {detail}"
     text = f"{message}: {summary} (result not cached)"
     logger.warning(text)
     _tracking.add_op_warning(text)
     skip_cache_write()
+
+
+def _catch_kwargs(model: Any) -> dict[str, Any]:
+    """``{"return_exceptions": True}`` for a model whose generate_batch takes it.
+
+    Duck-typed fakes and older backends get ``{}`` and raise as before.
+    """
+    if _accepts_kwarg(getattr(model, "generate_batch", None), "return_exceptions"):
+        return {"return_exceptions": True}
+    return {}
+
+
+class _RequestFailures:
+    """The failed requests an LLM filter tolerates, reported in one warning.
+
+    ``failed(result)`` is True for a transient error (a 504, a timeout) left in
+    a ``generate_batch`` slot by ``return_exceptions=True``; the filter then
+    treats it as a missing vote or sample. Any other error (a bad key, a
+    spending cap, a token-unit quota) is raised.
+    """
+
+    def __init__(self) -> None:
+        """Start with no failures."""
+        self.types: list[str] = []
+        self.last: BaseException | None = None
+
+    def __len__(self) -> int:
+        """Number of failed requests (or missing completions) so far."""
+        return len(self.types)
+
+    def failed(self, result: Any) -> bool:
+        """True (and counted) when ``result`` is a transient error; raise others."""
+        if not isinstance(result, BaseException):
+            return False
+        if not _is_transient(result):
+            raise result
+        self.types.append(type(result).__name__)
+        self.last = result
+        return True
+
+    def missing(self, count: int) -> None:
+        """Count completions that partly failed requests did not return."""
+        self.types.extend(["missing completions"] * count)
+
+    def report(self, message: str) -> None:
+        """Warn once, e.g. ``"<message>: Timeout ×2; last error: ..."``."""
+        if self.types:
+            _report_provider_failures(message, self.types, self.last)

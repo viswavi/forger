@@ -32,6 +32,7 @@ from typing import Literal, Union
 from rouge_score import rouge_scorer
 
 from pyforger import _tracking
+from pyforger.acquire._model_utils import _catch_kwargs, _RequestFailures
 from pyforger.acquire.model import Model, Prompt
 from pyforger.alter.generate import PromptTemplate, _normalized_equal, _resolve_prompt
 from pyforger.op import op
@@ -366,13 +367,19 @@ def _predictions(
     Raises ``ValueError`` when the model returns a different number of results
     than prompts, or of completions than ``n`` (e.g. a provider that ignores
     ``n``): a missing sample is not an empty answer, so it is never padded.
-    Exceptions propagate, so a failed call is not cached.
+    The exception is a request that still fails after the model's retries
+    with a transient error (a 504, a timeout): its samples are ``None``
+    (graded ``None``, so excluded), one warning names the count and the last
+    error, and the result is not cached. Other errors propagate.
     """
+    catch = _catch_kwargs(model)
+    failures = _RequestFailures()
+    lost = 0  # samples missing because their requests failed
     completions: list[list[str | None]] = []
     for start in range(0, len(prompts), batch_size):
         batch = prompts[start : start + batch_size]
         results = model.generate_batch(
-            batch, n=n, temperature=temperature, max_tokens=max_tokens
+            batch, n=n, temperature=temperature, max_tokens=max_tokens, **catch
         )
         if len(results) != len(batch):
             raise ValueError(
@@ -380,14 +387,29 @@ def _predictions(
                 f"{len(batch)} prompts (prompts {start} to {start + len(batch) - 1})"
             )
         for i, result in enumerate(results):
-            if len(result) != n:
+            if failures.failed(result):
+                completions.append([None] * n)
+                lost += n
+                continue
+            samples: list[str | None] = list(result)
+            if catch and len(samples) < n:
+                # Some of the prompt's n requests failed (n fan-out or n > 16);
+                # return_exceptions keeps the completions that arrived.
+                failures.missing(n - len(samples))
+                lost += n - len(samples)
+                samples += [None] * (n - len(samples))
+            if len(samples) != n:
                 raise ValueError(
-                    f"{model!r} returned {len(result)} completions for prompt "
+                    f"{model!r} returned {len(samples)} completions for prompt "
                     f"{start + i}, but n={n} were requested"
                 )
             completions.append(
-                [c if isinstance(c, str) and c.strip() else None for c in result]
+                [c if isinstance(c, str) and c.strip() else None for c in samples]
             )
+    failures.report(
+        f"difficulty filter: {lost} of {len(prompts) * n} samples from {model!r} "
+        "are missing (requests failed after retries); they grade None (excluded)"
+    )
     return completions
 
 

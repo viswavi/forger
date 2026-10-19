@@ -15,6 +15,7 @@ from collections.abc import Callable, Hashable
 from typing import Any, Union
 
 from pyforger import _tracking
+from pyforger.acquire._model_utils import _catch_kwargs, _RequestFailures
 from pyforger.acquire.model import Model, Prompt, _cache_kwargs
 from pyforger.op import op
 from pyforger.utils import get_field, get_formatted_logger
@@ -130,7 +131,12 @@ def by_llm_score(
     group entry is read from its own ``{...}``. Both paths read a
     string score's leading number (``"4/5"`` is 4) and keep fractions (``4.5``
     stays ``4.5``); the score must lie in ``[1, max_score]``. Unparseable
-    responses count as a judge that did not approve.
+    responses count as a judge that did not approve, and so does a judge
+    request that still fails after the model's retries with a transient error
+    (a 504, a timeout): its rows lose that vote, one warning names the count
+    and the last error, and the result is not cached, so a rerun asks again.
+    Other errors (a bad key, a spending cap) raise. With ``group_by``, the
+    warning counts the rows a failed or unparseable call left unscored.
 
     Returns:
         The kept rows, in input order. With ``score_field`` set, each carries
@@ -139,7 +145,10 @@ def by_llm_score(
 
     In a ``@step`` report the per-row score is the judge's score when
     ``num_judges == 1``, and otherwise the fraction of judges scoring at least
-    ``score_threshold`` (compared with ``agreement_threshold``).
+    ``score_threshold`` (compared with ``agreement_threshold``). Under the
+    histogram, the report shows up to three dropped rows (their
+    ``output_field``) with the judge's feedback, the lowest-scoring judge's
+    when there are several.
 
     Returns:
         The kept rows, in input order; unchanged unless ``score_field`` /
@@ -218,25 +227,38 @@ def by_llm_score(
 
     # verdicts[i][j] is judge j's (score, feedback) for row i.
     verdicts: list[list[Verdict]] = [[] for _ in items]
+    # Why each row lost a vote, e.g. {"failed", "cut off"}.
+    lost: list[set[str]] = [set() for _ in items]
+    # Judge calls that gave some row no score, by cause.
+    no_score_calls = {"failed": 0, "unparseable": 0, "cut off": 0}
     position = 0
     for idx, group_orders, single in zip(groups, orders, alone):
         for order in group_orders:
             raw = responses[position]
             position += 1
             if single:
-                verdicts[idx[0]].append(_parse_score_response(raw, max_score))
-                continue
-            for c, verdict in enumerate(_parse_group_response(raw, order, max_score)):
+                row_verdicts = [_parse_score_response(raw, max_score)]
+            else:
+                row_verdicts = _parse_group_response(raw, order, max_score)
+            cause = _no_score_cause(raw)
+            missed = False
+            for c, verdict in enumerate(row_verdicts):
                 verdicts[idx[c]].append(verdict)
+                if verdict[0] is None:
+                    lost[idx[c]].add(cause)
+                    missed = True
+            if missed:
+                no_score_calls[cause] += 1
 
     kept: list[dict] = []
     # One judge: its score. Several: the fraction of judges approving, which is
     # what agreement_threshold is compared with. None when nothing parsed.
     row_scores: list[float | int | None] = []
-    parse_failures = 0
-    for item, row_verdicts in zip(items, verdicts):
+    # The lowest-scoring judge's feedback, or why no judge scored the row.
+    notes: list[str | None] = []
+    for item, row_verdicts, row_lost in zip(items, verdicts, lost):
         parsed = [score for score, _ in row_verdicts if score is not None]
-        parse_failures += num_judges - len(parsed)
+        notes.append(_row_note(row_verdicts, row_lost))
         approvals = sum(1 for score in parsed if score >= score_threshold)
         if approvals / num_judges >= agreement_threshold:
             extra: dict[str, Any] = {}
@@ -253,10 +275,21 @@ def by_llm_score(
             row_scores.append(parsed[0])
         else:
             row_scores.append(approvals / num_judges)
-    _warn_unparsed(parse_failures, len(items) * num_judges)
+    _warn_unscored(
+        no_score_calls,
+        len(prompts),
+        rows=sum(1 for row_lost in lost if row_lost),
+        unscored=row_scores.count(None),
+    )
+    previews = [get_field(item, output_field, "by_llm_score") for item in items]
     if num_judges == 1:
         _tracking.record_scores(
-            "score", row_scores, keep="ge", threshold=float(score_threshold)
+            "score",
+            row_scores,
+            keep="ge",
+            threshold=float(score_threshold),
+            notes=notes,
+            previews=previews,
         )
     else:
         _tracking.record_scores(
@@ -264,6 +297,8 @@ def by_llm_score(
             row_scores,
             keep="ge",
             threshold=agreement_threshold,
+            notes=notes,
+            previews=previews,
         )
     return kept
 
@@ -271,8 +306,13 @@ def by_llm_score(
 @op(name="filter.by_llm_score.judge")
 def _judge_responses(
     prompts: list[Prompt], *, model: Model, temperature: float
-) -> list[str]:
-    """Return one raw judge response per prompt (prompts repeat per judge)."""
+) -> list[str | None]:
+    """Return one raw judge response per prompt (prompts repeat per judge).
+
+    A request that still fails after the model's retries with a transient
+    error (a 504, a timeout) gives ``None``, one warning names the count and
+    the last error, and the result is not cached; any other error raises.
+    """
     if not prompts:
         return []
     # One request per prompt with n=1: several providers reject n>1. Each prompt
@@ -284,13 +324,78 @@ def _judge_responses(
         n=1,
         temperature=temperature,
         **_cache_kwargs(model.generate_batch, cache_rows=list(prompts)),
+        **_catch_kwargs(model),
     )
-    return [result[0] if result else "" for result in results]
+    failures = _RequestFailures()
+    responses = [
+        None if failures.failed(result) else (result[0] if result else "")
+        for result in results
+    ]
+    failures.report(
+        f"filter.by_llm_score: {len(failures)} of {len(prompts)} judge requests "
+        "failed after retries; their votes are missing"
+    )
+    return responses
 
 
-def _warn_unparsed(count: int, total: int) -> None:
-    if count:
-        logger.warning("by_llm_score: %d of %d judge scores unparseable", count, total)
+# Why a judge call gave a row no score; see _no_score_cause.
+_CAUSES = {
+    "failed": "the judge request failed",
+    "cut off": "the judge stopped mid-thought (unclosed <think>)",
+    "unparseable": "unparseable judge response",
+}
+
+
+def _no_score_cause(raw: str | None) -> str:
+    """Why a response may lack a score: ``failed``, ``cut off``, or ``unparseable``."""
+    if raw is None:
+        return "failed"
+    if "<think>" in raw and "</think>" not in raw:
+        return "cut off"
+    return "unparseable"
+
+
+def _row_note(verdicts: list[Verdict], lost: set[str]) -> str | None:
+    """The lowest-scoring judge's feedback, or why no judge scored the row.
+
+    E.g. ``"no score: the judge request failed"``.
+    """
+    scored = [(score, why) for score, why in verdicts if score is not None]
+    if scored:
+        return min(scored, key=lambda verdict: verdict[0])[1]
+    return "no score: " + ", ".join(_CAUSES[cause] for cause in sorted(lost))
+
+
+def _warn_unscored(calls: dict[str, int], total: int, rows: int, unscored: int) -> None:
+    """One warning for judge calls that left rows without a vote.
+
+    Counts calls and the rows they cost, e.g. with ``group_by`` "2 of 10 judge
+    calls gave no score (2 stopped mid-thought ...) → 6 rows unscored".
+    """
+    n_calls = sum(calls.values())
+    if not n_calls:
+        return
+    causes = ", ".join(
+        f"{count} {text}"
+        for count, text in (
+            (calls["failed"], "failed"),
+            (calls["unparseable"], "unparseable"),
+            (
+                calls["cut off"],
+                "stopped mid-thought (unclosed <think>: raise max_tokens)",
+            ),
+        )
+        if count
+    )
+    consequence = f"{unscored} row{'' if unscored == 1 else 's'} unscored"
+    if rows > unscored:
+        consequence += f", {rows - unscored} more missing a vote"
+    message = (
+        f"filter.by_llm_score: {n_calls} of {total} judge calls gave no score "
+        f"({causes}) → {consequence}"
+    )
+    logger.warning(message)
+    _tracking.add_op_warning(message)
 
 
 def _hashable(value: Any) -> Hashable:

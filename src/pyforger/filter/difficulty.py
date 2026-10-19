@@ -7,6 +7,7 @@ rating falls in ``[min_difficulty, max_difficulty]``.
 from __future__ import annotations
 
 from pyforger import _tracking
+from pyforger.acquire._model_utils import _RequestFailures
 from pyforger.acquire.model import Message, Model, _cache_kwargs
 from pyforger.filter.judge import _parse_score_response
 from pyforger.op import op
@@ -63,8 +64,10 @@ def by_judged_difficulty(
 
     Each judge rates ``task_field`` from 1 to 5; with ``num_judges > 1`` the
     row's difficulty is the mean of the parsed ratings (e.g. 3, 4, 4 -> 3.67).
-    A row with no parseable rating is dropped. Ratings are cached separately
-    from the bounds, so re-running with other bounds makes no new calls.
+    A row with no parseable rating is dropped, as is one whose judge request
+    failed (a 504 or a timeout after the model's retries; a warning counts
+    them). Ratings are cached separately from the bounds, so re-running with
+    other bounds makes no new calls.
     """
     if num_judges < 1:
         raise ValueError("num_judges must be at least 1")
@@ -131,18 +134,32 @@ def _difficulty_scores(
     num_judges: int,
     temperature: float,
 ) -> list[list[int | float | None]]:
-    """Return each prompt's ``num_judges`` parsed ratings (None when unparseable)."""
-    # Each prompt is built from one row, so it keys that row in the request
-    # cache: a new row costs only its own judges.
-    return [
-        [
-            _parse_score_response(raw, MAX_DIFFICULTY)[0]
-            for raw in model.generate(
+    """Return each prompt's ``num_judges`` parsed ratings (None when unparseable).
+
+    A prompt whose request still fails after the model's retries with a
+    transient error (a 504, a timeout) gets ``None`` ratings, one warning names
+    the count and the last error, and the result is not cached; any other
+    error raises.
+    """
+    failures = _RequestFailures()
+    ratings: list[list[int | float | None]] = []
+    for prompt in prompts:
+        # Each prompt is built from one row, so it keys that row in the request
+        # cache: a new row costs only its own judges.
+        try:
+            raws = model.generate(
                 prompt,
                 n=num_judges,
                 temperature=temperature,
                 **_cache_kwargs(model.generate, cache_row=prompt),
             )
-        ]
-        for prompt in prompts
-    ]
+        except Exception as exc:
+            failures.failed(exc)  # raises unless transient
+            ratings.append([None] * num_judges)
+            continue
+        ratings.append([_parse_score_response(raw, MAX_DIFFICULTY)[0] for raw in raws])
+    failures.report(
+        f"filter.by_judged_difficulty: {len(failures)} of {len(prompts)} judge "
+        "requests failed after retries; those rows are unrated"
+    )
+    return ratings
