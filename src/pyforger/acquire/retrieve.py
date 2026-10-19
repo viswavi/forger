@@ -124,3 +124,25 @@ def retrieve_from_s2(
     """Fetch papers from Semantic Scholar."""
     source = S2RetrievalSource(**kwargs)
     return retrieve(source, mode=mode, queries=queries, n=n, seed=seed, **kwargs)
+
+
+def retrieve_citations_from_s2(
+    paper_id: str,
+    *,
+    n: int = 100,
+    **kwargs: Any,
+) -> list[dict[str, Any]]:
+    """Fetch papers citing one Semantic Scholar paper (ID or ``DOI:<doi>``).
+
+    Items carry the rich bibliographic fields of CITATIONS mode (year,
+    venue, authors, citation_count, external_ids, url) in addition to
+    the usual text/id/title/summary.
+    """
+    source = S2RetrievalSource(**kwargs)
+    return retrieve(
+        source,
+        mode=RetrieveMode.CITATIONS,
+        queries=[paper_id],
+        n=n,
+        **kwargs,
+    )
