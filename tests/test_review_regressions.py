@@ -116,7 +116,6 @@ def test_hostile_proc_name_cannot_evade_verifier_cleanup(tmp_path):
 @pytest.fixture
 def offline_sail(tmp_path, monkeypatch):
     """Offline Sail fixture using a local Sailbox substitute."""
-
     # Substitute only provisioning/UIDs and absolute VM paths. Commands, file
     # transport, validation, and verifier lifecycle are production code.
     class Box(LocalSailbox):
@@ -202,7 +201,6 @@ def test_sail_verifier_outputs_and_accepted_snapshot(offline_sail, validated):
 @pytest.fixture
 def offline_harbor(tmp_path, monkeypatch):
     """Offline Harbor fixture executing the replay worker locally."""
-
     # No Harbor service is required: execute the packaged replay worker in a
     # real subprocess, retaining the real request and collection protocol.
     def execute(task, scripts, output, **kwargs):
