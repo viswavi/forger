@@ -837,7 +837,7 @@ A `metric` for the difficulty filters that runs programs on tests.
 
 Inspect operations: analyze existing data.
 
-Also exported, not documented here: `SpendReport`, `SpendTotal`.
+Also exported, not documented here: `PhraseReport`, `SpendReport`, `SpendTotal`.
 
 ### `inspect.inspect_step`
 
@@ -850,6 +850,25 @@ inspect_step(name: str | None = None) -> StepRecord
 Print the full report of the latest run of step `name` and return it.
 
 **Returns:** The step's `StepRecord`, as printed.
+
+### `inspect.phrase_frequency`
+
+Not cached (wrap it with `@op` to memoize); listed in step reports as `inspect.phrase_frequency`.
+
+```python
+phrase_frequency(
+    rows: list[dict],
+    fields: list[str] | str | None = None,
+    *,
+    ngram_range: tuple[int, int] = (2, 4),
+    top_k: int = 10,
+    min_share: float = 0.05,
+    max_rows: int = 2000,
+    max_chars: int = 2000,
+) -> PhraseReport
+```
+
+Print and return the phrases and names that the most rows share, per field.
 
 ### `inspect.spend`
 

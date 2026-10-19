@@ -1359,6 +1359,24 @@ def _fields_text(rec: StepRecord | RowStream, label: str = "") -> Text | None:
     return text
 
 
+def _repeated_text(rec: StepRecord | RowStream, label: str = "") -> Text | None:
+    """``repeated: rewrite "i need" 78/79 (99%) · context "Maya" 46/79 (58%)``."""
+    if not rec.repeated:
+        return None
+    text = Text()
+    if label:
+        text.append(f"{_clean(label)} ", style="bold")
+    text.append("repeated: ", style="dim")
+    text.append(
+        " · ".join(
+            f'{_clean(r.field)} "{_clean(r.text)}" {r.rows}/{r.n_rows} '
+            f"({r.rows / r.n_rows:.0%})"
+            for r in rec.repeated
+        )
+    )
+    return text
+
+
 def _cached_line(rec: StepRecord) -> RenderableType:
     """A cached step in one line: ``step x · 5 → 3 rows · cached · originally …``."""
     title = Text()
@@ -1441,6 +1459,11 @@ def step_renderable(
         fields = _fields_text(stream, label=stream.name)
         if fields is not None:
             body.append(fields)
+    for line in [_repeated_text(rec)] + [
+        _repeated_text(s, label=s.name) for s in rec.streams or []
+    ]:
+        if line is not None:
+            body.append(line)
     if rec.input_type or rec.output_type:
         arrow = f"{rec.input_type or 'any'} → {rec.output_type or 'any'}"
         body.append(Text(f"rows validated: {arrow}", style="dim"))

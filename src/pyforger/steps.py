@@ -17,7 +17,8 @@ row lists (``{"train": kept, "refusals": refused}``), each reported as its own
 stream. A later step takes one stream: ``format_train(out["train"])``.
 
 Each step is cached like an ``@op`` and prints a report when it returns: the
-output rows' fields, every op it ran with rows in/out, yield, time, tokens, and
+output rows' fields, phrases and names that many of them repeat (see
+``pyforger._phrases``), every op it ran with rows in/out, yield, time, tokens, and
 cost (repeated calls of one op share a row), a histogram of each filter's
 scores, warnings, and a sample row. Rows that plain Python dropped or added
 between ops, or between steps, show as dim ``(python)`` rows (see
@@ -46,7 +47,7 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
-from pyforger import _summaries, _tracking
+from pyforger import _phrases, _summaries, _tracking
 from pyforger._render import (
     print_pipeline,
     print_step,
@@ -474,6 +475,8 @@ def step(
                     rec.cost_usd,
                     rec.token_units,
                 ) = usage
+                if _reports_enabled(prod):  # only printed reports pay for it
+                    _add_repeats(rec, result, filled if input_keys is not None else [])
                 _tracking.store_step(rec)
                 if pipeline_rec is not None:
                     _tracking.join_pipeline(pipeline_rec, rec, started, result)
@@ -505,6 +508,19 @@ def step(
     if _fn is not None:
         return decorate(_fn)
     return decorate
+
+
+def _add_repeats(rec: StepRecord, result: Any, inputs: list[list[Any]]) -> None:
+    """Set the ``repeated:`` items of the step's output rows (of each stream).
+
+    ``inputs`` are the step's rows arguments when they are dicts, else empty.
+    """
+    before = [row for rows in inputs for row in rows]
+    if isinstance(result, list):
+        rec.repeated = _phrases.step_repeats(result, before)
+    elif _is_streams(result) and rec.streams:
+        for stream in rec.streams:
+            stream.repeated = _phrases.step_repeats(result.get(stream.name, []), before)
 
 
 def _usage_totals(usage: _tracking.Usage, start: float) -> UsageTotals:

@@ -78,12 +78,13 @@ Structure a pipeline as a `@pyforger.pipeline` function that calls `@pyforger.st
 function from rows to rows built from Forger ops (typically acquire or alter, then filter); it may also take several
 lists of rows and return a dict of named row lists (see [Several inputs and output
 streams](#several-inputs-and-output-streams)). Each step is cached like
-an `@op` and, when it returns, prints a report: the fields of its output rows; every op it ran with rows in/out, yield,
-time, tokens, and cost; a histogram of each filter's scores with what other thresholds would have kept; warnings; and
-one sample output row. The pipeline prints a summary table of its steps at the end. Read these reports after every
-run. A cached step prints one line, `step translate · 42 → 40 rows · cached · originally 0.5s · $0.0034`, with the
-number of its warnings if it has any; `inspect_step(name)` prints its full report, which lists the ops of the run that
-cached it, marked `cached`, with that run's warnings and score histograms (`filter.by_llm_score (cached run) · …`).
+an `@op` and, when it returns, prints a report: the fields of its output rows; phrases and names repeated across
+them; every op it ran with rows in/out, yield, time, tokens, and cost; a histogram of each filter's scores with what
+other thresholds would have kept; warnings; and one sample output row. The pipeline prints a summary table of its
+steps at the end. Read these reports after every run. A cached step prints one line,
+`step translate · 42 → 40 rows · cached · originally 0.5s · $0.0034`, with the number of its warnings if it has any;
+`inspect_step(name)` prints its full report, which lists the ops of the run that cached it, marked `cached`, with that
+run's warnings and score histograms (`filter.by_llm_score (cached run) · …`).
 A filter whose own result came from the op cache inside a step that ran also shows the scores of the run that cached
 it, marked the same way (`×5 (2 cached)` when some chunks were cached). Results cached before scores were stored with
 them, and score lists of over 100,000 rows, have none: rerun with `_no_cache=True` to see them.
@@ -92,6 +93,17 @@ them, and score lists of over 100,000 rows, have none: rerun with `_no_cache=Tru
   of the output rows with the types of its values (from all rows, or 5,000 evenly spaced rows of a longer list); `?`
   marks a field that some rows lack; `+` / `−` are fields added or removed relative to the input rows, when the step's
   rows arguments are lists of dicts.
+- Repeated line: `repeated: rewrite "i need" 78/79 (99%) · context "is writing to" 64/79 (81%) · context "Maya" 46/79
+  (58%)`. For string fields the step added or changed, the phrases (2–4 words) and capitalized names in a large share
+  of the output rows: templating and name collapse that exact-match and ROUGE-L filters pass, since every row is
+  distinct. A phrase needs 30% of the rows for values of up to 100 words, more for longer ones (60% at 200 words, at
+  most 90%), since long values share phrases by chance; a name needs 30%. Each field gives its most repeated phrase,
+  the most repeated name gets a place, and the line has at most 3 items, or is absent. Left out as template text:
+  markup, headings and the section under a heading most rows share (an `## Input` section's "The first line
+  contains"), lines most rows share (an instruction prefix), code (`import sys`), categorical and identifier fields,
+  stopword-only and "the problem"-style phrases, and phrases the input rows had nearly as often (the seed or the
+  template put them there). It reads at most 200 rows (evenly spaced) of 1,000 characters each, from steps with 10 or
+  more output rows, and is skipped when reports are off. For the full lists, call `inspect.phrase_frequency`.
 - Chunks of one op in a step share one row, e.g. `alter.generate_from_context ×5`, with summed rows, time, tokens,
   and cost, and the yield of the sums. Each call is still checked against its own `min_yield` / `max_yield`
   (`LOW 2/5 · min 0.60` means two of five calls missed, `RAISED 1/5` that one raised). Their filter scores pool into
@@ -609,6 +621,15 @@ producing new rows in the pipeline.
 | `topic_based_clustering` | yes | Interpretable clustering of contents of one field from the input rows. |
 | `inspect_step` | no | Print the full report of the latest run of a `@step` and return its `StepRecord`. |
 | `spend` | no | Print and return the spend ledger's totals by run, pipeline, and step. |
+| `phrase_frequency` | no | Print and return, per string field, the phrases and names the most rows share. No LLM. |
+
+`phrase_frequency(rows, fields=None, *, ngram_range=(2, 4), top_k=10, min_share=0.05, max_rows=2000,
+max_chars=2000)` counts document frequency: the share of rows whose value contains each word n-gram (lowercased) or
+capitalized name, e.g. `rewrite  phrases: "i need" 78/79 (99%) · "i need you to" 46/79 (58%)` and `context  names:
+"Maya" 46/79 (58%)`. It leaves out the same template text as the step report's `repeated:` line, lists a phrase only
+when no longer phrase containing it is in nearly as many rows, and returns a `PhraseReport` (one `FieldPhrases` per
+field, with `skipped` set for categorical, identifier, and code fields). Topic clustering can look balanced while
+every row says "I need"; run both. Rows are not modified.
 
 Topic-based clustering uses the ClusterFusion clustering algorithm ([arXiv:2512.04350](https://arxiv.org/abs/2512.04350)),
 a hybrid method in which embeddings guide how rows are partitioned and an LLM summarizes the partitions into
