@@ -281,7 +281,8 @@ def test_rerun_resends_only_failed_prompts(monkeypatch):
     monkeypatch.setenv("FORGER_STEP_REPORT", "0")
     _tracking.clear_step_records()
     completions = FailingCompletions(fail={"B": 3})
-    model = Model("gpt-4o", show_progress=False)
+    # num_retries=0: each op-level try is one request, as the counts assume.
+    model = Model("gpt-4o", show_progress=False, num_retries=0)
 
     @step
     def answer(rows, model):
@@ -315,7 +316,7 @@ def test_repeated_prompt_retry_gets_its_own_completion():
         rows = generate_from_context(
             [{"q": "A"}, {"q": "A"}],
             "{q}",
-            Model("gpt-4o", show_progress=False),
+            Model("gpt-4o", show_progress=False, num_retries=0),
             max_retries=1,
         )
     assert sorted(row["text"] for row in rows) == ["A!0", "A!1"]
@@ -474,6 +475,21 @@ class TestFatalErrors:
         )
         with pytest.raises(litellm.AuthenticationError):
             generate_from_context(ITEMS, "{q}", model, max_retries=3, merge=True)
+        assert [c[0] for c in model.calls] == ["A", "B", "C"]
+
+    def test_generate_from_context_raises_when_out_of_quota(self):
+        """A 429 with OpenAI's insufficient_quota raises: no retry fixes it."""
+
+        def out_of_quota(prompt):
+            return litellm.RateLimitError(
+                message="Error code: 429 - {'error': {'code': 'insufficient_quota'}}",
+                llm_provider="openai",
+                model="m",
+            )
+
+        model = FlakyModel(fail={"B": 9}, error=out_of_quota)
+        with pytest.raises(litellm.RateLimitError):
+            generate_from_context(ITEMS, "{q}", model, max_retries=3)
         assert [c[0] for c in model.calls] == ["A", "B", "C"]
 
     def test_sample_from_llm_raises_on_unknown_model(self):

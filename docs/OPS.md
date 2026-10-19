@@ -36,6 +36,7 @@ Model(
     show_progress: bool | None = None,
     max_concurrency: int | None = None,
     request_cache: bool = True,
+    timeout: float | Literal["auto"] | None = "auto",
     **kwargs: Any,
 )
 ```

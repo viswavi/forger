@@ -6,16 +6,19 @@ completions from any supported LLM provider.
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import inspect
 import os
+import random
+import statistics
 import sys
 import threading
 import time
 import warnings
 from collections.abc import Callable, Iterable, Iterator
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from typing import Any, Union
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from typing import Any, Literal, Union
 
 import litellm
 
@@ -39,8 +42,40 @@ _DEFAULT_MAX_WORKERS = 100
 # requests, e.g. n=40 on gpt-4o sends n=14, 13 and 13.
 _MAX_N_PER_REQUEST = 16
 # Without a terminal (stderr redirected to a log file), progress is a plain log
-# line at most this often instead of a redrawn bar.
+# line this often instead of a redrawn bar, also while nothing finishes.
 _PROGRESS_LOG_INTERVAL_S = 30.0
+# A request in flight longer than both of these (seconds, and times the median
+# duration of the batch's finished requests) gets one warning, e.g. at 9
+# minutes when the others took 41s.
+_STRAGGLER_MIN_S = 120.0
+_STRAGGLER_FACTOR = 5.0
+# Model(timeout="auto"): each request attempt may take this long, or longer
+# when max_tokens at this slow a rate needs it (max_tokens=32768 gets 1311s).
+# LiteLLM's own default is 6000s, so a stuck request blocks for 100 minutes.
+_DEFAULT_TIMEOUT_S = 600.0
+_SLOW_TOKENS_PER_S = 25.0
+# Model(num_retries=) waits before retry k (0, 1, ...) about this many seconds
+# times 2**k, at most _RETRY_MAX_S: 1s, 2s, 4s, ... A 429's Retry-After header
+# is honoured up to _RETRY_AFTER_MAX_S.
+_RETRY_BASE_S = 1.0
+_RETRY_MAX_S = 30.0
+_RETRY_AFTER_MAX_S = 60.0
+# Status codes worth asking again: request timeout, conflict, too early, rate
+# limit. Every 5xx is too.
+_TRANSIENT_STATUS = frozenset({408, 409, 425, 429})
+# A 429 (or other error) that means the account is out of quota or budget,
+# which no retry fixes: OpenAI's "insufficient_quota" or "billing_hard_limit_
+# reached" code, Anthropic's "credit balance is too low", LiteLLM's
+# BudgetExceededError, Forger's spending caps (TokenUnitQuotaExceeded). Not
+# "You exceeded your current quota ... billing details" alone: Gemini says
+# that for a per-minute rate limit, which a retry does fix.
+_QUOTA_MARKERS = (
+    "insufficient_quota",
+    "billing_",
+    "credit balance",
+    "budget",
+    "quotaexceeded",
+)
 
 _logger = get_formatted_logger(__name__)
 
@@ -59,20 +94,212 @@ def _progress_mode(show_progress: bool | None) -> str:
     return "bar" if isatty is not None and isatty() else "log"
 
 
-def _log_progress(futures: Iterable[Future], total: int, desc: str) -> Iterator[Future]:
-    """Yield `futures` and log "<desc>: 120/500 done, 31s" at most every 30s.
+def _request_timeout(timeout: Any, max_tokens: int | None) -> Any:
+    """The `timeout` litellm gets per request attempt; "auto" picks one."""
+    if timeout != "auto":
+        return timeout
+    if max_tokens is None:
+        return _DEFAULT_TIMEOUT_S
+    return max(_DEFAULT_TIMEOUT_S, float(round(max_tokens / _SLOW_TOKENS_PER_S)))
 
-    A batch that finishes within the interval logs nothing.
+
+def _is_transient(exc: BaseException) -> bool:
+    """True for provider errors a retry can fix: timeouts, 429s, 5xx, lost connections.
+
+    litellm's and openai's ``Timeout`` / ``APIConnectionError`` and builtin
+    ``TimeoutError`` / ``ConnectionError`` are transient; other errors are judged
+    by their ``status_code``. A bad key (401), unknown model (404), or bad
+    request (400, e.g. context length) is not, nor is an error with no status,
+    nor an exhausted quota or budget (a 429 with "insufficient_quota").
     """
-    start = last = time.monotonic()
+    text = f"{type(exc).__name__} {getattr(exc, 'code', '')} {exc}".lower()
+    if any(marker in text for marker in _QUOTA_MARKERS):
+        return False
+    if isinstance(exc, (TimeoutError, ConnectionError)):
+        return True
+    try:
+        import openai
+    except ImportError:  # pragma: no cover - openai ships with litellm
+        pass
+    else:
+        if isinstance(exc, (openai.APITimeoutError, openai.APIConnectionError)):
+            return True
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        return status in _TRANSIENT_STATUS or status >= 500
+    return False
+
+
+def _retry_after(exc: BaseException) -> float | None:
+    """Seconds from the error's Retry-After header, or None without one.
+
+    openai errors carry the httpx response; litellm's also copy its headers
+    to ``litellm_response_headers``. An HTTP-date value is ignored.
+    """
+    response = getattr(exc, "response", None)
+    for headers in (
+        getattr(response, "headers", None),
+        getattr(exc, "litellm_response_headers", None),
+    ):
+        if headers is None:
+            continue
+        try:
+            value = headers.get("retry-after") or headers.get("Retry-After")
+            return max(0.0, float(value))
+        except (AttributeError, TypeError, ValueError):
+            continue
+    return None
+
+
+def _retry_delay(retry: int, exc: BaseException) -> float:
+    """Seconds to wait before retry `retry` (0, 1, ...) after `exc`."""
+    after = _retry_after(exc)
+    if after is not None:
+        return min(after, _RETRY_AFTER_MAX_S)
+    # Half to full backoff, so 100 requests that hit one 429 do not return
+    # together.
+    backoff = min(_RETRY_BASE_S * 2**retry, _RETRY_MAX_S)
+    return backoff * (0.5 + random.random() / 2)
+
+
+# Patched in tests, which also sleep in their fake completions.
+_sleep = time.sleep
+
+
+def _duration(seconds: float) -> str:
+    """Short duration, e.g. "41s", "9m 12s", "10m", "1h 5m"."""
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m {s % 60}s" if s % 60 else f"{s // 60}m"
+    return f"{s // 3600}h {s % 3600 // 60}m"
+
+
+class _RequestClock:
+    """When each request of one batch started and ended; warns about stragglers."""
+
+    def __init__(self, desc: str, timeout: Any) -> None:
+        """`timeout` is what litellm gets per attempt, named in the warning."""
+        self.desc = desc
+        self.timeout = timeout
+        self.lock = threading.Lock()
+        self.started: dict[int, float] = {}
+        self.ended: dict[int, float] = {}
+        self.warned: set[int] = set()
+
+    def run(
+        self,
+        i: int,
+        messages: list[Message],
+        n: int,
+        call_kwargs: dict[str, Any],
+        semaphore: threading.BoundedSemaphore | None,
+        retries: int = 0,
+        on_response: Callable[[int, Any], None] | None = None,
+    ) -> Any:
+        """`_complete_and_report` for request `i`, timed from its first slot."""
+
+        def start() -> None:
+            with self.lock:
+                self.started.setdefault(i, time.monotonic())
+
+        try:
+            return _complete_and_report(
+                i,
+                messages,
+                n,
+                call_kwargs,
+                semaphore,
+                on_response,
+                on_start=start,
+                retries=retries,
+            )
+        finally:
+            with self.lock:
+                self.ended[i] = time.monotonic()
+
+    def warn_stragglers(self, now: float) -> None:
+        """Warn once about requests in flight far longer than the finished ones.
+
+        Needs a finished request to compare with: a batch of long calls that
+        all run about equally long is not warned about.
+        """
+        with self.lock:
+            durations = [
+                end - self.started[i]
+                for i, end in self.ended.items()
+                if i in self.started
+            ]
+            in_flight = [
+                (i, now - t)
+                for i, t in self.started.items()
+                if i not in self.ended and i not in self.warned
+            ]
+        if not durations:
+            return
+        median = statistics.median(durations)
+        limit = max(_STRAGGLER_MIN_S, _STRAGGLER_FACTOR * median)
+        late = [(i, age) for i, age in in_flight if age > limit]
+        if not late:
+            return
+        self.warned.update(i for i, _ in late)
+        if isinstance(self.timeout, (int, float)):
+            # A timed-out attempt is retried (num_retries), so a request can
+            # stay in flight past its timeout.
+            limit_text = (
+                f"each attempt times out after {_duration(self.timeout)} "
+                "(Model(timeout=...)) and is retried"
+            )
+        elif self.timeout is None:
+            limit_text = "Model(timeout=None) leaves LiteLLM's default timeout"
+        else:  # e.g. an httpx.Timeout
+            limit_text = f"it times out per Model(timeout={self.timeout!r})"
+        _logger.warning(
+            "%s: %s in flight for %s (median of completed requests %s); %s",
+            self.desc,
+            "1 request" if len(late) == 1 else f"{len(late)} requests",
+            _duration(max(age for _, age in late)),
+            _duration(median),
+            limit_text,
+        )
+
+
+def _watch(
+    futures: Iterable[Future], total: int, desc: str, log: bool, clock: _RequestClock
+) -> Iterator[Future]:
+    """Yield `futures` as they finish, checking every 30s while any are in flight.
+
+    A check warns about stragglers and, with `log`, logs "<desc>: 120/500
+    done, 31s", also when nothing finished since the last line. A batch that
+    finishes within the interval logs nothing.
+    """
+    start = time.monotonic()
+    next_check = start + _PROGRESS_LOG_INTERVAL_S
+    pending = set(futures)
     done = 0
-    for future in futures:
-        done += 1
+    logged = False
+    while pending:
+        # Sleep until a request finishes or the next check is due (at least
+        # 10ms, so a zero interval does not spin).
+        finished, pending = wait(
+            pending,
+            timeout=max(next_check - time.monotonic(), 0.01),
+            return_when=FIRST_COMPLETED,
+        )
+        done += len(finished)
+        yield from finished
         now = time.monotonic()
-        if now - last >= _PROGRESS_LOG_INTERVAL_S or (done == total and last > start):
-            _logger.info("%s: %d/%d done, %.0fs", desc, done, total, now - start)
-            last = now
-        yield future
+        if pending and now >= next_check:
+            if log:
+                _logger.info("%s: %d/%d done, %.0fs", desc, done, total, now - start)
+                logged = True
+            clock.warn_stragglers(now)
+            next_check = now + _PROGRESS_LOG_INTERVAL_S
+    if logged:
+        _logger.info(
+            "%s: %d/%d done, %.0fs", desc, done, total, time.monotonic() - start
+        )
 
 
 def _make_semaphore(max_concurrency: int | None) -> threading.BoundedSemaphore | None:
@@ -110,18 +337,45 @@ def _complete(
     n: int,
     call_kwargs: dict[str, Any],
     semaphore: threading.BoundedSemaphore | None,
+    on_start: Callable[[], None] | None = None,
+    retries: int = 0,
 ) -> Any:
     """One litellm.completion call, holding a `max_concurrency` slot if any.
 
+    A transient error (`_is_transient`: a timeout, 429, 5xx, lost connection)
+    is retried up to `retries` times after a short backoff, without holding
+    the slot; any other error, or the last one, is raised. So a request makes
+    at most `retries + 1` attempts (LiteLLM itself is told not to retry).
+
     The response's usage is recorded here, in the worker, before the caller
     sees it: a batch that later raises or is interrupted keeps every
-    finished request in the step report.
+    finished request in the step report. `on_start` runs each time the
+    request holds its slot, just before it is sent.
     """
-    if semaphore is None:
-        response = litellm.completion(messages=messages, n=n, **call_kwargs)
-    else:
-        with semaphore:
-            response = litellm.completion(messages=messages, n=n, **call_kwargs)
+    retry = 0
+    while True:
+        try:
+            with contextlib.ExitStack() as slot:
+                if semaphore is not None:
+                    slot.enter_context(semaphore)
+                if on_start is not None:
+                    on_start()
+                response = litellm.completion(messages=messages, n=n, **call_kwargs)
+            break
+        except Exception as exc:
+            if retry >= retries or not _is_transient(exc):
+                raise
+            delay = _retry_delay(retry, exc)
+            retry += 1
+            _logger.info(
+                "LLM request (%s) failed with %s; retry %d of %d in %.1fs",
+                call_kwargs.get("model", "?"),
+                type(exc).__name__,
+                retry,
+                retries,
+                delay,
+            )
+            _sleep(delay)
     _add_response_usage(response, call_kwargs.get("model", "?"))
     return response
 
@@ -133,9 +387,13 @@ def _complete_and_report(
     call_kwargs: dict[str, Any],
     semaphore: threading.BoundedSemaphore | None,
     on_response: Callable[[int, Any], None] | None,
+    on_start: Callable[[], None] | None = None,
+    retries: int = 0,
 ) -> Any:
     """`_complete`, then `on_response(i, response)` in the same worker thread."""
-    response = _complete(messages, n, call_kwargs, semaphore)
+    response = _complete(
+        messages, n, call_kwargs, semaphore, on_start=on_start, retries=retries
+    )
     if on_response is not None:
         on_response(i, response)
     return response
@@ -149,23 +407,27 @@ def _batch_completion_with_progress(
     max_workers: int = _DEFAULT_MAX_WORKERS,
     progress: str = "bar",
     on_response: Callable[[int, Any], None] | None = None,
+    retries: int = 0,
 ) -> list[Any]:
     """Send (messages, n) requests concurrently; return responses or errors.
 
-    Results are in request order. `on_response(i, response)` runs in the worker
-    as each request succeeds (the request cache writes there, so a run killed
-    mid-batch keeps every finished request).
+    Results are in request order. Each request retries transient errors up
+    to `retries` times (see `_complete`). `on_response(i, response)` runs in
+    the worker as each request succeeds (the request cache writes there, so a
+    run killed mid-batch keeps every finished request).
 
     A replacement for `litellm.batch_completion`, which retrieves
     `future.result()` in submission order, so the whole call looks frozen until
-    the *slowest* early-submitted item finishes. This reports progress via
-    `as_completed` as each call actually finishes: a tqdm bar (`progress="bar"`),
-    a log line every 30s (`"log"`), or nothing (`"off"`). Each request holds a
-    slot of `semaphore` (the Model's `max_concurrency`) while in flight.
+    the *slowest* early-submitted item finishes. This reports progress as each
+    call actually finishes: a tqdm bar (`progress="bar"`), a log line every 30s
+    (`"log"`), or nothing (`"off"`). Each request holds a slot of `semaphore`
+    (the Model's `max_concurrency`) while in flight. In every mode, a request
+    in flight far longer than the finished ones gets one warning.
     """
     results: list[Any] = [None] * len(requests)
     total = len(requests)
     desc = f"LLM calls ({call_kwargs.get('model', '?')})"
+    clock = _RequestClock(desc, call_kwargs.get("timeout"))
     executor = ThreadPoolExecutor(max_workers=min(max_workers, total))
     try:
         future_to_idx: dict[Future, int] = {}
@@ -175,22 +437,23 @@ def _batch_completion_with_progress(
             run: Callable[..., Any] = contextvars.copy_context().run
             future = executor.submit(
                 run,
-                _complete_and_report,
+                clock.run,
                 i,
                 msgs,
                 n,
                 call_kwargs,
                 semaphore,
+                retries,
                 on_response,
             )
             future_to_idx[future] = i
-        finished: Iterable[Future] = as_completed(future_to_idx)
+        finished: Iterable[Future] = _watch(
+            future_to_idx, total, desc, progress == "log", clock
+        )
         if progress == "bar":
             from tqdm import tqdm
 
             finished = tqdm(finished, total=total, desc=desc, leave=False)
-        elif progress == "log":
-            finished = _log_progress(finished, total, desc)
         for future in finished:
             idx = future_to_idx[future]
             try:
@@ -596,6 +859,7 @@ class Model:
         show_progress: bool | None = None,
         max_concurrency: int | None = None,
         request_cache: bool = True,
+        timeout: float | Literal["auto"] | None = "auto",
         **kwargs: Any,
     ) -> None:
         """Create a Model instance.
@@ -607,8 +871,12 @@ class Model:
                 (OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.) when None.
             temperature: Default sampling temperature.
             max_tokens: Default max tokens. None lets the provider decide.
-            num_retries: Retries with exponential backoff on transient
-                failures.
+            num_retries: Retries per request on transient failures (a
+                timeout, 429, 5xx, or lost connection), after a 1s, 2s, ...
+                backoff or a 429's Retry-After. A request makes at most
+                num_retries + 1 attempts: LiteLLM is sent num_retries=0, so
+                neither it nor the openai client retries on top. A 400, 401,
+                403, 404, or an exhausted quota is not retried.
             show_progress: Progress for a generate_batch() call that sends
                 more than one request (several prompts, or n > 1 on a model
                 that does not support n): a tqdm bar when stderr is a
@@ -623,8 +891,13 @@ class Model:
                 the same request again (see generate_batch). False, or the
                 environment variable FORGER_REQUEST_CACHE=0, turns it off. Not
                 part of cache_key().
+            timeout: Seconds one request attempt may take before it fails
+                with a timeout, which is retried like other transient errors
+                (num_retries). "auto" (default) is 600, or
+                max_tokens / 25 when that is longer (32768 tokens get 1311).
+                None leaves LiteLLM's default (6000). Not part of cache_key().
             **kwargs: Passed through to litellm.completion()
-                (e.g. api_base, timeout, organization).
+                (e.g. api_base, organization).
         """
         if max_concurrency is not None and max_concurrency <= 0:
             raise ValueError("max_concurrency must be positive")
@@ -637,6 +910,7 @@ class Model:
         self._show_progress = show_progress
         self._max_concurrency = max_concurrency
         self._semaphore = _make_semaphore(max_concurrency)
+        self._timeout = timeout
         self._kwargs = kwargs
         self.history: list[GenerateResult] = []
         self._check_params(
@@ -659,6 +933,8 @@ class Model:
         """Restore, with a fresh semaphore of the same max_concurrency."""
         self.__dict__.update(state)
         self._semaphore = _make_semaphore(state.get("_max_concurrency"))
+        # A Model pickled before Model(timeout=) existed.
+        self.__dict__.setdefault("_timeout", "auto")
 
     def _check_params(self, **params: Any) -> None:
         """Validate params against LiteLLM's registry for this model id."""
@@ -852,9 +1128,17 @@ class Model:
             max_tokens=max_tokens,
             stop=stop,
             api_key=self._api_key,
-            num_retries=self._num_retries,
             **self._kwargs,
         )
+        # Model retries in _complete, so LiteLLM must not: num_retries=0 turns
+        # off its retries and sets the openai client's max_retries to 0. A
+        # max_retries the caller passed would be overwritten by it, so then
+        # only the openai client retries, as asked.
+        if "max_retries" not in self._kwargs:
+            call_kwargs["num_retries"] = 0
+        timeout = _request_timeout(self._timeout, max_tokens)
+        if timeout is not None:
+            call_kwargs["timeout"] = timeout
         # Key each prompt on the op call it comes from and its row, e.g. in
         # generate_from_context(rows, "Solve {q}", model) the row {"q": "2+2"}.
         # Slots are handed out per op call, so the same request asked twice in
@@ -1030,7 +1314,13 @@ class Model:
             try:
                 responses = [
                     _complete_and_report(
-                        0, messages, size, call_kwargs, self._semaphore, on_response
+                        0,
+                        messages,
+                        size,
+                        call_kwargs,
+                        self._semaphore,
+                        on_response,
+                        retries=self._num_retries,
                     )
                 ]
             except Exception as exc:
@@ -1045,6 +1335,7 @@ class Model:
                 max_workers=self._max_concurrency or _DEFAULT_MAX_WORKERS,
                 progress=progress,
                 on_response=on_response,
+                retries=self._num_retries,
             )
         if not return_exceptions:
             for response in responses:
