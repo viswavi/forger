@@ -779,7 +779,9 @@ class TinkerModel(Model):
         self._record(
             [r for r in results if isinstance(r, GenerateResult)], add_usage=False
         )
-        _note_truncation(results, self._model_id, max_tokens)
+        _note_truncation(
+            results, self._model_id, max_tokens, "; raise the TinkerModel's max_tokens"
+        )
         return results
 
     def _decode(self, runtime: _Runtime, sequence: Any, stop: list[str]) -> str:

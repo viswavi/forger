@@ -594,19 +594,37 @@ def _rebuild_generate_result(
     )
 
 
-def _note_truncation(results: list[Any], model_id: str, max_tokens: int | None) -> None:
+def _note_truncation(
+    results: list[Any],
+    model_id: str,
+    max_tokens: int | None,
+    advice: str | None = None,
+) -> None:
     """Count completions that hit max_tokens toward the running op's report.
 
     Outside any op the count is logged here, since no report will show it.
+    ``advice`` is the warning's tail (see ``_tracking.truncation_message``).
+    Inside ``_tracking.reporting_unclosed_think`` a completion that stops
+    mid-thought (``"<think>still thinking"``) is left out: the op reports it.
     """
     done = [r for r in results if isinstance(r, GenerateResult)]
-    truncated = sum(r.truncated for r in done)
+    skip_unclosed = _tracking.reports_unclosed_think()
+    truncated = sum(
+        reason == "length"
+        and not (
+            skip_unclosed
+            and isinstance(text, str)
+            and "<think>" in text
+            and "</think>" not in text
+        )
+        for r in done
+        for text, reason in zip(r, r.finish_reasons)
+    )
     total = sum(len(r) for r in done)
-    if not _tracking.add_truncation(model_id, max_tokens, truncated, total) and (
-        truncated
-    ):
+    noted = _tracking.add_truncation(model_id, max_tokens, truncated, total, advice)
+    if truncated and not noted:
         _logger.warning(
-            _tracking.truncation_message(model_id, max_tokens, truncated, total)
+            _tracking.truncation_message(model_id, max_tokens, truncated, total, advice)
         )
 
 
@@ -1990,7 +2008,9 @@ class LocalModel(Model):
             results.append(result)
 
         self._record(results)
-        _note_truncation(results, self._model_id, max_tokens)
+        _note_truncation(
+            results, self._model_id, max_tokens, "; raise the LocalModel's max_tokens"
+        )
         if n != 1:
             _check_completion_count(self._model_id, n, results, fanned_out=False)
         return results

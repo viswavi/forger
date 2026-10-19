@@ -126,7 +126,8 @@ is 4). Unparseable answers count as no vote, and so does a request that still fa
 transient error (a 504, a timeout): one warning in the step report names the count and the last error, and the result
 is not cached, so a rerun asks again. Another warning counts the judge calls that gave no score by cause (failed,
 unparseable, or stopped mid-thought in an unclosed `<think>`) and the rows they left unscored, e.g. with `group_by`
-`2 of 10 judge calls gave no score (...) → 6 rows unscored`. Errors a retry cannot fix (a bad key, a 400, a spending
+`2 of 10 judge calls gave no score (...) → 6 rows unscored`; calls cut off mid-thought are not counted again in the
+op's warning about completions that stopped at `max_tokens`. Errors a retry cannot fix (a bad key, a 400, a spending
 cap or token-unit quota) still raise. The same holds for every LLM filter: `by_judged_difficulty` leaves a row whose
 request failed unrated, `by_pass_at_k` and `by_comparative_difficulty` grade a failed sample `None` (excluded), and
 `inspect.topic_based_clustering` does not ask a failed request again, though it asks again after an unparseable answer:
@@ -175,7 +176,9 @@ not failed. A truncated completion (an opening `<think>` and no `</think>`: the 
 it graded `None`; `truncated="exclude"` restores that.) `by_comparative_difficulty` defaults to `"exclude"`: a weak
 model that ran out of tokens has not shown the row is hard. The step report counts truncated samples under the
 filter's histogram, e.g. `5 of 12 samples truncated (<think> never closed), graded failed`; if that is most of them,
-raise `max_tokens`. A sample whose request failed has no text, so it grades `None` (excluded), never truncated; with a
+raise `max_tokens`. This note is their only report: the op's warning about completions that stopped at `max_tokens`
+leaves them out, so `strict=True` does not fail on them. A sample whose request failed has no text, so it grades `None`
+(excluded), never truncated; with a
 `Model` or `TinkerModel` (any model whose `generate_batch` takes `return_exceptions`) this includes fan-out copies
 that failed, so a prompt that came back short is padded with `None`. Otherwise, a model that returns a number of
 completions other than `n` for a prompt raises `ValueError`: a sample missing for any reason other than a failed

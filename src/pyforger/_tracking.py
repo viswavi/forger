@@ -24,12 +24,13 @@ usage, and it counts only toward the process total.
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import json
 import math
 import os
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -404,10 +405,16 @@ _ACTIVE_WARNINGS: ContextVar[list[str] | None] = ContextVar(
     "forger_active_warnings", default=None
 )
 # Completions the innermost active op got that stopped at max_tokens, keyed by
-# (model_id, max_tokens): [truncated, total]. A nested op's counts go to its caller.
+# (model_id, max_tokens, advice): [truncated, total]. A nested op's counts go to
+# its caller.
 _ACTIVE_TRUNCATION: ContextVar[
-    dict[tuple[str, int | None], list[int]] | None
+    dict[tuple[str, int | None, str | None], list[int]] | None
 ] = ContextVar("forger_active_truncation", default=None)
+# True while an op reports completions cut off mid-thought (an unclosed
+# <think>) itself, e.g. by_pass_at_k's "3 of 8 samples truncated" note.
+_REPORTS_UNCLOSED_THINK: ContextVar[bool] = ContextVar(
+    "forger_reports_unclosed_think", default=False
+)
 # Set by the active step; ``op.py`` calls it on a step's fresh result before
 # caching it, so a result that breaks the step's contract (or, under
 # strict=True, has warnings) is never cached. It returns the step metadata that
@@ -788,7 +795,7 @@ class OpToken:
     usage_token: Token[tuple[Usage, ...]] | None = None
     warnings_token: Token[list[str] | None] | None = None
     truncation_token: (
-        Token[dict[tuple[str, int | None], list[int]] | None] | None
+        Token[dict[tuple[str, int | None, str | None], list[int]] | None] | None
     ) = None
 
     def usage_totals(self) -> tuple[int, int, float, float]:
@@ -841,24 +848,36 @@ def current_warnings() -> list[str]:
 
 
 def truncation_message(
-    model_id: str, max_tokens: int | None, truncated: int, total: int
+    model_id: str,
+    max_tokens: int | None,
+    truncated: int,
+    total: int,
+    advice: str | None = None,
 ) -> str:
     """Say how many completions hit max_tokens, and what to change.
 
     e.g. "349 of 768 completions from deepseek stopped at max_tokens=24000
-    (finish_reason=length) ...".
+    (finish_reason=length) ...". ``advice`` replaces the default tail, which
+    is for a ``Model`` (e.g. "; raise the TinkerModel's max_tokens").
     """
     limit = f"max_tokens={max_tokens}" if max_tokens is not None else "max_tokens"
+    if advice is None:
+        advice = (
+            " (a reasoning model's is often empty: the budget went to thinking); "
+            "raise the Model's max_tokens or lower its reasoning_effort"
+        )
     return (
         f"{truncated} of {total} completions from {model_id} stopped at {limit} "
-        "(finish_reason=length), so their text is cut off (a reasoning model's is "
-        "often empty: the budget went to thinking); raise the Model's max_tokens or "
-        "lower its reasoning_effort"
+        f"(finish_reason=length), so their text is cut off{advice}"
     )
 
 
 def add_truncation(
-    model_id: str, max_tokens: int | None, truncated: int, total: int
+    model_id: str,
+    max_tokens: int | None,
+    truncated: int,
+    total: int,
+    advice: str | None = None,
 ) -> bool:
     """Count one batch's completions toward the running op's truncation warning.
 
@@ -867,7 +886,7 @@ def add_truncation(
     counts = _ACTIVE_TRUNCATION.get()
     if counts is None:
         return False
-    entry = counts.setdefault((model_id, max_tokens), [0, 0])
+    entry = counts.setdefault((model_id, max_tokens, advice), [0, 0])
     entry[0] += truncated
     entry[1] += total
     return True
@@ -876,12 +895,34 @@ def add_truncation(
 def truncation_warnings(op_name: str) -> list[str]:
     """The running op's truncation warnings, one per (model, max_tokens) that hit it."""
     return [
-        f"{op_name}: {truncation_message(model_id, max_tokens, truncated, total)}"
-        for (model_id, max_tokens), (truncated, total) in (
+        f"{op_name}: "
+        + truncation_message(model_id, max_tokens, truncated, total, advice)
+        for (model_id, max_tokens, advice), (truncated, total) in (
             _ACTIVE_TRUNCATION.get() or {}
         ).items()
         if truncated
     ]
+
+
+@contextlib.contextmanager
+def reporting_unclosed_think() -> Iterator[None]:
+    """Leave completions cut off mid-thought out of the max_tokens warning.
+
+    For an op that reports them itself: by_pass_at_k's histogram note says
+    "4 of 8 samples truncated (<think> never closed), graded failed", so a
+    warning about the same samples would say it twice. A completion cut off
+    after its ``</think>`` (or with no ``<think>``) still counts.
+    """
+    token = _REPORTS_UNCLOSED_THINK.set(True)
+    try:
+        yield
+    finally:
+        _REPORTS_UNCLOSED_THINK.reset(token)
+
+
+def reports_unclosed_think() -> bool:
+    """True inside ``reporting_unclosed_think``."""
+    return _REPORTS_UNCLOSED_THINK.get()
 
 
 def scores_meta(scores: list[ScoreRecord]) -> str | None:

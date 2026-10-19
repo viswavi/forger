@@ -189,14 +189,16 @@ def by_comparative_difficulty(
     grades: dict[str, list[list[bool | None]]] = {}
     completions: dict[str, list[list[str | None]]] = {}
     for group, model in (("weak", weak_model), ("strong", strong_model)):
-        completions[group] = _predictions(
-            prompts,
-            model=model,
-            n=1,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            batch_size=batch_size,
-        )
+        # Samples cut off mid-thought are counted in the note under the histogram.
+        with _tracking.reporting_unclosed_think():
+            completions[group] = _predictions(
+                prompts,
+                model=model,
+                n=1,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                batch_size=batch_size,
+            )
         grades[group] = _grades(
             items,
             completions[group],
@@ -379,14 +381,16 @@ def by_pass_at_k(
         )
 
     prompts = _prompts(items, input_field, prompt_template)
-    completions = _predictions(
-        prompts,
-        model=model,
-        n=k,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        batch_size=batch_size,
-    )
+    # Samples cut off mid-thought are counted in the note under the histogram.
+    with _tracking.reporting_unclosed_think():
+        completions = _predictions(
+            prompts,
+            model=model,
+            n=k,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            batch_size=batch_size,
+        )
     grades = _grades(
         items,
         completions,

@@ -223,7 +223,9 @@ def by_llm_score(
                 )
             )
         orders.append(group_orders)
-    responses = _judge_responses(prompts, model=model, temperature=temperature)
+    # A judge cut off mid-thought is counted in the unscored warning below.
+    with _tracking.reporting_unclosed_think():
+        responses = _judge_responses(prompts, model=model, temperature=temperature)
 
     # verdicts[i][j] is judge j's (score, feedback) for row i.
     verdicts: list[list[Verdict]] = [[] for _ in items]
