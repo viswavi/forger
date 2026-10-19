@@ -81,9 +81,11 @@ streams](#several-inputs-and-output-streams)). Each step is cached like
 an `@op` and, when it returns, prints a report: the fields of its output rows; every op it ran with rows in/out, yield,
 time, tokens, and cost; a histogram of each filter's scores with what other thresholds would have kept; warnings; and
 one sample output row. The pipeline prints a summary table of its steps at the end. Read these reports after every
-run. A cached step prints one line, `step translate · 42 → 40 rows · cached · originally 0.5s · $0.0034`, with the
-number of its warnings if it has any; `inspect_step(name)` prints its full report, which lists the ops of the run that
-cached it, marked `cached`, with that run's warnings.
+run. Run each new pipeline version with `FORGER_SMOKE_ROWS=3` first: it runs every op on three rows in about a minute
+(see "Smoke runs" below). A cached step prints one line,
+`step translate · 42 → 40 rows · cached · originally 0.5s · $0.0034`, with the number of its warnings if it has any;
+`inspect_step(name)` prints its full report, which lists the ops of the run that cached it, marked `cached`, with that
+run's warnings.
 
 - Fields line: `fields: seed_id int · topic str · score int|None · twist str?  (+ score, twist; − draft)`. Each field
   of the output rows with the types of its values (from all rows, or 5,000 evenly spaced rows of a longer list); `?`
@@ -149,6 +151,16 @@ cached it, marked `cached`, with that run's warnings.
   request batch raises `pyforger.BudgetExceededError`, as does `dynamic_step` before starting an agent or during its
   run. Requests already sent finish and are recorded, so spend can pass a cap by up to one batch (or one agent step)
   per thread sending them.
+- Smoke runs: run every new pipeline version with `FORGER_SMOKE_ROWS=3 python pipeline.py` first (or
+  `@pipeline(smoke=3)`); it exercises every op in about a minute, so a wrong keyword or a missing argument fails at
+  once instead of minutes into the full run. Inside the pipeline, every `@step` call cuts each rows argument (each of
+  several inputs, `*rows` items too) to its first 3 rows. These ops also cap their counts: `acquire.sample_from_LLM`
+  (`n`) and `acquire.retrieve` / `retrieve_from_*` (the first 3 `queries`, `n` at most 3). Other ops keep their
+  counts, so a step that makes rows from nothing in some other way still makes all of them. Step reports say
+  `SMOKE: first 3 of 120 rows`, and the summary ends with `SMOKE RUN: at most 3 rows per step; outputs are not
+  representative`. Smoke results are cached under keys that include the row limit, so a later full run never reads
+  or overwrites them and recomputes every step. A second smoke run of the same code reuses them. `smoke=0` turns
+  smoke mode off even when the variable is set.
 
 ### Operation reference
 
@@ -368,8 +380,8 @@ def debug_step(rows):
 
 **Cache key.** SHA-256 of: the op name, a canonical representation of the function's compiled body (bytecode,
 constants, names, varnames, freevars, argcount, applied recursively to nested code objects), the captured closure
-values, and the call arguments. Editing the decorated function's body invalidates that function's cache; editing an
-unrelated helper does not.
+values, and the call arguments, plus the row limit in a smoke run. Editing the decorated function's body invalidates
+that function's cache; editing an unrelated helper does not.
 
 **Cache location.** `$FORGER_CACHE` if set, otherwise `~/.cache/forger`. The variable is read at call time, so tests
 can redirect it.

@@ -215,6 +215,9 @@ class StepRecord(BaseModel):
     token_units: float = 0.0
     original: UsageTotals | None = None
     python_gaps: list[PythonGap] = Field(default_factory=list)
+    # In a smoke run: the row limit, and the input rows before the cut (e.g. 120).
+    smoke_rows: int | None = None
+    smoke_n_in: int | None = None
 
 
 class PipelineRecord(BaseModel):
@@ -252,6 +255,8 @@ class PipelineRecord(BaseModel):
     unattributed: UsageTotals = Field(default_factory=UsageTotals)
     max_cost_usd: float | None = None
     python_gaps: list[PythonGap] = Field(default_factory=list)
+    # Set in a smoke run (``@pipeline(smoke=3)`` or ``FORGER_SMOKE_ROWS=3``).
+    smoke_rows: int | None = None
 
     @property
     def cached_cost_usd(self) -> float:
@@ -595,6 +600,17 @@ def pipeline_for_step() -> PipelineRecord | None:
         return running.rec
     with _RUNNING_LOCK:
         return _RUNNING_PIPELINES[0].rec if len(_RUNNING_PIPELINES) == 1 else None
+
+
+def smoke_rows() -> int | None:
+    """Return the row limit of the smoke run this call belongs to, if any.
+
+    That is ``smoke_rows`` of the pipeline ``pipeline_for_step`` finds: steps
+    cut their row arguments to it, ops count it in their cache key, and ops
+    declared with ``@op(smoke=...)`` cap those parameters to it.
+    """
+    rec = pipeline_for_step()
+    return rec.smoke_rows if rec is not None else None
 
 
 def _flow_of(rec: PipelineRecord) -> PipelineFlow | None:

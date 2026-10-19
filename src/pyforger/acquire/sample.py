@@ -71,7 +71,7 @@ def _generation_loop(
             consecutive_failed_rounds = 0
 
 
-@op(name="acquire.sample_from_LLM")
+@op(name="acquire.sample_from_LLM", smoke=("n",))
 def sample_from_LLM(
     prompt: Prompt,
     model: Model,
@@ -107,6 +107,7 @@ def sample_from_LLM(
         hash. Therefore, repeat calls with a non-zero temperature will still produce
         the same samples if all other arguments are the same. If this is not desired,
         force fresh generation by passing `_no_cache=True` or varying `name`.
+        In a smoke run (``FORGER_SMOKE_ROWS=3``), `n` is capped to the row limit.
     """
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")

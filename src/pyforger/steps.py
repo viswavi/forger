@@ -321,7 +321,9 @@ def step(
     e.g. ``solvable 111 + refusals 42 → 153 rows``, and the yield uses the sum.
     It returns a list of rows or a dict of named row lists (streams), e.g.
     ``{"train": kept, "refusals": refused}``; each stream gets its own count,
-    fields line, and sample rows.
+    fields line, and sample rows. In a smoke run (``@pipeline(smoke=3)`` or
+    ``FORGER_SMOKE_ROWS=3``) each rows argument is cut to its first 3 rows
+    before the call.
 
     If a parameter or the return value is annotated ``list[X]`` with ``X`` a
     pydantic model, every row must be a dict that validates against ``X``
@@ -375,6 +377,13 @@ def step(
                 hints[:] = [_step_hints(fn, localns)]
             hint = hints[0]
             row_args = _row_arguments(signature, hint, args, kwargs)
+            # The pipeline flow compares the uncut lists with the previous
+            # step's output, so a smoke cut is not shown as (python) rows.
+            full_rows = [rows for _, _, rows in row_args]
+            full_lists = [a for a in (*args, *kwargs.values()) if isinstance(a, list)]
+            smoke = _tracking.smoke_rows()
+            if smoke is not None:
+                args, kwargs, row_args = _smoke_cut(row_args, args, kwargs, smoke)
             several = len(row_args) > 1
             models = [(label, hint.model(param)) for label, param, _ in row_args]
             if several:
@@ -400,6 +409,10 @@ def step(
                 rec.warnings.append(hint.warning)
             if row_args:
                 rec.n_in = sum(len(rows) for _, _, rows in row_args)
+            if smoke is not None:
+                rec.smoke_rows = smoke
+                if row_args:
+                    rec.smoke_n_in = sum(len(rows) for rows in full_rows)
             if several:
                 rec.inputs = [
                     RowStream(name=label, n_rows=len(rows))
@@ -426,9 +439,7 @@ def step(
             flow = StepFlow(stream, arg_lists)
             pipeline_rec = _tracking.pipeline_for_step()
             started = (
-                _tracking.step_starting(
-                    pipeline_rec, [rows for _, _, rows in row_args], arg_lists
-                )
+                _tracking.step_starting(pipeline_rec, full_rows, full_lists)
                 if pipeline_rec is not None
                 else None
             )
@@ -556,6 +567,28 @@ def _row_arguments(
             if (i == 0 and j == 0) or hinted or dicts:
                 out.append((label, param, v))
     return out
+
+
+def _smoke_cut(
+    row_args: list[tuple[str, str, list[Any]]],
+    args: tuple,
+    kwargs: dict,
+    limit: int,
+) -> tuple[tuple, dict, list[tuple[str, str, list[Any]]]]:
+    """Cut each rows argument to its first ``limit`` rows, for a smoke run.
+
+    Returns the step's new ``args``, ``kwargs``, and rows arguments. The rows
+    arguments are the very objects in ``args`` / ``kwargs`` (also each
+    ``*rows`` item), so they are swapped by identity.
+    """
+    cut = {id(rows): rows[:limit] for _, _, rows in row_args if len(rows) > limit}
+    if not cut:
+        return args, kwargs, row_args
+    return (
+        tuple(cut.get(id(a), a) for a in args),
+        {k: cut.get(id(v), v) for k, v in kwargs.items()},
+        [(label, param, cut.get(id(rows), rows)) for label, param, rows in row_args],
+    )
 
 
 def _is_streams(result: Any) -> bool:
@@ -728,6 +761,7 @@ def pipeline(
     prod: bool = False,
     strict: bool = False,
     max_cost_usd: float | None = None,
+    smoke: int | None = None,
 ) -> Any:
     """Decorate a function that calls ``@step`` functions; print a summary at the end.
 
@@ -752,11 +786,19 @@ def pipeline(
         max_cost_usd: Stop when this run has spent this many dollars: the next
             model request batch raises ``BudgetExceededError``. Requests already
             sent finish, so spend can pass the cap by up to one batch.
+        smoke: Run as a smoke test with at most this many rows per step: every
+            step's rows arguments are cut to their first ``smoke`` rows, and
+            ``acquire.sample_from_LLM`` / ``acquire.retrieve*`` cap their counts
+            to it. Defaults to ``FORGER_SMOKE_ROWS`` (unset or 0: off);
+            ``smoke=0`` turns it off whatever the variable says. Smoke results
+            are cached apart from a full run's.
     """
     if max_cost_usd is not None and not max_cost_usd >= 0:
         raise ValueError(
             f"max_cost_usd must be a number of dollars >= 0, got {max_cost_usd}"
         )
+    if smoke is not None:
+        _check_smoke(smoke, "smoke")
 
     def decorate(fn: F) -> F:
         pipeline_name = name or fn.__name__
@@ -769,7 +811,11 @@ def pipeline(
                     f"pipeline {pipeline_name} was called inside pipeline "
                     f"{outer.name}; pipelines cannot nest"
                 )
-            rec = PipelineRecord(name=pipeline_name, max_cost_usd=max_cost_usd)
+            rec = PipelineRecord(
+                name=pipeline_name,
+                max_cost_usd=max_cost_usd,
+                smoke_rows=(smoke or None) if smoke is not None else _env_smoke(),
+            )
             start = time.perf_counter()
 
             def on_dynamic_step(step_rec: StepRecord) -> None:
@@ -801,6 +847,24 @@ def pipeline(
     if _fn is not None:
         return decorate(_fn)
     return decorate
+
+
+def _check_smoke(value: Any, label: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{label} must be a row count >= 0, got {value!r}")
+
+
+def _env_smoke() -> int | None:
+    """``FORGER_SMOKE_ROWS`` as a row limit; None when unset, empty, or 0."""
+    raw = os.environ.get("FORGER_SMOKE_ROWS", "").strip()
+    if not raw:
+        return None
+    try:
+        value: Any = int(raw)
+    except ValueError:
+        value = raw
+    _check_smoke(value, "FORGER_SMOKE_ROWS")
+    return value or None
 
 
 def _count_returned(rec: PipelineRecord, result: Any) -> None:
