@@ -10,6 +10,7 @@ from pyforger.acquire.model import (
 )
 from pyforger.acquire.retrieve import (
     retrieve,
+    retrieve_citations_from_s2,
     retrieve_from_arxiv,
     retrieve_from_hf,
     retrieve_from_s2,
@@ -35,6 +36,7 @@ __all__ = [
     "LocalModel",
     "split_reasoning",
     "retrieve",
+    "retrieve_citations_from_s2",
     "retrieve_from_web",
     "retrieve_from_wiki",
     "retrieve_from_hf",
