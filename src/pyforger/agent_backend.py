@@ -3,8 +3,8 @@
 Two independent axes:
 
 - Agent functionality (what an agent does) is expressed by an
-  :class:`AgentSpec` plus the functions in :mod:`pyforger.agents` and
-  :mod:`pyforger.agent_tasks`. Those functions never name a sandbox.
+  :class:`AgentSpec` plus the backend-agnostic functions in
+  :mod:`pyforger.agents`. Those functions never name a sandbox.
 - Execution (where an agent runs) is expressed by an :class:`AgentBackend`.
   Backends own no model and no prompts; they materialize a
   :class:`WorkspaceTask`, run the specified agent in it, optionally run a

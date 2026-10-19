@@ -505,18 +505,3 @@ launch. `agents.generate_object` layers caller-owned parsing on top: it
 returns the parsed object, retains rejected raw files as `previous-N/` inputs
 on fresh attempts, and preserves exact parse feedback. Session iteration and
 wall-time budgets are shared across generation and every repair turn.
-
-### Independent evaluation and success-rate filtering
-
-`inspect.measure(rows, evaluate)` reports `Measurement` values for existing data.
-`filter.by_evaluation(rows, evaluate)` selects explicit passes using the same
-measurements. Evaluators may be deterministic, LLM-based, or agent-based; an
-exception propagates instead of being recorded as an incorrect answer.
-
-`inspect.success_rates(rows)` summarizes an `evaluations` mapping from group labels
-to existing boolean or missing grades. `filter.by_success_rate(rows)` selects rows
-whose rate in every group falls within inclusive bounds (default 0.2–0.8).
-Neither operation generates or evaluates samples. Missing grades are excluded;
-all grades must be present unless `min_valid` explicitly permits exclusions.
-Inspect retains reports for rejected rows. Domain-specific attribution, audit,
-replay, and admission policy belong to the caller.
