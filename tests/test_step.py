@@ -303,15 +303,24 @@ def test_yield_names_are_reserved_at_decoration(reserved):
 
 
 def test_step_without_ops_warns():
-    """A step that calls no Forger op warns; strict=True makes it an error."""
+    """A step that calls no Forger op gets a suggestion; strict=True raises."""
 
     @step
     def plain(rows):
         return [r for r in rows if r["text"]]
 
     assert plain(_rows(*TEXTS)) == _rows(*TEXTS)
-    assert (
-        "called no Forger operations" in _tracking.step_records()["plain"].warnings[0]
+    rec = _tracking.step_records()["plain"]
+    assert rec.warnings == []
+    assert "called no Forger operations" in rec.suggestions[0]
+
+    @step
+    def dropping(rows):
+        return rows[:2]
+
+    dropping(_rows(*TEXTS))
+    assert "rows went 5 → 2 in plain Python" in (
+        _tracking.step_records()["dropping"].suggestions[0]
     )
 
     @step(strict=True)
@@ -401,7 +410,7 @@ def test_non_dict_rows_warn_instead_of_failing():
 
     assert texts(_rows(*TEXTS)) == ["one two", "three four five", "seven eight"]
     rec = _tracking.step_records()["texts"]
-    assert "rows are not dicts; schema checks and samples skipped" in rec.warnings
+    assert "rows are not dicts; schema checks and samples skipped" in rec.suggestions
     assert rec.sample == []
 
 
@@ -687,7 +696,7 @@ def test_nested_pipeline_raises():
 
 
 def test_pipeline_records_steps_and_warns(capsys, monkeypatch):
-    """A pipeline records each step; one step and missing filters are warnings."""
+    """A pipeline records each step; one step and missing filters are suggestions."""
     monkeypatch.delenv("FORGER_STEP_REPORT")
 
     @pipeline
@@ -697,18 +706,46 @@ def test_pipeline_records_steps_and_warns(capsys, monkeypatch):
     one_step(_rows(*TEXTS))
     rec = _tracking.last_pipeline()
     assert rec is not None and [s.name for s in rec.steps] == ["_shout_step"]
-    joined = " | ".join(rec.warnings)
+    assert rec.warnings == []
+    joined = " | ".join(rec.suggestions)
     assert "only one step ran" in joined
     assert "no quality filter ran" in joined
     assert "no diversity filter ran" in joined
     assert "no inspect op ran" in joined
     out = capsys.readouterr().out
     assert "pipeline one_step" in out and "1 step · 5 → 3 rows" in out
-    assert "pipeline warnings" in out and "⚠ no inspect op ran" in out
+    assert "suggestion: no inspect op ran" in out
+    # The summary always ends with the data problems, here none.
+    assert out.rstrip().endswith("data problems: none reported")
+
+
+def test_pipeline_summary_ends_with_data_problems(capsys, monkeypatch):
+    """Suggestions print first; data problems are the summary's last lines."""
+    monkeypatch.delenv("FORGER_STEP_REPORT")
+
+    @step
+    def strict_dedupe(rows):
+        return filter.by_exact_match(rows, field="text", min_yield=0.99)
+
+    @pipeline
+    def run(rows):
+        return strict_dedupe(_shout_step(rows))
+
+    run(_rows("a b", "a b", "c d e", "f g h i"))  # one duplicate: yield 0.75
+    out = capsys.readouterr().out
+    summary = out[out.index("pipeline run") :].rstrip().splitlines()
+    assert summary[-2].strip() == "data problems (1)"
+    assert (
+        summary[-1].strip().startswith("⚠ strict_dedupe: filter.by_exact_match: yield")
+    )
+    first_suggestion = next(
+        i for i, line in enumerate(summary) if "suggestion:" in line
+    )
+    assert first_suggestion < len(summary) - 2
 
 
 def test_pipeline_bare_op_warns():
-    """An op called in the pipeline outside a step is listed with a warning."""
+    """An op called in the pipeline outside a step is listed with a suggestion."""
 
     @pipeline
     def with_bare(rows):
@@ -721,9 +758,9 @@ def test_pipeline_bare_op_warns():
     assert rec is not None
     names = [s.name for s in rec.steps]
     assert names == ["_shout_step", "(bare) filter.by_exact_match", "_dedupe_step"]
-    assert rec.steps[1].warnings == ["called outside a @step"]
-    assert "1 op call outside a @step: filter.by_exact_match" in rec.warnings
-    assert not any("only one step" in w for w in rec.warnings)
+    assert rec.steps[1].suggestions == ["called outside a @step"]
+    assert "1 op call outside a @step: filter.by_exact_match" in rec.suggestions
+    assert not any("only one step" in w for w in rec.suggestions)
 
 
 def test_dynamic_step_in_pipeline_counts_as_step(monkeypatch):
@@ -893,14 +930,16 @@ def test_step_cached_without_op_record_skips_which_ops_ran_checks(tmp_path):
 
     twice(_rows(*TEXTS))
     first = _tracking.last_pipeline()
-    assert first is not None and "no inspect op ran" in first.warnings
+    assert first is not None and any(
+        "no inspect op ran" in s for s in first.suggestions
+    )
     for meta in tmp_path.rglob("*.step.json"):
         meta.unlink()
     twice(_rows(*TEXTS))
     second = _tracking.last_pipeline()
     assert second is not None and second.steps[0].cache_hit
     assert second.steps[0].ops == []
-    assert second.warnings == []
+    assert second.warnings == [] and second.suggestions == []
 
 
 def test_pyforger_exports_step_and_pipeline():
@@ -1244,7 +1283,7 @@ def test_step_with_ops_in_worker_threads_warns_instead_of_failing():
     assert len(threaded(_rows(*TEXTS))) == 3
     rec = _tracking.step_records()["threaded"]
     assert rec.ops == []
-    assert rec.warnings[0].startswith("its ops ran in worker threads")
+    assert rec.suggestions[0].startswith("its ops ran in worker threads")
 
 
 def test_step_ops_submitted_with_a_copied_context_are_itemized():
@@ -1403,14 +1442,14 @@ def test_row_model_hints_defined_in_a_function_resolve():
 
 
 def test_unresolvable_row_model_hints_warn():
-    """Hints that cannot be resolved are a warning, not a silent skip."""
+    """Hints that cannot be resolved are a suggestion, not a silent skip."""
 
     @step
     def unknown(rows: list[Missing]) -> list[Missing]:  # type: ignore[name-defined]  # noqa: F821, E501
         return _length_filter(rows)
 
     unknown(_rows(*TEXTS))
-    warning = _tracking.step_records()["unknown"].warnings[0]
+    warning = _tracking.step_records()["unknown"].suggestions[0]
     assert warning.startswith("type hints could not be resolved (NameError")
     assert warning.endswith("schema checks skipped")
 
@@ -1967,14 +2006,14 @@ def test_show_in_the_block_view_and_inspect_step(capsys):
 
 
 def test_show_warns_about_unknown_fields():
-    """A show= name that no output row has is a warning (strict raises)."""
+    """A show= name that no output row has is a suggestion (strict raises)."""
 
     @step(show="nope")
     def typo(rows):
         return _length_filter(rows)
 
     typo(_rows(*TEXTS))
-    assert _tracking.step_records()["typo"].warnings == [
+    assert _tracking.step_records()["typo"].suggestions == [
         "show= names fields no output row has: nope"
     ]
 

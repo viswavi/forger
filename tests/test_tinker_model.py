@@ -1178,8 +1178,9 @@ class TestTruncation:
 
         gen([{"q": "a"}])
         warnings = _tracking.step_records()["gen"].ops[0].warnings
+        # output_schema=None keeps any text, so the row stays, cut off.
         assert warnings == [
-            "alter.generate_from_context: 1 of 1 completions from Qwen/Qwen3-8B "
-            "stopped at max_tokens=50 (finish_reason=length), so their text is cut "
-            "off; raise the TinkerModel's max_tokens"
+            "alter.generate_from_context: 1 row kept with cut-off text, because 1 "
+            "of 1 completions from Qwen/Qwen3-8B stopped at max_tokens=50 "
+            "(finish_reason=length); raise the TinkerModel's max_tokens"
         ]

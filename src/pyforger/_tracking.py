@@ -243,6 +243,11 @@ class StepRecord(BaseModel):
     several (``solvable 111 + refusals 42``). A step that returned a dict of
     named row lists has ``streams`` (one per list, with its own fields and
     sample rows), ``n_out`` their sum, and no top-level ``sample``/``fields``.
+
+    ``warnings`` are data problems: something happened to this run's rows,
+    e.g. "34 of 120 completions ... stopped at max_tokens → 20 rows dropped".
+    ``suggestions`` are about how the step is written, e.g. "called no Forger
+    operations"; the report shows them dimmed, after the warnings.
     """
 
     name: str
@@ -256,6 +261,7 @@ class StepRecord(BaseModel):
     cache_hit: bool = False
     ops: list[OpCall] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    suggestions: list[str] = Field(default_factory=list)
     sample: list[Any] = Field(default_factory=list)
     sample_summaries: list[dict[int, FieldSummary]] = Field(default_factory=list)
     sample_shown: int = 1
@@ -283,6 +289,9 @@ class PipelineRecord(BaseModel):
     thread may not belong to the pipeline.
     ``no_filter_steps`` and ``noop_filters`` (``(op, step, rows)``) are notes,
     not warnings: a filter that removed nothing may be a check that passed.
+    ``warnings`` are data problems found across the pipeline; ``suggestions``
+    are about how it is written (only one step, no inspect op, ops outside a
+    step), as in ``StepRecord``.
     ``python_gaps`` are rows dropped in plain Python between two steps, found
     by row identity (see ``pyforger._rowflow``).
 
@@ -299,6 +308,7 @@ class PipelineRecord(BaseModel):
     out_streams: list[RowStream] = Field(default_factory=list)
     steps: list[StepRecord] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    suggestions: list[str] = Field(default_factory=list)
     no_filter_steps: list[str] = Field(default_factory=list)
     noop_filters: list[tuple[str, str, int]] = Field(default_factory=list)
     duration_s: float = 0.0
@@ -410,6 +420,11 @@ _ACTIVE_WARNINGS: ContextVar[list[str] | None] = ContextVar(
 _ACTIVE_TRUNCATION: ContextVar[
     dict[tuple[str, int | None, str | None], list[int]] | None
 ] = ContextVar("forger_active_truncation", default=None)
+# What the cut-off completions did to the innermost active op's rows, e.g.
+# "20 rows dropped"; added to its truncation warning (see add_truncation_outcome).
+_ACTIVE_TRUNCATION_OUTCOME: ContextVar[list[str] | None] = ContextVar(
+    "forger_active_truncation_outcome", default=None
+)
 # True while an op reports completions cut off mid-thought (an unclosed
 # <think>) itself, e.g. by_pass_at_k's "3 of 8 samples truncated" note.
 _REPORTS_UNCLOSED_THINK: ContextVar[bool] = ContextVar(
@@ -797,6 +812,7 @@ class OpToken:
     truncation_token: (
         Token[dict[tuple[str, int | None, str | None], list[int]] | None] | None
     ) = None
+    outcome_token: Token[list[str] | None] | None = None
 
     def usage_totals(self) -> tuple[int, int, float, float]:
         """The op's own usage so far (zero for a step's cache wrapper)."""
@@ -822,6 +838,7 @@ def enter_op(op_name: str) -> OpToken:
         usage_token=usage_token,
         warnings_token=_ACTIVE_WARNINGS.set([]),
         truncation_token=_ACTIVE_TRUNCATION.set({}),
+        outcome_token=_ACTIVE_TRUNCATION_OUTCOME.set([]),
     )
 
 
@@ -853,12 +870,15 @@ def truncation_message(
     truncated: int,
     total: int,
     advice: str | None = None,
+    outcome: str | None = None,
 ) -> str:
     """Say how many completions hit max_tokens, and what to change.
 
     e.g. "349 of 768 completions from deepseek stopped at max_tokens=24000
     (finish_reason=length) ...". ``advice`` replaces the default tail, which
     is for a ``Model`` (e.g. "; raise the TinkerModel's max_tokens").
+    ``outcome`` says what that did to the op's rows and leads the message:
+    "20 rows dropped (no parseable output), because 34 of 120 completions ...".
     """
     limit = f"max_tokens={max_tokens}" if max_tokens is not None else "max_tokens"
     if advice is None:
@@ -866,10 +886,26 @@ def truncation_message(
             " (a reasoning model's is often empty: the budget went to thinking); "
             "raise the Model's max_tokens or lower its reasoning_effort"
         )
-    return (
+    stopped = (
         f"{truncated} of {total} completions from {model_id} stopped at {limit} "
-        f"(finish_reason=length), so their text is cut off{advice}"
+        "(finish_reason=length)"
     )
+    if outcome:
+        return f"{outcome}, because {stopped}{advice}"
+    return f"{stopped}, so their text is cut off{advice}"
+
+
+def add_truncation_outcome(text: str) -> None:
+    """Say what cut-off completions did to the running op's rows.
+
+    e.g. ``add_truncation_outcome("20 rows dropped (no parseable output)")``;
+    the op's max_tokens warning then reads "20 rows dropped (no parseable
+    output), because 34 of 120 completions ... stopped at max_tokens=...".
+    A no-op outside ops.
+    """
+    outcomes = _ACTIVE_TRUNCATION_OUTCOME.get()
+    if outcomes is not None:
+        outcomes.append(text)
 
 
 def add_truncation(
@@ -894,9 +930,10 @@ def add_truncation(
 
 def truncation_warnings(op_name: str) -> list[str]:
     """The running op's truncation warnings, one per (model, max_tokens) that hit it."""
+    outcome = "; ".join(_ACTIVE_TRUNCATION_OUTCOME.get() or []) or None
     return [
         f"{op_name}: "
-        + truncation_message(model_id, max_tokens, truncated, total, advice)
+        + truncation_message(model_id, max_tokens, truncated, total, advice, outcome)
         for (model_id, max_tokens, advice), (truncated, total) in (
             _ACTIVE_TRUNCATION.get() or {}
         ).items()
@@ -988,6 +1025,9 @@ def exit_op(
                 entry = outer.setdefault(key, [0, 0])
                 entry[0] += truncated
                 entry[1] += total
+    if token.outcome_token is not None:
+        # A nested op's outcome describes its own rows, not its caller's.
+        _ACTIVE_TRUNCATION_OUTCOME.reset(token.outcome_token)
     if token.depth_token is not None:
         _OP_DEPTH.reset(token.depth_token)
     if call is None or token.depth != 0:
@@ -1018,10 +1058,10 @@ def exit_op(
 def step_from_bare_op(call: OpCall) -> StepRecord:
     """Wrap an op called directly in a pipeline as a one-op step record."""
     if call.op_name == DYNAMIC_STEP_OP:
-        name, kind, warnings = "dynamic_step", "dynamic_step", []
+        name, kind, suggestions = "dynamic_step", "dynamic_step", []
     else:
         name, kind = f"(bare) {call.op_name}", "bare"
-        warnings = ["called outside a @step"]
+        suggestions = ["called outside a @step"]
     return StepRecord(
         name=name,
         kind=kind,  # type: ignore[arg-type]
@@ -1030,7 +1070,8 @@ def step_from_bare_op(call: OpCall) -> StepRecord:
         duration_s=call.duration_s,
         cache_hit=call.cache_hit,
         ops=[call],
-        warnings=warnings + list(call.warnings),
+        warnings=list(call.warnings),
+        suggestions=suggestions,
         prompt_tokens=call.prompt_tokens,
         completion_tokens=call.completion_tokens,
         cost_usd=call.cost_usd,

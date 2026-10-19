@@ -297,7 +297,7 @@ def test_counts_as_a_diversity_filter(monkeypatch):
     run(_rows())
     rec = _tracking.last_pipeline()
     assert rec is not None
-    joined = " | ".join(rec.warnings)
+    joined = " | ".join(rec.suggestions)
     assert "no diversity filter ran" not in joined
     assert "no quality filter ran" in joined
 

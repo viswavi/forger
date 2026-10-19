@@ -54,11 +54,18 @@ them, and score lists of over 100,000 rows, have none: rerun with `_no_cache=Tru
 - Hard errors (`StepContractError` / `PipelineContractError`): a step returns neither a list nor a dict of row lists,
   a step is called inside another step, a pipeline calls no steps, or rows do not match a `list[X]` type hint where
   `X` is a pydantic model (rows stay dicts).
-- Warnings: a step calls no Forger ops (its report cannot show what it kept or changed: write its checks as ops such
-  as `filter.by_predicate`, and never add a no-op filter only to quiet the warning); an op misses its `min_yield` /
-  `max_yield`; an op's model calls stopped at `max_tokens`; a step's type hints cannot be resolved; `show=` names a
-  field no output row has; a pipeline has only one step; no quality filter, no diversity filter, or no inspect op ran
-  anywhere; an op was called in the pipeline outside a step.
+- Warnings (`⚠`) are data problems: something happened to this run's rows, and the warning says what. Examples: an op
+  misses its `min_yield` / `max_yield`; model calls stopped at `max_tokens` ("20 rows dropped (no parseable output),
+  because 34 of 120 completions ... stopped at max_tokens=16384"); samples failed to parse; requests failed at the
+  provider; a judge gave no score; reasoning traces open by discussing the output format (`output_schema` and the
+  prompt's own format instructions disagree, so the reasoning is a poor training target). The pipeline summary ends
+  with every step's data problems under `data problems (N)`, or `data problems: none reported`, so the last lines of
+  a log show them. Fix each one, or decide it does not matter for your data and say why in your notes.
+- Suggestions (dim `suggestion:` lines) are about how the code is written, not the rows: a step calls no Forger ops
+  (its report cannot show what it kept or changed: write its checks as ops such as `filter.by_predicate`, and never
+  add a no-op filter only to quiet it); a step's type hints cannot be resolved; `show=` names a field no output row
+  has; a pipeline has only one step; no quality filter, no diversity filter, or no inspect op ran anywhere; an op was
+  called in the pipeline outside a step.
 - These checks use each op's category, not its name. Ops under `pyforger.acquire/alter/filter/inspect` have their
   package's category; your own `@op` is `"other"` (even `@op(name="filter.x")`) unless it declares one, e.g.
   `@op(category="filter")` for a custom quality filter.
@@ -66,8 +73,8 @@ them, and score lists of over 100,000 rows, have none: rerun with `_no_cache=Tru
   and rows seen). These are notes, not warnings, and `strict=True` does not raise on them: a generate-only step
   followed by a filter step is fine, and a filter that removes nothing may be a check that passed or one that tests
   nothing. Do not add a filter only to quiet them.
-- `strict=True` on `@step` or `@pipeline` turns warnings into errors, also on cached runs; a step that fails strict
-  mode is not cached. `prod=True` or the environment variable `FORGER_STEP_REPORT=0` silences the reports.
+- `strict=True` on `@step` or `@pipeline` turns warnings and suggestions into errors, also on cached runs; a step that
+  fails strict mode is not cached. `prod=True` or the environment variable `FORGER_STEP_REPORT=0` silences the reports.
   `pyforger.inspect.inspect_step(name)` re-prints the full report of the latest run of a step, with up to 10 sample
   rows. It also works from another process (e.g. a shell, while the pipeline runs under `nohup`): every step saves its
   report under `$FORGER_CACHE/step_reports/`.
@@ -82,7 +89,7 @@ them, and score lists of over 100,000 rows, have none: rerun with `_no_cache=Tru
   still count them); silenced reports make no calls. A cheap model without reasoning is enough. Without a report
   model, the first report with a long value logs (at INFO) how to set one; `set_report_model(None)` turns summaries
   off and silences that.
-- Threads: ops called from `ThreadPoolExecutor` workers are not itemized in the step report (the step gets a warning
+- Threads: ops called from `ThreadPoolExecutor` workers are not itemized in the step report (the step gets a suggestion
   instead of an error) unless submitted as `pool.submit(contextvars.copy_context().run, fn, arg)`. Steps called from
   workers still join the pipeline, and their spend counts toward it (and its cap) as it arrives. Each op, step, and
   pipeline counts only its own LLM calls, also when several run at the same time. An op that raised is listed as
@@ -199,9 +206,10 @@ pipeline main ──────────────────────
   translate   42    40    0.95   0.5s   $0.0034
   dedupe      40    27    0.68   0.0s         -
 
-  pipeline warnings
-  ⚠ no quality filter ran (e.g. filter.by_llm_score)
-  ⚠ no inspect op ran
+  suggestion: no quality filter ran, so nothing checked the rows' quality (e.g. filter.by_llm_score)
+  suggestion: no inspect op ran, so nothing looked at what the rows cover (e.g. inspect.topic_based_clustering)
+
+  data problems: none reported
 ```
 
 Run again and both steps come from the cache, one line each, before the same summary:

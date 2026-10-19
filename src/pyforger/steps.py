@@ -31,9 +31,14 @@ scores, warnings, and a sample row. Rows that plain Python dropped or added
 between ops, or between steps, show as dim ``(python)`` rows (see
 ``pyforger._rowflow``). A cached step prints one line. A pipeline
 prints a summary table of its steps, with notes on steps without a filter and
-filters that removed nothing. ``@step(prod=True)``, ``@pipeline(prod=True)``,
-or ``FORGER_STEP_REPORT=0`` silence the reports; ``strict=True`` turns
-warnings into errors.
+filters that removed nothing.
+
+Warnings are data problems (rows dropped, cut off, or unscored), and each says
+what happened to the rows. Suggestions are about how the code is written (a
+step with no Forger ops, no inspect op); they print dimmed. The pipeline
+summary ends with every step's data problems, so the last lines of a log show
+them. ``@step(prod=True)``, ``@pipeline(prod=True)``, or ``FORGER_STEP_REPORT=0``
+silence the reports; ``strict=True`` turns warnings and suggestions into errors.
 
 Long sample values are summarized by shape (``[5 items] a.py, b.py, …``).
 ``set_report_model(model)`` or ``FORGER_REPORT_MODEL`` adds a one-sentence LLM
@@ -575,7 +580,7 @@ def step(
                 output_type=hint.out.label() if hint.out else None,
             )
             if hint.warning:
-                rec.warnings.append(hint.warning)
+                rec.suggestions.append(hint.warning)
             if row_args:
                 rec.n_in = sum(len(rows) for _, _, rows in row_args)
             if several:
@@ -630,7 +635,7 @@ def step(
                     _tracking.ops_started() - ops_before,
                     input_keys,
                 )
-                if strict and rec.warnings:
+                if strict and (rec.warnings or rec.suggestions):
                     strict_failed.append(True)
                     raise _strict_error(rec)
                 return _tracking.step_meta(rec, _usage_totals(scope.usage, start))
@@ -671,7 +676,7 @@ def step(
             if not checked:  # a cache hit
                 _check_step_result(rec, result, hint.out, 0, input_keys)
             finish(result)
-            if strict and rec.warnings:
+            if strict and (rec.warnings or rec.suggestions):
                 raise _strict_error(rec)
             return result
 
@@ -738,7 +743,7 @@ def _usage_totals(usage: _tracking.Usage, start: float) -> UsageTotals:
 def _strict_error(rec: StepRecord) -> StepContractError:
     return StepContractError(
         f"step {rec.name} has warnings (strict=True):\n"
-        + "\n".join(f"  - {w}" for w in rec.warnings)
+        + "\n".join(f"  - {w}" for w in [*rec.warnings, *rec.suggestions])
     )
 
 
@@ -883,7 +888,7 @@ def _check_step_result(
             _validate_rows(result, out.model, rec.name, "output")
         keys = _describe(result, rec.show, input_keys, rec)
         if keys is None:
-            rec.warnings.append(_NOT_DICTS)
+            rec.suggestions.append(_NOT_DICTS)
         output_keys = keys or []
     elif isinstance(result, dict):
         if not _is_streams(result):
@@ -907,7 +912,7 @@ def _check_step_result(
             output_keys += [k for k in keys or [] if k not in output_keys]
             rec.streams.append(stream)
         if not_dicts:
-            rec.warnings.append(
+            rec.suggestions.append(
                 f"rows of {', '.join(not_dicts)} are not dicts; schema checks and "
                 "samples skipped"
             )
@@ -918,23 +923,28 @@ def _check_step_result(
         )
     missing = [f for f in rec.show if output_keys and f not in output_keys]
     if missing:
-        rec.warnings.append(
+        rec.suggestions.append(
             f"show= names fields no output row has: {', '.join(missing)}"
         )
 
     if not rec.cache_hit and not rec.ops:
         if ops_started > 0:
-            rec.warnings.append(
+            rec.suggestions.append(
                 "its ops ran in worker threads and are not itemized; submit with "
                 "pool.submit(contextvars.copy_context().run, fn, arg) to list them"
             )
             return
-        # A warning, not an error: an error pushed agents to wrap pure-Python
+        # A suggestion, not an error: an error pushed agents to wrap pure-Python
         # steps in no-op filters (by_predicate(rows, lambda r: True)).
-        rec.warnings.append(
-            "called no Forger operations, so this report cannot show what the step "
-            "kept or changed; write its checks as Forger ops where one fits (e.g. "
-            "filter.by_predicate with the real check, alter.run_programs, "
+        changed = (
+            f"rows went {rec.n_in} → {rec.n_out} in plain Python, and "
+            if rec.n_in is not None and rec.n_out is not None and rec.n_in != rec.n_out
+            else ""
+        )
+        rec.suggestions.append(
+            f"called no Forger operations: {changed}this report cannot show what "
+            "the step kept or changed; write its checks as Forger ops where one fits "
+            "(e.g. filter.by_predicate with the real check, alter.run_programs, "
             "filter.by_tests), and do not add a no-op filter only to quiet this"
         )
         return
@@ -965,10 +975,13 @@ def pipeline(
     for anything else (a tuple, None).
 
     Errors (``PipelineContractError``): no step ran, or the pipeline was called
-    inside another pipeline. Warnings: only one step ran; no quality filter, no
-    diversity filter, or no inspect op ran anywhere; ops ran outside a step.
-    Notes, which are not warnings and never raise: steps that ran no filter,
-    and filters that removed nothing (a passed check, or one to tighten).
+    inside another pipeline. Warnings are data problems its steps reported
+    (e.g. completions cut off at max_tokens); the summary lists them last,
+    under "data problems". Suggestions are about how the pipeline is written:
+    only one step ran; no quality filter, no diversity filter, or no inspect
+    op ran anywhere; ops ran outside a step. Notes, which never raise: steps
+    that ran no filter, and filters that removed nothing (a passed check, or
+    one to tighten).
 
     Steps run with ``my_step.submit(...)`` are listed in the order they were
     submitted. When the function returns, the pipeline waits for submitted
@@ -981,7 +994,7 @@ def pipeline(
         name: Pipeline name in the report; defaults to the function name.
         prod: Do not print the summary.
         strict: Raise ``PipelineContractError`` when the pipeline has any
-            warning (notes do not count).
+            warning or suggestion (notes do not count).
         max_cost_usd: Stop when this run has spent this many dollars: the next
             model request raises ``BudgetExceededError``. Requests already in
             flight finish, so spend can pass the cap by what they cost.
@@ -1040,10 +1053,10 @@ def pipeline(
             _tracking.store_pipeline(rec)
             if _reports_enabled(prod):
                 print_pipeline(rec)
-            if strict and rec.warnings:
+            if strict and (rec.warnings or rec.suggestions):
                 raise PipelineContractError(
                     f"pipeline {pipeline_name} has warnings (strict=True):\n"
-                    + "\n".join(f"  - {w}" for w in rec.warnings)
+                    + "\n".join(f"  - {w}" for w in [*rec.warnings, *rec.suggestions])
                 )
             return result
 
@@ -1079,7 +1092,7 @@ def _check_pipeline(rec: PipelineRecord) -> None:
             "@step functions and call those from the pipeline"
         )
     if len(real) == 1:
-        rec.warnings.append(
+        rec.suggestions.append(
             "only one step ran; split the work into separate @step functions "
             "(e.g. generate, then filter) so each gets a report"
         )
@@ -1091,19 +1104,26 @@ def _check_pipeline(rec: PipelineRecord) -> None:
     filters = {c.op_name for s in rec.steps for c in s.ops if c.category == "filter"}
     if ops_known:
         if not filters - _NON_QUALITY_FILTERS:
-            rec.warnings.append("no quality filter ran (e.g. filter.by_llm_score)")
+            rec.suggestions.append(
+                "no quality filter ran, so nothing checked the rows' quality "
+                "(e.g. filter.by_llm_score)"
+            )
         if not filters & _DIVERSITY_FILTERS:
-            rec.warnings.append(
-                "no diversity filter ran (filter.by_exact_match, by_rouge_l, "
-                "by_n_gram_overlap, or by_topic_frequency)"
+            rec.suggestions.append(
+                "no diversity filter ran, so near-duplicate rows were not removed "
+                "(filter.by_exact_match, by_rouge_l, by_n_gram_overlap, or "
+                "by_topic_frequency)"
             )
         if not any(c.category == "inspect" for s in rec.steps for c in s.ops):
-            rec.warnings.append("no inspect op ran")
+            rec.suggestions.append(
+                "no inspect op ran, so nothing looked at what the rows cover "
+                "(e.g. inspect.topic_based_clustering)"
+            )
     _filter_notes(rec)
     bare = [s.ops[0].op_name for s in rec.steps if s.kind == "bare"]
     if bare:
         listed = ", ".join(dict.fromkeys(bare))
-        rec.warnings.append(
+        rec.suggestions.append(
             f"{len(bare)} op call{'s' if len(bare) != 1 else ''} outside a @step: "
             f"{listed}"
         )
