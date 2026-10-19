@@ -808,6 +808,11 @@ Usage of finished requests is recorded. The default (`False`) raises the first f
 error fills every slot, since vLLM runs the batch as one call.
 
 Use `Model(..., reasoning_effort="low")` where supported by the model/provider.
+
+`model.generate(prompt, n=...)` returns a `GenerateResult`, which is a `list` of completion strings: use `result[0]`
+or iterate over it. `result.texts` gives a plain `list[str]`. Per-call metadata is on `.usage`, `.reasoning` (one
+entry per completion), `.model_id`, and `.raw`. `generate_batch` returns one `GenerateResult` per prompt.
+
 `dynamic_step` forwards `reasoning_effort` and `extra_body` to OpenHands.
 
 `model.generate_batch(prompts, n=k)` returns exactly `k` completions per prompt. Claude, Grok, Gemini, o1/o3/o4, and

@@ -521,6 +521,9 @@ def _batch_completion_with_progress(
 class GenerateResult(list):
     """list[str] with `usage` / `reasoning` / `model_id` / `raw` attributes.
 
+    The completions are the list items: `result[0]`, `for text in result`, or
+    `result.texts` for a plain list.
+
     `raw` is the LiteLLM response. When `Model.generate_batch` fans `n` out into
     separate requests, it is the list of those responses, in completions order.
     It holds only the requests actually sent: None when every completion came
@@ -547,6 +550,27 @@ class GenerateResult(list):
         self.reasoning = reasoning
         self.model_id = model_id
         self.raw = raw
+
+    @property
+    def texts(self) -> list[str]:
+        """The completion strings as a plain list (same as `list(result)`)."""
+        return list(self)
+
+    def __getattr__(self, name: str) -> Any:
+        """Raise an AttributeError that names the real attributes.
+
+        Only runs for missing attributes, e.g. `result.completions`. Dunder and
+        private names fail plainly so pickle, copy and hasattr probes behave.
+        """
+        if name.startswith("_"):
+            raise AttributeError(
+                f"{type(self).__name__!r} object has no attribute {name!r}"
+            )
+        raise AttributeError(
+            f"GenerateResult has no attribute {name!r}; it is a list of completion "
+            "strings (use the result itself, e.g. result[0], or .texts for a plain "
+            "list); metadata: .usage, .reasoning, .model_id, .raw"
+        )
 
     def __reduce__(self):
         """Pickle support."""
