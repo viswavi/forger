@@ -75,6 +75,7 @@ class FlakyJudge(Model):
         self.fatal = fatal
         self.answer = answer
         self.caught: list[bool] = []
+        self.sent: list[str] = []  # every prompt, as text
 
     def cache_key(self) -> tuple:
         """Settings only, so the op cache works across instances."""
@@ -98,6 +99,7 @@ class FlakyJudge(Model):
         out: list[Any] = []
         for prompt in prompts:
             text = prompt if isinstance(prompt, str) else json.dumps(prompt)
+            self.sent.append(text)
             exc: Exception | None = None
             if self.fatal is not None:
                 exc = self.fatal
@@ -473,7 +475,7 @@ class TestDifficultyFilters:
 
 
 def test_topic_clustering_tolerates_failed_assignments(monkeypatch):
-    """A failed label request is retried, then falls back; one warning."""
+    """A failed label request is not asked again: it falls back; one warning."""
     monkeypatch.setenv("FORGER_STEP_REPORT", "0")
     animals = ("cats", "dogs", "fish")
     docs = [f"doc about {a} {i}" for a in animals for i in range(3)]
@@ -507,5 +509,7 @@ def test_topic_clustering_tolerates_failed_assignments(monkeypatch):
     warnings = [w for w in rec.warnings if "requests failed" in w]
     assert len(warnings) == 1
     assert warnings[0].startswith(
-        "inspect.topic_based_clustering: 2 requests failed after retries"
+        "inspect.topic_based_clustering: 1 requests failed after retries"
     )
+    # Asked once: the model's own retries are the only retries.
+    assert sum("Record: doc about fish 2" in text for text in judge.sent) == 1

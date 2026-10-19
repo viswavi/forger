@@ -244,7 +244,7 @@ _THREE_TOPICS = {**_TWO_TOPICS, "gardening": "Growing plants."}
 
 
 class _ScriptedCodebookModel(Model):
-    """Returns scripted codebooks in order, recording each prompt."""
+    """Returns scripted codebooks in order (raising error entries); records prompts."""
 
     def __init__(self, codebooks):
         super().__init__("fake-model")
@@ -253,7 +253,13 @@ class _ScriptedCodebookModel(Model):
 
     def generate_batch(self, prompts, **kwargs):
         self.prompts.extend(prompts)
-        return [[json.dumps(self.codebooks.pop(0))] for _ in prompts]
+        out = []
+        for _ in prompts:
+            codebook = self.codebooks.pop(0)
+            if isinstance(codebook, Exception):
+                raise codebook
+            out.append([json.dumps(codebook)])
+        return out
 
 
 def test_codebook_with_wrong_topic_count_is_sent_back():
@@ -271,6 +277,22 @@ def test_codebook_keeps_last_attempt_when_count_never_matches(caplog):
         codebook = _build_codebook([_THREE_TOPICS], model, CONTEXT, num_clusters=2)
     assert codebook == _THREE_TOPICS
     assert any("3 topics instead of 2" in record.message for record in caplog.records)
+
+
+def test_failed_codebook_request_is_not_asked_again():
+    """A codebook request that fails after the model's retries is not re-sent."""
+    model = _ScriptedCodebookModel([TimeoutError("slow"), _TWO_TOPICS])
+    with pytest.raises(RuntimeError, match="codebook request failed"):
+        _build_codebook([_TWO_TOPICS], model, CONTEXT, num_clusters=2)
+    assert len(model.prompts) == 1
+
+
+def test_failed_codebook_correction_keeps_last_codebook():
+    """A failed correction request ends the corrections; the last codebook is used."""
+    model = _ScriptedCodebookModel([_THREE_TOPICS, TimeoutError("slow"), _TWO_TOPICS])
+    codebook = _build_codebook([_THREE_TOPICS], model, CONTEXT, num_clusters=2)
+    assert codebook == _THREE_TOPICS
+    assert len(model.prompts) == 2
 
 
 def test_codebook_case_duplicates_count_once():

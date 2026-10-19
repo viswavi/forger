@@ -249,8 +249,9 @@ def _topic_based_clustering(
         summarize_truncation,
         seed,
     )
-    # A request that fails after the model's retries (a 504, a timeout) counts
-    # as an unparseable answer; one warning at the end names how many.
+    # A request that fails after the model's retries (a 504, a timeout) is not
+    # asked again: its shard gives no topics and its document gets the
+    # fallback topic; one warning at the end names how many.
     failures = _RequestFailures()
     shard_topics = _summarize_shards(shards, model, context, num_clusters, failures)
     codebook = _build_codebook(shard_topics, model, context, num_clusters, failures)
@@ -266,7 +267,8 @@ def _topic_based_clustering(
     )
     failures.report(
         f"inspect.topic_based_clustering: {len(failures)} requests failed after "
-        "retries and were treated as unparseable answers"
+        "retries; their shards were skipped and their documents got the "
+        "fallback topic"
     )
     return [topic_of[doc] for doc in row_docs]
 
@@ -485,8 +487,14 @@ def _build_codebook(
                 ),
             )[0]
         except Exception as exc:
-            failures.failed(exc)  # raises unless transient; then try again
-            continue
+            failures.failed(exc)  # raises unless transient
+            # Model already retried the request (num_retries): do not ask again.
+            if not codebook:
+                raise RuntimeError(
+                    "topic_based_clustering: the codebook request failed after "
+                    f"the model's retries: {type(exc).__name__}: {exc}"
+                ) from exc
+            break
         try:
             parsed = _parse_json(response)
         except ValueError:
@@ -545,6 +553,9 @@ def _assign_topics(
     }
     topic_of: dict[str, str] = {}
     pending = list(docs)
+    # Documents whose request failed after the model's retries (num_retries);
+    # not asked again, they get the fallback topic.
+    failed: list[str] = []
     for attempt in range(1 + max_retries):  # rerun documents with invalid labels
         prompts: list[Prompt] = [prompt_of[doc] for doc in pending]
         # Keyed per document; the salt gets a new label, not the invalid one.
@@ -561,7 +572,7 @@ def _assign_topics(
         still_pending = []
         for doc, doc_responses in zip(pending, responses):
             if failures.failed(doc_responses):
-                still_pending.append(doc)  # asked again on the next attempt
+                failed.append(doc)
                 continue
             try:
                 label = str(_parse_json(doc_responses[0]).get("topic", "")).strip()
@@ -575,6 +586,7 @@ def _assign_topics(
         pending = still_pending
         if not pending:
             break
+    pending += failed
     if pending:
         fallback = next(iter(codebook))
         logger.warning(

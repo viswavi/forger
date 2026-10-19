@@ -243,8 +243,9 @@ Generate or retrieve new rows.
 validation, making this a superior choice to calling `Model` directly. Any reasoning traces contained in a completion are
 contained in the output dict under a `thinking_trace` key. Inline traces are not extracted: `LocalModel` leaves `<think>`
 blocks in the completion text and supplies `None` for that metadata; use `split_reasoning` to separate them out.
-A round whose request fails at the provider with a transient error counts as a failed round (see `max_retries`); if
-failures leave fewer than `n` samples, it returns the shorter list with a warning and is not cached. Other errors raise.
+`max_retries` counts rounds whose replies all fail to parse. A request that still fails with a transient provider
+error after the `Model`'s own `num_retries` is not sent again: its samples are dropped, so the op returns fewer than `n`
+samples with a warning and is not cached. Other errors raise.
 
 `output_schema` (here and in `alter.generate_from_context`) is a dict of keys, e.g. `{"question": str, "answer": str}`,
 and the prompt asks for a JSON object with those keys. Only the keys are checked:
@@ -277,14 +278,16 @@ Transform rows without removing items.
 | `dynamic_step_source` | Generate or inspect sub-pipeline generated for a single input. |
 
 `generate_from_context` performs `samples_per_item` LLM calls per input and returns parsed dicts, with retry against an
-optional JSON schema. A prompt whose output fails to parse, or whose request still fails with a transient provider
-error (timeout, lost connection, 429, or 5xx) after the `Model`'s own `num_retries`, is retried up to `max_retries`
-times; after that its slots are `None` and the other prompts' results are kept. Other provider errors (a bad API key,
-an unknown model, a 400 such as an over-long prompt, an exhausted quota) raise at once, since retrying cannot fix them.
-When any slot failed at the provider, the op logs one warning
-(`1 of 64 prompts failed after 3 retries; their slots are None: InternalServerError ×1`), shows it in the step report,
-and is not cached (nor is its step), so a rerun re-sends only the failed prompts (the request cache replays the rest).
-Parse-failure `None`s are cached.
+optional JSON schema. A prompt whose output fails to parse (a reply arrived but did not parse) is asked again up to
+`max_retries` times; after that its slots are `None` and the other prompts' results are kept. A request that still
+fails with a transient provider error (timeout, lost connection, 429, or 5xx) after the `Model`'s own `num_retries` is
+not asked again, so with `num_retries=2` a request makes at most 3 attempts in all; its slots are `None`. Other
+provider errors (a bad API key, an unknown model, a 400 such as an over-long prompt, an exhausted quota) raise at
+once, since retrying cannot fix them. When any slot failed at the provider, the op logs one warning
+(`1 of 64 prompts failed after the model's retries; their slots are None: InternalServerError ×1`), shows it in the
+step report, and is not cached (nor is its step), so a rerun re-sends only the failed prompts (the request cache
+replays the rest). Parse-failure `None`s are cached. `inspect.topic_based_clustering` follows the same rule: a failed
+label request gets the fallback topic instead of being asked again.
 As with `sample_from_LLM`, reasoning traces are included under a `thinking_trace` key. Inline traces are not extracted:
 `LocalModel` leaves `<think>` blocks in the completion text. Use `split_reasoning` to separate them out.
 
@@ -737,9 +740,10 @@ a lost connection, a 408/409/425/429, or a 5xx. It waits about 1 s, then 2 s, 4 
 errors) raises at once; a per-minute rate limit is retried, also Gemini's "You exceeded your current quota" 429.
 LiteLLM is sent `num_retries=0`, so neither it nor the openai client retries on top: a request makes at most
 `num_retries + 1` attempts on every provider, and one that hangs on every attempt waits at most
-`timeout × (num_retries + 1)` (30 minutes with the defaults). Lower `num_retries` or `timeout` to bound it. Passing
-`max_retries=` to `Model` turns the openai client's own retries back on: that many more attempts inside each of
-Forger's.
+`timeout × (num_retries + 1)` (30 minutes with the defaults). Lower `num_retries` or `timeout` to bound it. Ops
+never re-send a request that failed after these retries (their `max_retries` count parse failures only), so the bound
+holds through `generate_from_context`, `sample_from_LLM`, and the LLM filters. Passing `max_retries=` to `Model` turns
+the openai client's own retries back on: that many more attempts inside each of Forger's.
 
 When a request has been in flight much longer than the batch's finished ones (over 2 minutes and over 5 times their
 median), Forger logs one warning for it, in every progress mode:
