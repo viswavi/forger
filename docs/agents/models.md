@@ -54,7 +54,8 @@ a lost connection, a 408/409/425/429, or a 5xx. It waits about 1 s, then 2 s, 4 
 errors, a spending cap, the token-unit quota) raises at once; a per-minute rate limit is retried, also Gemini's "You
 exceeded your current quota" 429. The spending caps and the token-unit quota are checked again before each retry.
 LiteLLM is sent `num_retries=0`, so neither it nor the openai client retries on top: a request makes at most
-`num_retries + 1` attempts on every provider, and one that hangs on every attempt waits at most
+`num_retries + 1` attempts on every provider (not on Tinker: see [`TinkerModel`](#tinkermodel)), and one that hangs
+on every attempt waits at most
 `timeout × (num_retries + 1)` (30 minutes with the defaults). Lower `num_retries` or `timeout` to bound it. Ops
 never re-send a request that failed after these retries (their `max_retries` count parse failures only), so the bound
 holds through `generate_from_context`, `sample_from_LLM`, and the LLM filters. Passing `max_retries=` to `Model` turns
@@ -110,10 +111,13 @@ requests come back short too, or a response has more than `n`, it raises a `Valu
   prompt; when every sample is cached, no Tinker client is opened. A new `tinker://` checkpoint is another model id,
   so it never reuses an old checkpoint's samples. Turn it off with `TinkerModel(..., request_cache=False)` or
   `FORGER_REQUEST_CACHE=0`.
-- Retries: each request is retried on Tinker's transient errors (`APIConnectionError`, `RateLimitError`,
-  `InternalServerError`) up to `num_retries` times (default 2), after 1 s, 2 s, ..., so it makes at most
-  `num_retries + 1` attempts; the budgets and spending caps are checked before each attempt and never retried. There
-  is no per-attempt timeout and no in-flight warning: `Model(timeout=)` does not apply.
+- Retries: `Model`'s bound of `num_retries + 1` attempts does not hold. The Tinker SDK retries inside each attempt,
+  with no attempt limit: a lost connection, a timeout, or a 408/409/429/5xx is sent again 0.5 s to 10 s later until
+  it succeeds, or until no request has made progress for 2 hours (then it raises `APIConnectionError`). On top of
+  that, `TinkerModel` retries the `APIConnectionError`, `RateLimitError`, and `InternalServerError` that reach it up
+  to `num_retries` times (default 2), after 1 s, 2 s, ..., so a stuck request can wait `2 h × (num_retries + 1)`. The
+  budgets and spending caps are checked before each of `TinkerModel`'s attempts and never retried. There is no
+  per-attempt timeout and no in-flight warning: `Model(timeout=)` does not apply.
 - `return_exceptions=True` puts a failed prompt's exception (after Tinker's retries, or a budget refusal) in its slot
   and keeps the others; the default raises the first failure in prompt order. Ctrl-C also stops requests waiting for
   a slot, for budget room, or for a retry.

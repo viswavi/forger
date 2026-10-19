@@ -16,7 +16,8 @@ Transform rows without removing items.
 optional JSON schema. A prompt whose output fails to parse (a reply arrived but did not parse) is asked again up to
 `max_retries` times; after that its slots are `None` and the other prompts' results are kept. A request that still
 fails with a transient provider error (timeout, lost connection, 429, or 5xx) after the model's own `num_retries` is
-not asked again, so with `num_retries=2` a request makes at most 3 attempts in all; its slots are `None`. Other
+not asked again, so with `num_retries=2` a request makes at most 3 attempts in all (for a `Model`; see
+[`TinkerModel`](models.md#tinkermodel)); its slots are `None`. Other
 provider errors (a bad API key, an unknown model, a 400 such as an over-long prompt, an exhausted quota, a spending
 cap) raise at once, since retrying cannot fix them. When any slot failed at the provider, the op logs one warning
 (`1 of 64 prompts failed after the model's retries; their slots are None: InternalServerError ×1`), shows it in the

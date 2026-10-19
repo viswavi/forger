@@ -214,7 +214,11 @@ class TinkerModel(Model):
                 used verbatim and `enable_thinking` is ignored.
             seed: Optional sampling seed.
             num_retries: Retries per request on transient Tinker errors
-                (connection errors, rate limits, server errors).
+                (connection errors, rate limits, server errors), on top of
+                the Tinker SDK's own retries: the SDK retries connection
+                errors, timeouts and 408/409/429/5xx with no attempt limit
+                until no request has made progress for 2 hours, so a request
+                can make many more than num_retries + 1 attempts.
             max_concurrent: In-flight requests per process. Defaults to
                 TINKER_MAX_CONCURRENT_SAMPLES, else 600.
             prices: USD per million tokens for "prefill", "cached_prefill" and
