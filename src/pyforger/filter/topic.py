@@ -24,7 +24,7 @@ def by_topic_frequency(
     *,
     field: str,
     model: Model,
-    context: str,
+    context: str | None = None,
     num_clusters: int = 20,
     min_frequency: float = 0.0,
     max_frequency: float | None = None,

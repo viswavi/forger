@@ -16,6 +16,7 @@ filtering passes) get cached at the @op layer.
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import inspect
 import os
@@ -318,6 +319,8 @@ def skip_cache_write() -> None:
 _STEP_META_SUFFIX = ".step.json"
 # A filter's per-row scores, so a cache hit still shows its histogram.
 _SCORES_SUFFIX = ".scores.json"
+# What the call added to the pipeline's retrieval check (see _tracking.ReachLog).
+_REACH_SUFFIX = ".reach.json"
 
 # Set on every @op / tracked wrapper, e.g. {"name": "filter.by_length", "kind":
 # "op", "cache": True}; scripts/gen_op_docs.py reads it to mark cached ops.
@@ -416,7 +419,7 @@ def _request_scope(
     """
     first = args[0] if args else None
     has_rows = isinstance(first, list) and _tracking.category_of(op_name) != "acquire"
-    if not bound:  # normalized is {"args": [...], "kwargs": {...}}
+    if not bound:  # no signature, e.g. a built-in: {"args": [...], "kwargs": {...}}
         positional = list(args[1:] if has_rows else args)
         named: dict[str, Any] = {
             "args": [_scope_value(v) for v in positional],
@@ -518,6 +521,7 @@ def op(
     samples_arg: str | None = None,
     unkeyed: tuple[str, ...] = (),
     category: str | None = None,
+    smoke: tuple[str, ...] = (),
 ) -> Any:
     """Decorator: cache output on disk, content-addressed by inputs.
 
@@ -558,6 +562,14 @@ def op(
     ``@step`` / ``@pipeline`` checks see, e.g. "no quality filter ran". Ops
     defined in ``pyforger.<category>`` default to that category; any other op
     defaults to "other", whatever its name.
+
+    In a smoke run (``@pipeline(smoke=3)`` or ``FORGER_SMOKE_ROWS=3``) the
+    cache key also holds the row limit, so smoke results never mix with a
+    full run's. ``smoke`` names count parameters capped to the limit: an int
+    above it is lowered (``n=100`` → ``n=3``), a list is cut to its first
+    rows, e.g. ``@op(name="acquire.sample_from_LLM", smoke=("n",))``. The
+    request cache is not keyed on the limit, so the full run reuses the
+    completions the smoke run got for the same rows.
     """
 
     def decorate(fn: Callable[..., T]) -> Callable[..., T]:
@@ -581,6 +593,7 @@ def op(
             for param in unkeyed:
                 if param not in sig.parameters:
                     raise TypeError(f"unkeyed names {param!r}, not a parameter")
+            _check_smoke_params(sig, smoke)
 
         op_name = name or f"{fn.__module__}.{fn.__qualname__}"
         op_category = _tracking.register_op(op_name, fn.__module__, category)
@@ -612,6 +625,7 @@ def op(
                     f"{op_name} takes no input rows, so min_yield / max_yield do "
                     "not apply; put them on the alter or filter op that follows"
                 )
+            args, kwargs = _smoke_capped(sig, smoke, args, kwargs)
             token = _tracking.enter_op(op_name)
             scope_token = _NO_CACHE_SCOPE.set(True) if _no_cache else None
             state = _CallState()
@@ -669,29 +683,31 @@ def op(
             # perf_counter, like the step and pipeline times: time.time() also
             # counts a laptop's sleep, so an op could outlast its step.
             start = time.perf_counter()
-            was_bound = False
             if sig is not None:
                 try:
                     # Attempt to normalize the op function's arguments before hashing.
                     bound = sig.bind(*args, **kwargs)
-                    bound.apply_defaults()
-                    # Normalize the different ways of stating the same arguments.
-                    args = bound.args
-                    kwargs = bound.kwargs
-                    normalized = dict(bound.arguments)
-                    was_bound = True
-                    for param in unkeyed:
-                        normalized.pop(param, None)
-                except TypeError:
-                    if _cache_only:
-                        raise
-                    # If the arguments don't match the signature, use them directly.
-                    normalized = {"args": list(args), "kwargs": dict(kwargs)}
+                except TypeError as exc:
+                    # fn would raise anyway; name the op and the likely fix. The
+                    # "_" is stripped since e.g. topic_based_clustering passes its
+                    # extra keywords on to the inner op _topic_based_clustering.
+                    display = fn.__name__.lstrip("_")
+                    raise _bind_error(display, sig, args, kwargs, exc) from None
+                bound.apply_defaults()
+                # Normalize the different ways of stating the same arguments.
+                args = bound.args
+                kwargs = bound.kwargs
+                normalized = dict(bound.arguments)
+                for param in unkeyed:
+                    normalized.pop(param, None)
             else:
                 normalized = {"args": list(args), "kwargs": dict(kwargs)}
             # E.g. a PROMPT constant edited since the last run changes the key.
             globals_key = keyed_globals(fn)
             key = [_CACHE_KEY_VERSION, op_name, body_key, globals_key, normalized]
+            smoke_rows = _tracking.smoke_rows()
+            if smoke_rows is not None:  # never read or overwrite a full run's entry
+                key.append(["smoke", smoke_rows])
             t0 = time.perf_counter()
             input_hash, hash_size = _hash(key)
             _maybe_warn_hash_cost(op_name, time.perf_counter() - t0, hash_size)
@@ -709,6 +725,7 @@ def op(
             is_step = op_name.startswith(_tracking.STEP_OP_PREFIX)
             meta_path = cache_path.with_name(input_hash + _STEP_META_SUFFIX)
             scores_path = cache_path.with_name(input_hash + _SCORES_SUFFIX)
+            reach_path = cache_path.with_name(input_hash + _REACH_SUFFIX)
 
             if use_cache and cache_path.exists():
                 try:
@@ -744,6 +761,8 @@ def op(
                         type(exc).__name__,
                         exc,
                     )
+            if cache_hit:
+                _replay_reach(reach_path)
 
             if not cache_hit:
                 if _cache_only:
@@ -751,11 +770,12 @@ def op(
                         f"No cached result for {op_name} with these arguments"
                     )
                 scope = _request_scope(
-                    op_name, body_key, normalized, args, samples_arg, was_bound
+                    op_name, body_key, normalized, args, samples_arg, sig is not None
                 )
                 scope_token = _REQUEST_SCOPE.set(scope)
                 try:
-                    result = fn(*args, **kwargs)
+                    with _tracking.reach_scope() as reach:
+                        result = fn(*args, **kwargs)
                 finally:
                     _REQUEST_SCOPE.reset(scope_token)
                     # Also "0 of N": a rerun that reuses nothing usually means
@@ -791,6 +811,13 @@ def op(
                             _atomic_write(scores_path, scores.encode())
                         else:  # no stale scores from an earlier result
                             scores_path.unlink(missing_ok=True)
+                    if reach is not None:
+                        # Written even when empty: a missing file means the
+                        # result was cached outside a pipeline or by an older
+                        # Forger, so its prompts are unknown (see _replay_reach).
+                        _atomic_write(reach_path, reach.dumps().encode())
+                    else:  # no log from an earlier run describing another result
+                        reach_path.unlink(missing_ok=True)
                     _write_result(cache_path, result, cache_root)
 
             duration = time.perf_counter() - start
@@ -828,6 +855,84 @@ def op(
     return decorate
 
 
+# Keywords every @op call accepts on top of the function's own parameters.
+_CALL_KEYWORDS = ("min_yield", "max_yield", "_no_cache", "_cache_only")
+
+
+def _suggest(key: str, candidates: list[str]) -> list[str]:
+    """Return likely intended names, e.g. 'max_workers' -> ['verifier_workers']."""
+    close = difflib.get_close_matches(key, candidates, n=3)
+    # Same last word, which difflib scores low for long prefixes.
+    last = key.rsplit("_", 1)[-1]
+    if len(last) >= 4:
+        close += [c for c in candidates if c.rsplit("_", 1)[-1] == last]
+    return list(dict.fromkeys(close))[:3]
+
+
+def _bind_error(
+    display: str,
+    sig: inspect.Signature,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    exc: TypeError,
+) -> TypeError:
+    """Explain a call that does not match the op's signature.
+
+    E.g. ``by_pass_at_k() got an unexpected keyword argument 'max_workers'; did
+    you mean 'verifier_workers'? Accepted keywords: rows, model, ...``.
+    """
+    params = list(sig.parameters.values())
+    keywords = [
+        p.name for p in params if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)
+    ]
+    accepted = (
+        f" Accepted keywords: {', '.join(keywords) or '(none)'} "
+        f"(plus {', '.join(_CALL_KEYWORDS)})."
+    )
+    candidates = keywords + list(_CALL_KEYWORDS)
+    takes_any = any(p.kind == p.VAR_KEYWORD for p in params)
+    unknown = [] if takes_any else [k for k in kwargs if k not in candidates]
+    if len(unknown) == 1:
+        message = f"{display}() got an unexpected keyword argument {unknown[0]!r}"
+        close = _suggest(unknown[0], candidates)
+        if close:
+            message += f"; did you mean {' or '.join(map(repr, close))}?"
+        else:
+            message += "."
+        return TypeError(message + accepted)
+    if unknown:
+        message = (
+            f"{display}() got unexpected keyword arguments "
+            f"{', '.join(map(repr, unknown))}."
+        )
+        for key in unknown:
+            close = _suggest(key, candidates)
+            if close:
+                message += (
+                    f" For {key!r}, did you mean {' or '.join(map(repr, close))}?"
+                )
+        return TypeError(message + accepted)
+    try:
+        bound = sig.bind_partial(*args, **kwargs)
+    except TypeError:
+        return TypeError(f"{display}(): {exc}." + accepted)
+    missing = [
+        p
+        for p in params
+        if p.name not in bound.arguments
+        and p.default is p.empty
+        and p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD)
+    ]
+    if not missing:
+        return TypeError(f"{display}(): {exc}." + accepted)
+    names = ", ".join(
+        repr(p.name) + (" (keyword-only)" if p.kind == p.KEYWORD_ONLY else "")
+        for p in missing
+    )
+    noun = "argument" if len(missing) == 1 else "arguments"
+    return TypeError(f"{display}() missing required {noun}: {names}." + accepted)
+
+
 def _atomic_write(path: Path, data: bytes) -> None:
     """Write ``data`` to ``path`` so concurrent readers never see a partial file."""
     tmp_path = path.parent / f"{path.name}.tmp.{os.getpid()}.{threading.get_ident()}"
@@ -840,12 +945,28 @@ def _write_result(cache_path: Path, result: Any, cache_root: Path) -> None:
     _atomic_write(cache_path, _blobs.dumps(result, cache_root / "blobs"))
 
 
+def _replay_reach(path: Path) -> None:
+    """Replay what a cached call added to the pipeline's retrieval check."""
+    if not _tracking.reach_active():
+        return
+    try:
+        text = path.read_text()
+    except OSError:
+        # Cached outside a pipeline or before this check existed: its prompts
+        # are unknown, so the pipeline must not claim retrieved text went unused.
+        _tracking.mark_reach_blind()
+        return
+    _tracking.replay_reach(text)
+
+
 def _read_result(cache_path: Path, cache_root: Path) -> Any:
     """Load what ``_write_result`` wrote, or an entry pickled without blobs."""
     return _blobs.loads(cache_path.read_bytes(), cache_root / "blobs")
 
 
-def tracked(op_name: str) -> Callable[[Callable[..., T]], Callable[..., T]]:
+def tracked(
+    op_name: str, *, smoke: tuple[str, ...] = ()
+) -> Callable[[Callable[..., T]], Callable[..., T]]:
     """Report calls in ``@step`` reports like an op, without caching or hashing.
 
     For functions whose arguments cannot be hashed into a cache key, e.g.
@@ -853,6 +974,7 @@ def tracked(op_name: str) -> Callable[[Callable[..., T]], Callable[..., T]]:
     and for cheap ops not worth caching, e.g. ``filter.by_predicate``. Calls
     take ``min_yield=`` / ``max_yield=`` like ``@op`` calls; ``_no_cache=True``
     is accepted (nothing is cached) and ``_cache_only=True`` raises.
+    ``smoke`` names count parameters capped in a smoke run, as for ``@op``.
     """
 
     def decorate(fn: Callable[..., T]) -> Callable[..., T]:
@@ -863,6 +985,7 @@ def tracked(op_name: str) -> Callable[[Callable[..., T]], Callable[..., T]]:
                     "Forger functions decorated with @tracked cannot use the "
                     f"reserved argument name '{reserved}'."
                 )
+        _check_smoke_params(sig, smoke)
         op_category = _tracking.register_op(op_name, fn.__module__)
 
         @wraps(fn)
@@ -884,6 +1007,7 @@ def tracked(op_name: str) -> Callable[[Callable[..., T]], Callable[..., T]]:
                     f"{op_name} takes no input rows, so min_yield / max_yield do "
                     "not apply; put them on the alter or filter op that follows"
                 )
+            args, kwargs = _smoke_capped(sig, smoke, args, kwargs)
             # The rows, also when passed by keyword: by_predicate(items=rows, ...).
             try:
                 first_arg = next(iter(sig.bind(*args, **kwargs).arguments.values()))
@@ -920,6 +1044,43 @@ def tracked(op_name: str) -> Callable[[Callable[..., T]], Callable[..., T]]:
         return wrapper
 
     return decorate
+
+
+def _check_smoke_params(sig: inspect.Signature | None, smoke: tuple[str, ...]) -> None:
+    """Raise TypeError when ``smoke`` names a parameter the function lacks."""
+    missing = [p for p in smoke if sig is None or p not in sig.parameters]
+    if missing:
+        raise TypeError(f"smoke= names parameters the function lacks: {missing}")
+
+
+def _smoke_capped(
+    sig: inspect.Signature | None,
+    smoke: tuple[str, ...],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    """Cap the ``smoke`` parameters to the smoke run's row limit, if one is active.
+
+    An int above the limit becomes the limit (``n=100`` → ``n=3``); a list is
+    cut to its first rows. Calls whose arguments do not bind pass unchanged.
+    """
+    if not smoke or sig is None:
+        return args, kwargs
+    limit = _tracking.smoke_rows()
+    if limit is None:
+        return args, kwargs
+    try:
+        bound = sig.bind(*args, **kwargs)
+    except TypeError:
+        return args, kwargs  # the call itself raises
+    bound.apply_defaults()
+    for param in smoke:
+        value = bound.arguments.get(param)
+        if isinstance(value, int) and not isinstance(value, bool) and value > limit:
+            bound.arguments[param] = limit
+        elif isinstance(value, list) and len(value) > limit:
+            bound.arguments[param] = value[:limit]
+    return bound.args, bound.kwargs
 
 
 def _failed_call(

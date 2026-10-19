@@ -1,6 +1,12 @@
 """Acquire operations: generate or retrieve new data."""
 
-from pyforger.acquire.model import GenerateResult, LocalModel, Model, split_reasoning
+from pyforger.acquire.model import (
+    GenerateResult,
+    LocalModel,
+    Model,
+    PromptTooLongError,
+    split_reasoning,
+)
 from pyforger.acquire.retrieve import (
     retrieve,
     retrieve_from_arxiv,
@@ -33,6 +39,7 @@ __all__ = [
     "LocalModel",
     "TinkerModel",
     "TinkerBudgetExceeded",
+    "PromptTooLongError",
     "split_reasoning",
     "retrieve",
     "retrieve_from_web",

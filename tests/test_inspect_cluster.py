@@ -121,6 +121,62 @@ def test_returns_aligned_cluster_names():
     assert sorted(model.summarized_records) == sorted(set(docs))
 
 
+class _RecordingClusterModel(_FakeClusterModel):
+    """Fake cluster model that keeps every user prompt it answers."""
+
+    def __init__(self):
+        """Start with no prompts."""
+        super().__init__()
+        self.user_prompts = []
+
+    def _respond(self, prompt):
+        self.user_prompts.append(prompt[-1]["content"])
+        return super()._respond(prompt)
+
+
+def _first_lines(model):
+    """The first line of each prompt kind: summarize, aggregate, assign."""
+    lines = {prompt.split("\n", 1)[0] for prompt in model.user_prompts}
+    return sorted(lines)
+
+
+def test_context_defaults_to_the_field_values():
+    """Without context, every prompt describes the corpus by its field."""
+    docs = COOKING_DOCS + SPACE_DOCS
+    model = _RecordingClusterModel()
+    clusters = topic_based_clustering(
+        _rows(docs), field="text", model=model, num_clusters=2, embed_fn=_fake_embed
+    )
+    assert clusters == ["cooking" if _is_cooking(doc) else "space" for doc in docs]
+    assert _first_lines(model) == [
+        "Below are candidate topics proposed independently from 1 different "
+        "samples of a corpus of 'text' values from a dataset",
+        "Following record is about 'text' values from a dataset",
+        "You are now tasked with reviewing records related to 'text' values "
+        "from a dataset",
+    ]
+
+
+def test_explicit_context_prompts_and_cache_are_unchanged():
+    """An explicit context is used verbatim and cached apart from the default."""
+    docs = COOKING_DOCS + SPACE_DOCS
+    model = _RecordingClusterModel()
+    _cluster(_rows(docs), model)
+    assert _first_lines(model) == [
+        "Below are candidate topics proposed independently from 1 different "
+        f"samples of a corpus of {CONTEXT}",
+        f"Following record is about {CONTEXT}",
+        f"You are now tasked with reviewing records related to {CONTEXT}",
+    ]
+    calls = len(model.user_prompts)
+    _cluster(_rows(docs), model)
+    assert len(model.user_prompts) == calls  # cache hit
+    topic_based_clustering(
+        _rows(docs), field="text", model=model, num_clusters=2, embed_fn=_fake_embed
+    )
+    assert len(model.user_prompts) > calls  # the default is a different key
+
+
 def test_tiny_tokens_per_shard_splits_into_shards():
     """A tiny token budget puts each record in its own shard."""
     docs = COOKING_DOCS + SPACE_DOCS
@@ -571,4 +627,20 @@ def test_cache_only_is_forwarded():
     with pytest.raises(FileNotFoundError):
         _cluster_with(
             _rows(COOKING_DOCS + SPACE_DOCS), embedding_model="tfidf", _cache_only=True
+        )
+
+
+def test_misspelled_keyword_names_the_public_op():
+    """A wrong keyword reaches the inner op but is reported under the public name."""
+    with pytest.raises(
+        TypeError,
+        match=r"^topic_based_clustering\(\) got an unexpected keyword argument "
+        r"'num_cluster'; did you mean 'num_clusters'",
+    ):
+        topic_based_clustering(
+            _rows(COOKING_DOCS),
+            field="text",
+            model=_FakeClusterModel(),
+            embed_fn=_fake_embed,
+            num_cluster=2,
         )

@@ -87,7 +87,7 @@ def by_judged_difficulty(
         medium=medium_difficulty_criterion,
         maximum=maximum_difficulty_criterion,
     )
-    tasks = [get_field(item, task_field, "by_judged_difficulty") for item in items]
+    tasks = [_task_text(item, task_field) for item in items]
     # Building prompts here puts their exact text in the cache key of the ratings.
     prompts = [
         [
@@ -126,6 +126,31 @@ def by_judged_difficulty(
     return kept
 
 
+def _task_text(item: dict, task_field: str) -> str:
+    """Return the task under ``task_field`` as text for the judge.
+
+    Chat messages are written out one block each, the role line and then the
+    content, e.g. an RL row's ``[{"role": "user", "content": "Add 2 and 2."}]``
+    becomes "user:" and "Add 2 and 2." on two lines, not the repr of the list.
+    A number is sent as its text.
+    """
+    value = get_field(item, task_field, "by_judged_difficulty")
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float)):  # bool too: e.g. 7 → "7"
+        return str(value)
+    if (
+        isinstance(value, list)
+        and value
+        and all(isinstance(m, dict) and "role" in m and "content" in m for m in value)
+    ):
+        return "\n\n".join(f"{m['role']}:\n{m['content']}" for m in value)
+    raise ValueError(
+        f"task_field {task_field!r} must hold text or a list of chat messages "
+        f'({{"role": ..., "content": ...}} dicts), got {type(value).__name__}'
+    )
+
+
 @op(name="filter.by_judged_difficulty.scores", samples_arg="num_judges")
 def _difficulty_scores(
     prompts: list[list[Message]],
@@ -137,9 +162,10 @@ def _difficulty_scores(
     """Return each prompt's ``num_judges`` parsed ratings (None when unparseable).
 
     A prompt whose request still fails after the model's retries with a
-    transient error (a 504, a timeout) gets ``None`` ratings, one warning names
-    the count and the last error, and the result is not cached; any other
-    error raises.
+    transient error (a 504, a timeout), or that hits a row error (the content
+    filter, an over-long prompt), gets ``None`` ratings, one warning names the
+    count and the last error, and the result is not cached; any other error
+    raises, as does a row error on every prompt.
     """
     failures = _RequestFailures()
     ratings: list[list[int | float | None]] = []
@@ -154,10 +180,11 @@ def _difficulty_scores(
                 **_cache_kwargs(model.generate, cache_row=prompt),
             )
         except Exception as exc:
-            failures.failed(exc)  # raises unless transient
+            failures.failed(exc)  # raises unless transient or a row error
             ratings.append([None] * num_judges)
             continue
         ratings.append([_parse_score_response(raw, MAX_DIFFICULTY)[0] for raw in raws])
+    failures.raise_if_systemic(len(prompts))
     failures.report(
         f"filter.by_judged_difficulty: {len(failures)} of {len(prompts)} judge "
         "requests failed after retries; those rows are unrated"

@@ -351,7 +351,9 @@ def _module_section(module_name: str) -> str:
     )
     if skipped:
         names = ", ".join(f"`{n}`" for n in skipped)
-        section += f"\nAlso exported, not documented here: {names}.\n"
+        section += (
+            "\n" + _markdown(f"Also exported, not documented here: {names}.") + "\n"
+        )
     return "\n".join([section, *entries])
 
 

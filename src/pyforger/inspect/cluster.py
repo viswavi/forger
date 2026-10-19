@@ -12,7 +12,11 @@ from typing import Any
 
 import tiktoken
 
-from pyforger.acquire._model_utils import _catch_kwargs, _RequestFailures
+from pyforger.acquire._model_utils import (
+    _catch_kwargs,
+    _raise_if_systemic,
+    _RequestFailures,
+)
 from pyforger.acquire.model import Message, Model, Prompt, _cache_kwargs
 from pyforger.op import op
 from pyforger.utils import get_field, get_formatted_logger
@@ -110,6 +114,15 @@ _ASSIGN_USER = (
 )
 
 
+def _default_context(field: str) -> str:
+    """Describe the corpus from the field, e.g. "'problem' values from a dataset".
+
+    It fills every ``{context}`` slot above: "reviewing records related to ...",
+    "a corpus of ...", and "Following record is about ...".
+    """
+    return f"{field!r} values from a dataset"
+
+
 def _chat(system: str, user: str) -> list[Message]:
     """A system + user message prompt."""
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
@@ -125,7 +138,7 @@ def topic_based_clustering(
     *,
     field: str,
     model: Model,
-    context: str,
+    context: str | None = None,
     num_clusters: int = 10,
     embed_fn: Callable[[list[str]], Any] | None = None,
     embedding_model: str = _DEFAULT_EMBEDDING_MODEL,
@@ -139,15 +152,16 @@ def topic_based_clustering(
 ) -> list[str]:
     """Cluster rows into ``num_clusters`` LLM-named topics by one field.
 
-    Returns one topic name per row, aligned with ``items``. ``context``
-    describes the corpus and what topics should capture, e.g.
-    "competition math problems. Topics should describe the technique,
-    NOT the numeric answer.". If the LLM still misses ``num_clusters``
-    topics after being corrected, a warning is logged and its last
-    codebook is used. With fewer unique values than ``num_clusters``, it
-    uses one cluster per unique value and logs a warning; with a single
-    unique value, every row gets that value (cut to 80 characters) as its
-    topic and the LLM is not called.
+    Returns one topic name per row, aligned with ``items``. ``context`` is
+    an optional hint that describes the corpus and what topics should
+    capture, e.g. "competition math problems. Topics should describe the
+    technique, NOT the numeric answer."; it improves topic names. Without
+    it the prompts call the corpus "'<field>' values from a dataset". If
+    the LLM still misses ``num_clusters`` topics after being corrected, a
+    warning is logged and its last codebook is used. With fewer unique
+    values than ``num_clusters``, it uses one cluster per unique value and
+    logs a warning; with a single unique value, every row gets that value
+    (cut to 80 characters) as its topic and the LLM is not called.
 
     Embeddings only guide which rows the LLM summarizes together. They come
     from, in order of precedence:
@@ -182,6 +196,9 @@ def topic_based_clustering(
             _TFIDF_EMBEDDING,
         )
         embedding_model = _TFIDF_EMBEDDING
+    # Resolved outside the cached op, so its code and cache keys stay as before.
+    if context is None:
+        context = _default_context(field)
     return _topic_based_clustering(
         items,
         field=field,
@@ -457,6 +474,8 @@ def _summarize_shards(
         for shard in shards
     ]
     responses = model.generate_batch(prompts, **_catch_kwargs(model))
+    # Every shard blocked by the content filter (or too long) is systemic.
+    _raise_if_systemic(responses, len(responses))
     shard_topics = [
         {} if failures.failed(shard_responses) else _parse_topics(shard_responses[0])
         for shard_responses in responses
@@ -509,7 +528,7 @@ def _build_codebook(
                 ),
             )[0]
         except Exception as exc:
-            failures.failed(exc)  # raises unless transient
+            failures.failed(exc)  # raises unless transient or a row error
             # Model already retried the request (num_retries): do not ask again.
             if not codebook:
                 raise RuntimeError(
@@ -590,6 +609,8 @@ def _assign_topics(
             ),
             **_catch_kwargs(model),
         )
+        if attempt == 0:  # every document blocked or too long: the template
+            _raise_if_systemic(responses, len(responses))
         still_pending = []
         for doc, doc_responses in zip(pending, responses):
             if failures.failed(doc_responses):

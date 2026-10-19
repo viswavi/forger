@@ -127,12 +127,15 @@ transient error (a 504, a timeout): one warning in the step report names the cou
 is not cached, so a rerun asks again. Another warning counts the judge calls that gave no score by cause (failed,
 unparseable, or stopped mid-thought in an unclosed `<think>`) and the rows they left unscored, e.g. with `group_by`
 `2 of 10 judge calls gave no score (...) → 6 rows unscored`; calls cut off mid-thought are not counted again in the
-op's warning about completions that stopped at `max_tokens`. Errors a retry cannot fix (a bad key, a 400, a spending
-cap or token-unit quota) still raise. The same holds for every LLM filter: `by_judged_difficulty` leaves a row whose
-request failed unrated, `by_pass_at_k` and `by_comparative_difficulty` grade a failed sample `None` (excluded), and
-`inspect.topic_based_clustering` does not ask a failed request again, though it asks again after an unparseable answer:
-a failed shard summary is skipped, a failed label request gives its document the fallback topic, and a failed codebook
-request keeps the last codebook, or raises `RuntimeError` when there is none yet.
+op's warning about completions that stopped at `max_tokens`. A row error (a content-filter block or an over-long
+prompt; see `generate_from_context` in [alter.md](alter.md)) counts as a failed request too, and the warning names its
+reason, e.g. `1 prompt longer than the model's context window`; a row error on every prompt (at least 2) raises. Other
+errors a retry cannot fix (a bad key, another 400, a spending cap or token-unit quota) still raise. The same holds for
+every LLM filter: `by_judged_difficulty` leaves a row whose request failed unrated, `by_pass_at_k` and
+`by_comparative_difficulty` grade a failed sample `None` (excluded), and `inspect.topic_based_clustering` does not ask
+a failed request again, though it asks again after an unparseable answer: a failed shard summary is skipped, a failed
+label request gives its document the fallback topic, and a failed codebook request keeps the last codebook, or raises
+`RuntimeError` when there is none yet.
 
 `prompt_template` replaces the prompt: a format string or a callable taking a dict. The placeholders are the row's
 fields (for a group, its first row's) plus `{input}`, `{output}`, `{criteria}`, `{max_score}`, and `{rubric}` (the
@@ -155,8 +158,12 @@ row in one `n=k` call, keeping rows whose pass rate (passed / valid grades) is i
 `[0.1, 0.9]`, inclusive).
 `by_judged_difficulty` (least expensive, least reliable) only asks a judge how hard a task looks.
 
-No answer format is imposed. The prompt is the task text itself (`prompt_template` replaces it, e.g. to ask for a
-final `ANSWER: ...` line), and each completion is graded on what `extract_answer` takes from it. The default,
+No answer format is imposed. The prompt is the task itself (`prompt_template` replaces it, e.g. to ask for a final
+`ANSWER: ...` line). `input_field` may hold text or chat messages: a list of `{"role", "content"}` dicts, such as an
+RL row's `prompt`, is sent as the conversation; a number is sent as its text; any other value raises `ValueError`.
+`by_judged_difficulty`'s `task_field` takes the same values; the judge reads chat messages as text, each one written
+as `<role>:` and its content on the next line, separated by blank lines.
+Each completion is graded on what `extract_answer` takes from it. The default,
 `pyforger.filter.model_difficulty.answer_segment`, is the text after the completion's closed `<think>` block, stripped
 of surrounding whitespace. `metric` is `"exact_match"` (normalized equality with the reference), `"rouge_l"` (F1 at
 least `rouge_l_threshold`), or a verifier `(prediction, row) -> bool | None`, e.g. `filter.program_verifier("tests")`,
@@ -213,6 +220,25 @@ targets = [
 ]
 ```
 
+To measure without filtering, keep every row with `min_rate=0.0, max_rate=1.0`. The step report's pass-rate
+histogram, or each row's grades, is then the measurement; e.g. how often a model, such as a fine-tuned checkpoint,
+already solves your prompts:
+
+```python
+measured = filter.by_pass_at_k(
+    rows,
+    model=checkpoint,
+    input_field="prompt",  # text or chat messages
+    metric=verifier,  # (prediction, row) -> bool | None; no ground_truth_field needed
+    k=8,
+    min_rate=0.0,
+    max_rate=1.0,
+    outcomes_field="grades",  # every row gets {"model": [True, False, ...]}
+)
+```
+
+A row with too few valid grades (see `min_valid`) is still dropped.
+
 `filter.by_judged_difficulty` asks an LLM judge to rate how hard each task in `task_field` is on a 5-point scale and
 keeps rows rated in `[min_difficulty, max_difficulty]` (default `[3, 5]`, inclusive). It is the least expensive but
 least reliable of the difficulty filters: one judge call per row, but the judge only guesses how hard the task is.
@@ -240,9 +266,10 @@ hard = filter.by_judged_difficulty(
 [`inspect.topic_based_clustering`](inspect.md). A topic whose share of the input rows is above `max_frequency`
 keeps a random subset of `max_frequency` of the input (seeded by `sample_seed`); a topic below `min_frequency` is
 dropped (bounds inclusive). `1 / num_clusters` is the uniform share, and `max_frequency` defaults to twice that.
-`topic_field="topic"` adds each kept row's topic name. The clustering is
-the expensive part (one LLM call per unique value) and is cached as its own op, so trying other bounds makes no new
-model or embedding calls; use the report's histogram of topic shares to choose them.
+`topic_field="topic"` adds each kept row's topic name. `context` is an optional hint for topic names (see
+`topic_based_clustering` in [inspect.md](inspect.md)). The clustering is the expensive part (one LLM call per unique
+value) and is cached as its own op, so trying other bounds makes no new model or embedding calls; use the report's
+histogram of topic shares to choose them.
 
 ```python
 balanced = filter.by_topic_frequency(

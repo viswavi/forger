@@ -49,7 +49,8 @@ own default (6000 s). The timeout is not part of the cache key, so changing it k
 
 `Model` retries each request itself, up to `num_retries` times (default 2), and only on transient errors: a timeout,
 a lost connection, a 408/409/425/429, or a 5xx. It waits about 1 s, then 2 s, 4 s, ... between attempts (a 429's
-`Retry-After` header instead, up to 60 s), and logs each retry at INFO. A 400 (e.g. an over-long prompt), 401, 403,
+`Retry-After` header instead, up to 60 s), and logs each retry at INFO. A 400 (e.g. an over-long prompt or a
+content-filter block, which ops treat as row errors; see `generate_from_context` in [alter.md](alter.md)), 401, 403,
 404, or an exhausted quota, credit balance, or budget (OpenAI's `insufficient_quota`, LiteLLM's or Forger's budget
 errors, a spending cap, the token-unit quota) raises at once; a per-minute rate limit is retried, also Gemini's "You
 exceeded your current quota" 429. The spending caps and the token-unit quota are checked again before each retry.
@@ -84,6 +85,11 @@ form each model reads: DeepSeek-V4 as `reasoning={"effort": "low"}` (the gateway
 GLM-5.3 and other models as `reasoning_effort`. It overrides any reasoning setting passed through `**kwargs` or
 `extra_body`. Without it, DeepSeek-V4-Flash on the gateway does not think at all.
 `dynamic_step` forwards the reasoning effort and `extra_body` to OpenHands.
+
+`model.generate(prompt, n=...)` returns a `GenerateResult`, which is a `list` of completion strings: use `result[0]`
+or iterate over it. `result.texts` gives a plain `list[str]`. Per-call metadata is on `.usage`, `.reasoning` (one
+entry per completion), `.finish_reasons` (one per completion, `"length"` when it hit `max_tokens`), `.truncated` (how
+many hit it), `.model_id`, and `.raw`. `generate_batch` returns one `GenerateResult` per prompt.
 
 `model.generate_batch(prompts, n=k)` returns exactly `k` completions per prompt. Claude, Grok, Gemini, o1/o3/o4, and
 gpt-5 models (also behind `litellm_proxy/`, `openrouter/`, or provider prefixes), and models whose LiteLLM supported

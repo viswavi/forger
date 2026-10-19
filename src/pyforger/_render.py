@@ -1388,6 +1388,18 @@ def _repeated_text(rec: StepRecord | RowStream, label: str = "") -> Text | None:
     return text
 
 
+def _smoke_mark(rec: StepRecord) -> str:
+    """``SMOKE: first 3 of 120 rows``, or ``SMOKE: ≤3 rows`` when nothing was cut."""
+    if rec.smoke_n_in is not None and rec.smoke_n_in != rec.n_in:
+        return f"SMOKE: first {fmt_int(rec.n_in)} of {fmt_int(rec.smoke_n_in)} rows"
+    return f"SMOKE: ≤{rec.smoke_rows} rows"
+
+
+def smoke_banner(rows: int) -> str:
+    """The line that marks a smoke run's pipeline summary."""
+    return f"SMOKE RUN: at most {rows} rows per step; outputs are not representative"
+
+
 def _cached_line(rec: StepRecord) -> RenderableType:
     """A cached step in one line: ``step x · 5 → 3 rows · cached · originally …``."""
     title = Text()
@@ -1409,6 +1421,8 @@ def _cached_line(rec: StepRecord) -> RenderableType:
         if cost and math.isfinite(cost):
             cached += f" · {fmt_cost(cost)}"
     title.append(f" · {cached}", style="dim")
+    if rec.smoke_rows is not None:
+        title.append(f" · {_smoke_mark(rec)}", style="bold yellow")
     n_warn = len(dict.fromkeys(rec.warnings))
     if n_warn:
         title.append(
@@ -1462,6 +1476,8 @@ def step_renderable(
         stats.append(f" · {usage}")
     if rec.cache_hit:
         stats.append(" · cached" + _originally(rec), style="dim")
+    if rec.smoke_rows is not None:
+        stats.append(f" · {_smoke_mark(rec)}", style="bold yellow")
     body.append(stats)
     fields = _fields_text(rec)
     if fields is not None:
@@ -1615,6 +1631,8 @@ def pipeline_renderable(rec: PipelineRecord, *, width: int = WIDTH) -> Renderabl
         stats.append(f" · cached (originally {fmt_cost(cached_cost)})", style="dim")
     elif usage:
         stats.append(f" · {usage}")
+    if rec.smoke_rows is not None:
+        stats.append(" · SMOKE RUN", style="bold yellow")
 
     def original_cost(s: StepRecord) -> float:
         return s.original.cost_usd if s.cache_hit and s.original else 0.0
@@ -1685,6 +1703,10 @@ def pipeline_renderable(rec: PipelineRecord, *, width: int = WIDTH) -> Renderabl
             )
         )
     body.extend(_filter_notes(rec))
+    if rec.notes:
+        body.append(Text(""))
+        body.append(Text("notes", style="bold"))
+        body.extend(Text(_clean(note)) for note in dict.fromkeys(rec.notes))
     step_warnings = [
         line for s in rec.steps for line in _warning_lines(s.warnings, prefix=s.name)
     ]
@@ -1696,6 +1718,9 @@ def pipeline_renderable(rec: PipelineRecord, *, width: int = WIDTH) -> Renderabl
         body.append(Text(""))
         body.append(Text("pipeline warnings", style="bold"))
         body.extend(_warning_lines(rec.warnings))
+    if rec.smoke_rows is not None:  # last, where `tail` sees it
+        body.append(Text(""))
+        body.append(Text(smoke_banner(rec.smoke_rows), style="bold yellow"))
     return Group(_rule("pipeline", rec.name), Padding(Group(*body), (0, 0, 0, 2)))
 
 

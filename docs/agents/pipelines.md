@@ -58,7 +58,19 @@ them, and score lists of over 100,000 rows, have none: rerun with `_no_cache=Tru
   as `filter.by_predicate`, and never add a no-op filter only to quiet the warning); an op misses its `min_yield` /
   `max_yield`; an op's model calls stopped at `max_tokens`; a step's type hints cannot be resolved; `show=` names a
   field no output row has; a pipeline has only one step; no quality filter, no diversity filter, or no inspect op ran
-  anywhere; an op was called in the pipeline outside a step.
+  anywhere; an op was called in the pipeline outside a step; retrieved text reached no prompt (below).
+- Retrieved text that reaches no prompt: inside a pipeline, each `acquire.retrieve*` call fingerprints the documents
+  it returns (three 60-character pieces of each document's `text`, or its longest string; documents under 200
+  characters are skipped, and at most 2,000 per run are fingerprinted). Every `Model` / `LocalModel` prompt is
+  checked for them, ignoring whitespace, also one answered from the request cache, and so are the string values of the
+  rows the pipeline returns. If none appears anywhere, the pipeline warns: `acquire.retrieve_from_web returned 223
+  documents, but none of their text appeared in any of the 1,840 model prompts or in the pipeline's output; to ground
+  generation on them, format the retrieved text into your prompts`. A field that carries the documents but that no
+  prompt formats does not count, unless the pipeline returns the rows that hold it. When fewer than 10% of the
+  documents were used, the summary's `notes` section says so instead. Cached ops and steps replay what their first run
+  saw, so a cached rerun gives the same verdict. A result cached outside a pipeline, or by an older Forger, has unknown
+  prompts, so the check says nothing for that run rather than warn falsely. Direct `source.fetch()` calls are not
+  tracked.
 - These checks use each op's category, not its name. Ops under `pyforger.acquire/alter/filter/inspect` have their
   package's category; your own `@op` is `"other"` (even `@op(name="filter.x")`) unless it declares one, e.g.
   `@op(category="filter")` for a custom quality filter.
@@ -128,6 +140,18 @@ them, and score lists of over 100,000 rows, have none: rerun with `_no_cache=Tru
   `TokenUnitQuotaExceeded`; `dynamic_step` agents are charged to it and checked against it like `Model` requests)
   and `TinkerModel`'s dollar ledger (`FORGER_TINKER_USAGE_FILE`, which raises
   `TinkerBudgetExceeded`). The caps count this process's spend; the quotas count every process sharing the file.
+- Smoke runs: run every new pipeline version with `FORGER_SMOKE_ROWS=3 python pipeline.py` first (or
+  `@pipeline(smoke=3)`); it exercises every op in about a minute, so a wrong keyword or a missing argument fails at
+  once instead of minutes into the full run. Inside the pipeline, every `@step` call cuts each rows argument (each of
+  several inputs, `*rows` items too) to its first 3 rows. These ops also cap their counts: `acquire.sample_from_LLM`
+  (`n`) and `acquire.retrieve` / `retrieve_from_*` (the first 3 `queries`, `n` at most 3). Other ops keep their
+  counts, so a step that makes rows from nothing in some other way still makes all of them. Step reports say
+  `SMOKE: first 3 of 120 rows`, and the summary ends with `SMOKE RUN: at most 3 rows per step; outputs are not
+  representative`. Smoke results are cached under keys that include the row limit, so a later full run never reads
+  or overwrites them and recomputes every step. A second smoke run of the same code reuses them. The request cache is
+  not keyed on the limit, though, so the full run sends no model request the smoke run already sent for the same rows:
+  `generate_from_context` asks only about rows 4 onward, and `sample_from_LLM(n=100)` asks for 97 more samples.
+  `smoke=0` turns smoke mode off even when the variable is set.
 
 ## Composing a pipeline
 

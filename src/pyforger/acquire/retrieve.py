@@ -11,6 +11,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+from pyforger import _tracking
 from pyforger.acquire.sources import (
     ArxivRetrievalSource,
     HFRetrievalSource,
@@ -21,6 +22,16 @@ from pyforger.acquire.sources import (
     WikiRetrievalSource,
 )
 from pyforger.op import op
+
+# The wrapper that builds each source, named in the pipeline's warning when
+# retrieved text reaches no prompt.
+_WRAPPER_OF = {
+    WebRetrievalSource: "acquire.retrieve_from_web",
+    WikiRetrievalSource: "acquire.retrieve_from_wiki",
+    HFRetrievalSource: "acquire.retrieve_from_hf",
+    ArxivRetrievalSource: "acquire.retrieve_from_arxiv",
+    S2RetrievalSource: "acquire.retrieve_from_s2",
+}
 
 
 def _resolve_queries(queries: str | list[str] | None) -> list[str | None]:
@@ -53,7 +64,16 @@ def _fetch(
     return rows
 
 
-@op(name="acquire.retrieve")
+def _register(source: RetrievalSource, rows: list[dict]) -> None:
+    """Fingerprint ``rows`` for the pipeline's check, under the wrapper's name."""
+    label = next(
+        (name for cls, name in _WRAPPER_OF.items() if isinstance(source, cls)),
+        "acquire.retrieve",
+    )
+    _tracking.register_documents(label, rows)
+
+
+@op(name="acquire.retrieve", smoke=("queries", "n"))
 def retrieve(
     source: RetrievalSource,
     queries: str | list[str] | None = None,
@@ -67,6 +87,10 @@ def retrieve(
 
     Each row is stamped with a ``"query"`` field. With ``queries=None``,
     a single fetch with no query is performed (e.g. random sampling).
+    Inside a ``@pipeline`` the rows' text is fingerprinted, and the pipeline
+    warns when none of it reaches a model prompt or the pipeline's output.
+    In a smoke run (``FORGER_SMOKE_ROWS=3``) only the first 3 queries run,
+    with ``n`` capped to 3.
 
     Returns:
         The source's rows for each query in turn, each with a ``query`` field
@@ -80,12 +104,13 @@ def retrieve(
     all_rows: list[dict[str, Any]] = []
     for q in _resolve_queries(queries):
         all_rows.extend(_fetch(source, mode, q, n, seed, kwargs))
+    _register(source, all_rows)
     return all_rows
 
 
 # Backend wrappers own their cache boundary; call the unwrapped retrieval
 # implementation so bypassing a wrapper cannot hit an inner cache.
-@op(name="acquire.retrieve_from_web")
+@op(name="acquire.retrieve_from_web", smoke=("queries", "n"))
 def retrieve_from_web(
     queries: str | list[str] | None = None,
     *,
@@ -114,7 +139,7 @@ def retrieve_from_web(
     )
 
 
-@op(name="acquire.retrieve_from_wiki")
+@op(name="acquire.retrieve_from_wiki", smoke=("queries", "n"))
 def retrieve_from_wiki(
     queries: str | list[str] | None = None,
     *,
@@ -136,7 +161,7 @@ def retrieve_from_wiki(
     )
 
 
-@op(name="acquire.retrieve_from_hf")
+@op(name="acquire.retrieve_from_hf", smoke=("queries", "n"))
 def retrieve_from_hf(
     dataset: str,
     queries: str | list[str] | None = None,
@@ -168,7 +193,7 @@ def retrieve_from_hf(
     )
 
 
-@op(name="acquire.retrieve_from_arxiv")
+@op(name="acquire.retrieve_from_arxiv", smoke=("queries", "n"))
 def retrieve_from_arxiv(
     queries: str | list[str] | None = None,
     *,
@@ -191,7 +216,7 @@ def retrieve_from_arxiv(
 
 # max_workers only changes how fast the queries run (rows keep query order),
 # so it stays out of the cache key.
-@op(name="acquire.retrieve_from_s2", unkeyed=("max_workers",))
+@op(name="acquire.retrieve_from_s2", unkeyed=("max_workers",), smoke=("queries", "n"))
 def retrieve_from_s2(
     queries: str | list[str] | None = None,
     *,
@@ -236,4 +261,6 @@ def retrieve_from_s2(
         return _fetch(source, mode, query, n, seed, kwargs)
 
     with ThreadPoolExecutor(max_workers=min(max_workers, len(resolved))) as pool:
-        return [row for rows in pool.map(fetch, resolved) for row in rows]
+        all_rows = [row for rows in pool.map(fetch, resolved) for row in rows]
+    _register(source, all_rows)
+    return all_rows

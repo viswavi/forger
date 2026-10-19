@@ -7,10 +7,11 @@ import logging
 import re
 from typing import Any
 
+import litellm
 import numpy as np
 import pytest
 
-from pyforger import _tracking
+from pyforger import PromptTooLongError, _tracking
 from pyforger._render import render_scores, render_step
 from pyforger.acquire.model import GenerateResult, Model
 from pyforger.filter import (
@@ -55,7 +56,8 @@ class FlakyJudge(Model):
     """Answers like a judge; prompts containing a ``fail`` text 504 instead.
 
     ``cut`` texts get a ``<think>`` block that never closes (out of tokens),
-    ``fatal`` texts a non-transient error. Records each batch's
+    ``fatal`` texts a non-transient error. With ``row_error``, ``fail`` texts
+    raise ``row_error(text)`` instead of a 504. Records each batch's
     ``return_exceptions``.
     """
 
@@ -66,6 +68,7 @@ class FlakyJudge(Model):
         cut: tuple[str, ...] = (),
         fatal: Exception | None = None,
         answer: Any = None,
+        row_error: Any = None,
     ) -> None:
         """Store what to score, fail, and cut off."""
         super().__init__("test/flaky-judge")
@@ -74,6 +77,7 @@ class FlakyJudge(Model):
         self.cut = cut
         self.fatal = fatal
         self.answer = answer
+        self.row_error = row_error
         self.caught: list[bool] = []
         self.sent: list[str] = []  # every prompt, as text
 
@@ -103,6 +107,8 @@ class FlakyJudge(Model):
             exc: Exception | None = None
             if self.fatal is not None:
                 exc = self.fatal
+            elif any(f in text for f in self.fail) and self.row_error is not None:
+                exc = self.row_error(text)
             elif any(f in text for f in self.fail):
                 exc = GatewayTimeout(f"504 Gateway Timeout for {text[:20]!r}")
             if exc is not None:
@@ -516,3 +522,95 @@ def test_topic_clustering_tolerates_failed_assignments(monkeypatch):
     )
     # Asked once: the model's own retries are the only retries.
     assert sum("Record: doc about fish 2" in text for text in judge.sent) == 1
+
+
+def _too_long(text: str) -> PromptTooLongError:
+    """What a backend that checks lengths before sending raises."""
+    return PromptTooLongError("Prompt 17 has 69685 tokens; the context window is 32768")
+
+
+def _blocked(text: str) -> litellm.BadRequestError:
+    """Azure's content-filter 400."""
+    return litellm.BadRequestError(
+        message="AzureException - {'error': {'code': 'content_filter'}}",
+        llm_provider="azure",
+        model="m",
+    )
+
+
+class TestRowErrors:
+    """A content-filter block or an over-long prompt costs one row, not the op."""
+
+    def _pass_at_k(self, rows, student):
+        return by_pass_at_k(
+            rows,
+            model=student,
+            input_field="task",
+            ground_truth_field="answer",
+            k=2,
+            min_rate=0.0,
+            max_rate=1.0,
+        )
+
+    def test_pass_at_k_over_long_prompt_is_unscored(self, monkeypatch):
+        """The over-long row grades None (unscored); the warning names why."""
+        monkeypatch.setenv("FORGER_STEP_REPORT", "0")
+        student = FlakyJudge(fail=("LONG",), answer=lambda t: "4", row_error=_too_long)
+
+        @step
+        def hard(rows):
+            return self._pass_at_k(rows, student)
+
+        rows = [{"task": "2+2", "answer": "4"}, {"task": "LONG", "answer": "4"}]
+        assert hard(rows) == [rows[0]]
+        call = _tracking.step_records()["hard"].ops[0]
+        assert call.scores is not None and call.scores.values == [1.0, None]
+        assert len(call.warnings) == 1
+        assert (
+            ": 1 prompt longer than the model's context window; last error: "
+            "PromptTooLongError: Prompt 17 has 69685 tokens"
+        ) in call.warnings[0]
+
+    def test_judged_difficulty_over_long_prompt_is_unrated(self):
+        """by_judged_difficulty leaves the row unrated instead of raising."""
+        judge = FlakyJudge(fail=("LONG",), row_error=_too_long)
+        rows = [{"task": "Prove it."}, {"task": "LONG task"}]
+        assert by_judged_difficulty(rows, model=judge, task_field="task") == [rows[0]]
+
+    def test_llm_score_content_filter_is_a_missing_vote(self, caplog):
+        """A blocked judge request is a missing vote, counted by reason."""
+        judge = FlakyJudge(fail=("TIMEOUT",), row_error=_blocked)
+        with caplog.at_level(logging.WARNING):
+            assert _score(ROWS, judge) == [ROWS[0], ROWS[2]]
+        assert any(
+            "votes are missing: 1 prompt blocked by the provider's content filter;"
+            in message
+            for message in _messages(caplog)
+        )
+
+    def test_every_prompt_row_error_raises(self):
+        """Every prompt over the context window points at the template."""
+        student = FlakyJudge(fail=("",), answer=lambda t: "4", row_error=_too_long)
+        rows = [{"task": "2+2", "answer": "4"}, {"task": "3+1", "answer": "4"}]
+        with pytest.raises(PromptTooLongError):
+            self._pass_at_k(rows, student)
+        with pytest.raises(litellm.BadRequestError):
+            _score(ROWS, FlakyJudge(fail=("",), row_error=_blocked))
+
+    def test_topic_clustering_every_label_blocked_raises(self):
+        """Every label request blocked raises instead of all-fallback topics."""
+        animals = ("cats", "dogs", "fish")
+        judge = FlakyJudge(
+            fail=("Record: ",),
+            answer=lambda t: json.dumps({a: f"about {a}" for a in animals}),
+            row_error=_blocked,
+        )
+        with pytest.raises(litellm.BadRequestError):
+            topic_based_clustering(
+                [{"text": f"doc about {a} {i}"} for a in animals for i in range(3)],
+                field="text",
+                context="pets",
+                model=judge,
+                num_clusters=3,
+                embed_fn=lambda d: np.array([[float(i), 1.0] for i in range(len(d))]),
+            )

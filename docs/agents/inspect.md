@@ -38,6 +38,9 @@ clusters = topic_based_clustering(
 # clusters[i] is the topic name of rows[i]
 ```
 
+`context` is an optional hint that describes the corpus and what the topics should capture; it improves topic names.
+Without it, the prompts describe the corpus as the field's values (e.g. "'problem' values from a dataset").
+
 `filter.by_topic_frequency` runs this clustering (cached) to downsample over-represented topics.
 
 With fewer unique `field` values than `num_clusters` (e.g. 6 for `num_clusters=20`), the op uses one cluster per

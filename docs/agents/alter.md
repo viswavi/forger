@@ -17,13 +17,20 @@ optional JSON schema. A prompt whose output fails to parse (a reply arrived but 
 `max_retries` times; after that its slots are `None` and the other prompts' results are kept. A request that still
 fails with a transient provider error (timeout, lost connection, 429, or 5xx) after the model's own `num_retries` is
 not asked again, so with `num_retries=2` a request makes at most 3 attempts in all (for a `Model`; see
-[`TinkerModel`](models.md#tinkermodel)); its slots are `None`. Other
-provider errors (a bad API key, an unknown model, a 400 such as an over-long prompt, an exhausted quota, a spending
-cap) raise at once, since retrying cannot fix them. When any slot failed at the provider, the op logs one warning
-(`1 of 64 prompts failed after the model's retries; their slots are None: InternalServerError ×1`), shows it in the
-step report, and is not cached (nor is its step), so a rerun re-sends only the failed prompts (the request cache
-replays the rest). Parse-failure `None`s are cached. `inspect.topic_based_clustering` does not ask a failed request
-again either (see [LLM judges](filter.md#llm-judges)).
+[`TinkerModel`](models.md#tinkermodel)); its slots are `None`.
+A row error belongs to one prompt, not to the key, model, or account, so it is never retried and also leaves that
+prompt's slots `None`: the provider's content filter blocked the prompt or its reply
+(`litellm.ContentPolicyViolationError`, or a 400 whose body says `content_filter` or `content_policy`), or the prompt
+is longer than the context window (`litellm.ContextWindowExceededError`, or `pyforger.PromptTooLongError` from a
+backend that checks lengths before sending). If every prompt of the call (at least 2) hits a row error, the op raises
+the first one instead, since that points at the template or the model (e.g. a system prompt that trips the filter).
+Other provider errors (a bad API key, an unknown model, any other 400, an exhausted quota, a spending cap) raise at
+once, since retrying cannot fix them. When any slot failed at the provider, the op logs one warning that counts the
+failures by type or reason (`3 of 64 prompts failed after the model's retries; their slots are None: 2 prompts blocked
+by the provider's content filter, InternalServerError ×1`), shows it in the step report, and is not cached (nor is its
+step). Successful requests are cached one by one in the request cache, so a rerun re-sends only the failed prompts.
+Parse-failure `None`s are cached. `inspect.topic_based_clustering` does not ask a failed request again either (see
+[LLM judges](filter.md#llm-judges)).
 As with `sample_from_LLM`, reasoning traces are included under a `thinking_trace` key. Inline traces are not extracted:
 `LocalModel` leaves `<think>` blocks in the completion text. Use `split_reasoning` to separate them out.
 

@@ -12,8 +12,11 @@ from pyforger import _tracking
 from pyforger.acquire._model_utils import (
     _accepts_kwarg,
     _build_prompt,
+    _failure_label,
+    _is_row_error,
     _is_transient,
     _parse_output,
+    _raise_if_systemic,
     _reasoning_for,
     _report_provider_failures,
 )
@@ -120,7 +123,10 @@ def generate_from_context(
         ``i * samples_per_item`` to ``(i + 1) * samples_per_item``). Each slot
         holds the parsed output dict, or ``None`` if the prompt failed to parse
         after ``max_retries`` or failed at the provider after the model's own
-        retries; when any slot failed at the provider, the result is not
+        retries. A row error (the provider's content filter blocked it, or
+        the prompt is longer than the context window) also gives ``None``,
+        unless every prompt (at least 2) hit one: then the first is raised.
+        When any slot failed at the provider, the result is not
         cached, so a rerun asks again (the request cache replays the
         completions that arrived). With
         ``merge=True``, the merged rows of the slots that succeeded. When the
@@ -161,10 +167,12 @@ def generate_from_context(
         (i, list(range(i * samples_per_item, (i + 1) * samples_per_item)))
         for i in range(len(prompts))
     ]
-    # Item index -> type name of its latest provider failure, e.g.
-    # "InternalServerError". Model already retried the request (num_retries),
-    # so the op does not ask again: those slots stay None.
+    # Item index -> label of its latest provider failure, e.g.
+    # "InternalServerError" or "content filter". Model already retried the
+    # request (num_retries) if a retry could help, so the op does not ask
+    # again: those slots stay None.
     provider_errors: dict[int, str] = {}
+    row_errors: dict[int, BaseException] = {}
     # Slots whose output failed to parse after stopping at max_tokens.
     cut_off: set[int] = set()
 
@@ -209,10 +217,14 @@ def generate_from_context(
                     continue
                 for (i, slots), completions in zip(batch, batch_results):
                     if isinstance(completions, BaseException):
-                        # A bad key, unknown model, or 400 fails every retry.
-                        if not _is_transient(completions):
+                        # A content-filter block or an over-long prompt fails
+                        # only this row; a bad key, unknown model, or other
+                        # 400 fails every retry.
+                        if _is_row_error(completions):
+                            row_errors[i] = completions
+                        elif not _is_transient(completions):
                             raise completions
-                        provider_errors[i] = type(completions).__name__
+                        provider_errors[i] = _failure_label(completions)
                         continue
                     unfilled: list[int] = []
                     if len(completions) < len(slots) and catch:
@@ -258,6 +270,7 @@ def generate_from_context(
             len(failed_parse),
             max_retries,
         )
+    _raise_if_systemic(list(row_errors.values()), len(prompts))
     if provider_errors:
         _report_provider_failures(
             f"alter.generate_from_context: {len(provider_errors)} of {len(prompts)} "

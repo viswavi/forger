@@ -675,3 +675,99 @@ def test_cache_keys_match_across_processes(tmp_path) -> None:
     second_run = run(4)
     assert second_run["hits"] == {"step.first": True, "step.second": True}
     assert second_run["judge_calls"] == 0
+
+
+def _pass_at_k_op(tmp_path, monkeypatch):
+    """An op shaped like filter.by_pass_at_k, recording the calls that ran."""
+    monkeypatch.setenv("FORGER_CACHE", str(tmp_path))
+    calls = []
+
+    @op
+    def by_pass_at_k(rows, *, model, k=4, verifier_workers=4):
+        calls.append(rows)
+        return rows
+
+    return by_pass_at_k, calls
+
+
+def test_unknown_keyword_names_op_and_suggests_close_match(
+    tmp_path, monkeypatch
+) -> None:
+    """A misspelled keyword names the op, suggests the real one and lists all."""
+    by_pass_at_k, calls = _pass_at_k_op(tmp_path, monkeypatch)
+    with pytest.raises(TypeError) as excinfo:
+        by_pass_at_k([1], model="m", max_workers=8)
+    message = str(excinfo.value)
+    assert message.startswith(
+        "by_pass_at_k() got an unexpected keyword argument 'max_workers'; "
+        "did you mean 'verifier_workers'?"
+    )
+    assert (
+        "Accepted keywords: rows, model, k, verifier_workers (plus min_yield" in message
+    )
+    assert excinfo.value.__cause__ is None
+    assert calls == []
+
+
+def test_unknown_keyword_without_close_match_lists_accepted(
+    tmp_path, monkeypatch
+) -> None:
+    """With no close match, every unknown keyword is named and no guess is made."""
+    by_pass_at_k, _ = _pass_at_k_op(tmp_path, monkeypatch)
+    with pytest.raises(TypeError) as excinfo:
+        by_pass_at_k([1], model="m", zzz=1, qqq=2)
+    message = str(excinfo.value)
+    assert message.startswith(
+        "by_pass_at_k() got unexpected keyword arguments 'zzz', 'qqq'."
+    )
+    assert "did you mean" not in message
+    assert "Accepted keywords: rows, model, k, verifier_workers" in message
+
+
+def test_misspelled_call_keyword_suggests_reserved_name(tmp_path, monkeypatch) -> None:
+    """Per-call keywords like min_yield are suggestion candidates too."""
+    by_pass_at_k, _ = _pass_at_k_op(tmp_path, monkeypatch)
+    with pytest.raises(TypeError, match=r"did you mean 'min_yield'"):
+        by_pass_at_k([1], model="m", min_yeild=0.5)
+    with pytest.raises(TypeError, match=r"For 'k_', did you mean 'k'\?"):
+        by_pass_at_k([1], model="m", k_=2, zzz=1)
+
+
+def test_missing_keyword_only_argument_names_op(tmp_path, monkeypatch) -> None:
+    """A missing required keyword-only argument names the op and the argument."""
+    by_pass_at_k, calls = _pass_at_k_op(tmp_path, monkeypatch)
+    with pytest.raises(
+        TypeError,
+        match=r"^by_pass_at_k\(\) missing required argument: 'model' "
+        r"\(keyword-only\)\. Accepted keywords: rows, model",
+    ):
+        by_pass_at_k([1])
+    with pytest.raises(
+        TypeError, match=r"missing required arguments: 'rows', 'model' \(keyword-only\)"
+    ):
+        by_pass_at_k()
+    assert calls == []
+
+
+def test_other_bind_errors_name_the_op(tmp_path, monkeypatch) -> None:
+    """Other bind failures keep Python's message, prefixed with the op name."""
+    by_pass_at_k, _ = _pass_at_k_op(tmp_path, monkeypatch)
+    with pytest.raises(TypeError, match=r"^by_pass_at_k\(\): too many positional"):
+        by_pass_at_k([1], "m", model="m")
+
+
+def test_valid_calls_and_var_keyword_ops_are_unchanged(tmp_path, monkeypatch) -> None:
+    """Valid calls, **kwargs ops and reserved keywords still work as before."""
+    by_pass_at_k, calls = _pass_at_k_op(tmp_path, monkeypatch)
+    assert by_pass_at_k([1], model="m", verifier_workers=8) == [1]
+    assert by_pass_at_k([1], model="m", verifier_workers=8, _no_cache=True) == [1]
+    assert by_pass_at_k(
+        [1], model="m", verifier_workers=8, min_yield=0.5, _cache_only=True
+    ) == [1]
+    assert len(calls) == 2
+
+    @op(name="test.loose")
+    def loose(rows, **options):
+        return sorted(options)
+
+    assert loose([1], anything=1, _no_cache=True) == ["anything"]

@@ -14,7 +14,8 @@ def debug_step(rows):
 
 **Cache key.** SHA-256 of: the op name, the function's qualified name and compiled body (bytecode, constants, names,
 varnames, freevars, argcount, applied recursively to nested code objects), the captured closure values, the module
-globals it reads that are plain data or define `cache_key()`, and the call arguments. Plain data is `None`, `bool`,
+globals it reads that are plain data or define `cache_key()`, and the call arguments, plus the row limit in a smoke
+run. Plain data is `None`, `bool`,
 numbers, `str`, `bytes`, and tuples, lists, dicts, and sets of those. A global counts when the body loads it by name,
 including in lambdas, comprehensions, and inner functions (`r.split()` does not read a global `split`). Editing a
 `PROMPT = "..."` constant or a config dict, or pointing `MODEL = Model(...)` at another model, therefore invalidates

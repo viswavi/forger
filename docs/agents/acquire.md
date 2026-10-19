@@ -29,17 +29,25 @@ contained in the output dict under a `thinking_trace` key. Inline traces are not
 to separate them out.
 `max_retries` counts rounds whose replies all fail to parse. A request that still fails with a transient provider
 error after the model's own `num_retries` is not sent again: its samples are dropped, so the op returns fewer than `n`
-samples with a warning and is not cached. Other errors raise.
+samples with a warning and is not cached. A row error (a content-filter block or an over-long prompt; see
+`generate_from_context` in [alter.md](alter.md)) is not sent again either, but when every request hit one and no sample
+arrived it raises, since the one prompt is the template itself. Other errors raise.
 
 `output_schema` (here and in `alter.generate_from_context`) is a dict of keys, e.g. `{"question": str, "answer": str}`,
-and the prompt asks for a JSON object with those keys. Only the keys are checked:
+and the prompt gets an instruction to end the response with a JSON object with those keys. Only the keys are checked:
 
 - A response must contain a JSON object with every schema key; one without them fails to parse and is retried.
 - Keys outside the schema are dropped, so a key the model invents (`"crafted_by"`) never reaches your rows.
 - Value types are shown to the model as a format example but not checked: `{"answer": 42}` passes `{"answer": str}`.
   Check types or values yourself, e.g. `[r for r in rows if isinstance(r["answer"], str)]`.
-- A ```` ```json ```` fence, prose around the object, or a leading `<think>...</think>` block is tolerated. The first
-  object with every schema key wins; JSON that is not an object (a list, a number) fails.
+- A ```` ```json ```` fence, prose around the object, or a leading `<think>...</think>` block is tolerated. The last
+  object with every schema key wins, so an example object quoted in earlier reasoning is skipped; JSON that is not an
+  object (a list, a number) fails.
+
+The instruction allows text before the object, but a reasoning model may still spend its reasoning reconciling it with
+your prompt's own format instructions (e.g. "answer with one code block"). If you will train on the model's reasoning,
+don't combine `output_schema` with format instructions in the prompt, or generate without `output_schema` and parse
+the answer yourself.
 
 `TinkerModel` samples a base model (e.g. `"Qwen/Qwen3-8B"`) or a trained `tinker://...` sampler checkpoint remotely on
 Tinker. Use it whenever you need a student model's own outputs: STaR traces, pass@k difficulty checks, or sanity

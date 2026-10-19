@@ -11,6 +11,8 @@ from typing import Any
 from pyforger.acquire._model_utils import (
     _accepts_kwarg,
     _build_prompt,
+    _failure_label,
+    _is_row_error,
     _is_transient,
     _parse_output,
     _reasoning_for,
@@ -32,15 +34,17 @@ def _generation_loop(
     max_retries: int,
     batch_size: int | None,
     errors: list[str] | None = None,
+    row_errors: list[BaseException] | None = None,
 ) -> Generator[dict[str, Any], None, None]:
     """Yield accepted samples until ``n`` collected or retries exhausted.
 
     A request that fails at the provider with a transient error (e.g. a 504)
-    after the model's own retries is not sent again: the samples it would have
-    returned drop out of the target, and its error type name is appended to
-    ``errors``. Later rounds re-ask only for replies that did not parse (or
-    that a duck-typed model did not return). Other errors (a bad key, a 400)
-    raise.
+    after the model's own retries, or with a row error (a content-filter
+    block, an over-long prompt), is not sent again: the samples it would have
+    returned drop out of the target, its label (`_failure_label`) is appended
+    to ``errors``, and a row error itself to ``row_errors``. Later rounds
+    re-ask only for replies that did not parse (or that a duck-typed model did
+    not return). Other errors (a bad key, a 400) raise.
     """
     # Only Model.generate_batch can hand back an error instead of raising it;
     # duck-typed fakes and models with their own generate keep calling generate.
@@ -89,11 +93,14 @@ def _generation_loop(
         round_index += 1
 
         if isinstance(raw_responses, BaseException):
-            if not _is_transient(raw_responses):
+            if _is_row_error(raw_responses):
+                if row_errors is not None:
+                    row_errors.append(raw_responses)
+            elif not _is_transient(raw_responses):
                 raise raw_responses
             logger.warning("sample_from_LLM request failed: %s", raw_responses)
             if errors is not None:
-                errors.append(type(raw_responses).__name__)
+                errors.append(_failure_label(raw_responses))
             lost += current_batch_size
             continue
         round_lost = 0
@@ -138,7 +145,7 @@ def _generation_loop(
             consecutive_failed_rounds = 0
 
 
-@op(name="acquire.sample_from_LLM", samples_arg="n")
+@op(name="acquire.sample_from_LLM", samples_arg="n", smoke=("n",))
 def sample_from_LLM(
     prompt: Prompt,
     model: Model,
@@ -163,7 +170,10 @@ def sample_from_LLM(
             stopping. A request that fails at the provider (e.g. a 504) is
             retried by ``model`` itself (``Model(num_retries=)``) and not asked
             for again here; when failures leave fewer than ``n`` samples, the
-            shorter list is returned and not cached.
+            shorter list is returned and not cached. A row error (the
+            provider's content filter, a prompt longer than the context
+            window) is not retried either; when every request hit one and no
+            sample arrived, it is raised, since the prompt itself is at fault.
         batch_size: Number of responses to request per round (one
             ``model.generate`` call with ``n=batch_size``). None (default) requests
             all that are still missing at once.
@@ -185,12 +195,14 @@ def sample_from_LLM(
         model's request cache follows the same rule: a call that differs in any
         argument but `n` draws new samples, and raising `n` keeps the samples
         already drawn and requests only the extra ones.
+        In a smoke run (``FORGER_SMOKE_ROWS=3``), `n` is capped to the row limit.
     """
     if batch_size is not None and batch_size <= 0:
         raise ValueError("batch_size must be positive")
     if n <= 0:
         raise ValueError("n must be positive")
     errors: list[str] = []
+    row_errors: list[BaseException] = []
     samples = list(
         _generation_loop(
             prompt=prompt,
@@ -201,8 +213,13 @@ def sample_from_LLM(
             max_retries=max_retries,
             batch_size=batch_size,
             errors=errors,
+            row_errors=row_errors,
         )
     )
+    # The one prompt is the template, not a row: if every request hit a row
+    # error and nothing arrived, the template itself is the problem.
+    if not samples and row_errors and len(row_errors) == len(errors):
+        raise row_errors[0]
     # Short because requests failed: not cached, so a rerun asks again (the
     # request cache replays the completions that arrived).
     if errors and len(samples) < n:
