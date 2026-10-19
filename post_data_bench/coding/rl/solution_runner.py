@@ -13,7 +13,9 @@ Forger's program ops as ``runner=`` and also works on its own::
 ``score_targets`` scores each row's ``ground_truth`` with the row's own code
 criteria, exactly as one RL reward would (``rubric_rm.code_score``), so targets
 and rubrics that disagree (a solution using ``__slots__``, a grade() that
-crashes) show up before training.
+crashes) show up before training. ``rubric_verifier`` scores a sampled response
+the same way, e.g. to measure with ``filter.by_pass_at_k`` how often a
+checkpoint already earns full reward on a row.
 """
 from __future__ import annotations
 
@@ -143,6 +145,34 @@ def run_solution(code: str, tests: list[dict]) -> list[dict[str, Any]]:
     return results
 
 
+def _code_jobs(row: dict, response: str) -> list[tuple[int, str, list, str, str]]:
+    """The row's weighted code criteria as (index, code, prompt, response, target)."""
+    rubric = validate_rubric(row["rubric"])
+    prompt = row["prompt"]
+    if isinstance(prompt, str):
+        prompt = [{"role": "user", "content": prompt}]
+    return [
+        (j, criterion["code"], prompt, response, row["ground_truth"])
+        for j, (criterion, weight) in enumerate(rubric)
+        if "code" in criterion and weight
+    ]
+
+
+def _weighted(row: dict, criteria: list[float | None]) -> dict[str, Any]:
+    """The weighted mean over the scored criteria, as score_targets reports it."""
+    weights = [float(weight) for _, weight in row["rubric"]]
+    code_weight = sum(w for w, s in zip(weights, criteria) if s is not None)
+    return {
+        "score": (
+            sum(w * s for w, s in zip(weights, criteria) if s is not None) / code_weight
+            if code_weight
+            else None
+        ),
+        "criteria": criteria,
+        "prompt_weight": sum(weights) - code_weight,
+    }
+
+
 def score_targets(
     rows: list[dict],
     *,
@@ -158,39 +188,61 @@ def score_targets(
     score is below 1 means its rubric or its code does not survive the RL
     sandbox. Rows may be raw submission rows or validated ones.
     """
-    jobs = []
-    for i, row in enumerate(rows):
-        rubric = validate_rubric(row["rubric"])
-        prompt = row["prompt"]
-        if isinstance(prompt, str):
-            prompt = [{"role": "user", "content": prompt}]
-        for j, (criterion, weight) in enumerate(rubric):
-            if "code" in criterion and weight:
-                jobs.append((i, j, criterion["code"], prompt, row[response_field], row))
+    jobs = [
+        (i, *job)
+        for i, row in enumerate(rows)
+        for job in _code_jobs(row, row[response_field])
+    ]
     with ThreadPoolExecutor(max_workers=max_workers or _default_workers()) as pool:
-        values = list(
-            pool.map(
-                lambda job: code_score(job[2], job[3], job[4], job[5]["ground_truth"]),
-                jobs,
-            )
-        )
+        values = list(pool.map(lambda job: code_score(*job[2:]), jobs))
     scores: list[list[float | None]] = [[None] * len(row["rubric"]) for row in rows]
     for (i, j, *_), value in zip(jobs, values):
         scores[i][j] = value
-    out = []
-    for row, criteria in zip(rows, scores):
-        weights = [float(weight) for _, weight in row["rubric"]]
-        code_weight = sum(w for w, s in zip(weights, criteria) if s is not None)
-        out.append(
-            {
-                "score": (
-                    sum(w * s for w, s in zip(weights, criteria) if s is not None)
-                    / code_weight
-                    if code_weight
-                    else None
-                ),
-                "criteria": criteria,
-                "prompt_weight": sum(weights) - code_weight,
-            }
+    return [_weighted(row, criteria) for row, criteria in zip(rows, scores)]
+
+
+class RubricVerifier:
+    """``(response, row) -> bool | None``: see ``rubric_verifier``."""
+
+    def __init__(self, threshold: float = 1.0) -> None:
+        """Pass a response whose weighted code score is at least ``threshold``."""
+        self.threshold = threshold
+
+    def cache_key(self) -> tuple:
+        """Stable key for Forger's op cache: the threshold and the grader's sources."""
+        sources = ("rubric_rm.py", "rubric_worker.py", "rubric_sandbox.py")
+        return ("RubricVerifier", self.threshold) + tuple(
+            (Path(__file__).with_name(name)).read_text() for name in sources
         )
-    return out
+
+    def __repr__(self) -> str:
+        """Short name for error messages and reports."""
+        return f"rubric_verifier({self.threshold})"
+
+    def __call__(self, response: str, row: dict) -> bool | None:
+        """Score ``response`` with the row's code criteria in the RL sandbox."""
+        try:
+            jobs = _code_jobs(row, response)
+            criteria: list[float | None] = [None] * len(row["rubric"])
+            for j, *job in jobs:
+                criteria[j] = code_score(*job)
+        except Exception:
+            return None
+        score = _weighted(row, criteria)["score"]
+        return None if score is None else score >= self.threshold
+
+
+def rubric_verifier(threshold: float = 1.0) -> RubricVerifier:
+    """Forger verifier: does a response score at least ``threshold`` on its rubric?
+
+    ``verify(response, row)`` scores ``response`` with the row's code criteria
+    as ``score_targets`` scores a target: the RL reward's sandbox, timeouts and
+    weights, averaged over the code criteria (prompt criteria need the judge
+    and are not run). None when the row has no weighted code criteria or
+    grading fails (an invalid rubric, a sandbox that cannot start).
+
+    RL grades the whole response, thinking included, so give it the whole
+    completion: with ``filter.by_pass_at_k``, pass ``extract_answer=lambda c:
+    c`` (the default passes only the text after ``</think>``).
+    """
+    return RubricVerifier(threshold)
