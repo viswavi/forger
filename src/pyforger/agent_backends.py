@@ -5,7 +5,7 @@ from pathlib import Path
 from pyforger.agent_backend import AgentBackend
 
 DEFAULT_BACKEND = "local"
-BACKEND_CHOICES = ("local", "sail", "harbor-sail", "docker", "modal")
+BACKEND_CHOICES = ("local",)
 
 
 def get_backend(
@@ -21,17 +21,6 @@ def get_backend(
         from pyforger.local_backend import LocalBackend
 
         return LocalBackend()
-    if name == "sail":
-        from pyforger.sail_backend import SailBackend
-
-        return SailBackend()
-    if name in {"harbor-sail", "docker", "modal"}:
-        from pyforger.harbor_backend import HarborBackend
-
-        return HarborBackend(
-            {"type": "sail" if name == "harbor-sail" else name},
-            retain_trials=retain,
-        )
     raise ValueError(f"Unknown backend {name!r}; choose from {BACKEND_CHOICES}")
 
 

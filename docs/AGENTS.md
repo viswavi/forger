@@ -506,7 +506,6 @@ returns the parsed object, retains rejected raw files as `previous-N/` inputs
 on fresh attempts, and preserves exact parse feedback. Session iteration and
 wall-time budgets are shared across generation and every repair turn.
 
-
 ### Independent evaluation and success-rate filtering
 
 `inspect.measure(rows, evaluate)` reports `Measurement` values for existing data.

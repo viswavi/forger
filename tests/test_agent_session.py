@@ -139,8 +139,6 @@ def test_walltime_cancels_shell_children(tmp_path):
     assert not marker.exists()
 
 
-
-
 @pytest.mark.parametrize("repairs", [-1, True, 1.5])
 def test_invalid_repairs(repairs):
     """Invalid repair counts are rejected before execution."""
