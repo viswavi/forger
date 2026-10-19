@@ -219,9 +219,10 @@ fraction of judges scoring at least `score_threshold`, which is what `agreement_
 [`inspect.topic_based_clustering`](#pyforgerinspect). A topic whose share of the input rows is above `max_frequency`
 keeps a random subset of `max_frequency` of the input (seeded by `sample_seed`); a topic below `min_frequency` is
 dropped (bounds inclusive). `1 / num_clusters` is the uniform share, and `max_frequency` defaults to twice that.
-`topic_field="topic"` adds each kept row's topic name. The clustering is
-the expensive part (one LLM call per unique value) and is cached as its own op, so trying other bounds makes no new
-model or embedding calls; use the report's histogram of topic shares to choose them.
+`topic_field="topic"` adds each kept row's topic name. `context` is an optional hint for topic names (see
+`topic_based_clustering`). The clustering is the expensive part (one LLM call per unique value) and is cached as its
+own op, so trying other bounds makes no new model or embedding calls; use the report's histogram of topic shares to
+choose them.
 
 ```python
 balanced = filter.by_topic_frequency(
@@ -262,6 +263,9 @@ clusters = topic_based_clustering(
 )
 # clusters[i] is the topic name of rows[i]
 ```
+
+`context` is an optional hint that describes the corpus and what the topics should capture; it improves topic names.
+Without it, the prompts describe the corpus as the field's values (e.g. "'problem' values from a dataset").
 
 `filter.by_topic_frequency` runs this clustering (cached) to downsample over-represented topics.
 

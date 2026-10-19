@@ -238,6 +238,32 @@ def test_topics_match_topic_based_clustering():
     assert [row["topic"] for row in kept] == clusters == _topics_of(items)
 
 
+def test_context_is_optional():
+    """Without context, the clustering prompts describe the field's values."""
+    items = _rows()
+    prompts = []
+
+    class _RecordingModel(_FakeTopicModel):
+        def _respond(self, prompt):
+            prompts.append(prompt[-1]["content"])
+            return super()._respond(prompt)
+
+    model = _RecordingModel()
+    kept = by_topic_frequency(
+        items,
+        field="text",
+        model=model,
+        num_clusters=3,
+        max_frequency=1.0,
+        embed_fn=_CountingEmbed(),
+    )
+    assert kept == items
+    assert prompts and all(
+        "'text' values from a dataset" in prompt and CONTEXT not in prompt
+        for prompt in prompts
+    )
+
+
 def test_scores_recorded_in_step(monkeypatch):
     """Each row's score is its topic's share, kept between the bounds."""
     monkeypatch.setenv("FORGER_STEP_REPORT", "0")

@@ -83,6 +83,15 @@ _ASSIGN_USER = (
 )
 
 
+def _default_context(field: str) -> str:
+    """Describe the corpus from the field, e.g. "'problem' values from a dataset".
+
+    It fills every ``{context}`` slot above: "reviewing records related to ...",
+    "a corpus of ...", and "Following record is about ...".
+    """
+    return f"{field!r} values from a dataset"
+
+
 def _chat(system: str, user: str) -> list[Message]:
     """A system + user message prompt."""
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
@@ -99,7 +108,7 @@ def topic_based_clustering(
     *,
     field: str,
     model: Model,
-    context: str,
+    context: str | None = None,
     num_clusters: int = 10,
     embed_fn: Callable[[list[str]], Any] | None = None,
     embedding_model: str = _DEFAULT_EMBEDDING_MODEL,
@@ -112,10 +121,12 @@ def topic_based_clustering(
 ) -> list[str]:
     """Cluster rows into ``num_clusters`` LLM-named topics by one field.
 
-    Returns one topic name per row, aligned with ``items``. ``context``
-    describes the corpus and what topics should capture, e.g.
-    "competition math problems. Topics should describe the technique,
-    NOT the numeric answer.". Embeddings default to ``embedding_model``
+    Returns one topic name per row, aligned with ``items``. ``context`` is
+    an optional hint that describes the corpus and what topics should
+    capture, e.g. "competition math problems. Topics should describe the
+    technique, NOT the numeric answer."; it improves topic names. Without
+    it the prompts call the corpus "'<field>' values from a dataset".
+    Embeddings default to ``embedding_model``
     via sentence-transformers (GPU when available); pass ``embed_fn``
     to use another backend. If the LLM still misses ``num_clusters``
     topics after being corrected, a warning is logged and its last
@@ -136,6 +147,8 @@ def topic_based_clustering(
         raise ValueError("max_assign_retries must be non-negative")
     if not items:
         return []
+    if context is None:
+        context = _default_context(field)
     # Perform topic-based clustering.
     row_docs = [str(get_field(item, field, "topic_based_clustering")) for item in items]
     unique_docs = list(dict.fromkeys(row_docs))
