@@ -74,7 +74,9 @@ def test_retained_absolute_workspace_script_replays():
     first = run_command(task, "python3 analysis.py", backend=LocalBackend())
     assert first["files"]["analysis.py"] == script.encode()
     second = run_command(
-        replace(task, files=first["files"]), "python3 analysis.py", backend=LocalBackend()
+        replace(task, files=first["files"]),
+        "python3 analysis.py",
+        backend=LocalBackend(),
     )
     assert second["files"]["answer"] == b"ok"
 
