@@ -4,12 +4,12 @@
 does not. ``by_pass_at_k`` samples one model ``k`` times and keeps rows whose
 pass rate falls within ``[min_rate, max_rate]``.
 
-No answer format is imposed: the prompt is the task text itself unless
-``prompt_template`` is given, and each completion is graded on what
-``extract_answer`` takes from it. The default, ``answer_segment``, is the text
-after a closed ``<think>...</think>`` block with surrounding whitespace
-stripped; pass another function, e.g. one reading an ``ANSWER:`` line, to
-replace it.
+No answer format is imposed: the prompt is the task itself (text, or a list
+of chat messages) unless ``prompt_template`` is given, and each completion is
+graded on what ``extract_answer`` takes from it. The default,
+``answer_segment``, is the text after a closed ``<think>...</think>`` block
+with surrounding whitespace stripped; pass another function, e.g. one reading
+an ``ANSWER:`` line, to replace it.
 
 Grades use the format ``{group: [True | False | None, ...]}``, where ``None``
 is a grade that could not be made (an empty answer, a ``<think>`` block that
@@ -99,7 +99,9 @@ def by_comparative_difficulty(
         items: Input rows.
         weak_model: Model expected to fail on hard rows.
         strong_model: Model expected to succeed on rows worth keeping.
-        input_field: Key holding the task; its text is the default prompt.
+        input_field: Key holding the task, the default prompt: text, or a list
+            of chat messages (``{"role", "content"}`` dicts) sent as the
+            conversation. Any other value raises ``ValueError``.
         ground_truth_field: Key holding the reference answer.
         metric: ``"exact_match"`` (normalized prediction equals the
             reference), ``"rouge_l"`` (ROUGE-L F1 of the prediction against the
@@ -213,7 +215,8 @@ def by_pass_at_k(
     Args:
         items: Input rows.
         model: Model to sample from.
-        input_field: Key holding the task; its text is the default prompt.
+        input_field: Key holding the task, the default prompt: text or chat
+            messages; see ``by_comparative_difficulty``.
         ground_truth_field: Key holding the reference answer.
         k: Samples per row.
         min_rate: Lowest pass rate kept (inclusive); raise it to drop rows the
@@ -395,9 +398,32 @@ def _prompts(
 ) -> list[Prompt]:
     if prompt_template is not None:
         return [_resolve_prompt(prompt_template, item) for item in items]
-    return [
-        str(get_field(item, input_field, "filter.model_difficulty")) for item in items
-    ]
+    return [_field_prompt(item, input_field) for item in items]
+
+
+def _field_prompt(item: dict, input_field: str) -> Prompt:
+    """Return the task under ``input_field`` as a prompt: text or chat messages.
+
+    E.g. an RL row's ``[{"role": "system", ...}, {"role": "user", ...}]`` is sent
+    as that conversation, not as the repr of the list. A number is sent as its
+    text, as before.
+    """
+    value = get_field(item, input_field, "filter.model_difficulty")
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float)):  # bool too: e.g. 7 → "7"
+        return str(value)
+    if (
+        isinstance(value, list)
+        and value
+        and all(isinstance(m, dict) and "role" in m and "content" in m for m in value)
+    ):
+        return value
+    raise ValueError(
+        f"input_field {input_field!r} must hold text or a list of chat messages "
+        f'({{"role": ..., "content": ...}} dicts), got {type(value).__name__}; '
+        "pass prompt_template to build the prompt from other fields"
+    )
 
 
 def _check_common(metric: Metric, rouge_l_threshold: float, batch_size: int) -> None:

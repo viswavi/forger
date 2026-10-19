@@ -573,6 +573,86 @@ class TestPassAtK:
         assert model.prompts == ["Q: t1"]
 
 
+class ChatModel(ScriptedModel):
+    """ScriptedModel whose task is the last message of a chat prompt."""
+
+    def completions(self, prompt: Any, n: int) -> list[str]:
+        """Script on the last message's content."""
+        return super().completions(prompt[-1]["content"], n)
+
+
+# An RL row: the prompt is a chat conversation, not text.
+CHAT = [
+    {"role": "system", "content": "Answer with a number."},
+    {"role": "user", "content": "t1"},
+]
+
+
+def test_pass_at_k_sends_chat_messages_unchanged():
+    """A message-list input_field is sent as the conversation, not its repr."""
+    model = ChatModel("chat", {"t1": ["1"]})
+    rows = [{"prompt": CHAT, "answer": "1"}]
+    kept = by_pass_at_k(
+        rows,
+        model=model,
+        input_field="prompt",
+        ground_truth_field="answer",
+        k=1,
+        min_rate=1.0,
+        max_rate=1.0,
+    )
+    assert kept == rows
+    assert model.prompts == [CHAT]
+
+
+def test_comparative_sends_chat_messages_unchanged():
+    """Both models get the message list unchanged."""
+    weak, strong = ChatModel("weak", {"t1": ["9"]}), ChatModel("strong", {"t1": ["1"]})
+    rows = [{"prompt": CHAT, "answer": "1"}]
+    kept = by_comparative_difficulty(
+        rows,
+        weak_model=weak,
+        strong_model=strong,
+        input_field="prompt",
+        ground_truth_field="answer",
+    )
+    assert kept == rows
+    assert weak.prompts == strong.prompts == [CHAT]
+
+
+@pytest.mark.parametrize(
+    "value,type_name",
+    [
+        ({"role": "user", "content": "t1"}, "dict"),
+        ([], "list"),
+        (["t1"], "list"),
+        ([{"text": "t1"}], "list"),  # no role / content keys
+    ],
+)
+def test_non_text_input_field_raises(value, type_name):
+    """Values other than text or chat messages raise, naming field and type."""
+    model = ScriptedModel("m", {})
+    with pytest.raises(ValueError, match=rf"'task'.*got {type_name}"):
+        _pass_at_k([{"task": value, "answer": "1"}], model, k=1)
+    assert model.calls == []
+
+
+def test_number_input_field_is_sent_as_text():
+    """A number is stringified, as before chat messages were accepted."""
+    model = ScriptedModel("m", {"7": ["1"]})
+    _pass_at_k([{"task": 7, "answer": "1"}], model, k=1, max_rate=1.0)
+    assert model.prompts == ["7"]
+
+
+def test_prompt_template_ignores_input_field_type():
+    """With prompt_template, input_field's value is not checked."""
+    model = ScriptedModel("m", {"t1": ["1"]})
+    rows = [{"task": 7, "q": "t1", "answer": "1"}]
+    kept = _pass_at_k(rows, model, k=1, prompt_template="{q}", max_rate=1.0)
+    assert kept == rows
+    assert model.prompts == ["t1"]
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [

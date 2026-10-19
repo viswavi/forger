@@ -225,16 +225,19 @@ right. `by_pass_at_k` is the most expensive but most reliable difficulty filter:
 keeping rows whose pass rate (passed / valid grades) is in `[min_rate, max_rate]` (default `[0.1, 0.9]`, inclusive).
 `by_judged_difficulty` (least expensive, least reliable) only asks a judge how hard a task looks.
 
-No answer format is imposed. The prompt is the task text itself (`prompt_template` replaces it, e.g. to ask for a
-final `ANSWER: ...` line), and each completion is graded on what `extract_answer` takes from it. The default,
+No answer format is imposed. The prompt is the task itself (`prompt_template` replaces it, e.g. to ask for a final
+`ANSWER: ...` line). `input_field` may hold text or chat messages: a list of `{"role", "content"}` dicts, such as an
+RL row's `prompt`, is sent as the conversation; a number is sent as its text; any other value raises `ValueError`.
+Each completion is graded on what `extract_answer` takes from it. The default,
 `pyforger.filter.model_difficulty.answer_segment`, is the text after the completion's closed `<think>` block, stripped
 of surrounding whitespace. `metric` is `"exact_match"` (normalized equality with the reference), `"rouge_l"` (F1 at
-least `rouge_l_threshold`), or a verifier `(prediction, row) -> bool | None`, e.g. one that runs tests against
-generated code. By default the whole answer segment is compared, so for `exact_match` the task or `prompt_template`
-should ask for a bare answer, or pass your own `extract_answer(completion) -> str | None`. It replaces the default and
-sees the raw completion, thinking included; e.g. `lambda t: t.rsplit("ANSWER:", 1)[-1].strip()` keeps what follows
-the last `ANSWER:`. By default an empty answer segment or an unclosed `<think>` block grades `None`, as does
-`extract_answer` or a verifier returning `None`: excluded, not failed. A model that does not return exactly `n`
+least `rouge_l_threshold`), or a verifier
+`(prediction, row) -> bool | None`, e.g. one that runs tests against generated code. By default the whole answer
+segment is compared, so for `exact_match` the task or `prompt_template` should ask for a bare answer, or pass your own
+`extract_answer(completion) -> str | None`. It replaces the default and sees the raw completion, thinking included;
+e.g. `lambda t: t.rsplit("ANSWER:", 1)[-1].strip()` keeps what follows the last `ANSWER:`. By default an empty answer
+segment or an unclosed `<think>` block grades `None`, as does `extract_answer` or a verifier returning `None`:
+excluded, not failed. A model that does not return exactly `n`
 completions per prompt raises `ValueError`; missing samples are never padded.
 `by_pass_at_k` needs all `k` grades valid unless `min_valid` allows fewer, and a row needs both comparative grades.
 Grades use the format `{group: [True | False | None, ...]}`; with `outcomes_field` set, kept rows carry them
@@ -253,6 +256,26 @@ hard = filter.by_pass_at_k(
     outcomes_field="evaluations",  # kept rows get e.g. {"model": [True, False, ...]}
 )
 ```
+
+To measure without filtering, keep every row with `min_rate=0.0, max_rate=1.0`. The step report's pass-rate
+histogram, or each row's grades, is then the measurement; e.g. how often a model, such as a fine-tuned checkpoint,
+already solves your prompts:
+
+```python
+measured = filter.by_pass_at_k(
+    rows,
+    model=checkpoint,
+    input_field="prompt",  # text or chat messages
+    ground_truth_field="answer",
+    metric=verifier,  # (prediction, row) -> bool | None
+    k=8,
+    min_rate=0.0,
+    max_rate=1.0,
+    outcomes_field="grades",  # every row gets {"model": [True, False, ...]}
+)
+```
+
+A row with too few valid grades (see `min_valid`) is still dropped.
 
 #### `pyforger.inspect`
 
