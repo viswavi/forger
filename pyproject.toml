@@ -52,15 +52,13 @@ exclude = [
 only-packages = true
 
 [project.optional-dependencies]
+sail = ["sail>=0.14,<0.15"]
 # Harbor is pinned to an exact commit of the neubig/harbor fork because the
 # modal/sail extras are not yet in an upstream PyPI release. Replace this
 # direct git dependency with the upstream `harbor` release (and drop the
 # python_version marker if it widens) once those extras are published.
 harbor = [
     "harbor[modal,sail] @ git+https://github.com/neubig/harbor.git@1ccd8b04f513fb09149fb128678279bbba1c4f05 ; python_version >= '3.12'",
-]
-sail = [
-    "sail @ git+https://github.com/OpenHands/sail.git@a5d237e9a685c7de34a93ace359718ec1de94d35 ; python_version >= '3.12'",
 ]
 # Topic-Based Clustering requires K-means clustering and on-device embedding creation.
 clustering = [
