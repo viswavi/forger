@@ -158,6 +158,21 @@ them, and score lists of over 100,000 rows, have none: rerun with `_no_cache=Tru
   `RAISED` with what it spent. LLM calls from workers that did not copy the context and run no step belong to no
   step or pipeline: while exactly one pipeline runs, its report lists them as one `unattributed` line (it may include
   other threads in the process), kept out of its totals and its `max_cost_usd`.
+- Concurrent steps: `my_step.submit(*args, **kwargs)` starts a step in a background thread and returns a
+  `concurrent.futures.Future`; `.result()` returns its rows or re-raises its error. Use it for independent branches:
+
+  ```python
+  impossible = make_impossible.submit(verified[:n], writer, judge)
+  hard = student_difficulty(verified[n:], student)        # runs meanwhile
+  rows = assemble(impossible.result(), hard)
+  ```
+
+  The step runs in a copy of the caller's context, so it joins the pipeline, counts toward its caps, and keeps its own
+  report and usage. At most `pyforger.steps.SUBMIT_WORKERS` (8) submitted steps run at once; the rest queue.
+  `.submit` inside a step raises like a nested call. The summary lists steps in the order they were started or
+  submitted. When the pipeline function returns, it waits for submitted steps still running and raises the error of
+  any whose `.result()` was never called; when it raises (or on Ctrl-C), queued steps are cancelled and running ones
+  are not waited for.
 - Cost: a cached step costs nothing this run; its line shows the time and cost of the run that cached it (`cached ·
   originally 37.9s · $0.50`), and the pipeline summary separates what was spent this run from
   `cached (originally $X)`.
