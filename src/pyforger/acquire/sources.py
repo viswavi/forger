@@ -8,7 +8,7 @@ from __future__ import annotations
 import random
 from abc import ABC, abstractmethod
 from enum import Enum, auto
-from typing import Any
+from typing import Any, ClassVar
 
 import arxiv
 import requests
@@ -24,6 +24,7 @@ class RetrieveMode(Enum):
 
     QUERY = auto()  # query string (and optional k/top_k)
     RANDOM = auto()  # random sampling (seed, n)
+    CITATIONS = auto()  # papers citing a seed identified by query (paper ID/DOI)
 
 
 class RetrievalSource(ABC):
@@ -796,6 +797,18 @@ class S2RetrievalSource(RetrievalSource):
         self._kwargs = kwargs
         self._client: SemanticScholar | None = None
 
+    # Fields requested in CITATIONS mode: everything _rich_item exposes.
+    _CITATION_FIELDS: ClassVar[tuple[str, ...]] = (
+        "title",
+        "year",
+        "venue",
+        "authors",
+        "abstract",
+        "citationCount",
+        "externalIds",
+        "url",
+    )
+
     @staticmethod
     def _result_to_item(paper: Any) -> dict[str, Any]:
         """Convert semanticscholar Paper to item dict (text, id, title, summary)."""
@@ -810,6 +823,32 @@ class S2RetrievalSource(RetrievalSource):
             "title": title or "",
             "summary": abstract or "",
         }
+
+    @staticmethod
+    def _rich_item(paper: Any) -> dict[str, Any]:
+        """Item with bibliographic fields, for citation-graph consumers."""
+        item = S2RetrievalSource._result_to_item(paper)
+        authors = []
+        for author in getattr(paper, "authors", None) or []:
+            name = (
+                author.get("name")
+                if isinstance(author, dict)
+                else getattr(author, "name", None)
+            )
+            if name:
+                authors.append(name)
+        external = getattr(paper, "externalIds", None) or {}
+        item.update(
+            {
+                "year": getattr(paper, "year", None),
+                "venue": getattr(paper, "venue", None),
+                "authors": authors,
+                "citation_count": getattr(paper, "citationCount", None) or 0,
+                "external_ids": dict(external),
+                "url": getattr(paper, "url", None),
+            }
+        )
+        return item
 
     def _get_client(self) -> SemanticScholar:
         """Return shared S2 client, creating once with client-safe kwargs."""
@@ -860,19 +899,38 @@ class S2RetrievalSource(RetrievalSource):
         seed: int | None = None,
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
-        """Return items from Semantic Scholar by mode (QUERY or RANDOM).
+        """Return items from Semantic Scholar by mode.
 
         QUERY: When query is empty, uses default "machine learning". Paginates
         (100 per request) up to n or 1000. RANDOM: Builds pool via relevance
         search (paginated, up to 1000) or bulk when requested pool size (n*10)
         exceeds 1000; bulk pool is capped at 10,000. Then samples n with seed.
-        Effective max for QUERY: 1000.
+        Effective max for QUERY: 1000. CITATIONS: papers citing the seed
+        identified by ``query`` (an S2 paper ID or ``DOI:<doi>``); each item
+        additionally carries year, venue, authors, citation_count,
+        external_ids, and url.
 
         Returns:
             List of dicts; each has "text", "id", "title", "summary".
         """
         merged = {**self._kwargs, **kwargs}
         client = self._get_client()
+
+        if mode == RetrieveMode.CITATIONS:
+            if not query:
+                raise ValueError("CITATIONS mode requires a seed paper ID or DOI")
+            if n > self._RELEVANCE_CAP:
+                raise ValueError(
+                    f"n={n} exceeds Semantic Scholar citations cap "
+                    f"of {self._RELEVANCE_CAP}."
+                )
+            results = client.get_paper_citations(
+                query,
+                fields=list(self._CITATION_FIELDS),
+                limit=self._PAGE_LIMIT,
+            )
+            accumulated = self._collect_paginated(results, n)
+            return [self._rich_item(edge.paper) for edge in accumulated]
 
         if mode == RetrieveMode.QUERY:
             if n > self._RELEVANCE_CAP:
