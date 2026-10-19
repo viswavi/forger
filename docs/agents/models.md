@@ -127,6 +127,10 @@ requests come back short too, or a response has more than `n`, it raises a `Valu
 - `return_exceptions=True` puts a failed prompt's exception (after Tinker's retries, or a budget refusal) in its slot
   and keeps the others; the default raises the first failure in prompt order. Ctrl-C also stops requests waiting for
   a slot, for budget room, or for a retry.
+- Over-long prompts: every prompt is rendered before any request is sent. One that leaves no room in the context
+  window gets `pyforger.PromptTooLongError` (`Prompt 17 has 69685 tokens; the context window is 32768`): by default it
+  is raised before any request goes out; with `return_exceptions=True` it fills that prompt's slot and the other
+  prompts are sampled. Ops treat it as a row error (see `generate_from_context` in [alter.md](alter.md)).
 - Spend: each request is charged as it finishes to the Tinker dollar ledger (`FORGER_TINKER_USAGE_FILE`), the
   instance totals, the step report, and the spend ledger, in dollars from Tinker's rate card. It adds no token units
   and is exempt from the token-unit quota. `max_cost_usd` / `FORGER_MAX_COST_USD` are checked before each request,

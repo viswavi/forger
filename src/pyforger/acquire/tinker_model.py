@@ -27,6 +27,7 @@ from pyforger.acquire.model import (
     GenerateResult,
     Model,
     Prompt,
+    PromptTooLongError,
     _is_transient,
     _note_truncation,
     _progress_mode,
@@ -574,7 +575,8 @@ class TinkerModel(Model):
             return_exceptions: When True, a prompt whose request failed (after
                 retries, or a budget refusal) gets the exception in its slot,
                 and the other prompts keep their results. When False (default),
-                the first failure in prompt order is raised.
+                the first failure in prompt order is raised; a prompt longer
+                than the context window raises before any request is sent.
             cache_salt: Part of the request-cache key (see `Model`).
             cache_rows: The row each prompt was built from (see `Model`).
 
@@ -587,6 +589,9 @@ class TinkerModel(Model):
             ``cached_completions`` when the request cache supplied some.
 
         Raises:
+            PromptTooLongError: A prompt leaves no room in the context window
+                (without `return_exceptions`; with it, the error fills that
+                prompt's slot and the other prompts are sampled).
             TinkerBudgetExceeded: A request would cross a configured dollar
                 limit (the Tinker ledger or `budget`).
             BudgetExceededError: Spend reached ``max_cost_usd`` or
@@ -606,6 +611,7 @@ class TinkerModel(Model):
                 f"cache_rows has {len(cache_rows)} entries for {len(prompts)} prompts"
             )
         _tracking.check_budget()  # raises BudgetExceededError at a spending cap
+        _tracking.note_prompt_texts(prompts)  # did retrieved text reach a prompt?
         temperature = temperature if temperature is not None else self._temperature
         if max_tokens is None:
             max_tokens = (
@@ -664,7 +670,7 @@ class TinkerModel(Model):
                 # Keep prompt + completion inside the context window.
                 limit = min(max_tokens, runtime.max_context - len(rendered))
                 if limit < 1:
-                    errors[i] = ValueError(
+                    errors[i] = PromptTooLongError(
                         f"Prompt {i} has {len(rendered)} tokens; the context "
                         f"window is {runtime.max_context}"
                     )
@@ -678,6 +684,10 @@ class TinkerModel(Model):
                     seed=self._seed,
                 )
                 jobs[i] = (rendered, limit, sampling)
+            if errors and not return_exceptions:
+                # Every prompt is rendered before any request goes out, so an
+                # over-long prompt costs no wait for the others' samples.
+                raise errors[min(errors)]
 
         cancel = threading.Event()
 

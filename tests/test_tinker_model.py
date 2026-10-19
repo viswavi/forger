@@ -10,15 +10,18 @@ import threading
 import time
 import types
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
-from pyforger import _tracking, op, step
+from pyforger import _tracking, op, pipeline, step
 from pyforger import tinker_usage as tinker_usage_module
 from pyforger.acquire import (
     GenerateResult,
+    PromptTooLongError,
     TinkerBudgetExceeded,
     TinkerModel,
+    retrieve_from_web,
     sample_from_LLM,
     split_reasoning,
 )
@@ -378,9 +381,26 @@ class TestRequests:
     def test_prompt_longer_than_context_fails_without_a_request(self, world):
         """A prompt that leaves no room to generate raises before sampling."""
         world.max_context = 10
-        with pytest.raises(ValueError, match="context window"):
+        with pytest.raises(PromptTooLongError, match="context window"):
             TinkerModel(QWEN).generate("hello")
         assert world.calls == []
+
+    def test_long_prompt_in_a_batch_raises_before_any_request(self, world):
+        """Every prompt is checked first, so the short ones are not sampled in vain."""
+        world.max_context = len(expected_prompt("x" * 20))
+        with pytest.raises(PromptTooLongError, match="Prompt 1 has"):
+            TinkerModel(QWEN).generate_batch(["hi", "x" * 40, "ok"])
+        assert world.calls == []
+
+    def test_long_prompt_fills_its_slot_with_return_exceptions(self, world):
+        """With return_exceptions the error is that prompt's; the others are sampled."""
+        world.max_context = len(expected_prompt("x" * 20))
+        results = TinkerModel(QWEN).generate_batch(
+            ["hi", "x" * 40, "ok"], return_exceptions=True
+        )
+        assert isinstance(results[1], PromptTooLongError)
+        assert [type(r) for r in (results[0], results[2])] == [GenerateResult] * 2
+        assert len(world.calls) == 2
 
     def test_stop_strings_join_eos_tokens_and_cut_text(self, world):
         """Stop strings are sent with the eos tokens as strings; text ends before."""
@@ -793,6 +813,54 @@ class TestOps:
             ("add", "4")
         ]
         assert [c.num_samples for c in world.calls] == [2]
+
+    def test_long_prompt_is_a_row_error(self, world, monkeypatch):
+        """An over-long row leaves its slot None; the op keeps the other rows."""
+        monkeypatch.setenv("FORGER_STEP_REPORT", "0")
+        world.max_context = len(expected_prompt("x" * 20))
+
+        @step
+        def gen(rows: list[dict]) -> list[dict]:
+            return generate_from_context(rows, "{q}", TinkerModel(QWEN), merge=True)
+
+        out = gen([{"q": "hi"}, {"q": "x" * 40}])
+        assert [r["q"] for r in out] == ["hi"]
+        (warning,) = _tracking.step_records()["gen"].ops[0].warnings
+        assert "1 prompt longer than the model's context window" in warning
+
+    def test_retrieved_text_in_a_prompt_clears_the_reach_warning(
+        self, world, monkeypatch
+    ):
+        """Retrieved text in a TinkerModel prompt counts, as for Model."""
+        monkeypatch.setenv("FORGER_STEP_REPORT", "0")
+        words = " ".join(f"fact{j}" for j in range(60))
+        page = {"text": f"The page says: {words}.", "id": "http://p", "url": "p"}
+
+        @step
+        def search(topics: list[dict]) -> list[dict]:
+            return retrieve_from_web(queries=[t["topic"] for t in topics], n=1)
+
+        def run(template: str) -> list[str]:
+            @step
+            def write(docs: list[dict]) -> list[dict]:
+                rows = generate_from_context(docs, template, TinkerModel(QWEN))
+                return [r for r in rows if r]
+
+            @pipeline
+            def build() -> list[dict]:
+                return write(search([{"topic": "tides"}]))
+
+            build()
+            rec = _tracking.last_pipeline()
+            assert rec is not None
+            return [w for w in rec.warnings if "retrieve_from_web" in w]
+
+        with patch(
+            "pyforger.acquire.sources.WebRetrievalSource.fetch",
+            side_effect=lambda *a, **k: [dict(page)],
+        ):
+            assert run("Ask about {query}.") != []  # the page never reached a prompt
+            assert run("Ask about this page:\n{text}") == []
 
     def test_by_llm_score(self, world):
         """by_llm_score sends num_judges n=1 requests per row."""

@@ -22,8 +22,9 @@ A row error belongs to one prompt, not to the key, model, or account, so it is n
 prompt's slots `None`: the provider's content filter blocked the prompt or its reply
 (`litellm.ContentPolicyViolationError`, or a 400 whose body says `content_filter` or `content_policy`), or the prompt
 is longer than the context window (`litellm.ContextWindowExceededError`, or `pyforger.PromptTooLongError` from a
-backend that checks lengths before sending). If every prompt of the call (at least 2) hits a row error, the op raises
-the first one instead, since that points at the template or the model (e.g. a system prompt that trips the filter).
+backend that checks lengths before sending, such as `TinkerModel`). If every prompt of the call (at least 2) hits a
+row error, the op raises the first one instead, since that points at the template or the model (e.g. a system prompt
+that trips the filter).
 Other provider errors (a bad API key, an unknown model, any other 400, an exhausted quota, a spending cap) raise at
 once, since retrying cannot fix them. When any slot failed at the provider, the op logs one warning that counts the
 failures by type or reason (`3 of 64 prompts failed after the model's retries; their slots are None: 2 prompts blocked

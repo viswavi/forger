@@ -68,18 +68,17 @@ them, and score lists of over 100,000 rows, have none: rerun with `_no_cache=Tru
   add a no-op filter only to quiet it); a step's type hints cannot be resolved; `show=` names a field no output row
   has; a pipeline has only one step; no quality filter, no diversity filter, or no inspect op ran anywhere; an op was
   called in the pipeline outside a step.
-- Retrieved text that reaches no prompt: inside a pipeline, each `acquire.retrieve*` call fingerprints the documents
-  it returns (three 60-character pieces of each document's `text`, or its longest string; documents under 200
-  characters are skipped, and at most 2,000 per run are fingerprinted). Every `Model` / `LocalModel` prompt is
+- Retrieved text that reaches no prompt: inside a pipeline, each `acquire.retrieve*` call fingerprints the documents it
+  returns (three 60-character pieces of each document's `text`, or its longest string; documents under 200 characters
+  are skipped, and at most 2,000 per run are fingerprinted). Every `Model` / `LocalModel` / `TinkerModel` prompt is
   checked for them, ignoring whitespace, also one answered from the request cache, and so are the string values of the
   rows the pipeline returns. If none appears anywhere, the pipeline warns: `acquire.retrieve_from_web returned 223
   documents, but none of their text appeared in any of the 1,840 model prompts or in the pipeline's output; to ground
   generation on them, format the retrieved text into your prompts`. A field that carries the documents but that no
-  prompt formats does not count, unless the pipeline returns the rows that hold it. When fewer than 10% of the
-  documents were used, the summary's `notes` section says so instead. Cached ops and steps replay what their first run
-  saw, so a cached rerun gives the same verdict. A result cached outside a pipeline, or by an older Forger, has unknown
-  prompts, so the check says nothing for that run rather than warn falsely. Direct `source.fetch()` calls are not
-  tracked.
+  prompt formats does not count, unless the pipeline returns the rows that hold it. When fewer than 10% of the documents
+  were used, the summary's `notes` section says so instead. Cached ops and steps replay what their first run saw, so a
+  cached rerun gives the same verdict. A result cached outside a pipeline, or by an older Forger, has unknown prompts,
+  so the check says nothing for that run rather than warn falsely. Direct `source.fetch()` calls are not tracked.
 - These checks use each op's category, not its name. Ops under `pyforger.acquire/alter/filter/inspect` have their
   package's category; your own `@op` is `"other"` (even `@op(name="filter.x")`) unless it declares one, e.g.
   `@op(category="filter")` for a custom quality filter.

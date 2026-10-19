@@ -36,6 +36,7 @@ class Student:
 
     def generate_batch(self, prompts, n=1, **kwargs):
         """Two whole completions per prompt, thinking included."""
+        self.prompts = prompts
         return [[target(DOUBLE), target("print(5)")][:n] for _ in prompts]
 
 
@@ -143,14 +144,14 @@ class RubricVerifierTests(unittest.TestCase):
 
     @unittest.skipUnless(importlib.util.find_spec("pyforger"), "needs pyforger")
     def test_whole_completion_reaches_it_through_by_pass_at_k(self):
-        """extract_answer=lambda c: c keeps the thinking for the rubric."""
+        """The chat messages go out as they are; the thinking reaches the rubric."""
         from pyforger.filter import by_pass_at_k
 
+        student = Student()
         rows = by_pass_at_k(
             [self.ROW],
-            model=Student(),
+            model=student,
             input_field="prompt",
-            prompt_template=lambda row: row["prompt"],
             metric=rubric_verifier(),
             extract_answer=lambda c: c,
             k=2,
@@ -160,6 +161,7 @@ class RubricVerifierTests(unittest.TestCase):
             _no_cache=True,
         )
         self.assertEqual(rows[0]["grades"], {"model": [True, False]})
+        self.assertEqual(student.prompts, [self.ROW["prompt"]])
 
 
 if __name__ == "__main__":
