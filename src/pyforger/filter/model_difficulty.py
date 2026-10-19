@@ -433,9 +433,11 @@ def _predictions(
     than prompts, or of completions than ``n`` (e.g. a provider that ignores
     ``n``): a missing sample is not an empty answer, so it is never padded.
     The exception is a request that still fails after the model's retries
-    with a transient error (a 504, a timeout): its samples are ``None``
-    (graded ``None``, so excluded), one warning names the count and the last
-    error, and the result is not cached. Other errors propagate.
+    with a transient error (a 504, a timeout), or that hits a row error (the
+    content filter, a prompt longer than the context window): its samples are
+    ``None`` (graded ``None``, so excluded), one warning names the count and
+    the last error, and the result is not cached. Other errors propagate, as
+    does a row error on every prompt.
     """
     catch = _catch_kwargs(model)
     failures = _RequestFailures()
@@ -471,6 +473,7 @@ def _predictions(
             completions.append(
                 [c if isinstance(c, str) and c.strip() else None for c in samples]
             )
+    failures.raise_if_systemic(len(prompts))
     failures.report(
         f"difficulty filter: {lost} of {len(prompts) * n} samples from {model!r} "
         "are missing (requests failed after retries); they grade None (excluded)"

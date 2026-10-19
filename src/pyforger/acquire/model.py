@@ -22,6 +22,10 @@ from typing import Any, Literal, Union
 
 import litellm
 
+# Bound by name: tests patch this module's `litellm`, and isinstance needs classes.
+from litellm.exceptions import BadRequestError as LitellmBadRequestError
+from litellm.exceptions import ContentPolicyViolationError, ContextWindowExceededError
+
 from pyforger import _tracking
 from pyforger.acquire import _request_cache
 from pyforger.op import _NO_CACHE_SCOPE, _REQUEST_SCOPE, _hash
@@ -103,6 +107,48 @@ def _request_timeout(timeout: Any, max_tokens: int | None) -> Any:
     return max(_DEFAULT_TIMEOUT_S, float(round(max_tokens / _SLOW_TOKENS_PER_S)))
 
 
+class PromptTooLongError(ValueError):
+    """A prompt longer than the model's context window, found before sending it.
+
+    A row error (see `_is_row_error`): the op leaves that prompt's slots None
+    instead of failing, e.g. ``PromptTooLongError("Prompt 17 has 69685 tokens;
+    the context window is 32768")``.
+    """
+
+
+# Words in a 400's message or body that mean the provider's content filter
+# blocked the prompt or the reply, e.g. Azure's '"code":"content_filter"'.
+_CONTENT_FILTER_MARKERS = ("content_filter", "content_policy")
+
+
+def _row_error_reason(exc: BaseException) -> str | None:
+    """Why ``exc`` failed only its prompt: "content filter", "context window", or None.
+
+    These errors come from one prompt (or its reply), not from the key, the
+    model, or the account, so neither Model nor the ops retry them, and an op
+    gives that prompt's slots None instead of raising.
+    """
+    if isinstance(exc, (PromptTooLongError, ContextWindowExceededError)):
+        return "context window"
+    if isinstance(exc, ContentPolicyViolationError):
+        return "content filter"
+    if isinstance(exc, LitellmBadRequestError):
+        text = f"{exc} {getattr(exc, 'body', '')}".lower()
+        if any(marker in text for marker in _CONTENT_FILTER_MARKERS):
+            return "content filter"
+    return None
+
+
+def _is_row_error(exc: BaseException) -> bool:
+    """True for an error that fails one prompt: a content-filter block, a long prompt.
+
+    That is `PromptTooLongError`, litellm's ``ContextWindowExceededError`` and
+    ``ContentPolicyViolationError``, and a litellm ``BadRequestError`` whose
+    message or body says content_filter or content_policy (Azure's filter 400).
+    """
+    return _row_error_reason(exc) is not None
+
+
 def _is_transient(exc: BaseException) -> bool:
     """True for provider errors a retry can fix: timeouts, 429s, 5xx, lost connections.
 
@@ -110,8 +156,11 @@ def _is_transient(exc: BaseException) -> bool:
     ``TimeoutError`` / ``ConnectionError`` are transient; other errors are judged
     by their ``status_code``. A bad key (401), unknown model (404), or bad
     request (400, e.g. context length) is not, nor is an error with no status,
-    nor an exhausted quota or budget (a 429 with "insufficient_quota").
+    nor an exhausted quota or budget (a 429 with "insufficient_quota"), nor a
+    row error (`_is_row_error`).
     """
+    if _is_row_error(exc):
+        return False
     text = f"{type(exc).__name__} {getattr(exc, 'code', '')} {exc}".lower()
     if any(marker in text for marker in _QUOTA_MARKERS):
         return False

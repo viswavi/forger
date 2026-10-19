@@ -245,7 +245,9 @@ contained in the output dict under a `thinking_trace` key. Inline traces are not
 blocks in the completion text and supplies `None` for that metadata; use `split_reasoning` to separate them out.
 `max_retries` counts rounds whose replies all fail to parse. A request that still fails with a transient provider
 error after the `Model`'s own `num_retries` is not sent again: its samples are dropped, so the op returns fewer than `n`
-samples with a warning and is not cached. Other errors raise.
+samples with a warning and is not cached. A row error (a content-filter block or an over-long prompt; see
+`generate_from_context` below) is not sent again either, but when every request hit one and no sample arrived it
+raises, since the one prompt is the template itself. Other errors raise.
 
 `output_schema` (here and in `alter.generate_from_context`) is a dict of keys, e.g. `{"question": str, "answer": str}`,
 and the prompt asks for a JSON object with those keys. Only the keys are checked:
@@ -281,12 +283,19 @@ Transform rows without removing items.
 optional JSON schema. A prompt whose output fails to parse (a reply arrived but did not parse) is asked again up to
 `max_retries` times; after that its slots are `None` and the other prompts' results are kept. A request that still
 fails with a transient provider error (timeout, lost connection, 429, or 5xx) after the `Model`'s own `num_retries` is
-not asked again, so with `num_retries=2` a request makes at most 3 attempts in all; its slots are `None`. Other
-provider errors (a bad API key, an unknown model, a 400 such as an over-long prompt, an exhausted quota) raise at
-once, since retrying cannot fix them. When any slot failed at the provider, the op logs one warning
-(`1 of 64 prompts failed after the model's retries; their slots are None: InternalServerError ×1`), shows it in the
-step report, and is not cached (nor is its step), so a rerun re-sends only the failed prompts (the request cache
-replays the rest). Parse-failure `None`s are cached. `inspect.topic_based_clustering` does not ask a failed request
+not asked again, so with `num_retries=2` a request makes at most 3 attempts in all; its slots are `None`.
+A row error belongs to one prompt, not to the key, model, or account, so it is never retried and also leaves that
+prompt's slots `None`: the provider's content filter blocked the prompt or its reply
+(`litellm.ContentPolicyViolationError`, or a 400 whose body says `content_filter` or `content_policy`), or the prompt
+is longer than the context window (`litellm.ContextWindowExceededError`, or `pyforger.PromptTooLongError` from a
+backend that checks lengths before sending). If every prompt of the call (at least 2) hits a row error, the op raises
+the first one instead, since that points at the template or the model (e.g. a system prompt that trips the filter).
+Other provider errors (a bad API key, an unknown model, any other 400, an exhausted quota) raise at once, since
+retrying cannot fix them. When any slot failed at the provider, the op logs one warning that counts the failures by
+type or reason (`3 of 64 prompts failed after the model's retries; their slots are None: 2 prompts blocked by the
+provider's content filter, InternalServerError ×1`), shows it in the step report, and is not cached (nor is its
+step). Successful requests are cached one by one in the request cache, so a rerun re-sends only the failed prompts.
+Parse-failure `None`s are cached. `inspect.topic_based_clustering` does not ask a failed request
 again either (see `filter.by_llm_score` below).
 As with `sample_from_LLM`, reasoning traces are included under a `thinking_trace` key. Inline traces are not extracted:
 `LocalModel` leaves `<think>` blocks in the completion text. Use `split_reasoning` to separate them out.
@@ -520,8 +529,11 @@ is 4). Unparseable answers count as no vote, and so does a request that still fa
 transient error (a 504, a timeout): one warning in the step report names the count and the last error, and the result
 is not cached, so a rerun asks again. Another warning counts the judge calls that gave no score by cause (failed,
 unparseable, or stopped mid-thought in an unclosed `<think>`) and the rows they left unscored, e.g. with `group_by`
-`2 of 10 judge calls gave no score (...) → 6 rows unscored`. Errors a retry cannot fix (a bad key, a 400, a spending
-cap or token-unit quota) still raise. The same holds for every LLM filter: `by_judged_difficulty` leaves a row whose
+`2 of 10 judge calls gave no score (...) → 6 rows unscored`. A row error (a content-filter block or an over-long
+prompt; see `generate_from_context`) counts as a failed request too, and the warning names its reason, e.g.
+`1 prompt longer than the model's context window`; a row error on every prompt (at least 2) raises. Other errors a
+retry cannot fix (a bad key, another 400, a spending cap or token-unit quota) still raise. The same holds for every
+LLM filter: `by_judged_difficulty` leaves a row whose
 request failed unrated, `by_pass_at_k` and `by_comparative_difficulty` grade a failed sample `None` (excluded), and
 `inspect.topic_based_clustering` does not ask a failed request again, though it asks again after an unparseable answer:
 a failed shard summary is skipped, a failed label request gives its document the fallback topic, and a failed codebook
@@ -740,7 +752,8 @@ own default (6000 s). The timeout is not part of the cache key, so changing it k
 
 `Model` retries each request itself, up to `num_retries` times (default 2), and only on transient errors: a timeout,
 a lost connection, a 408/409/425/429, or a 5xx. It waits about 1 s, then 2 s, 4 s, ... between attempts (a 429's
-`Retry-After` header instead, up to 60 s), and logs each retry at INFO. A 400 (e.g. an over-long prompt), 401, 403,
+`Retry-After` header instead, up to 60 s), and logs each retry at INFO. A 400 (e.g. an over-long prompt or a
+content-filter block, which ops treat as row errors; see `generate_from_context`), 401, 403,
 404, or an exhausted quota, credit balance, or budget (OpenAI's `insufficient_quota`, LiteLLM's or Forger's budget
 errors) raises at once; a per-minute rate limit is retried, also Gemini's "You exceeded your current quota" 429.
 LiteLLM is sent `num_retries=0`, so neither it nor the openai client retries on top: a request makes at most

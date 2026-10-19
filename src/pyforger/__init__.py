@@ -18,6 +18,7 @@ import pyforger.alter as alter
 import pyforger.filter as filter  # noqa: A001
 import pyforger.inspect as inspect
 from pyforger._tracking import BudgetExceededError
+from pyforger.acquire.model import PromptTooLongError
 from pyforger.op import op
 from pyforger.pipeline import optimize, run
 
@@ -27,6 +28,7 @@ from pyforger.steps import pipeline, step
 
 __all__ = [
     "BudgetExceededError",
+    "PromptTooLongError",
     "acquire",
     "alter",
     "filter",
