@@ -960,18 +960,18 @@ def record_scores(
     if scores is None:
         return
     dropped: list[DroppedRow] = []
-    for i, note in enumerate(notes or []):
+    for i, row_note in enumerate(notes or []):
         if len(dropped) == MAX_DROPPED_NOTES:
             break
         value = values[i]
-        if not note or _is_kept(value, keep, threshold, lower, upper):
+        if not row_note or _is_kept(value, keep, threshold, lower, upper):
             continue
         preview = previews[i] if previews is not None else ""
         dropped.append(
             DroppedRow(
                 value=value if isinstance(value, (int, float)) else None,
                 preview=_cut(preview, PREVIEW_CHARS),
-                note=_cut(note, NOTE_CHARS),
+                note=_cut(row_note, NOTE_CHARS),
             )
         )
     scores.append(

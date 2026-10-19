@@ -260,8 +260,10 @@ class TestDroppedNotes:
             (2, "answer 2", "on answer 2"),
             (2, "answer 4", "on answer 4"),
         ]
+        assert scores.note is None  # not the last row's feedback
         text = render_step(rec)
         assert "dropped, with notes:" in text
+        assert text.count("on answer 5") == 0 and text.count("on answer 1") == 1
         assert "2 · answer 1" in text
         assert "↳ on answer 1" in text
         assert "answer 5" not in text.split("dropped, with notes:")[1]
@@ -298,6 +300,7 @@ class TestDroppedNotes:
         rec = _tracking.step_records()["judged_again"]
         assert not rec.cache_hit and rec.ops[0].cache_hit
         assert notes("judged_again") == expected
+        assert rec.ops[0].scores is not None and rec.ops[0].scores.note is None
         assert "↳ on answer 1" in render_step(rec)
 
     def test_nothing_dropped_no_notes(self, monkeypatch):
