@@ -463,7 +463,9 @@ def _histogram(scores: ScoreRecord) -> _Histogram:
     total = len(scores.values)
     good = _finite(scores.values)
     label = _clean(scores.label)
-    hist = _Histogram(label=label, title=label)
+    # One line per note: pooled chunks keep each chunk's (see _merged_scores).
+    note = "\n".join(_clean(line) for line in (scores.note or "").splitlines())
+    hist = _Histogram(label=label, title=label, note=note)
     hist.unparsed = total - len(good)
     if label.startswith("approval >="):
         hist.label = f"judges ≥{label.removeprefix('approval >=')}"
@@ -520,10 +522,11 @@ def _histogram(scores: ScoreRecord) -> _Histogram:
         )
     hist.mode = "pooled" if scores.pooled else "cut"
     if scores.pooled:
-        hist.note = (
+        pooled_note = (
             "No what-if columns: each score depends on the rows kept before it. "
             "Rerun to compare thresholds."
         )
+        hist.note = f"{hist.note}\n{pooled_note}" if hist.note else pooled_note
     for i, r in enumerate(raws):
         is_current = i == marked
         if is_current and current is not None:
@@ -573,6 +576,8 @@ def _histogram_renderable(
         heading.append("█" * n_kept, style="green")
         heading.append("░" * (_SPLIT_CHARS - n_kept), style="red")
     if hist.mode == "none" or not hist.bins:
+        if hist.note:
+            return Group(heading, Padding(Text(hist.note, style="dim"), (0, 0, 0, 2)))
         return heading
 
     def style_of(b: _Bin) -> str:
@@ -884,9 +889,15 @@ def _merged_scores(calls: list[OpCall]) -> list[tuple[ScoreRecord, int, int]]:
         if key in merged:
             rec, n, n_cached = merged[key]
             dropped = (rec.dropped + sc.dropped)[:MAX_DROPPED_NOTES]
+            # Each chunk's own note, once, e.g. "3 of 12 samples truncated ...".
+            notes = dict.fromkeys(n for n in (rec.note, sc.note) if n)
             merged[key] = (
                 rec.model_copy(
-                    update={"values": rec.values + sc.values, "dropped": dropped}
+                    update={
+                        "values": rec.values + sc.values,
+                        "dropped": dropped,
+                        "note": "\n".join(notes) or None,
+                    }
                 ),
                 n + 1,
                 n_cached + call.cache_hit,

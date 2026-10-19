@@ -409,6 +409,9 @@ class TestDifficultyFilters:
         assert kept == [{**rows[0], "ev": {"model": [True, True]}}]
         call = _tracking.step_records()["hard"].ops[0]
         assert call.scores is not None and call.scores.values == [1.0, None]
+        # Missing samples have no <think>: excluded, never counted as truncated
+        # (by_pass_at_k grades truncated samples as failures by default).
+        assert call.scores.note is None
         assert len(call.warnings) == 1
         assert call.warnings[0].startswith(
             "difficulty filter: 2 of 4 samples from Model("

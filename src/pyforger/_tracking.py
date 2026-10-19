@@ -117,6 +117,8 @@ class ScoreRecord(BaseModel):
     pooled: bool = False
     # The first few dropped rows that have a note (see ``record_scores``).
     dropped: list[DroppedRow] = Field(default_factory=list)
+    # One line shown under the histogram, e.g. "3 of 12 samples truncated".
+    note: str | None = None
 
 
 class OpCall(BaseModel):
@@ -943,10 +945,12 @@ def record_scores(
     pooled: bool = False,
     notes: list[str | None] | None = None,
     previews: list[Any] | None = None,
+    note: str | None = None,
 ) -> None:
     """Record one per-row score list for the active op; a no-op outside ops.
 
-    Pass ``pooled=True`` when each score depends on the rows kept so far.
+    Pass ``pooled=True`` when each score depends on the rows kept so far, and
+    ``note`` for a line the report shows under the histogram.
     ``notes`` (aligned with ``values``) says why each row scored as it did,
     e.g. a judge's feedback; the report shows the first ``MAX_DROPPED_NOTES``
     dropped rows that have one, each with its ``previews`` entry (e.g. the
@@ -980,6 +984,7 @@ def record_scores(
             upper=upper,
             pooled=pooled,
             dropped=dropped,
+            note=note,
         )
     )
 

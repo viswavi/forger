@@ -365,8 +365,11 @@ are cached apart from `min_pass_rate`, so a new bound runs nothing, and the step
 with their first failing test (`test 2 of 3: wrong_answer, got '4', expected '5'`). `filter.program_verifier` takes the
 last fenced
 Python block from each sampled answer (`last_code_block`), runs it on the row's tests until one fails, and grades it
-`True` only if all pass (`None` when the row has no graded tests). `extract_code=last_code_block` does the same for
-`run_programs` and `by_tests` when a field holds a model's answer.
+`True` only if all pass. An answer with no code block (or one `extract_code` maps to `None` or blank code) grades
+`False` without running anything; only a row with no graded tests (none with an `"output"`) grades `None`. The
+verifier never sees a `None` answer: the difficulty filter grades an empty answer `None` and, with `by_pass_at_k`'s
+default `truncated="fail"`, an unclosed `<think>` block `False`, before calling it. `extract_code=last_code_block`
+does the same for `run_programs` and `by_tests` when a field holds a model's answer.
 
 Every run is its own process, so the ops are safe to call from threads and run up to `max_workers` (default
 `min(8, cpu count)`) programs at a time. `timeout_s` is wall-clock time, so too many workers on a loaded machine
@@ -552,9 +555,15 @@ cache key, since a verifier with wall-clock timeouts (e.g. `program_verifier`) c
 By default the whole answer segment is compared, so for `exact_match` the task or `prompt_template` should ask for a
 bare answer, or pass your own `extract_answer(completion) -> str | None`. It replaces the default and sees the raw
 completion, thinking included; e.g. `lambda t: t.rsplit("ANSWER:", 1)[-1].strip()` keeps what follows the last
-`ANSWER:`. By default an empty answer segment or an unclosed `<think>` block grades `None`, as does
-`extract_answer` or a verifier returning `None`: excluded, not failed. A model that does not return exactly `n`
-completions per prompt raises `ValueError`; missing samples are never padded.
+`ANSWER:`. An empty answer segment grades `None`, as does `extract_answer` or a verifier returning `None`: excluded,
+not failed. A truncated completion (an opening `<think>` and no `</think>`: the model hit `max_tokens`) grades as
+`truncated` says. `by_pass_at_k` defaults to `truncated="fail"`: such a sample grades `False` without calling
+`extract_answer` or the verifier, since a task the model thinks itself to death on is hard, not ungradable. (Before,
+it graded `None`; `truncated="exclude"` restores that.) `by_comparative_difficulty` defaults to `"exclude"`: a weak
+model that ran out of tokens has not shown the row is hard. The step report counts truncated samples under the
+filter's histogram, e.g. `5 of 12 samples truncated (<think> never closed), graded failed`; if that is most of them,
+raise `max_tokens`. A sample whose request failed has no text, so it grades `None` (excluded), never truncated. A
+model that does not return exactly `n` completions per prompt raises `ValueError`; missing samples are never padded.
 `by_pass_at_k` needs all `k` grades valid unless `min_valid` allows fewer, and a row needs both comparative grades.
 With `outcomes_field` set, kept rows carry their grades as `{group: [True | False | None, ...]}`, one grade per
 sample: `{"model": [...]}` for `by_pass_at_k`, `{"weak": [...], "strong": [...]}` for `by_comparative_difficulty`.

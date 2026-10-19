@@ -507,6 +507,7 @@ by_comparative_difficulty(
     outcomes_field: str | None = None,
     completions_field: str | None = None,
     verifier_workers: int = 8,
+    truncated: Literal["fail", "exclude"] = "exclude",
 ) -> list[dict]
 ```
 
@@ -694,6 +695,7 @@ by_pass_at_k(
     outcomes_field: str | None = None,
     completions_field: str | None = None,
     verifier_workers: int = 8,
+    truncated: Literal["fail", "exclude"] = "fail",
 ) -> list[dict]
 ```
 

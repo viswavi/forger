@@ -10,7 +10,7 @@ import pytest
 from pydantic import StrictBool, TypeAdapter
 
 from pyforger import _tracking
-from pyforger._render import render_scores
+from pyforger._render import render_scores, render_step
 from pyforger.acquire.model import GenerateResult, Model
 from pyforger.filter import by_comparative_difficulty, by_pass_at_k, program_verifier
 from pyforger.filter.model_difficulty import answer_segment
@@ -181,6 +181,32 @@ class TestComparative:
         weak = ScriptedModel("weak", {"t": ["<think>hm</think>9"]})
         assert _comparative(rows, weak, strong) == rows
 
+    def test_truncated_fail_counts_weak_as_wrong(self):
+        """truncated="fail" grades a weak completion cut off mid-thought False."""
+        weak = ScriptedModel("weak", {"t": ["<think>Let me try 9, then"]})
+        strong = ScriptedModel("strong", {"t": ["1"]})
+        rows = [{"task": "t", "answer": "1"}]
+        kept = _comparative(rows, weak, strong, truncated="fail", outcomes_field="ev")
+        assert kept == [{**rows[0], "ev": {"weak": [False], "strong": [True]}}]
+
+    def test_truncation_note_in_scores(self, monkeypatch):
+        """The step report says how many samples were truncated, per model."""
+        monkeypatch.setenv("FORGER_STEP_REPORT", "0")
+        weak = ScriptedModel("weak", {"t": ["<think>Let me try 9, then"]})
+        strong = ScriptedModel("strong", {"t": ["1"]})
+
+        @step
+        def hard(rows):
+            return _comparative(rows, weak, strong)
+
+        hard([{"task": "t", "answer": "1"}])
+        scores = _tracking.step_records()["hard"].ops[0].scores
+        assert scores is not None
+        assert scores.note is not None
+        assert scores.note.startswith("weak: 1 of 1 samples truncated")
+        assert "excluded" in scores.note
+        assert "weak: 1 of 1 samples truncated" in render_scores(scores)
+
     def test_model_error_propagates_and_is_not_cached(self):
         """A failing model call raises; the next call samples again."""
         strong = ScriptedModel("strong", STRONG)
@@ -317,17 +343,90 @@ class TestPassAtK:
         assert _pass_at_k(rows, model, min_rate=0.0, max_rate=1.0, min_valid=1) == []
 
     def test_unanswered_sample_is_excluded(self):
-        """Unclosed thinking or nothing after </think> grades None, like ''."""
+        """With truncated="exclude", unclosed thinking grades None, like ''."""
         model = ScriptedModel(
             "m", {"t": ["1", "<think>still going", "<think>1</think>"]}
         )
         rows = [{"task": "t", "answer": "1"}]
-        kept = _pass_at_k(rows, model, k=3, outcomes_field="evaluations")
+        kwargs = dict(k=3, outcomes_field="evaluations", truncated="exclude")
+        kept = _pass_at_k(rows, model, **kwargs)
         assert kept == []
-        kept = _pass_at_k(
-            rows, model, k=3, min_valid=1, max_rate=1.0, outcomes_field="evaluations"
-        )
+        kept = _pass_at_k(rows, model, min_valid=1, max_rate=1.0, **kwargs)
         assert kept[0]["evaluations"] == {"model": [True, None, None]}
+
+    def test_truncated_sample_fails_by_default(self):
+        """A <think> block that never closes grades False; nothing after it, None."""
+        model = ScriptedModel(
+            "m", {"t": ["1", "<think>still going", "<think>1</think>"]}
+        )
+        rows = [{"task": "t", "answer": "1"}]
+        assert _pass_at_k(rows, model, k=3) == []  # the empty answer is still None
+        kept = _pass_at_k(rows, model, k=3, min_valid=2, outcomes_field="ev")
+        assert kept[0]["ev"] == {"model": [True, False, None]}  # rate 1/2
+
+    def test_all_truncated_row_is_hard(self):
+        """A row the model always thinks itself to death on has pass rate 0."""
+        model = ScriptedModel("m", {"t": ["<think>hmm", "<think>so maybe"]})
+        rows = [{"task": "t", "answer": "1"}]
+        assert _pass_at_k(rows, model, k=2, min_rate=0.0, max_rate=0.0) == rows
+        assert _pass_at_k(rows, model, k=2, truncated="exclude", min_rate=0.0) == []
+
+    def test_truncation_note_in_scores(self, monkeypatch):
+        """The step report counts truncated samples graded as failures."""
+        monkeypatch.setenv("FORGER_STEP_REPORT", "0")
+        model = ScriptedModel("m", {"t": ["1", "<think>still", "0", "<think>so"]})
+
+        @step
+        def hard(rows):
+            return _pass_at_k(rows, model, min_rate=0.0)
+
+        hard([{"task": "t", "answer": "1"}])
+        scores = _tracking.step_records()["hard"].ops[0].scores
+        assert scores is not None
+        assert scores.values == [0.25]
+        assert scores.note is not None
+        assert scores.note.startswith("2 of 4 samples truncated")
+        assert "graded failed" in scores.note
+        assert "2 of 4 samples truncated" in render_scores(scores)
+
+    def test_chunks_keep_each_truncation_note(self, monkeypatch):
+        """Two by_pass_at_k chunks pool into one histogram with both notes."""
+        monkeypatch.setenv("FORGER_STEP_REPORT", "0")
+        model = ScriptedModel(
+            "m", {"t1": ["1", "<think>still"], "t2": ["<think>a", "<think>b"]}
+        )
+
+        @step
+        def hard(rows):
+            return [
+                row
+                for chunk in ([rows[0]], [rows[1]])
+                for row in _pass_at_k(chunk, model, k=2, min_rate=0.0)
+            ]
+
+        rows = [{"task": "t1", "answer": "1"}, {"task": "t2", "answer": "1"}]
+        hard(rows)
+        hard(rows)  # a cached step keeps its ops' notes too
+        rec = _tracking.step_records()["hard"]
+        assert rec.cache_hit
+        text = render_step(rec, full=True)
+        assert "by_pass_at_k ×2" in text
+        notes = [line.strip() for line in text.splitlines() if "truncated" in line]
+        assert notes[0].startswith("1 of 2 samples truncated")
+        assert notes[1].startswith("2 of 2 samples truncated")
+
+    def test_no_truncation_note_without_truncation(self, monkeypatch):
+        """No note when every sample closed its thinking."""
+        monkeypatch.setenv("FORGER_STEP_REPORT", "0")
+        model = ScriptedModel("m", {"t": ["1", "<think>a</think>0"]})
+
+        @step
+        def hard(rows):
+            return _pass_at_k(rows, model, k=2, min_rate=0.0)
+
+        hard([{"task": "t", "answer": "1"}])
+        scores = _tracking.step_records()["hard"].ops[0].scores
+        assert scores is not None and scores.note is None
 
     def test_answer_segment_for_verifier(self):
         """A verifier gets the stripped completion after its closed <think> block."""
@@ -344,7 +443,8 @@ class TestPassAtK:
         assert kept == rows
         assert seen == [code]
 
-    def test_verifier_skips_unclosed_thinking(self):
+    @pytest.mark.parametrize("truncated,grade", [("fail", False), ("exclude", None)])
+    def test_verifier_skips_unclosed_thinking(self, truncated, grade):
         """A verifier is not called on a <think> block that never closes."""
         calls: list[str] = []
         model = ScriptedModel("m", {"t": ["<think>still going", "42"]})
@@ -357,9 +457,27 @@ class TestPassAtK:
             min_valid=1,
             outcomes_field="evaluations",
             max_rate=1.0,
+            min_rate=0.5,
+            truncated=truncated,
         )
-        assert kept[0]["evaluations"] == {"model": [None, True]}
+        assert kept[0]["evaluations"] == {"model": [grade, True]}
         assert calls == ["42"]
+
+    def test_truncated_ignores_custom_extract_answer(self):
+        """truncated="fail" grades a cut-off sample before extract_answer sees it."""
+        seen: list[str] = []
+        model = ScriptedModel("m", {"t": ["<think>ANSWER: 1", "ANSWER: 1"]})
+        rows = [{"task": "t", "answer": "1"}]
+        kept = _pass_at_k(
+            rows,
+            model,
+            k=2,
+            extract_answer=lambda t: seen.append(t)
+            or t.rsplit("ANSWER:", 1)[1].strip(),
+            outcomes_field="ev",
+        )
+        assert kept[0]["ev"] == {"model": [False, True]}
+        assert seen == ["ANSWER: 1"]
 
     def test_rouge_l_threshold(self):
         """rouge_l scores the answer segment and passes at F1 >= the threshold."""
@@ -392,6 +510,7 @@ class TestPassAtK:
             min_valid=1,
             max_rate=1.0,
             outcomes_field="ev",
+            truncated="exclude",  # else the cut-off sample is never extracted
         )
         assert kept[0]["ev"] == {"model": [True, None]}
         assert seen == ["<think>ANSWER: 7</think>\nANSWER: 3\n", "<think>ANSWER: 3"]
@@ -591,6 +710,7 @@ class TestPassAtK:
         {"metric": "bleu"},
         {"rouge_l_threshold": 1.5},
         {"batch_size": 0},
+        {"truncated": "skip"},
     ],
 )
 def test_pass_at_k_validation(kwargs):
@@ -609,7 +729,13 @@ def test_greedy_single_sample_allowed():
 
 
 @pytest.mark.parametrize(
-    "kwargs", [{"metric": "bleu"}, {"rouge_l_threshold": -0.1}, {"batch_size": 0}]
+    "kwargs",
+    [
+        {"metric": "bleu"},
+        {"rouge_l_threshold": -0.1},
+        {"batch_size": 0},
+        {"truncated": "none"},
+    ],
 )
 def test_comparative_validation(kwargs):
     """Bad metric settings or batch size raise before any model call."""
@@ -702,6 +828,25 @@ class TestCompletionsAndVerifiers:
         assert kept[0]["ev"] == {"model": [True, None, False, True]}
         assert kept[0]["samples"] == {"model": ["<think>a</think>1", None, "0", "1"]}
         assert "samples" not in rows[0]
+
+    def test_truncated_completions_kept_with_failed_grades(self):
+        """completions_field keeps a truncated sample's raw text next to its False."""
+        model = ScriptedModel("m", {"t": ["1", "<think>going", "1", "<think>on"]})
+        rows = [{"task": "t", "answer": "1"}]
+        kept = _pass_at_k(rows, model, outcomes_field="ev", completions_field="samples")
+        assert kept[0]["ev"] == {"model": [True, False, True, False]}
+        assert kept[0]["samples"] == {"model": ["1", "<think>going", "1", "<think>on"]}
+        excluded = _pass_at_k(
+            rows,
+            model,
+            min_valid=2,
+            max_rate=1.0,
+            outcomes_field="ev",
+            completions_field="samples",
+            truncated="exclude",
+        )
+        assert excluded[0]["ev"] == {"model": [True, None, True, None]}
+        assert excluded[0]["samples"] == kept[0]["samples"]
 
     def test_completions_field_reuses_cached_samples(self):
         """Asking for completions later makes no new model call."""
