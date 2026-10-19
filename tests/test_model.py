@@ -589,6 +589,61 @@ class TestGenerateResult:
         assert copied.usage == {"cost_usd": 0.01}
         assert copied.model_id == "gpt-4o"
 
+    def test_texts_is_plain_list(self):
+        """The texts property returns the completions as a plain list."""
+        result = GenerateResult(
+            ["a", "b"], usage={}, reasoning=[None, None], model_id="gpt-4o", raw=None
+        )
+        assert result.texts == ["a", "b"]
+        assert type(result.texts) is list
+
+    @pytest.mark.parametrize("name", ["completions", "text", "choices"])
+    def test_unknown_attribute_hint(self, name):
+        """A guessed attribute name raises AttributeError naming the real ones."""
+        result = GenerateResult(
+            ["a"], usage={}, reasoning=[None], model_id="gpt-4o", raw=None
+        )
+        with pytest.raises(AttributeError) as excinfo:
+            getattr(result, name)
+        message = str(excinfo.value)
+        assert f"GenerateResult has no attribute {name!r}" in message
+        assert "list of completion strings" in message
+        assert "result[0]" in message
+        for attr in (".texts", ".usage", ".reasoning", ".model_id", ".raw"):
+            assert attr in message
+        assert not hasattr(result, name)
+
+    @pytest.mark.parametrize("name", ["__array__", "__deepcopy__", "_private"])
+    def test_private_names_fail_plainly(self, name):
+        """Dunder and private names get a plain AttributeError, no hint."""
+        result = GenerateResult(
+            ["a"], usage={}, reasoning=[None], model_id="gpt-4o", raw=None
+        )
+        with pytest.raises(AttributeError) as excinfo:
+            getattr(result, name)
+        assert "completion strings" not in str(excinfo.value)
+
+    def test_pickle_and_copy_keep_texts_and_metadata(self):
+        """Pickle, copy and deepcopy round-trip with texts and metadata intact."""
+        result = GenerateResult(
+            ["a", "b"],
+            usage={"cost_usd": 0.01},
+            reasoning=["r1", None],
+            model_id="gpt-4o",
+            raw={"id": "x"},
+        )
+        for restored in (
+            pickle.loads(pickle.dumps(result)),
+            copy.copy(result),
+            copy.deepcopy(result),
+        ):
+            assert isinstance(restored, GenerateResult)
+            assert restored.texts == ["a", "b"]
+            assert restored.usage == {"cost_usd": 0.01}
+            assert restored.reasoning == ["r1", None]
+            assert restored.model_id == "gpt-4o"
+            assert restored.raw == {"id": "x"}
+
 
 class TestFamily:
     """_family normalizes model_id to a constraint-table key prefix."""

@@ -226,6 +226,11 @@ model = Model(
 ```
 
 Use `Model(..., reasoning_effort="low")` where supported by the model/provider.
+
+`model.generate(prompt, n=...)` returns a `GenerateResult`, which is a `list` of completion strings: use `result[0]`
+or iterate over it. `result.texts` gives a plain `list[str]`. Per-call metadata is on `.usage`, `.reasoning` (one
+entry per completion), `.model_id`, and `.raw`. `generate_batch` returns one `GenerateResult` per prompt.
+
 `dynamic_step` forwards `reasoning_effort` and `extra_body` to OpenHands.
 
 #### Prompt types
