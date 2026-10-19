@@ -127,7 +127,9 @@ cached it, marked `cached`, with that run's warnings.
   free. For a one-sentence LLM summary of each long value as well, call `pyforger.steps.set_report_model(model)` or
   set `FORGER_REPORT_MODEL=<litellm model id>` (key from `LITELLM_API_KEY`). That costs up to 8 LLM calls per printed
   report, cached on disk and left out of the step and pipeline totals (the spend ledger and `FORGER_MAX_COST_USD`
-  still count them); silenced reports make no calls.
+  still count them); silenced reports make no calls. A cheap model without reasoning is enough. Without a report
+  model, the first report with a long value logs (at INFO) how to set one; `set_report_model(None)` turns summaries
+  off and silences that.
 - Threads: ops called from `ThreadPoolExecutor` workers are not itemized in the step report (the step gets a warning
   instead of an error) unless submitted as `pool.submit(contextvars.copy_context().run, fn, arg)`. Steps called from
   workers still join the pipeline, and their spend counts toward it (and its cap) as it arrives. Each op, step, and
@@ -175,6 +177,10 @@ For the full call signature of every op (parameter names, defaults, field parame
 | `pyforger.utils` | `src/pyforger/utils.py` | `get_field`, `get_formatted_logger`, `canonical`. |
 
 The tables below give one line per op; [OPS.md](OPS.md) lists each op's signature and docstring summary.
+
+Forger's loggers print to stderr themselves and also propagate to the root logger. Once the root logger has a handler
+that prints to the terminal (e.g. after `logging.basicConfig()`), Forger lines are printed by that handler, in its
+format, and not a second time by Forger's own.
 
 #### `pyforger.acquire`
 
@@ -666,6 +672,9 @@ requests of at most 16, merged the same way (`n=40` sends 14, 13, 13). If such a
 concurrent `n=1` requests, and fans out that model id for the rest of the process. It never pads: if the `n=1`
 requests come back short too, or a response has more than `n`, it raises a `ValueError` (add the model to
 `_NO_N_BRANDS` / `_NO_N_PREFIXES` in `model.py`).
+
+Importing `pyforger.acquire` sets `litellm.suppress_debug_info = True`, so provider errors no longer print LiteLLM's
+"Give Feedback / Get Help" banner; the raised error is unchanged. Set it back to `False` to see the banner.
 
 #### Prompt types
 

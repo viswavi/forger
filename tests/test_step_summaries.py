@@ -42,9 +42,11 @@ def _fresh(monkeypatch):
     monkeypatch.delenv("FORGER_REPORT_MODEL", raising=False)
     _tracking.clear_step_records()
     _summaries._ENV_MODELS.clear()
+    _summaries._HINTED[0] = False
     yield
     _summaries._REPORT_MODEL[0] = _summaries._UNSET
     _summaries._ENV_MODELS.clear()
+    _summaries._HINTED[0] = False
     _tracking.clear_step_records()
 
 
@@ -414,7 +416,29 @@ def test_set_report_model_none_overrides_the_env(monkeypatch):
     _make_step()([{"solution": CODE}])
 
 
-def test_unbuildable_env_model_falls_back_quietly(monkeypatch, capsys):
+def test_without_a_model_the_first_report_says_how_to_get_summaries(
+    monkeypatch, caplog
+):
+    """One hint per process, only when a value could have been summarized."""
+    monkeypatch.setenv("FORGER_STEP_REPORT", "1")
+    _make_step()([{"solution": "short"}])
+    assert "set_report_model" not in caplog.text  # nothing long to summarize
+    _make_step()([{"solution": CODE}])
+    _make_step()([{"solution": CODE + "\n# again\n"}])
+    hints = [r for r in caplog.records if "summarize long values" in r.getMessage()]
+    assert len(hints) == 1
+    assert hints[0].levelname == "INFO"  # a tip, not a problem with the run
+
+
+def test_no_hint_when_summaries_are_turned_off(monkeypatch, caplog):
+    """set_report_model(None) is a choice, not something to warn about."""
+    monkeypatch.setenv("FORGER_STEP_REPORT", "1")
+    set_report_model(None)
+    _make_step()([{"solution": CODE}])
+    assert "set_report_model" not in caplog.text
+
+
+def test_unbuildable_env_model_falls_back_quietly(monkeypatch, capsys, caplog):
     """A model that cannot be built leaves the structural summary in place."""
 
     def broken(*args, **kwargs):
@@ -424,4 +448,10 @@ def test_unbuildable_env_model_falls_back_quietly(monkeypatch, capsys):
     monkeypatch.setenv("FORGER_REPORT_MODEL", "nope/none")
     monkeypatch.setenv("FORGER_STEP_REPORT", "1")
     _make_step()([{"solution": CODE}])
+    _make_step()([{"solution": CODE + "\n# again\n"}])
     assert "python)" in capsys.readouterr().out
+    # one warning naming the model; no "how to set one" hint on top
+    warnings = [r for r in caplog.records if "is unusable" in r.getMessage()]
+    assert [r.levelname for r in warnings] == ["WARNING"]
+    assert "FORGER_REPORT_MODEL=nope/none" in warnings[0].getMessage()
+    assert "summarize long values" not in caplog.text
