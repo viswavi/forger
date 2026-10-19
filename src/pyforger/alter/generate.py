@@ -41,6 +41,15 @@ _ANSWER_PATTERNS = [
     re.compile(_NUMBER),
 ]
 
+# Reasoning that opens by working out the reply format, e.g. "We need answer
+# JSON only with solution_code? User says 'Respond with your reasoning' but...".
+_FORMAT_TALK_RE = re.compile(
+    r"\bjson\b|required keys|output format|response format", re.I
+)
+_FORMAT_TALK_CHARS = 400  # how far into a trace to look
+_FORMAT_TALK_MIN_TRACES = 5
+_FORMAT_TALK_SHARE = 0.2
+
 
 def _get_logger() -> logging.Logger:
     """Lazy logger to avoid circular import with utils."""
@@ -175,6 +184,12 @@ def generate_from_context(
     row_errors: dict[int, BaseException] = {}
     # Slots whose output failed to parse after stopping at max_tokens.
     cut_off: set[int] = set()
+    # Slots kept although they stopped at max_tokens (e.g. output_schema=None
+    # keeps any text), so their text is cut off.
+    cut_kept: set[int] = set()
+    # Slot -> the start of its reasoning when it talks about the reply format,
+    # else "" (slots without reasoning are left out). Only with output_schema.
+    format_talk: dict[int, str] = {}
 
     for attempt in range(1 + max_retries):
         if not pending:
@@ -240,10 +255,19 @@ def generate_from_context(
                         parsed = _parse_output(
                             raw_text, output_schema, reasoning=reasoning_text
                         )
+                        stopped = k < len(reasons) and reasons[k] == "length"
+                        if output_schema is not None:
+                            talk = _format_talk(raw_text, reasoning_text)
+                            if talk is not None:
+                                format_talk[slot] = talk
                         if parsed is not None:
                             results[slot] = parsed
                             cut_off.discard(slot)
-                        elif k < len(reasons) and reasons[k] == "length":
+                            if stopped:
+                                cut_kept.add(slot)
+                            else:
+                                cut_kept.discard(slot)
+                        elif stopped:
                             cut_off.add(slot)
                             if retry_truncated:
                                 unfilled.append(slot)
@@ -253,6 +277,16 @@ def generate_from_context(
                         next_pending.append((i, unfilled))
         pending = next_pending
 
+    # With merge=True a failed slot's row is dropped; otherwise its slot is None.
+    def lost(n: int) -> str:
+        if merge:
+            return f"{n} row{'' if n == 1 else 's'} dropped"
+        return f"{n} output{'' if n == 1 else 's'} None"
+
+    def kept(n: int) -> str:
+        noun = "row" if merge else "output"
+        return f"{n} {noun}{'' if n == 1 else 's'} kept with cut-off text"
+
     if cut_off:
         log.warning(
             "%d sample(s) stopped at max_tokens before any parseable output; %s"
@@ -260,16 +294,25 @@ def generate_from_context(
             len(cut_off),
             "" if retry_truncated else "not retried (retry_truncated=False); ",
         )
+    if cut_off or cut_kept:
+        # Leads the op's max_tokens warning: "20 rows dropped (...), because ...".
+        outcome = []
+        if cut_off:
+            outcome.append(f"{lost(len(cut_off))} (no parseable output)")
+        if cut_kept:
+            outcome.append(kept(len(cut_kept)))
+        _tracking.add_truncation_outcome(", ".join(outcome))
     failed_parse = [
         slot for _, slots in pending for slot in slots if slot not in cut_off
     ]
     if failed_parse:
-        log.warning(
-            "%d sample(s) failed to parse after %d retries; "
-            "returning None for those slots",
-            len(failed_parse),
-            max_retries,
+        message = (
+            f"alter.generate_from_context: {len(failed_parse)} sample(s) failed to "
+            f"parse after {max_retries} retries → {lost(len(failed_parse))}"
         )
+        log.warning(message)
+        _tracking.add_op_warning(message)
+    _report_format_talk(format_talk, log)
     _raise_if_systemic(list(row_errors.values()), len(prompts))
     if provider_errors:
         _report_provider_failures(
@@ -280,6 +323,46 @@ def generate_from_context(
     if not merge:
         return results
     return _merge_outputs(items, results, samples_per_item, output_field, log)
+
+
+def _format_talk(raw_text: str, reasoning_text: str | None) -> str | None:
+    """The start of a completion's reasoning if it talks about the reply format.
+
+    Returns "" for reasoning that does not, and None for a completion without
+    reasoning (neither ``reasoning_text`` nor an inline ``<think>`` block).
+    """
+    if reasoning_text is None:
+        head = raw_text.lstrip()
+        if not head.startswith("<think>"):
+            return None
+        reasoning_text = head[len("<think>") :]
+    start = reasoning_text[:_FORMAT_TALK_CHARS]
+    return " ".join(start.split()) if _FORMAT_TALK_RE.search(start) else ""
+
+
+def _report_format_talk(format_talk: dict[int, str], log: logging.Logger) -> None:
+    """Warn when many reasoning traces open by working out the reply format.
+
+    e.g. "We need answer JSON only? User says 'Respond with your reasoning,
+    then a code block' but ...": the prompt asks for one format and
+    output_schema's instruction for another. Such reasoning is a poor training
+    target, so the warning says so.
+    """
+    talking = [t for t in format_talk.values() if t]
+    if len(format_talk) < _FORMAT_TALK_MIN_TRACES or not talking:
+        return
+    if len(talking) / len(format_talk) < _FORMAT_TALK_SHARE:
+        return
+    example = talking[0][:80] + ("…" if len(talking[0]) > 80 else "")
+    message = (
+        f"alter.generate_from_context: {len(talking)} of {len(format_talk)} "
+        f'reasoning traces open by discussing the output format (e.g. "{example}") '
+        "→ the prompt's own format instructions likely conflict with "
+        "output_schema's; if this reasoning becomes a training target, generate "
+        "without output_schema and parse the answer yourself"
+    )
+    log.warning(message)
+    _tracking.add_op_warning(message)
 
 
 def _merge_outputs(

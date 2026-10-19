@@ -161,11 +161,13 @@ class TestReport:
         assert run() == [{"q": "S", "x": 1}]
 
         warnings = _tracking.step_records()["gen"].ops[0].warnings
+        # The warning leads with what happened to the rows.
         assert warnings == [
-            "alter.generate_from_context: 2 of 3 completions from gpt-4o stopped at "
-            "max_tokens=100 (finish_reason=length), so their text is cut off (a "
-            "reasoning model's is often empty: the budget went to thinking); raise "
-            "the Model's max_tokens or lower its reasoning_effort"
+            "alter.generate_from_context: 2 rows dropped (no parseable output), "
+            "because 2 of 3 completions from gpt-4o stopped at max_tokens=100 "
+            "(finish_reason=length) (a reasoning model's is often empty: the budget "
+            "went to thinking); raise the Model's max_tokens or lower its "
+            "reasoning_effort"
         ]
 
     def test_logged_outside_ops(self, fake, caplog):
@@ -216,3 +218,107 @@ class TestRetries:
         )
         assert out == [{"x": 2}]
         assert fake.calls.count("Q") == 2
+
+
+class TestRowOutcomes:
+    """generate_from_context's warnings say what happened to the rows."""
+
+    def test_cut_off_rows_kept_without_schema(self, fake, monkeypatch):
+        """Without output_schema any text is kept, so the warning says it is cut off."""
+        monkeypatch.setenv("FORGER_STEP_REPORT", "0")
+        fake.script = {"Q": [("partial code", "length")]}
+
+        @step
+        def gen(rows: list[dict]) -> list[dict]:
+            return generate_from_context(rows, "{q}", gpt(), merge=True)
+
+        assert gen([{"q": "Q"}, {"q": "R"}])[0]["text"] == "partial code"
+        warning = _tracking.step_records()["gen"].ops[0].warnings[0]
+        assert warning.startswith(
+            "alter.generate_from_context: 1 row kept with cut-off text, because 1 "
+            "of 2 completions from gpt-4o stopped at max_tokens=100"
+        )
+
+    def test_dropped_and_kept_in_one_warning(self, fake, monkeypatch):
+        """Unparseable cut-offs are dropped rows; parseable ones are kept, cut off."""
+        monkeypatch.setenv("FORGER_STEP_REPORT", "0")
+        fake.script = {"Q": [('{"x": ', "length")], "R": [('{"x": 3} and', "length")]}
+
+        @step
+        def gen(rows: list[dict]) -> list[dict]:
+            return generate_from_context(
+                rows, "{q}", gpt(), output_schema={"x": "int"}, merge=True
+            )
+
+        assert gen([{"q": "Q"}, {"q": "R"}]) == [{"q": "R", "x": 3}]
+        warning = _tracking.step_records()["gen"].ops[0].warnings[0]
+        assert warning.startswith(
+            "alter.generate_from_context: 1 row dropped (no parseable output), 1 row "
+            "kept with cut-off text, because 2 of 2 completions"
+        )
+
+    def test_parse_failures_reach_the_report(self, fake, monkeypatch):
+        """A sample that never parses is a data problem in the report, not a log."""
+        monkeypatch.setenv("FORGER_STEP_REPORT", "0")
+        fake.script = {"R": [("not json", "stop")] * 4}
+
+        @step
+        def gen(rows: list[dict]) -> list[dict]:
+            return generate_from_context(
+                rows, "{q}", gpt(), output_schema={"x": "int"}, merge=True
+            )
+
+        gen([{"q": "Q"}, {"q": "R"}])
+        assert _tracking.step_records()["gen"].ops[0].warnings == [
+            "alter.generate_from_context: 1 sample(s) failed to parse after 3 "
+            "retries → 1 row dropped"
+        ]
+
+
+class TestFormatTalk:
+    """Reasoning that opens by negotiating the reply format is a data problem."""
+
+    TALK = (
+        '<think>We need answer JSON only? User says code block but...</think>{"x": 1}'
+    )
+    PLAIN = '<think>Sort the array, then scan once.</think>{"x": 1}'
+
+    def _run(self, fake, monkeypatch, texts: list[str]) -> list[str]:
+        monkeypatch.setenv("FORGER_STEP_REPORT", "0")
+        fake.script = {f"Q{i}": [(t, "stop")] for i, t in enumerate(texts)}
+
+        @step
+        def gen(rows: list[dict]) -> list[dict]:
+            return generate_from_context(
+                rows, "{q}", gpt(), output_schema={"x": "int"}, merge=True
+            )
+
+        gen([{"q": f"Q{i}"} for i in range(len(texts))])
+        return _tracking.step_records()["gen"].ops[0].warnings
+
+    def test_warns_when_many_traces_talk_about_the_format(self, fake, monkeypatch):
+        """3 of 6 traces discuss JSON: the warning quotes one and says what to do."""
+        warnings = self._run(fake, monkeypatch, [self.TALK] * 3 + [self.PLAIN] * 3)
+        assert len(warnings) == 1
+        assert warnings[0].startswith(
+            "alter.generate_from_context: 3 of 6 reasoning traces open by discussing "
+            'the output format (e.g. "We need answer JSON only?'
+        )
+        assert "generate without output_schema" in warnings[0]
+
+    def test_quiet_below_the_share_or_count(self, fake, monkeypatch):
+        """1 of 6 traces, or fewer than 5 traces in all, is not worth a warning."""
+        assert self._run(fake, monkeypatch, [self.TALK] + [self.PLAIN] * 5) == []
+        assert self._run(fake, monkeypatch, [self.TALK] * 4) == []
+
+    def test_no_check_without_output_schema(self, fake, monkeypatch):
+        """Without output_schema Forger added no format instruction to conflict."""
+        monkeypatch.setenv("FORGER_STEP_REPORT", "0")
+        fake.script = {f"Q{i}": [(self.TALK, "stop")] for i in range(6)}
+
+        @step
+        def gen(rows: list[dict]) -> list[dict]:
+            return generate_from_context(rows, "{q}", gpt(), merge=True)
+
+        gen([{"q": f"Q{i}"} for i in range(6)])
+        assert _tracking.step_records()["gen"].ops[0].warnings == []

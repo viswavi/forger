@@ -1329,6 +1329,19 @@ def _warning_lines(warnings: Iterable[str], prefix: str = "") -> list[Text]:
     return out
 
 
+def _suggestion_lines(suggestions: Iterable[str], prefix: str = "") -> list[Text]:
+    """Dim lines: ``suggestion: no inspect op ran, so ...``."""
+    out: list[Text] = []
+    for s in dict.fromkeys(suggestions):
+        line = Text(style="dim")
+        line.append("suggestion: ")
+        if prefix:
+            line.append(f"{_clean(prefix)}: ")
+        line.append(_clean(s))
+        out.append(line)
+    return out
+
+
 def _rule(kind: str, name: str) -> Rule:
     title = Text()
     title.append(f"{kind} ", style="dim")
@@ -1495,6 +1508,7 @@ def step_renderable(
         arrow = f"{rec.input_type or 'any'} → {rec.output_type or 'any'}"
         body.append(Text(f"rows validated: {arrow}", style="dim"))
     body.extend(_warning_lines(rec.warnings))
+    body.extend(_suggestion_lines(rec.suggestions))
 
     if rec.ops and not one_plain_op:
         body.append(Text(""))
@@ -1707,17 +1721,24 @@ def pipeline_renderable(rec: PipelineRecord, *, width: int = WIDTH) -> Renderabl
         body.append(Text(""))
         body.append(Text("notes", style="bold"))
         body.extend(Text(_clean(note)) for note in dict.fromkeys(rec.notes))
-    step_warnings = [
+    suggestions = [
+        line
+        for s in rec.steps
+        for line in _suggestion_lines(s.suggestions, prefix=s.name)
+    ] + _suggestion_lines(rec.suggestions)
+    if suggestions:
+        body.append(Text(""))
+        body.extend(suggestions)
+    # Data problems come last: agents often read only the end of a log.
+    problems = [
         line for s in rec.steps for line in _warning_lines(s.warnings, prefix=s.name)
-    ]
-    if step_warnings:
-        body.append(Text(""))
-        body.append(Text("step warnings", style="bold"))
-        body.extend(step_warnings)
-    if rec.warnings:
-        body.append(Text(""))
-        body.append(Text("pipeline warnings", style="bold"))
-        body.extend(_warning_lines(rec.warnings))
+    ] + _warning_lines(rec.warnings)
+    body.append(Text(""))
+    if problems:
+        body.append(Text(f"data problems ({len(problems)})", style="bold"))
+        body.extend(problems)
+    else:
+        body.append(Text("data problems: none reported", style="dim"))
     if rec.smoke_rows is not None:  # last, where `tail` sees it
         body.append(Text(""))
         body.append(Text(smoke_banner(rec.smoke_rows), style="bold yellow"))

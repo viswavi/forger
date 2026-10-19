@@ -251,7 +251,9 @@ def test_show_warns_only_for_fields_no_stream_has():
         return {"train": rows[:2], "refusals": [{"reason": "x"}]}
 
     split(_rows(3))
-    assert _record("split").warnings == ["show= names fields no output row has: nope"]
+    assert _record("split").suggestions == [
+        "show= names fields no output row has: nope"
+    ]
 
 
 def test_dict_of_all_one_model_validates_every_stream():
@@ -370,7 +372,7 @@ def test_stream_of_non_dicts_warns():
     split(_rows(2))
     rec = _record("split")
     assert rec.n_out == 4
-    assert rec.warnings == [
+    assert rec.suggestions == [
         "rows of ids are not dicts; schema checks and samples skipped"
     ]
 

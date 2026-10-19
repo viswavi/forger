@@ -99,6 +99,52 @@ def test_banner_ends_the_summary_and_marks_step_reports(monkeypatch, capsys):
     assert "SMOKE RUN" in render_pipeline(_last()).splitlines()[1]
 
 
+@step
+def picky(rows: list[dict]) -> list[dict]:
+    """Keep rows with long text, expecting most of them."""
+    return filter.by_length(rows, instruction_field="text", min_len=3, min_yield=0.9)
+
+
+# One row in three has 3+ words: yield 0.33.
+UNEVEN = [{"id": i, "text": "short" if i % 3 else "a longer text"} for i in range(9)]
+
+
+def test_smoke_yield_miss_is_a_suggestion(monkeypatch, capsys):
+    """On 3 rows a min_yield miss says little: a suggestion, not a data problem."""
+    monkeypatch.delenv("FORGER_STEP_REPORT")
+
+    @pipeline(smoke=3)
+    def build() -> list[dict]:
+        return picky(UNEVEN)
+
+    assert [r["id"] for r in build()] == [0]
+    rec = _last()
+    (only,) = rec.steps
+    expected = "smoke run: filter.by_length: yield 0.33 below min_yield 0.90"
+    assert only.warnings == [] and only.suggestions == [expected]
+    lines = [line.strip() for line in capsys.readouterr().out.splitlines()]
+    lines = [line for line in lines if line]
+    # The data-problems block, then the banner as the very last line.
+    assert lines[-2:] == ["data problems: none reported", BANNER]
+    assert f"suggestion: picky: {expected}" in lines
+
+
+def test_full_run_yield_miss_is_a_data_problem():
+    """Outside a smoke run the same miss is a warning, listed under data problems."""
+
+    @pipeline
+    def build() -> list[dict]:
+        return picky(UNEVEN)
+
+    build()
+    (only,) = _last().steps
+    assert only.warnings == ["filter.by_length: yield 0.33 below min_yield 0.90"]
+    assert not any("min_yield" in s for s in only.suggestions)
+    summary = render_pipeline(_last())
+    assert "data problems (1)" in summary
+    assert not summary.rstrip().endswith(BANNER)
+
+
 def test_no_banner_in_a_full_run():
     """A pipeline without smoke has no banner and no step marks."""
 

@@ -1173,12 +1173,16 @@ def _op_call(
         token_units=usage[3],
         scores=scores[0] if scores else None,
     )
+    # A smoke run's yield on 3 rows says little, so a miss is only a suggestion.
+    smoke = _tracking.smoke_rows() is not None
+    missed = call.suggestions if smoke else call.warnings
+    prefix = "smoke run: " if smoke else ""
     if (min_yield is not None or max_yield is not None) and yield_ratio is None:
         if n_in == 0 and n_out is not None:
             if min_yield:
-                call.warnings.append(
-                    f"{op_name}: no input rows, so yield is 0 and below min_yield "
-                    f"{min_yield:.2f}"
+                missed.append(
+                    f"{prefix}{op_name}: no input rows, so yield is 0 and below "
+                    f"min_yield {min_yield:.2f}"
                 )
         else:
             call.warnings.append(
@@ -1187,12 +1191,14 @@ def _op_call(
             )
     if yield_ratio is not None:
         if min_yield is not None and yield_ratio < min_yield:
-            call.warnings.append(
-                f"{op_name}: yield {yield_ratio:.2f} below min_yield {min_yield:.2f}"
+            missed.append(
+                f"{prefix}{op_name}: yield {yield_ratio:.2f} below min_yield "
+                f"{min_yield:.2f}"
             )
         if max_yield is not None and yield_ratio > max_yield:
-            call.warnings.append(
-                f"{op_name}: yield {yield_ratio:.2f} above max_yield {max_yield:.2f}"
+            missed.append(
+                f"{prefix}{op_name}: yield {yield_ratio:.2f} above max_yield "
+                f"{max_yield:.2f}"
             )
     # Completions cut off at max_tokens, from any model call the op made.
     call.warnings.extend(_tracking.truncation_warnings(op_name))

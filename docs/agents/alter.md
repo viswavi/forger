@@ -33,6 +33,10 @@ Parse-failure `None`s are cached. `inspect.topic_based_clustering` does not ask 
 [LLM judges](filter.md#llm-judges)).
 As with `sample_from_LLM`, reasoning traces are included under a `thinking_trace` key. Inline traces are not extracted:
 `LocalModel` leaves `<think>` blocks in the completion text. Use `split_reasoning` to separate them out.
+`output_schema` adds an instruction about the reply's format. If your prompt also asks for a format ("reason step by
+step, then one code block"), reasoning models spend the start of their reasoning sorting out the conflict, and the
+step report warns when many traces open that way. When you will train on the reasoning, leave `output_schema` out
+and parse the answer yourself.
 
 By default the op returns a flat list of `len(items) * samples_per_item` outputs (or `None`). `merge=True` returns the
 input rows with the output attached instead, one row per successful sample (failed slots dropped), with `sample_idx`

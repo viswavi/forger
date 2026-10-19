@@ -145,4 +145,4 @@ def test_does_not_count_as_a_quality_filter():
     run(ROWS)
     rec = _tracking.last_pipeline()
     assert rec is not None
-    assert "no quality filter ran (e.g. filter.by_llm_score)" in rec.warnings
+    assert any("no quality filter ran" in s for s in rec.suggestions)
