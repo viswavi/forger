@@ -87,7 +87,7 @@ def by_judged_difficulty(
         medium=medium_difficulty_criterion,
         maximum=maximum_difficulty_criterion,
     )
-    tasks = [get_field(item, task_field, "by_judged_difficulty") for item in items]
+    tasks = [_task_text(item, task_field) for item in items]
     # Building prompts here puts their exact text in the cache key of the ratings.
     prompts = [
         [
@@ -124,6 +124,31 @@ def by_judged_difficulty(
         upper=max_difficulty,
     )
     return kept
+
+
+def _task_text(item: dict, task_field: str) -> str:
+    """Return the task under ``task_field`` as text for the judge.
+
+    Chat messages are written out one block each, the role line and then the
+    content, e.g. an RL row's ``[{"role": "user", "content": "Add 2 and 2."}]``
+    becomes "user:" and "Add 2 and 2." on two lines, not the repr of the list.
+    A number is sent as its text.
+    """
+    value = get_field(item, task_field, "by_judged_difficulty")
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float)):  # bool too: e.g. 7 → "7"
+        return str(value)
+    if (
+        isinstance(value, list)
+        and value
+        and all(isinstance(m, dict) and "role" in m and "content" in m for m in value)
+    ):
+        return "\n\n".join(f"{m['role']}:\n{m['content']}" for m in value)
+    raise ValueError(
+        f"task_field {task_field!r} must hold text or a list of chat messages "
+        f'({{"role": ..., "content": ...}} dicts), got {type(value).__name__}'
+    )
 
 
 @op(name="filter.by_judged_difficulty.scores", samples_arg="num_judges")

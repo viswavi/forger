@@ -246,6 +246,33 @@ def test_missing_field_raises():
     assert judge.call_count == 0
 
 
+def test_chat_message_task_is_rendered_as_text():
+    """An RL row's message list reaches the judge as readable text, not its repr."""
+    rendered = "system:\nBe brief.\n\nuser:\nAdd 2 and 2."
+    judge = _ScriptedJudge({rendered: [1], "7": [4]})
+    messages = [
+        {"role": "system", "content": "Be brief."},
+        {"role": "user", "content": "Add 2 and 2."},
+    ]
+    kept = by_judged_difficulty(
+        [{"prompt": messages}, {"prompt": 7}], model=judge, task_field="prompt"
+    )
+    assert [user["content"] for _, user in judge.prompts] == [
+        f"Task:\n{rendered}",
+        "Task:\n7",
+    ]
+    assert kept == [{"prompt": 7}]
+
+
+@pytest.mark.parametrize("value", [{"role": "user"}, [], ["Add 2 and 2."], None])
+def test_other_task_types_raise(value):
+    """A dict, an empty list, a list of non-messages, or None raises before any call."""
+    judge = _ScriptedJudge(TASKS)
+    with pytest.raises(ValueError, match="list of chat messages"):
+        by_judged_difficulty([{"task": value}], model=judge, task_field="task")
+    assert judge.call_count == 0
+
+
 @pytest.mark.parametrize(
     "kwargs, match",
     [

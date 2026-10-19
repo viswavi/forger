@@ -593,6 +593,8 @@ row in one `n=k` call, keeping rows whose pass rate (passed / valid grades) is i
 No answer format is imposed. The prompt is the task itself (`prompt_template` replaces it, e.g. to ask for a final
 `ANSWER: ...` line). `input_field` may hold text or chat messages: a list of `{"role", "content"}` dicts, such as an
 RL row's `prompt`, is sent as the conversation; a number is sent as its text; any other value raises `ValueError`.
+`by_judged_difficulty`'s `task_field` takes the same values; the judge reads chat messages as text, each one written
+as `<role>:` and its content on the next line, separated by blank lines.
 Each completion is graded on what `extract_answer` takes from it. The default,
 `pyforger.filter.model_difficulty.answer_segment`, is the text after the completion's closed `<think>` block, stripped
 of surrounding whitespace. `metric` is `"exact_match"` (normalized equality with the reference), `"rouge_l"` (F1 at
