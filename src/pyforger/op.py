@@ -16,6 +16,7 @@ filtering passes) get cached at the @op layer.
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import inspect
 import io
@@ -294,11 +295,9 @@ def op(
                     args = bound.args
                     kwargs = bound.kwargs
                     normalized = dict(bound.arguments)
-                except TypeError:
-                    if _cache_only:
-                        raise
-                    # If the arguments don't match the signature, use them directly.
-                    normalized = {"args": list(args), "kwargs": dict(kwargs)}
+                except TypeError as exc:
+                    # fn would raise anyway; name the op and the likely fix.
+                    raise _bind_error(fn.__name__, sig, args, kwargs, exc) from None
             else:
                 normalized = {"args": list(args), "kwargs": dict(kwargs)}
             key = [op_name, body_key, normalized]
@@ -406,6 +405,84 @@ def op(
     if _fn is not None:
         return decorate(_fn)
     return decorate
+
+
+# Keywords every @op call accepts on top of the function's own parameters.
+_CALL_KEYWORDS = ("min_yield", "max_yield", "_no_cache", "_cache_only")
+
+
+def _suggest(key: str, candidates: list[str]) -> list[str]:
+    """Return likely intended names, e.g. 'max_workers' -> ['verifier_workers']."""
+    close = difflib.get_close_matches(key, candidates, n=3)
+    # Same last word, which difflib scores low for long prefixes.
+    last = key.rsplit("_", 1)[-1]
+    if len(last) >= 4:
+        close += [c for c in candidates if c.rsplit("_", 1)[-1] == last]
+    return list(dict.fromkeys(close))[:3]
+
+
+def _bind_error(
+    display: str,
+    sig: inspect.Signature,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    exc: TypeError,
+) -> TypeError:
+    """Explain a call that does not match the op's signature.
+
+    E.g. ``by_pass_at_k() got an unexpected keyword argument 'max_workers'; did
+    you mean 'verifier_workers'? Accepted keywords: rows, model, ...``.
+    """
+    params = list(sig.parameters.values())
+    keywords = [
+        p.name for p in params if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)
+    ]
+    accepted = (
+        f" Accepted keywords: {', '.join(keywords) or '(none)'} "
+        f"(plus {', '.join(_CALL_KEYWORDS)})."
+    )
+    candidates = keywords + list(_CALL_KEYWORDS)
+    takes_any = any(p.kind == p.VAR_KEYWORD for p in params)
+    unknown = [] if takes_any else [k for k in kwargs if k not in candidates]
+    if len(unknown) == 1:
+        message = f"{display}() got an unexpected keyword argument {unknown[0]!r}"
+        close = _suggest(unknown[0], candidates)
+        if close:
+            message += f"; did you mean {' or '.join(map(repr, close))}?"
+        else:
+            message += "."
+        return TypeError(message + accepted)
+    if unknown:
+        message = (
+            f"{display}() got unexpected keyword arguments "
+            f"{', '.join(map(repr, unknown))}."
+        )
+        for key in unknown:
+            close = _suggest(key, candidates)
+            if close:
+                message += (
+                    f" For {key!r}, did you mean {' or '.join(map(repr, close))}?"
+                )
+        return TypeError(message + accepted)
+    try:
+        bound = sig.bind_partial(*args, **kwargs)
+    except TypeError:
+        return TypeError(f"{display}(): {exc}." + accepted)
+    missing = [
+        p
+        for p in params
+        if p.name not in bound.arguments
+        and p.default is p.empty
+        and p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD)
+    ]
+    if not missing:
+        return TypeError(f"{display}(): {exc}." + accepted)
+    names = ", ".join(
+        repr(p.name) + (" (keyword-only)" if p.kind == p.KEYWORD_ONLY else "")
+        for p in missing
+    )
+    noun = "argument" if len(missing) == 1 else "arguments"
+    return TypeError(f"{display}() missing required {noun}: {names}." + accepted)
 
 
 def _atomic_write(path: Path, data: bytes) -> None:
