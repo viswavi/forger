@@ -16,7 +16,10 @@ import shlex
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from pyforger.agent_tasks import TaskSpec
 
 from pyforger.agent_backend import (
     AgentRunResult,
@@ -131,6 +134,27 @@ def _failure_kind(outcome: dict[str, Any]) -> str | None:
     if outcome["status"] == "timed_out":
         return "budget"
     return None if outcome["status"] == "completed" else "infrastructure"
+
+
+def export_task(
+    task: TaskSpec,
+    path: str | Path,
+    *,
+    solution: str | None = None,
+    timeout_s: float = 1800.0,
+) -> ArtifactRef:
+    """Explicitly export a neutral task to a new native Harbor task directory."""
+    from pyforger.agent_tasks import _reject_links
+
+    root = Path(path)
+    _reject_links(root)
+    workspace = WorkspaceTask(**task.__dict__, timeout_s=timeout_s)
+    agent = (
+        AgentSpec(kind="oracle", solution=solution)
+        if solution
+        else AgentSpec(kind="nop")
+    )
+    return _package(workspace, agent, root, ["/work/" + name for name in task.outputs])
 
 
 class HarborBackend:
