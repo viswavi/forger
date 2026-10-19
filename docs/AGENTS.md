@@ -99,8 +99,11 @@ Control flow (`for`, `if`, comprehensions, helper functions) in plain Python can
 Structure a pipeline as a `@pyforger.pipeline` function that calls `@pyforger.step` functions. A step is a named
 function from rows to rows built from Forger ops (typically acquire or alter, then filter); it may also take several
 lists of rows and return a dict of named row lists. Each step is cached like an `@op` and, when it returns, prints a
-report; the pipeline prints a summary table of its steps at the end. Read these reports after every run. See
-[`docs/agents/pipelines.md`](agents/pipelines.md) for the reports, warnings, spend ledger, and spending caps.
+report; the pipeline prints a summary table of its steps at the end. Read these reports after every run. A few
+warnings that may not matter for your data (e.g. truncation in a draft step) can be suppressed with a reason, e.g.
+`@step(suppress_truncation_warning="<why these rows are still fine>")`. See
+[`docs/agents/pipelines.md`](agents/pipelines.md) for the reports, warnings, suppression flags, spend ledger, and
+spending caps.
 
 ### Operation reference
 

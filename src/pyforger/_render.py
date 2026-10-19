@@ -31,7 +31,7 @@ from rich.rule import Rule
 from rich.table import Table
 from rich.text import Text
 
-from pyforger import _summaries
+from pyforger import _summaries, _tracking
 from pyforger._rowflow import group_calls
 from pyforger._tracking import (
     MAX_DROPPED_NOTES,
@@ -42,6 +42,7 @@ from pyforger._tracking import (
     RowStream,
     ScoreRecord,
     StepRecord,
+    Suppression,
 )
 
 WIDTH = 120  # reports never exceed this many columns
@@ -1329,8 +1330,26 @@ def _warning_lines(warnings: Iterable[str], prefix: str = "") -> list[Text]:
     return out
 
 
-def _suggestion_lines(suggestions: Iterable[str], prefix: str = "") -> list[Text]:
-    """Dim lines: ``suggestion: no inspect op ran, so ...``."""
+def _flag_for(kind: str | None) -> str | None:
+    """The flag that suppresses ``kind``, e.g. "@step(suppress_no_ops_warning=...)"."""
+    for decorator, flags in (
+        ("step", _tracking.STEP_SUPPRESS_FLAGS),
+        ("pipeline", _tracking.PIPELINE_SUPPRESS_FLAGS),
+    ):
+        for flag, flag_kind in flags.items():
+            if flag_kind == kind:
+                return f"@{decorator}({flag}=...)"
+    return None
+
+
+def _suggestion_lines(
+    suggestions: Iterable[str], prefix: str = "", kinds: dict[str, str] | None = None
+) -> list[Text]:
+    """Dim lines: ``suggestion: no inspect op ran, so ...``.
+
+    A suggestion that has a flag names it, e.g. "... (does not apply? say why
+    with @pipeline(suppress_no_inspect_warning=...))".
+    """
     out: list[Text] = []
     for s in dict.fromkeys(suggestions):
         line = Text(style="dim")
@@ -1338,8 +1357,32 @@ def _suggestion_lines(suggestions: Iterable[str], prefix: str = "") -> list[Text
         if prefix:
             line.append(f"{_clean(prefix)}: ")
         line.append(_clean(s))
+        flag = _flag_for((kinds or {}).get(s))
+        if flag is not None:
+            line.append(f" (does not apply? say why with {flag})")
         out.append(line)
     return out
+
+
+def _suppressed_lines(suppressed: Iterable[Suppression]) -> list[Text]:
+    """Dim lines: ``suppressed: truncation in solve (10 of 50 cut off) — <why>``.
+
+    One per kind and place, also when a step ran several times; a data
+    problem keeps its size.
+    """
+    seen: dict[tuple[str, str, str], list[str]] = {}
+    for x in suppressed:
+        sizes = seen.setdefault((x.kind, x.where, x.reason), [])
+        sizes.extend(z for z in x.sizes if z not in sizes)
+    return [
+        Text(
+            f"suppressed: {kind} in {_clean(where)}"
+            + (f" ({_clean('; '.join(sizes))})" if sizes else "")
+            + f" — {_clean(reason)}",
+            style="dim",
+        )
+        for (kind, where, reason), sizes in seen.items()
+    ]
 
 
 def _rule(kind: str, name: str) -> Rule:
@@ -1508,7 +1551,8 @@ def step_renderable(
         arrow = f"{rec.input_type or 'any'} → {rec.output_type or 'any'}"
         body.append(Text(f"rows validated: {arrow}", style="dim"))
     body.extend(_warning_lines(rec.warnings))
-    body.extend(_suggestion_lines(rec.suggestions))
+    body.extend(_suggestion_lines(rec.suggestions, kinds=rec.kinds))
+    body.extend(_suppressed_lines(rec.suppressed))
 
     if rec.ops and not one_plain_op:
         body.append(Text(""))
@@ -1625,6 +1669,37 @@ def _stream_cells(s: StepRecord, n_cells: int) -> list[list[Text]]:
     return out
 
 
+def _suppress_hint(rec: PipelineRecord) -> Text | None:
+    """One dim line naming the flags for the open data problems that have one.
+
+    e.g. "Fix these if they matter; if one does not matter for your data, say
+    why with its flag and a reason: @step(suppress_truncation_warning=...) on
+    draft". None when no open data problem has a flag (suggestions name their
+    own flag on their line).
+    """
+    found: dict[str, list[str]] = {}  # flag -> steps it applies to
+    for s in rec.steps:
+        for message in s.warnings:
+            flag = _flag_for(s.kinds.get(message))
+            if flag is not None and s.kind == "step":
+                found.setdefault(flag, []).append(s.name)
+    for message in rec.warnings:
+        flag = _flag_for(rec.kinds.get(message))
+        if flag is not None:
+            found.setdefault(flag, [])
+    if not found:
+        return None
+    parts = [
+        f"{flag} on {', '.join(dict.fromkeys(where))}" if where else flag
+        for flag, where in found.items()
+    ]
+    return Text(
+        "Fix these if they matter; if one does not matter for your data, say why "
+        f"with its flag and a reason: {'; '.join(parts)}",
+        style="dim",
+    )
+
+
 def pipeline_renderable(rec: PipelineRecord, *, width: int = WIDTH) -> RenderableType:
     """Build the rich renderable for a pipeline summary (see ``render_pipeline``)."""
     n_steps = sum(1 for s in rec.steps if s.kind != "bare")
@@ -1724,21 +1799,42 @@ def pipeline_renderable(rec: PipelineRecord, *, width: int = WIDTH) -> Renderabl
     suggestions = [
         line
         for s in rec.steps
-        for line in _suggestion_lines(s.suggestions, prefix=s.name)
-    ] + _suggestion_lines(rec.suggestions)
+        for line in _suggestion_lines(s.suggestions, prefix=s.name, kinds=s.kinds)
+    ] + _suggestion_lines(rec.suggestions, kinds=rec.kinds)
     if suggestions:
         body.append(Text(""))
         body.extend(suggestions)
+    # Every suppression with its reason, so a reader can audit them: the
+    # suggestions' here, the data problems' (with their size) in the last block.
+    hidden = [x for s in rec.steps for x in s.suppressed] + rec.suppressed
+    hidden_suggestions = _suppressed_lines(x for x in hidden if not x.warning)
+    if hidden_suggestions:
+        if not suggestions:
+            body.append(Text(""))
+        body.extend(hidden_suggestions)
     # Data problems come last: agents often read only the end of a log.
     problems = [
         line for s in rec.steps for line in _warning_lines(s.warnings, prefix=s.name)
     ] + _warning_lines(rec.warnings)
+    hidden_problems = _suppressed_lines(x for x in hidden if x.warning)
     body.append(Text(""))
-    if problems:
+    if hidden_problems:
+        body.append(
+            Text(
+                f"data problems: {len(problems)} open, {len(hidden_problems)} "
+                "suppressed",
+                style="bold",
+            )
+        )
+        body.extend(problems + hidden_problems)
+    elif problems:
         body.append(Text(f"data problems ({len(problems)})", style="bold"))
         body.extend(problems)
     else:
         body.append(Text("data problems: none reported", style="dim"))
+    hint = _suppress_hint(rec)
+    if hint is not None:
+        body.append(hint)
     if rec.smoke_rows is not None:  # last, where `tail` sees it
         body.append(Text(""))
         body.append(Text(smoke_banner(rec.smoke_rows), style="bold yellow"))

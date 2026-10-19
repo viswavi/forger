@@ -213,7 +213,7 @@ def _report_provider_failures(
         summary += f"; last error: {type(last_error).__name__}: {detail}"
     text = f"{message}: {summary} (result not cached)"
     logger.warning(text)
-    _tracking.add_op_warning(text)
+    _tracking.add_op_warning(text, "provider_failure")
     skip_cache_write()
 
 

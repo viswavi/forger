@@ -26,9 +26,11 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import difflib
 import json
 import math
 import os
+import re
 import threading
 from collections.abc import Callable, Iterable, Iterator
 from contextvars import ContextVar, Token
@@ -122,6 +124,54 @@ class ScoreRecord(BaseModel):
     note: str | None = None
 
 
+# Every warning and suggestion carries a kind, e.g. "truncation" or
+# "no_inspect" (see ``add_problem``). A few can be suppressed with a reason,
+# each by its own keyword: on @step the step's own problems, on @pipeline the
+# pipeline's. Truncation in a draft step may be harmless while truncation in the
+# answer step is not, so no pipeline-wide flag covers a step's problems. The
+# others have a fix or a knob (yield bounds have min_yield / max_yield; provider
+# errors and parse failures lose rows that a rerun can get back).
+STEP_SUPPRESS_FLAGS = {
+    "suppress_truncation_warning": "truncation",
+    "suppress_no_ops_warning": "no_forger_ops",
+}
+PIPELINE_SUPPRESS_FLAGS = {
+    "suppress_no_quality_filter_warning": "no_quality_filter",
+    "suppress_no_diversity_filter_warning": "no_diversity_filter",
+    "suppress_no_inspect_warning": "no_inspect",
+    "suppress_retrieval_warning": "retrieval_unused",
+}
+# What happened instead, for a flag whose problem never fired.
+_INSTEAD = {
+    "truncation": "no truncation occurred",
+    "no_forger_ops": "the step called Forger ops",
+    "no_quality_filter": "a quality filter ran",
+    "no_diversity_filter": "a diversity filter ran",
+    "no_inspect": "an inspect op ran",
+    "retrieval_unused": "retrieved text reached a prompt or the output",
+}
+# Data problems: suppressing one hides rows lost, so a stale flag is a warning.
+_DATA_KINDS = frozenset({"truncation", "retrieval_unused"})
+STALE_SUPPRESSION = "stale_suppression"
+
+
+class Suppression(BaseModel):
+    """Problems of one kind that a ``suppress_*_warning`` flag moved out of the lists.
+
+    e.g. ``Suppression(kind="truncation", flag="suppress_truncation_warning",
+    reason="...", where="solve", messages=[...], sizes=["10 of 50 completions
+    cut off, 10 rows dropped"])``. ``warning`` is False for a suggestion.
+    """
+
+    kind: str
+    flag: str
+    reason: str
+    where: str
+    messages: list[str] = Field(default_factory=list)
+    sizes: list[str] = Field(default_factory=list)
+    warning: bool = True
+
+
 class OpCall(BaseModel):
     """One top-level op call inside a step or pipeline."""
 
@@ -143,6 +193,10 @@ class OpCall(BaseModel):
     # About the run rather than the rows, e.g. a smoke run's yield outside
     # min_yield (3 rows say little about yield); shown dimmed.
     suggestions: list[str] = Field(default_factory=list)
+    # Each warning's and suggestion's kind, by message (see ``add_problem``),
+    # and for some, how many rows it hit, e.g. "10 of 50 completions cut off".
+    kinds: dict[str, str] = Field(default_factory=dict)
+    sizes: dict[str, str] = Field(default_factory=dict)
     # Set when the op raised, e.g. "ValueError: bad JSON"; its usage still counts.
     error: str | None = None
     # Positions in the step's ``ops`` of the earlier calls whose output rows this
@@ -251,6 +305,9 @@ class StepRecord(BaseModel):
     e.g. "34 of 120 completions ... stopped at max_tokens → 20 rows dropped".
     ``suggestions`` are about how the step is written, e.g. "called no Forger
     operations"; the report shows them dimmed, after the warnings.
+    ``kinds`` gives each one's kind (``"truncation"``) and ``sizes`` the rows
+    some hit; ``suppress`` maps the kinds its ``suppress_*_warning`` flags name
+    to their reasons, and ``suppressed`` holds the problems they moved out.
     """
 
     name: str
@@ -265,6 +322,10 @@ class StepRecord(BaseModel):
     ops: list[OpCall] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     suggestions: list[str] = Field(default_factory=list)
+    kinds: dict[str, str] = Field(default_factory=dict)
+    sizes: dict[str, str] = Field(default_factory=dict)
+    suppress: dict[str, str] = Field(default_factory=dict)
+    suppressed: list[Suppression] = Field(default_factory=list)
     sample: list[Any] = Field(default_factory=list)
     sample_summaries: list[dict[int, FieldSummary]] = Field(default_factory=list)
     sample_shown: int = 1
@@ -316,6 +377,9 @@ class PipelineRecord(BaseModel):
     steps: list[StepRecord] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     suggestions: list[str] = Field(default_factory=list)
+    kinds: dict[str, str] = Field(default_factory=dict)
+    sizes: dict[str, str] = Field(default_factory=dict)
+    suppressed: list[Suppression] = Field(default_factory=list)
     no_filter_steps: list[str] = Field(default_factory=list)
     noop_filters: list[tuple[str, str, int]] = Field(default_factory=list)
     duration_s: float = 0.0
@@ -338,6 +402,171 @@ class PipelineRecord(BaseModel):
         return sum(
             s.original.cost_usd for s in self.steps if s.cache_hit and s.original
         )
+
+
+_Problems = OpCall | StepRecord | PipelineRecord
+
+# A reason needs this many words and characters: "ok" or "known issue" would
+# suppress without saying why the rows are still fine.
+MIN_REASON_WORDS = 3
+MIN_REASON_CHARS = 15
+# Reasons from examples (agents copied them verbatim into unrelated pipelines);
+# the docs use placeholders such as "<why these rows are still fine>" instead.
+_EXAMPLE_REASONS = frozenset(
+    {
+        "long proofs are filtered by length next",
+        "one row per distinct task; duplicates impossible",
+        "drafts are regenerated in full by the solve step",
+        "rows are unique by construction",
+        "long traces are filtered later anyway",
+    }
+)
+
+
+def add_problem(
+    rec: _Problems,
+    kind: str,
+    message: str,
+    *,
+    suggestion: bool = False,
+    size: str | None = None,
+) -> None:
+    """Add a warning (or a suggestion) of ``kind`` to ``rec``.
+
+    e.g. ``add_problem(call, "yield_bounds", "filter.x: yield 0.10 below ...")``.
+    ``size`` says how many rows it hit, e.g. "10 of 50 completions cut off".
+    """
+    (rec.suggestions if suggestion else rec.warnings).append(message)
+    rec.kinds[message] = kind
+    if size:
+        rec.sizes[message] = size
+
+
+def copy_problems(source: _Problems, into: _Problems) -> None:
+    """Add ``source``'s warnings and suggestions, with kinds and sizes, to ``into``."""
+    into.warnings.extend(source.warnings)
+    into.suggestions.extend(source.suggestions)
+    into.kinds.update(source.kinds)
+    into.sizes.update(source.sizes)
+
+
+def check_suppress(
+    level: Literal["step", "pipeline"],
+    flags: dict[str, str | None],
+    unknown: dict[str, Any],
+) -> dict[str, str]:
+    """Return {kind: reason} for the ``suppress_*_warning`` flags that are set.
+
+    ``unknown`` holds the other keywords the decorator got: one raises
+    TypeError with the closest flag, e.g. "did you mean
+    'suppress_truncation_warning'?". A reason under ``MIN_REASON_WORDS`` words,
+    or one copied from an example, raises ValueError.
+    """
+    own = STEP_SUPPRESS_FLAGS if level == "step" else PIPELINE_SUPPRESS_FLAGS
+    other = PIPELINE_SUPPRESS_FLAGS if level == "step" else STEP_SUPPRESS_FLAGS
+    for key in unknown:
+        if key in other:
+            owner = "@pipeline" if level == "step" else "@step"
+            hint = f"; {key} is a {owner} flag, so set it there."
+        else:
+            # 0.8 catches typos (suppress_truncaton_warning: 0.98) but not other
+            # kinds (suppress_parse_failure_warning: 0.67 to truncation).
+            close = difflib.get_close_matches(key, list(own), n=1, cutoff=0.8)
+            if close:
+                hint = f"; did you mean {close[0]!r}?"
+            elif key.startswith("suppress_"):
+                hint = (
+                    "; only the problems below can be suppressed, the others have a "
+                    "fix (for a yield miss, set min_yield / max_yield to the yield "
+                    "you expect)."
+                )
+            else:
+                hint = "."
+        raise TypeError(
+            f"@{level}() got an unexpected keyword argument {key!r}{hint} "
+            f"Its suppress flags: {', '.join(own)}"
+        )
+    out = {}
+    for flag, reason in flags.items():
+        if reason is None:
+            continue
+        text = " ".join(reason.split()) if isinstance(reason, str) else ""
+        if len(text.split()) < MIN_REASON_WORDS or len(text) < MIN_REASON_CHARS:
+            raise ValueError(
+                f"@{level}({flag}=...) needs a reason of at least "
+                f"{MIN_REASON_WORDS} words saying why the rows are still fine, "
+                f"got {reason!r}"
+            )
+        if text.lower() in _EXAMPLE_REASONS or (
+            text.startswith("<") and text.endswith(">")
+        ):
+            raise ValueError(
+                f"@{level}({flag}=...) got an example reason, {reason!r}; say why "
+                "this pipeline's rows are still fine"
+            )
+        out[own[flag]] = text
+    return out
+
+
+def apply_suppress(
+    rec: StepRecord | PipelineRecord, suppress: dict[str, str], where: str
+) -> None:
+    """Move ``rec``'s problems whose kind ``suppress`` names into ``rec.suppressed``.
+
+    Safe to call again: problems already moved stay in one ``Suppression`` per
+    kind.
+    """
+    if not suppress:
+        return
+    flags = {**STEP_SUPPRESS_FLAGS, **PIPELINE_SUPPRESS_FLAGS}
+    flag_of = {kind: flag for flag, kind in flags.items()}
+    for warning, problems in ((True, rec.warnings), (False, rec.suggestions)):
+        kept = []
+        for message in problems:
+            kind = rec.kinds.get(message)
+            if kind not in suppress:
+                kept.append(message)
+                continue
+            entry = next((x for x in rec.suppressed if x.kind == kind), None)
+            if entry is None:
+                entry = Suppression(
+                    kind=kind,
+                    flag=flag_of[kind],
+                    reason=suppress[kind],
+                    where=where,
+                    warning=warning,
+                )
+                rec.suppressed.append(entry)
+            if message not in entry.messages:
+                entry.messages.append(message)
+                if message in rec.sizes:
+                    entry.sizes.append(rec.sizes[message])
+        problems[:] = kept
+
+
+def stale_suppressions(
+    suppress: dict[str, str], suppressed: Iterable[Suppression]
+) -> list[str]:
+    """The kinds ``suppress`` names that hid nothing, e.g. ``["truncation"]``."""
+    seen = {x.kind for x in suppressed}
+    return [kind for kind in suppress if kind not in seen]
+
+
+def add_stale(rec: StepRecord | PipelineRecord, kind: str, where: str) -> None:
+    """Report a flag whose problem never fired: a warning for a data problem.
+
+    e.g. "suppress_truncation_warning is set on solve, but no truncation
+    occurred; remove it so it cannot hide a later one".
+    """
+    flags = {**STEP_SUPPRESS_FLAGS, **PIPELINE_SUPPRESS_FLAGS}
+    flag = next(f for f, k in flags.items() if k == kind)
+    add_problem(
+        rec,
+        STALE_SUPPRESSION,
+        f"{flag} is set on {where}, but {_INSTEAD[kind]}; remove it so it cannot "
+        "hide a later one",
+        suggestion=kind not in _DATA_KINDS,
+    )
 
 
 _USAGE_LOCK = threading.Lock()
@@ -421,8 +650,9 @@ _OP_DEPTH: ContextVar[int] = ContextVar("forger_op_depth", default=0)
 _ACTIVE_SCORES: ContextVar[list[ScoreRecord] | None] = ContextVar(
     "forger_active_scores", default=None
 )
-# Warnings the innermost active op raised about its own work (see ``warn``).
-_ACTIVE_WARNINGS: ContextVar[list[str] | None] = ContextVar(
+# Warnings the innermost active op raised about its own work, as (kind,
+# message) (see ``add_op_warning``).
+_ACTIVE_WARNINGS: ContextVar[list[tuple[str, str]] | None] = ContextVar(
     "forger_active_warnings", default=None
 )
 # Completions the innermost active op got that stopped at max_tokens, keyed by
@@ -832,7 +1062,7 @@ class OpToken:
     scores_token: Token[list[ScoreRecord] | None] | None = None
     usage: Usage | None = None
     usage_token: Token[tuple[Usage, ...]] | None = None
-    warnings_token: Token[list[str] | None] | None = None
+    warnings_token: Token[list[tuple[str, str]] | None] | None = None
     truncation_token: (
         Token[dict[tuple[str, int | None, str | None], list[int]] | None] | None
     ) = None
@@ -871,20 +1101,21 @@ def current_scores() -> list[ScoreRecord]:
     return list(_ACTIVE_SCORES.get() or [])
 
 
-def add_op_warning(message: str) -> None:
+def add_op_warning(message: str, kind: str = "other") -> None:
     """Add ``message`` to the running op's warnings in the step report.
 
     For an op that logs a problem with its own work, e.g. "3 of 64 prompts
-    failed". The op logs it itself, so it is not logged again; a nested op's
-    warnings go to the op that called it. A no-op outside ops.
+    failed" (``kind="provider_failure"``, see ``add_problem``). The op
+    logs it itself, so it is not logged again; a nested op's warnings go to
+    the op that called it. A no-op outside ops.
     """
     warnings = _ACTIVE_WARNINGS.get()
     if warnings is not None:
-        warnings.append(message)
+        warnings.append((kind, message))
 
 
-def current_warnings() -> list[str]:
-    """Return the warnings the innermost active op has added so far."""
+def current_warnings() -> list[tuple[str, str]]:
+    """Return the innermost active op's warnings so far, as (kind, message)."""
     return list(_ACTIVE_WARNINGS.get() or [])
 
 
@@ -961,19 +1192,29 @@ def add_truncation(
     return True
 
 
-def truncation_warnings(op_name: str) -> list[str]:
-    """The running op's truncation warnings, one per (model, max_tokens) that hit it."""
+def truncation_warnings(op_name: str) -> list[tuple[str, str]]:
+    """The running op's truncation warnings, one per (model, max_tokens) that hit it.
+
+    Each comes with its size, e.g. "10 of 50 completions cut off, 10 rows
+    dropped", which a suppressed warning still shows.
+    """
     outcome = "; ".join(_ACTIVE_TRUNCATION_OUTCOME.get() or []) or None
+    # "10 rows dropped (no parseable output)" -> "10 rows dropped"
+    lost = re.sub(r" \([^)]*\)", "", outcome) if outcome else None
     return [
-        f"{op_name}: "
-        + truncation_message(
-            model_id,
-            max_tokens,
-            truncated,
-            total,
-            advice,
-            outcome=outcome,
-            mid_thought=mid,
+        (
+            f"{op_name}: "
+            + truncation_message(
+                model_id,
+                max_tokens,
+                truncated,
+                total,
+                advice,
+                outcome=outcome,
+                mid_thought=mid,
+            ),
+            f"{truncated} of {total} completions cut off"
+            + (f", {lost}" if lost else ""),
         )
         for (model_id, max_tokens, advice), (truncated, total, mid) in (
             _ACTIVE_TRUNCATION.get() or {}
@@ -1046,8 +1287,7 @@ def exit_op(
         step = _ACTIVE_STEP.get()
         if step is not None and call is not None:
             step.cache_hit = call.cache_hit
-            step.warnings.extend(call.warnings)
-            step.suggestions.extend(call.suggestions)
+            copy_problems(call, step)
         return
     if token.usage_token is not None:
         _ACCUMULATORS.reset(token.usage_token)
@@ -1101,26 +1341,24 @@ def exit_op(
 
 def step_from_bare_op(call: OpCall) -> StepRecord:
     """Wrap an op called directly in a pipeline as a one-op step record."""
-    if call.op_name == DYNAMIC_STEP_OP:
-        name, kind, suggestions = "dynamic_step", "dynamic_step", []
-    else:
-        name, kind = f"(bare) {call.op_name}", "bare"
-        suggestions = ["called outside a @step"]
-    return StepRecord(
-        name=name,
-        kind=kind,  # type: ignore[arg-type]
+    bare = call.op_name != DYNAMIC_STEP_OP
+    rec = StepRecord(
+        name=f"(bare) {call.op_name}" if bare else "dynamic_step",
+        kind="bare" if bare else "dynamic_step",
         n_in=call.n_in,
         n_out=call.n_out,
         duration_s=call.duration_s,
         cache_hit=call.cache_hit,
         ops=[call],
-        warnings=list(call.warnings),
-        suggestions=suggestions + list(call.suggestions),
         prompt_tokens=call.prompt_tokens,
         completion_tokens=call.completion_tokens,
         cost_usd=call.cost_usd,
         token_units=call.token_units,
     )
+    if bare:
+        add_problem(rec, "outside_step", "called outside a @step", suggestion=True)
+    copy_problems(call, rec)
+    return rec
 
 
 def record_scores(
@@ -1719,10 +1957,13 @@ def close_retrieval_reach(rec: PipelineRecord, result: Any) -> None:
             if reach.prompts == 1
             else f"any of the {reach.prompts:,} model prompts"
         )
-        rec.warnings.append(
+        add_problem(
+            rec,
+            "retrieval_unused",
             f"{who} returned {sum(reach.returned.values()):,} documents, but none "
             f"of their text appeared in {sent} or in the pipeline's output; to "
-            "ground generation on them, format the retrieved text into your prompts"
+            "ground generation on them, format the retrieved text into your prompts",
+            size=f"{sum(reach.returned.values()):,} documents, none used",
         )
     elif len(reach.used) < _FEW_USED * len(reach.docs):
         rec.notes.append(

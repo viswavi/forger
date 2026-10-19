@@ -40,6 +40,11 @@ summary ends with every step's data problems, so the last lines of a log show
 them. ``@step(prod=True)``, ``@pipeline(prod=True)``, or ``FORGER_STEP_REPORT=0``
 silence the reports; ``strict=True`` turns warnings and suggestions into errors.
 
+A few can be suppressed with a reason: ``@step(suppress_truncation_warning=
+"<why these rows are still fine>")`` turns that step's truncation warnings into
+one dim ``suppressed:`` line with their size, and the pipeline summary lists
+every suppression (see ``_tracking.STEP_SUPPRESS_FLAGS``).
+
 Long sample values are summarized by shape (``[5 items] a.py, b.py, …``).
 ``set_report_model(model)`` or ``FORGER_REPORT_MODEL`` adds a one-sentence LLM
 summary of each; see ``pyforger._summaries``.
@@ -488,6 +493,9 @@ def step(
     strict: bool = False,
     sample: int = 1,
     show: list[str] | tuple[str, ...] | str = (),
+    suppress_truncation_warning: str | None = None,
+    suppress_no_ops_warning: str | None = None,
+    **unknown: Any,
 ) -> Any:
     """Decorate a function from rows to rows built from Forger ops.
 
@@ -532,8 +540,25 @@ def step(
         show: Fields of the sample rows to print in full, each as an indented
             block under its row, e.g. ``show=["statement"]``. Other fields are
             cut or summarized.
+        suppress_truncation_warning: Why this step's completions cut off at
+            max_tokens do not hurt its rows. Its truncation warnings then print
+            as one dim ``suppressed:`` line with their size and the reason, and
+            leave the data-problem count and ``strict``. If no truncation
+            occurs in any run of the step, that is a warning (remove the flag).
+        suppress_no_ops_warning: Why this step has no Forger ops; the
+            "called no Forger operations" suggestion is suppressed the same way.
+        **unknown: Any other keyword raises TypeError with the closest flag.
+            A reason under 3 words, or a placeholder, raises ValueError.
     """
     shown_fields = [show] if isinstance(show, str) else list(show)
+    suppress = _tracking.check_suppress(
+        "step",
+        {
+            "suppress_truncation_warning": suppress_truncation_warning,
+            "suppress_no_ops_warning": suppress_no_ops_warning,
+        },
+        unknown,
+    )
     # The scope that defines the step (where ``step`` is called, both for
     # ``@step`` and ``@step(...)``), for resolving string annotations.
     frame = sys._getframe(1)
@@ -589,9 +614,10 @@ def step(
                 show=shown_fields,
                 input_type=input_type,
                 output_type=hint.out.label() if hint.out else None,
+                suppress=suppress,
             )
             if hint.warning:
-                rec.suggestions.append(hint.warning)
+                _tracking.add_problem(rec, "type_hints", hint.warning, suggestion=True)
             if row_args:
                 rec.n_in = sum(len(rows) for _, _, rows in row_args)
             if smoke is not None:
@@ -648,6 +674,7 @@ def step(
                     _tracking.ops_started() - ops_before,
                     input_keys,
                 )
+                _tracking.apply_suppress(rec, suppress, step_name)
                 if strict and (rec.warnings or rec.suggestions):
                     strict_failed.append(True)
                     raise _strict_error(rec)
@@ -688,6 +715,11 @@ def step(
 
             if not checked:  # a cache hit
                 _check_step_result(rec, result, hint.out, 0, input_keys)
+            # Again: the step's own min_yield warning came after ``check``.
+            _tracking.apply_suppress(rec, suppress, step_name)
+            if pipeline_rec is None and smoke is None:  # else the pipeline checks
+                for kind in _tracking.stale_suppressions(suppress, rec.suppressed):
+                    _tracking.add_stale(rec, kind, step_name)
             finish(result)
             if strict and (rec.warnings or rec.suggestions):
                 raise _strict_error(rec)
@@ -923,7 +955,7 @@ def _check_step_result(
             _validate_rows(result, out.model, rec.name, "output")
         keys = _describe(result, rec.show, input_keys, rec)
         if keys is None:
-            rec.suggestions.append(_NOT_DICTS)
+            _tracking.add_problem(rec, "not_dicts", _NOT_DICTS, suggestion=True)
         output_keys = keys or []
     elif isinstance(result, dict):
         if not _is_streams(result):
@@ -947,9 +979,12 @@ def _check_step_result(
             output_keys += [k for k in keys or [] if k not in output_keys]
             rec.streams.append(stream)
         if not_dicts:
-            rec.suggestions.append(
+            _tracking.add_problem(
+                rec,
+                "not_dicts",
                 f"rows of {', '.join(not_dicts)} are not dicts; schema checks and "
-                "samples skipped"
+                "samples skipped",
+                suggestion=True,
             )
     else:
         raise StepContractError(
@@ -958,15 +993,21 @@ def _check_step_result(
         )
     missing = [f for f in rec.show if output_keys and f not in output_keys]
     if missing:
-        rec.suggestions.append(
-            f"show= names fields no output row has: {', '.join(missing)}"
+        _tracking.add_problem(
+            rec,
+            "show_missing",
+            f"show= names fields no output row has: {', '.join(missing)}",
+            suggestion=True,
         )
 
     if not rec.cache_hit and not rec.ops:
         if ops_started > 0:
-            rec.suggestions.append(
+            _tracking.add_problem(
+                rec,
+                "worker_threads",
                 "its ops ran in worker threads and are not itemized; submit with "
-                "pool.submit(contextvars.copy_context().run, fn, arg) to list them"
+                "pool.submit(contextvars.copy_context().run, fn, arg) to list them",
+                suggestion=True,
             )
             return
         # A suggestion, not an error: an error pushed agents to wrap pure-Python
@@ -976,16 +1017,18 @@ def _check_step_result(
             if rec.n_in is not None and rec.n_out is not None and rec.n_in != rec.n_out
             else ""
         )
-        rec.suggestions.append(
+        _tracking.add_problem(
+            rec,
+            "no_forger_ops",
             f"called no Forger operations: {changed}this report cannot show what "
             "the step kept or changed; write its checks as Forger ops where one fits "
             "(e.g. filter.by_predicate with the real check, alter.run_programs, "
-            "filter.by_tests), and do not add a no-op filter only to quiet this"
+            "filter.by_tests), and do not add a no-op filter only to quiet this",
+            suggestion=True,
         )
         return
     for call in rec.ops:
-        rec.warnings.extend(call.warnings)
-        rec.suggestions.extend(call.suggestions)
+        _tracking.copy_problems(call, rec)
 
 
 # --------------------------------------------------------------------------- #
@@ -1002,6 +1045,11 @@ def pipeline(
     max_cost_usd: float | None = None,
     max_token_units: float | None = None,
     smoke: int | None = None,
+    suppress_no_quality_filter_warning: str | None = None,
+    suppress_no_diversity_filter_warning: str | None = None,
+    suppress_no_inspect_warning: str | None = None,
+    suppress_retrieval_warning: str | None = None,
+    **unknown: Any,
 ) -> Any:
     """Decorate a function that calls ``@step`` functions; print a summary at the end.
 
@@ -1046,7 +1094,33 @@ def pipeline(
             to it. Defaults to ``FORGER_SMOKE_ROWS`` (unset or 0: off);
             ``smoke=0`` turns it off whatever the variable says. Smoke results
             are cached apart from a full run's.
+        suppress_no_quality_filter_warning: Why the rows need no quality
+            filter, e.g. every row is checked against a reference answer. The
+            suggestion then prints as one dim ``suppressed:`` line.
+        suppress_no_diversity_filter_warning: Why the rows need no diversity
+            filter.
+        suppress_no_inspect_warning: Why no inspect op is needed.
+        suppress_retrieval_warning: Why retrieved text that reached no prompt
+            is fine (a data problem: its size stays in the last block).
+        **unknown: Any other keyword raises TypeError with the closest flag (a
+            step's flag names the decorator to put it on). A step's problems
+            are suppressed on that step, where the reason is about its rows.
+            A reason under 3 words, or a placeholder, raises ValueError. A flag
+            whose problem never fired is a warning (retrieval) or a
+            suggestion (the rest), and so is a step's (not in a smoke run).
     """
+    suppress = _tracking.check_suppress(
+        "pipeline",
+        {
+            "suppress_no_quality_filter_warning": suppress_no_quality_filter_warning,
+            "suppress_no_diversity_filter_warning": (
+                suppress_no_diversity_filter_warning
+            ),
+            "suppress_no_inspect_warning": suppress_no_inspect_warning,
+            "suppress_retrieval_warning": suppress_retrieval_warning,
+        },
+        unknown,
+    )
     for label, cap in (
         ("max_cost_usd", max_cost_usd),
         ("max_token_units", max_token_units),
@@ -1099,6 +1173,7 @@ def pipeline(
                 _tracking.exit_pipeline(scope)
             rec.duration_s = time.perf_counter() - start
             _check_pipeline(rec)
+            _suppress_pipeline(rec, suppress)
             _tracking.store_pipeline(rec)
             if _reports_enabled(prod):
                 print_pipeline(rec)
@@ -1159,9 +1234,12 @@ def _check_pipeline(rec: PipelineRecord) -> None:
             "@step functions and call those from the pipeline"
         )
     if len(real) == 1:
-        rec.suggestions.append(
+        _tracking.add_problem(
+            rec,
+            "one_step",
             "only one step ran; split the work into separate @step functions "
-            "(e.g. generate, then filter) so each gets a report"
+            "(e.g. generate, then filter) so each gets a report",
+            suggestion=True,
         )
     # A step cached by an older Forger version has no record of its ops; skip
     # the checks for which ops ran rather than warn about ops that may have run.
@@ -1171,29 +1249,65 @@ def _check_pipeline(rec: PipelineRecord) -> None:
     filters = {c.op_name for s in rec.steps for c in s.ops if c.category == "filter"}
     if ops_known:
         if not filters - _NON_QUALITY_FILTERS:
-            rec.suggestions.append(
+            _tracking.add_problem(
+                rec,
+                "no_quality_filter",
                 "no quality filter ran, so nothing checked the rows' quality "
-                "(e.g. filter.by_llm_score)"
+                "(e.g. filter.by_llm_score)",
+                suggestion=True,
             )
         if not filters & _DIVERSITY_FILTERS:
-            rec.suggestions.append(
+            _tracking.add_problem(
+                rec,
+                "no_diversity_filter",
                 "no diversity filter ran, so near-duplicate rows were not removed "
                 "(filter.by_exact_match, by_rouge_l, by_n_gram_overlap, or "
-                "by_topic_frequency)"
+                "by_topic_frequency)",
+                suggestion=True,
             )
         if not any(c.category == "inspect" for s in rec.steps for c in s.ops):
-            rec.suggestions.append(
+            _tracking.add_problem(
+                rec,
+                "no_inspect",
                 "no inspect op ran, so nothing looked at what the rows cover "
-                "(e.g. inspect.topic_based_clustering)"
+                "(e.g. inspect.topic_based_clustering)",
+                suggestion=True,
             )
     _filter_notes(rec)
     bare = [s.ops[0].op_name for s in rec.steps if s.kind == "bare"]
     if bare:
         listed = ", ".join(dict.fromkeys(bare))
-        rec.suggestions.append(
+        _tracking.add_problem(
+            rec,
+            "outside_step",
             f"{len(bare)} op call{'s' if len(bare) != 1 else ''} outside a @step: "
-            f"{listed}"
+            f"{listed}",
+            suggestion=True,
         )
+
+
+def _suppress_pipeline(rec: PipelineRecord, suppress: dict[str, str]) -> None:
+    """Apply the pipeline's suppress flags; report flags whose problem never fired.
+
+    Also its steps' flags: ``suppress_truncation_warning`` on a step none of
+    whose runs truncated. A smoke run checks no flag (3 rows rarely show a
+    problem), nor a step cached by an older Forger (its ops are unknown).
+    """
+    _tracking.apply_suppress(rec, suppress, f"pipeline {rec.name}")
+    if rec.smoke_rows is not None:
+        return
+    for kind in _tracking.stale_suppressions(suppress, rec.suppressed):
+        _tracking.add_stale(rec, kind, f"pipeline {rec.name}")
+    runs: dict[str, list[StepRecord]] = {}
+    for s in rec.steps:
+        if s.suppress:
+            runs.setdefault(s.name, []).append(s)
+    for name, recs in runs.items():
+        if any(s.cache_hit and not s.ops for s in recs):
+            continue
+        hidden = [x for s in recs for x in s.suppressed]
+        for kind in _tracking.stale_suppressions(recs[-1].suppress, hidden):
+            _tracking.add_stale(rec, kind, name)
 
 
 def _filter_notes(rec: PipelineRecord) -> None:

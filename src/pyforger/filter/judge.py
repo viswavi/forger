@@ -400,7 +400,7 @@ def _warn_unscored(calls: dict[str, int], total: int, rows: int, unscored: int) 
         f"({causes}) → {consequence}"
     )
     logger.warning(message)
-    _tracking.add_op_warning(message)
+    _tracking.add_op_warning(message, "judge_unscored")
 
 
 def _hashable(value: Any) -> Hashable:
