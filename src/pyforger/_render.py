@@ -791,10 +791,17 @@ def _group_ops(ops: list[OpCall]) -> list[_OpGroup]:
 
     A call joins the latest row of its op unless its input rows came from that
     row's output (``OpCall.after``): two judges in a row, or a refine pass over
-    generated rows, get a row each, with their own counts and histograms. The
+    generated rows, get a row each, with their own counts and histograms. A
+    call with another score label, or whose rows were rebuilt in Python while
+    the row's took known rows (``OpCall.new_rows``), gets its own row too. The
     (python) rows use the same grouping (``_rowflow.group_calls``).
     """
-    positions = group_calls([c.op_name for c in ops], [c.after for c in ops])
+    positions = group_calls(
+        [c.op_name for c in ops],
+        [c.after for c in ops],
+        [c.scores.label if c.scores is not None else None for c in ops],
+        [c.new_rows for c in ops],
+    )
     return [_OpGroup([ops[i] for i in g], g[0]) for g in positions]
 
 
@@ -861,29 +868,31 @@ def _check_text(group: _OpGroup) -> Text:
     return text
 
 
-def _merged_scores(calls: list[OpCall]) -> list[tuple[ScoreRecord, int]]:
+def _merged_scores(calls: list[OpCall]) -> list[tuple[ScoreRecord, int, int]]:
     """One score record per distinct rule, values concatenated over the calls.
 
     Calls whose scores share a label, keep rule, and thresholds pool into one
-    histogram; returns ``(record, number of calls in it)``, in call order.
+    histogram; returns ``(record, calls in it, cached calls in it)``, in call
+    order. A cached call's scores are those of the run that cached it.
     """
-    merged: dict[tuple[Any, ...], tuple[ScoreRecord, int]] = {}
+    merged: dict[tuple[Any, ...], tuple[ScoreRecord, int, int]] = {}
     for call in calls:
         sc = call.scores
-        if sc is None or call.cache_hit:
+        if sc is None:
             continue
         key = (sc.label, sc.keep, sc.threshold, sc.lower, sc.upper, sc.pooled)
         if key in merged:
-            rec, n = merged[key]
+            rec, n, n_cached = merged[key]
             dropped = (rec.dropped + sc.dropped)[:MAX_DROPPED_NOTES]
             merged[key] = (
                 rec.model_copy(
                     update={"values": rec.values + sc.values, "dropped": dropped}
                 ),
                 n + 1,
+                n_cached + call.cache_hit,
             )
         else:
-            merged[key] = (sc, 1)
+            merged[key] = (sc, 1, int(call.cache_hit))
     return list(merged.values())
 
 
@@ -1445,16 +1454,20 @@ def step_renderable(
             Text("result loaded from the step cache; its ops did not run", style="dim")
         )
     for group in groups:
-        for scores, n in _merged_scores(group.calls):
+        for scores, n, n_cached in _merged_scores(group.calls):
             name = group.op_name + (f" ×{n}" if n > 1 else "")
+            if n_cached:  # e.g. "filter.by_llm_score (cached run)"
+                name += " (cached run)" if n_cached == n else f" ({n_cached} cached)"
             body.append(Text(""))
             body.append(_histogram_renderable(_histogram(scores), name, width - 2))
             body.extend(_dropped_lines(scores))
-        if group.n_cached and group.category == "filter":
-            if group.cache_hit:
+        # Cached before scores were stored with results, or too many to store.
+        unscored = sum(1 for c in group.calls if c.cache_hit and c.scores is None)
+        if unscored and group.category == "filter":
+            if unscored == len(group.calls):
                 what = "no score histogram for a cached result"
             else:
-                what = f"{group.n_cached} cached calls are not in the histogram"
+                what = f"{unscored} cached calls are not in the histogram"
             body.append(Text(""))
             body.append(
                 Text(

@@ -304,6 +304,8 @@ def skip_cache_write() -> None:
 
 
 _STEP_META_SUFFIX = ".step.json"
+# A filter's per-row scores, so a cache hit still shows its histogram.
+_SCORES_SUFFIX = ".scores.json"
 
 # Set on every @op / tracked wrapper, e.g. {"name": "filter.by_length", "kind":
 # "op", "cache": True}; scripts/gen_op_docs.py reads it to mark cached ops.
@@ -652,7 +654,9 @@ def op(
             state: _CallState,
         ) -> tuple[Any, bool, Any, float]:
             """Run or load the op; return (result, cache_hit, first arg, seconds)."""
-            start = time.time()
+            # perf_counter, like the step and pipeline times: time.time() also
+            # counts a laptop's sleep, so an op could outlast its step.
+            start = time.perf_counter()
             was_bound = False
             if sig is not None:
                 try:
@@ -692,6 +696,7 @@ def op(
             cache_hit = False
             is_step = op_name.startswith(_tracking.STEP_OP_PREFIX)
             meta_path = cache_path.with_name(input_hash + _STEP_META_SUFFIX)
+            scores_path = cache_path.with_name(input_hash + _SCORES_SUFFIX)
 
             if use_cache and cache_path.exists():
                 try:
@@ -708,6 +713,8 @@ def op(
                     cache_hit = True
                     if is_step and meta_path.exists():
                         _tracking.restore_step_meta(meta_path.read_text())
+                    elif not is_step and scores_path.exists():
+                        _tracking.restore_scores(scores_path.read_text())
                 except _blobs.MissingBlobError as exc:
                     # E.g. blobs/ was deleted but the entry was not: a miss.
                     logger.debug("cache entry %s is incomplete: %s", cache_path, exc)
@@ -764,9 +771,15 @@ def op(
                     if meta is not None:
                         # Written first, so a cached step always has its ops.
                         _atomic_write(meta_path, meta.encode())
+                    if not is_step:
+                        scores = _tracking.scores_meta(_tracking.current_scores())
+                        if scores is not None:
+                            _atomic_write(scores_path, scores.encode())
+                        else:  # no stale scores from an earlier result
+                            scores_path.unlink(missing_ok=True)
                     _write_result(cache_path, result, cache_root)
 
-            duration = time.time() - start
+            duration = time.perf_counter() - start
             # If tracing is enabled, record this call on the in-memory trace.
             if _TRACE.maxlen is not None and _TRACE.maxlen > 0:
                 output_hash = None if cache_hit else _hash(result)[0]

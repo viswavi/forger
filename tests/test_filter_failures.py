@@ -264,6 +264,40 @@ class TestDroppedNotes:
         assert "↳ on answer 1" in text
         assert "answer 5" not in text.split("dropped, with notes:")[1]
 
+    def test_cached_reruns_keep_dropped_notes(self, monkeypatch):
+        """A cached step, or a cached filter op in a new step, still shows them."""
+        monkeypatch.setenv("FORGER_STEP_REPORT", "0")
+        rows = [{"q": f"q{i}", "a": f"answer {i}"} for i in range(3)]
+        judge = FlakyJudge(scores={"answer 1": 2})
+        expected = [(2, "answer 1", "on answer 1")]
+
+        def notes(step_name):
+            scores = _tracking.step_records()[step_name].ops[0].scores
+            assert scores is not None
+            return [(d.value, d.preview, d.note) for d in scores.dropped]
+
+        @step
+        def judged(rows):
+            return _score(rows, judge)
+
+        judged(rows)
+        judged(rows)  # the step cache: scores come from its .step.json
+        rec = _tracking.step_records()["judged"]
+        assert rec.cache_hit
+        assert notes("judged") == expected
+        assert "↳ on answer 1" in render_step(rec, full=True)  # as inspect_step
+
+        @step
+        def judged_again(rows):
+            # A new step, so only by_llm_score's op cache (.scores.json) hits.
+            return _score(rows, judge)
+
+        judged_again(rows)
+        rec = _tracking.step_records()["judged_again"]
+        assert not rec.cache_hit and rec.ops[0].cache_hit
+        assert notes("judged_again") == expected
+        assert "↳ on answer 1" in render_step(rec)
+
     def test_nothing_dropped_no_notes(self, monkeypatch):
         """No section when every row is kept."""
         monkeypatch.setenv("FORGER_STEP_REPORT", "0")

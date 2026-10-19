@@ -17,6 +17,7 @@ from rich.console import Console
 import pyforger
 from pyforger import _tracking, acquire, alter, filter, op
 from pyforger._render import _histogram, fmt_num, pipeline_renderable, step_renderable
+from pyforger._rowflow import group_calls
 from pyforger._tracking import PipelineRecord, ScoreRecord, StepRecord
 from pyforger.acquire import Model
 from pyforger.alter import dynamic
@@ -501,9 +502,102 @@ def test_cached_step_reports_its_ops_as_cached(capsys, monkeypatch):
         ("alter.test_counted", 5, 5, True),
         ("filter.by_length", 5, 3, True),
     ]
-    assert all(c.scores is None and c.duration_s == 0.0 for c in rec.ops)
+    assert all(c.duration_s == 0.0 for c in rec.ops)
+    # The filter's scores are those of the run that cached the step.
+    assert rec.ops[1].scores is not None and len(rec.ops[1].scores.values) == 5
     full = render_step(rec, full=True)
     assert re.search(r"filter\.by_length\s+5\s+3\s+0\.60\s+-\s+cached", full)
+    assert "filter.by_length (cached run) · words · keeps 2 to 10k: 3 of 5" in full
+    assert "no score histogram" not in full
+
+
+def test_cached_filter_op_keeps_its_histogram():
+    """An op cache hit in a fresh step shows the scores of the run that cached it."""
+
+    @step
+    def first(rows):
+        return _length_filter(_upper(rows))
+
+    @step
+    def second(rows):
+        return _length_filter(_upper(rows))
+
+    first(_rows(*TEXTS))
+    second(_rows(*TEXTS))
+    before = _tracking.step_records()["first"].ops[1].scores
+    rec = _tracking.step_records()["second"]
+    assert [c.cache_hit for c in rec.ops] == [True, True]
+    assert rec.ops[1].scores == before
+    text = render_step(rec)
+    assert "filter.by_length (cached run) · words · keeps 2 to 10k: 3 of 5" in text
+    assert re.search(r"words\s+rows", text) and "no score histogram" not in text
+
+
+def test_partly_cached_chunks_pool_their_scores():
+    """Chunks of which some came from the op cache: one histogram, marked."""
+
+    @step
+    def head(rows):
+        return _length_filter(rows[:2])
+
+    @step
+    def chunks(rows):
+        return _length_filter(rows[:2]) + _length_filter(rows[2:])
+
+    head(_rows(*TEXTS))
+    chunks(_rows(*TEXTS))
+    text = render_step(_tracking.step_records()["chunks"])
+    assert "filter.by_length ×2 (1 cached) · words · keeps 2 to 10k: 3 of 5" in text
+    assert "not in the histogram" not in text
+
+
+def test_too_many_scores_are_not_stored(monkeypatch):
+    """Score lists past MAX_STORED_SCORES stay out of the cache; the report says so."""
+    monkeypatch.setattr(_tracking, "MAX_STORED_SCORES", 4)
+
+    @step
+    def big(rows):
+        return _length_filter(rows)
+
+    @step
+    def again(rows):
+        return _length_filter(rows)
+
+    big(_rows(*TEXTS))
+    assert big(_rows(*TEXTS)) and _tracking.step_records()["big"].cache_hit
+    again(_rows(*TEXTS))
+    for name in ("big", "again"):
+        rec = _tracking.step_records()[name]
+        assert rec.ops[0].cache_hit and rec.ops[0].scores is None
+        text = render_step(rec, full=True)
+        assert "no score histogram for a cached result" in text
+
+
+def test_op_time_and_step_time_use_one_clock(monkeypatch):
+    """A wall-clock jump (a laptop asleep) does not make an op outlast its step.
+
+    Ops timed themselves with time.time() and steps with perf_counter(), which
+    on macOS stops while the machine sleeps: a 2m 34s step listed a 3m 14s op.
+    """
+    import time
+
+    real_time = time.time
+    jump = [0.0]
+    monkeypatch.setattr(time, "time", lambda: real_time() + jump[0])
+
+    @op(name="alter.test_sleepy")
+    def sleepy(rows):
+        jump[0] += 120.0  # the wall clock moves on; perf_counter does not
+        return list(rows)
+
+    @step
+    def napping(rows):
+        return _length_filter(sleepy(rows))
+
+    napping(_rows(*TEXTS))
+    rec = _tracking.step_records()["napping"]
+    assert rec.duration_s < 60
+    assert sum(c.duration_s for c in rec.ops) <= rec.duration_s
 
 
 def test_cached_step_prints_one_line(capsys, monkeypatch):
@@ -1054,7 +1148,7 @@ def test_report_text_is_not_parsed_as_markup():
     assert "[red]not red[/red] :smile:" in text
 
 
-def test_render_step_lines_fit_and_cached_op_hides_scores():
+def test_render_step_lines_fit_and_cached_op_shows_its_scores():
     """Report lines stay within 120 columns; cached ops print (cached)."""
     scores = ScoreRecord(label="score", values=[1, 2, 3], keep="ge", threshold=2)
     call = _tracking.OpCall(
@@ -1087,8 +1181,13 @@ def test_render_step_lines_fit_and_cached_op_hides_scores():
         assert all(len(line) <= 120 for line in text.splitlines())
         assert re.search(r"4,120\s+38\.9K", text) and "$0.041" in text
         assert re.search(r"cached\s+ok · min 0\.30", text)
-        assert "no score histogram for a cached result" in text
-        assert "if cut at" not in text
+        assert "filter.by_llm_score (cached run) · score · keeps ≥ 2" in text
+        assert "if cut at" in text and "no score histogram" not in text
+    # Cached before scores were stored with results: say so.
+    rec.ops = [call.model_copy(update={"scores": None})]
+    text = render_step(rec)
+    assert "no score histogram for a cached result" in text
+    assert "if cut at" not in text
 
 
 # --------------------------------------------------------------------------- #
@@ -1901,6 +2000,67 @@ def test_two_filters_on_the_same_rows_are_not_summed():
     rec = _tracking.step_records()["twice"]
     assert rec.ops[1].after == [0]
     assert render_step(rec).count("filter.by_length   ") >= 2
+
+
+def test_calls_with_other_labels_over_rebuilt_rows_get_their_own_rows():
+    """Two checks with a {**r} rebuild between them are not chunks (T5)."""
+
+    @step
+    def verify(rows):
+        rows = filter.by_predicate(rows, lambda r: r["text"] != "six", label="runs")
+        rows = [{**r, "n": len(r["text"])} for r in rows]
+        return filter.by_predicate(rows, lambda r: r["n"] > 4, label="long enough")
+
+    verify(_rows(*TEXTS))
+    rec = _tracking.step_records()["verify"]
+    assert rec.ops[1].after == [] and rec.ops[1].new_rows is True
+    text = render_step(rec)
+    assert "×2" not in text
+    assert re.search(r"filter\.by_predicate\s+5\s+4\s+0\.80", text)
+    assert re.search(r"filter\.by_predicate\s+4\s+3\s+0\.75", text)
+
+
+def test_same_label_after_a_rebuild_gets_its_own_row():
+    """Known rows, then rows rebuilt in Python: a chain even with one label."""
+
+    @step
+    def chain(rows):
+        rows = _length_filter(rows)
+        return _length_filter([{**r, "x": 1} for r in rows])
+
+    chain(_rows(*TEXTS))
+    rec = _tracking.step_records()["chain"]
+    assert [c.new_rows for c in rec.ops] == [False, True]
+    text = render_step(rec)
+    assert "×2" not in text
+    assert re.search(r"filter\.by_length\s+5\s+3\s+0\.60", text)
+    assert re.search(r"filter\.by_length\s+3\s+3\s+1\.00", text)
+
+
+def test_chunks_with_one_label_still_share_a_row():
+    """A loop over batches, of known or of rebuilt rows, is one row."""
+
+    def keep(rows):
+        return filter.by_predicate(rows, lambda r: r["text"] != "six", label="ok")
+
+    @step
+    def batches(rows):
+        return keep(rows[:2]) + keep(rows[2:4]) + keep(rows[4:])
+
+    @step
+    def rebuilt_batches(rows):
+        rows = [{**r, "x": 1} for r in rows]
+        return keep(rows[:2]) + keep(rows[2:4]) + keep(rows[4:])
+
+    batches(_rows(*TEXTS))
+    rebuilt_batches(_rows(*TEXTS))
+    for name in ("batches", "rebuilt_batches"):
+        text = render_step(_tracking.step_records()[name])
+        assert re.search(r"filter\.by_predicate ×3\s+5\s+4\s+0\.80", text), text
+    # Per-chunk labels with no rows to tell them apart (e.g. a cached step
+    # from before new_rows was kept) still merge.
+    assert group_calls(["a", "a"], [[], []], [None, "x"], [None, None]) == [[0, 1]]
+    assert group_calls(["a", "a"], [[], []], ["x", "y"], [None, None]) == [[0], [1]]
 
 
 def test_raised_call_marks_its_collapsed_row():

@@ -83,7 +83,10 @@ time, tokens, and cost; a histogram of each filter's scores with what other thre
 one sample output row. The pipeline prints a summary table of its steps at the end. Read these reports after every
 run. A cached step prints one line, `step translate · 42 → 40 rows · cached · originally 0.5s · $0.0034`, with the
 number of its warnings if it has any; `inspect_step(name)` prints its full report, which lists the ops of the run that
-cached it, marked `cached`, with that run's warnings.
+cached it, marked `cached`, with that run's warnings and score histograms (`filter.by_llm_score (cached run) · …`).
+A filter whose own result came from the op cache inside a step that ran also shows the scores of the run that cached
+it, marked the same way (`×5 (2 cached)` when some chunks were cached). Results cached before scores were stored with
+them, and score lists of over 100,000 rows, have none: rerun with `_no_cache=True` to see them.
 
 - Fields line: `fields: seed_id int · topic str · score int|None · twist str?  (+ score, twist; − draft)`. Each field
   of the output rows with the types of its values (from all rows, or 5,000 evenly spaced rows of a longer list); `?`
@@ -94,7 +97,10 @@ cached it, marked `cached`, with that run's warnings.
   (`LOW 2/5 · min 0.60` means two of five calls missed, `RAISED 1/5` that one raised). Their filter scores pool into
   one histogram when the label, keep rule, and thresholds match, and get one histogram per rule otherwise. A call
   whose input rows are an earlier call's output rows (the same row objects, also through other ops) gets its own
-  row: two `by_llm_score` rubric judges in a row read `10 → 8` and `8 → 4`, not one summed row.
+  row: two `by_llm_score` rubric judges in a row read `10 → 8` and `8 → 4`, not one summed row. Rows rebuilt in
+  Python (`{**r, ...}`) between two calls hide that, so two more things keep calls apart: different score labels
+  (`by_predicate(..., label="runs")`, then `label=">=3 outputs"`), and input rows that are all new to the step after
+  a call that took known rows. A loop over batches with one label still makes one row.
 - `(python)` rows: when rows change between two ops with no op to account for it (e.g. `[r for r in rows if ...]`
   between `generate_from_context` and `by_exact_match`), the op table shows a dim row such as
   `(python)  356 → 330  0.93` between them, or before the first op / after the last one. They are inferred: by row

@@ -142,6 +142,10 @@ class OpCall(BaseModel):
     # call's input rows are (directly, or through other ops), by row identity.
     # The report sums chunks of one op into a row, but not a call fed by them.
     after: list[int] = Field(default_factory=list)
+    # True when none of the input rows were the step's or an earlier call's
+    # rows (rebuilt in Python, e.g. ``{**r, ...}``), False when some were, None
+    # when unknown (no rows, or rows that have no identity).
+    new_rows: bool | None = None
 
 
 class FieldSummary(BaseModel):
@@ -485,13 +489,26 @@ def check_step_result(result: Any) -> str | None:
     return check(result) if check is not None else None
 
 
+# Score lists longer than this are not stored with a cached result (one
+# number per row; the cached rows themselves are far larger).
+MAX_STORED_SCORES = 100_000
+
+
+def storable_scores(scores: ScoreRecord | None) -> ScoreRecord | None:
+    """``scores`` when it is small enough to store with a cached result."""
+    if scores is None or len(scores.values) > MAX_STORED_SCORES:
+        return None
+    return scores
+
+
 def step_meta(rec: StepRecord, original: UsageTotals) -> str:
     """Serialize the ops a step ran, to store next to its cached result.
 
     On a cache hit ``restore_step_meta`` puts them back (marked cached, with no
-    time, usage, or scores), so the cached step reports the same ops and yield
-    warnings, and ``strict=True`` still sees them. ``original`` (the step's
-    time, tokens, and cost in this run) becomes the cached step's ``original``.
+    time or usage, and with their scores), so the cached step reports the same
+    ops, yield warnings, and score histograms, and ``strict=True`` still sees
+    them. ``original`` (the step's time, tokens, and cost in this run) becomes
+    the cached step's ``original``.
     """
     ops = [
         call.model_copy(
@@ -502,7 +519,7 @@ def step_meta(rec: StepRecord, original: UsageTotals) -> str:
                 "completion_tokens": 0,
                 "cost_usd": 0.0,
                 "token_units": 0.0,
-                "scores": None,
+                "scores": storable_scores(call.scores),
             }
         ).model_dump(mode="json")
         for call in rec.ops
@@ -755,6 +772,31 @@ def add_op_warning(message: str) -> None:
 def current_warnings() -> list[str]:
     """Return the warnings the innermost active op has added so far."""
     return list(_ACTIVE_WARNINGS.get() or [])
+
+
+def scores_meta(scores: list[ScoreRecord]) -> str | None:
+    """Serialize an op's score records, to store next to its cached result.
+
+    None when there is nothing to store (no scores, or too many values).
+    """
+    kept = [s for s in scores if storable_scores(s) is not None]
+    if not kept:
+        return None
+    return json.dumps(
+        {"version": 1, "scores": [s.model_dump(mode="json") for s in kept]}
+    )
+
+
+def restore_scores(text: str) -> None:
+    """Record the scores from ``scores_meta`` for the active op (a cache hit)."""
+    scores = _ACTIVE_SCORES.get()
+    if scores is None:
+        return
+    try:
+        records = [ScoreRecord.model_validate(d) for d in json.loads(text)["scores"]]
+    except (ValueError, KeyError, TypeError):
+        return  # unreadable: the report says the histogram is missing
+    scores.extend(records)
 
 
 def exit_op(
