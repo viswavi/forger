@@ -16,7 +16,7 @@ import math
 import threading
 import warnings
 from collections.abc import Callable, Iterable
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
@@ -28,10 +28,11 @@ from pyforger.acquire.model import (
     Model,
     Prompt,
     _is_transient,
-    _log_progress,
     _note_truncation,
     _progress_mode,
+    _RequestClock,
     _to_messages,
+    _watch,
 )
 from pyforger.op import _NO_CACHE_SCOPE, _REQUEST_SCOPE, _hash
 from pyforger.tinker_usage import (
@@ -720,16 +721,22 @@ class TinkerModel(Model):
                 for i in jobs:
                     in_context: Callable[..., Any] = contextvars.copy_context().run
                     futures[executor.submit(in_context, run, i)] = i
-                finished: Iterable[Future] = as_completed(futures)
                 desc = f"Tinker samples ({self._model_id})"
+                # The clock never sees a request start, so it warns about no
+                # stragglers: Tinker requests have no per-attempt timeout.
+                finished: Iterable[Future] = _watch(
+                    futures,
+                    len(futures),
+                    desc,
+                    len(futures) > 1 and progress == "log",
+                    _RequestClock(desc, None),
+                )
                 if len(futures) > 1 and progress == "bar":
                     from tqdm import tqdm
 
                     finished = tqdm(
                         finished, total=len(futures), desc=desc, leave=False
                     )
-                elif len(futures) > 1 and progress == "log":
-                    finished = _log_progress(finished, len(futures), desc)
                 for future in finished:
                     i = futures[future]
                     try:

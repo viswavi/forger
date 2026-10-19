@@ -37,6 +37,12 @@ key layout makes existing cache entries miss once.
 **Cache location.** `$FORGER_CACHE` if set, otherwise `~/.cache/forger`. The variable is read at call time, so tests
 can redirect it.
 
+**Large values are stored once.** A cached result's `str` or `bytes` values of 16K or more, and lists or tuples of that
+total size (e.g. a row's tests), are written once to `$FORGER_CACHE/blobs/<sha256>`, and the entry keeps a reference.
+A 47K-char thinking trace carried through six steps is then stored once, not in every step's entry. Cache keys hash
+each `str` or `bytes` of 4K or more by its SHA-256, computed once per string object. Deleting `$FORGER_CACHE` still
+clears everything; an entry whose blob is gone is a cache miss and is recomputed.
+
 **Per-call bypass.** Pass `_no_cache=True` at the call site to skip the cache for a single invocation, including the
 ops it calls. Pass `_cache_only=True` to retrieve an existing result without executing the function;
 a miss raises `FileNotFoundError`.
@@ -47,6 +53,8 @@ result is still returned, and the next call runs again. An op in a worker thread
 `pool.map` cannot see which op or step started the thread, so every op and step running in the process at that moment
 is left uncached instead, and a step that is skipped this way gets the warning `not cached: an op in a worker thread
 kept its result out of the cache`. Submit with `contextvars.copy_context().run` to limit it to the enclosing calls.
+`my_step.submit(...)` already runs the step in a copy of the context, so a failure in it or elsewhere in the
+pipeline leaves the other submitted steps cached.
 
 Built-in retrieval sources provide stable configuration keys that exclude runtime clients and sessions.
 Custom `RetrievalSource` implementations with mutable state should define `cache_key()` using their

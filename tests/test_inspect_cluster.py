@@ -165,10 +165,58 @@ def test_invalid_count_parameters_raise(param, value):
         _cluster(_rows(COOKING_DOCS), **{param: value})
 
 
-def test_too_few_unique_values_raises():
-    """More clusters than unique values is rejected."""
-    with pytest.raises(ValueError, match="unique"):
-        _cluster(_rows(COOKING_DOCS), num_clusters=3)
+class _PromptRecordingModel(_FakeClusterModel):
+    """_FakeClusterModel that also keeps every user prompt."""
+
+    def __init__(self):
+        """Start with no prompts."""
+        super().__init__()
+        self.prompts = []
+
+    def _respond(self, prompt):
+        self.prompts.append(prompt[-1]["content"])
+        return super()._respond(prompt)
+
+
+def test_fewer_unique_values_than_clusters_clamps_with_a_warning(caplog):
+    """Two unique values and num_clusters=5: two clusters, and a warning."""
+    docs = [COOKING_DOCS[0], SPACE_DOCS[0]] * 3
+    model = _PromptRecordingModel()
+    with caplog.at_level("WARNING", logger="Inspect"):
+        clusters = _cluster(_rows(docs), model, num_clusters=5)
+    assert clusters == ["cooking", "space"] * 3
+    assert (
+        "only 2 unique 'text' values, so using 2 clusters instead of num_clusters=5"
+        in caplog.text
+    )
+    assert any("Extract at most 2 topics" in p for p in model.prompts)
+    assert any("into exactly 2 final" in p for p in model.prompts)
+
+
+def test_as_many_unique_values_as_clusters_runs_without_a_warning(caplog):
+    """num_clusters equal to the unique count is used as given."""
+    docs = [COOKING_DOCS[0], SPACE_DOCS[0], COOKING_DOCS[0]]
+    with caplog.at_level("WARNING", logger="Inspect"):
+        clusters = _cluster(_rows(docs), num_clusters=2)
+    assert clusters == ["cooking", "space", "cooking"]
+    assert "unique" not in caplog.text
+
+
+def test_one_unique_value_is_one_topic_without_llm_calls():
+    """Every row gets the value itself as its topic; the model is not called."""
+
+    class _NoCalls(Model):
+        def generate_batch(self, prompts, **kwargs):
+            raise AssertionError("the model should not be called")
+
+    long_note = "I baked a sourdough loaf.\n" + "x" * 200
+    clusters = _cluster(_rows([long_note] * 4), _NoCalls("fake-model"), num_clusters=5)
+    assert clusters == [("I baked a sourdough loaf. " + "x" * 200)[:80]] * 4
+
+
+def test_no_rows_with_many_clusters_returns_empty():
+    """Zero rows is not too few unique values: the result is just empty."""
+    assert _cluster([], num_clusters=50) == []
 
 
 def test_all_unparseable_summaries_raise():
@@ -201,7 +249,7 @@ _THREE_TOPICS = {**_TWO_TOPICS, "gardening": "Growing plants."}
 
 
 class _ScriptedCodebookModel(Model):
-    """Returns scripted codebooks in order, recording each prompt."""
+    """Returns scripted codebooks in order (raising error entries); records prompts."""
 
     def __init__(self, codebooks):
         super().__init__("fake-model")
@@ -210,7 +258,13 @@ class _ScriptedCodebookModel(Model):
 
     def generate_batch(self, prompts, **kwargs):
         self.prompts.extend(prompts)
-        return [[json.dumps(self.codebooks.pop(0))] for _ in prompts]
+        out = []
+        for _ in prompts:
+            codebook = self.codebooks.pop(0)
+            if isinstance(codebook, Exception):
+                raise codebook
+            out.append([json.dumps(codebook)])
+        return out
 
 
 def test_codebook_with_wrong_topic_count_is_sent_back():
@@ -228,6 +282,22 @@ def test_codebook_keeps_last_attempt_when_count_never_matches(caplog):
         codebook = _build_codebook([_THREE_TOPICS], model, CONTEXT, num_clusters=2)
     assert codebook == _THREE_TOPICS
     assert any("3 topics instead of 2" in record.message for record in caplog.records)
+
+
+def test_failed_codebook_request_is_not_asked_again():
+    """A codebook request that fails after the model's retries is not re-sent."""
+    model = _ScriptedCodebookModel([TimeoutError("slow"), _TWO_TOPICS])
+    with pytest.raises(RuntimeError, match="codebook request failed"):
+        _build_codebook([_TWO_TOPICS], model, CONTEXT, num_clusters=2)
+    assert len(model.prompts) == 1
+
+
+def test_failed_codebook_correction_keeps_last_codebook():
+    """A failed correction request ends the corrections; the last codebook is used."""
+    model = _ScriptedCodebookModel([_THREE_TOPICS, TimeoutError("slow"), _TWO_TOPICS])
+    codebook = _build_codebook([_THREE_TOPICS], model, CONTEXT, num_clusters=2)
+    assert codebook == _THREE_TOPICS
+    assert len(model.prompts) == 2
 
 
 def test_codebook_case_duplicates_count_once():

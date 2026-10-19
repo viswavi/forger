@@ -122,7 +122,7 @@ def gpt(**kwargs) -> Model:
     return Model("gpt-4o", show_progress=False, **kwargs)
 
 
-@op(name="alter.ask", cache=False, samples_arg="n")
+@op(name="alter.ask", category="alter", cache=False, samples_arg="n")
 def _ask(prompts, model, n=1, **kwargs):
     """Send `prompts` from inside an op, one row per prompt."""
     return model.generate_batch(prompts, n=n, cache_rows=prompts, **kwargs)
@@ -162,7 +162,7 @@ class TestHitsAndMisses:
         """A worker thread that did not copy the context has no op scope."""
         model = gpt()
 
-        @op(name="alter.threaded", cache=False)
+        @op(name="alter.threaded", category="alter", cache=False)
         def threaded(prompts, model):
             with ThreadPoolExecutor(1) as pool:
                 return pool.submit(model.generate_batch, prompts).result()
@@ -410,12 +410,16 @@ class TestBypass:
 
 
 class TestFailures:
-    """Errors are never cached; finished requests are kept."""
+    """Errors are never cached; finished requests are kept.
+
+    Models here make one attempt (num_retries=0): the fake's 504 is what a
+    request gives once Model's retries run out.
+    """
 
     def test_errors_not_cached(self, fake, tmp_path):
         """A 504 leaves its slot empty; the rerun sends only that request."""
         fake.fail = {"B"}
-        model = gpt()
+        model = gpt(num_retries=0)
         results = ask(model, ["A", "B", "C"], return_exceptions=True)
         assert isinstance(results[1], RuntimeError)
         assert len(slot_files(tmp_path)) == 2
@@ -428,13 +432,13 @@ class TestFailures:
         """A failed one-request call writes nothing."""
         fake.fail = {"A"}
         with pytest.raises(RuntimeError):
-            ask1(gpt(), "A")
+            ask1(gpt(num_retries=0), "A")
         assert slot_files(tmp_path) == []
 
     def test_raised_failure_keeps_finished(self, fake):
         """Without return_exceptions the batch raises, but finished ones stay."""
         fake.fail = {"P2"}
-        model = gpt()
+        model = gpt(num_retries=0)
         with pytest.raises(RuntimeError):
             ask(model, [f"P{i}" for i in range(5)])
         fake.reset()
@@ -457,7 +461,7 @@ class TestFailures:
 
     def test_partial_fan_out_with_hits(self, fake):
         """Hits plus a failed top-up request: the hits come back, fewer than n."""
-        model = Model("xai/grok-4", show_progress=False)
+        model = Model("xai/grok-4", show_progress=False, num_retries=0)
         two = ask1(model, "Q", n=2, return_exceptions=True)
         fake.fail = {"Q"}
         [result] = ask(model, ["Q"], n=3, return_exceptions=True)
@@ -635,13 +639,13 @@ class TestOpScope:
         """Two ops with other bodies but one name and template share nothing."""
         model = gpt()
 
-        @op(name="alter.ask", cache=False)
+        @op(name="alter.ask", category="alter", cache=False)
         def ask(rows, model):
             return model.generate_batch([r["q"] for r in rows], cache_rows=rows)
 
         ask([{"q": "a"}], model)
 
-        @op(name="alter.ask", cache=False)
+        @op(name="alter.ask", category="alter", cache=False)
         def ask(rows, model):  # noqa: F811 - an edited version of the op
             out = model.generate_batch([r["q"] for r in rows], cache_rows=rows)
             return list(out)
@@ -765,7 +769,7 @@ class TestClusterRetries:
         prompt = _assign_prompt("A triangle has three sides.", codebook)
         fake.script = {prompt: ['{"topic": "Nope"}', '{"topic": "Geometry"}']}
 
-        @op(name="inspect.assign", cache=False)
+        @op(name="inspect.assign", category="inspect", cache=False)
         def assign(docs, model):
             return _assign_topics(
                 docs, model, "math", codebook, truncation=1000, max_retries=2

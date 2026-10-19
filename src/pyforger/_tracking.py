@@ -1,7 +1,7 @@
 """Shared run-time state for ``@op`` calls, ``@step`` reports, and filter scores.
 
-This module imports nothing from the rest of pyforger but ``_spend`` and
-``_rowflow`` (which import nothing), so ``op.py``, ``steps.py``,
+This module imports nothing from the rest of pyforger but ``_spend``,
+``_rowflow``, and ``_phrases`` (which import nothing), so ``op.py``, ``steps.py``,
 ``acquire/model.py``, and the filters can all use it without circular imports.
 
 Context variables do not propagate into ``ThreadPoolExecutor`` workers. Ops
@@ -37,6 +37,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from pyforger import _spend
+from pyforger._phrases import Repeat
 from pyforger._rowflow import PipelineFlow, PythonGap, StepFlow
 
 _CATEGORIES = frozenset({"acquire", "alter", "filter", "inspect"})
@@ -46,10 +47,53 @@ STEP_OP_PREFIX = "step."
 DYNAMIC_STEP_OP = "alter.dynamic_step"
 
 
+# Op name -> category, filled when ``@op`` decorates a function. The name does
+# not decide: a user's ``@op(name="filter.keep_all")`` is "other".
+_OP_CATEGORIES: dict[str, str] = {}
+
+
+def register_op(op_name: str, module: str, category: str | None = None) -> str:
+    """Record and return an op's category.
+
+    A function defined in a ``pyforger.<category>`` package gets that category,
+    e.g. ``pyforger.filter.format`` gives ``"filter"``; any other function gets
+    ``"other"``. An explicit ``category`` overrides both.
+    """
+    if category is None:
+        parts = module.split(".")
+        in_package = len(parts) > 1 and parts[0] == "pyforger"
+        category = parts[1] if in_package and parts[1] in _CATEGORIES else "other"
+    elif category not in _CATEGORIES | {"other"}:
+        raise ValueError(
+            f"unknown op category {category!r}; use one of "
+            f"{sorted(_CATEGORIES | {'other'})}"
+        )
+    _OP_CATEGORIES[op_name] = category
+    return category
+
+
 def category_of(op_name: str) -> str:
-    """Return the op category from its name prefix, e.g. ``filter.by_length``."""
-    head = op_name.split(".", 1)[0]
-    return head if head in _CATEGORIES else "other"
+    """Return the category an ``@op`` registered under ``op_name``, else "other"."""
+    return _OP_CATEGORIES.get(op_name, "other")
+
+
+# Dropped rows a score record keeps with their notes, for the step report.
+MAX_DROPPED_NOTES = 3
+# Characters kept of a dropped row's preview and of its note.
+PREVIEW_CHARS = 200
+NOTE_CHARS = 300
+
+
+class DroppedRow(BaseModel):
+    """A row a filter dropped, with the filter's note on why.
+
+    E.g. ``DroppedRow(value=2, preview="Paris is in Italy.", note="The output
+    puts Paris in Italy.")`` for a judge's feedback.
+    """
+
+    value: float | int | bool | None
+    preview: str
+    note: str
 
 
 class ScoreRecord(BaseModel):
@@ -71,6 +115,10 @@ class ScoreRecord(BaseModel):
     # by_rouge_l): another threshold would change the scores themselves, so the
     # report cannot say what it would keep.
     pooled: bool = False
+    # The first few dropped rows that have a note (see ``record_scores``).
+    dropped: list[DroppedRow] = Field(default_factory=list)
+    # One line shown under the histogram, e.g. "3 of 12 samples truncated".
+    note: str | None = None
 
 
 class OpCall(BaseModel):
@@ -97,6 +145,10 @@ class OpCall(BaseModel):
     # call's input rows are (directly, or through other ops), by row identity.
     # The report sums chunks of one op into a row, but not a call fed by them.
     after: list[int] = Field(default_factory=list)
+    # True when none of the input rows were the step's or an earlier call's
+    # rows (rebuilt in Python, e.g. ``{**r, ...}``), False when some were, None
+    # when unknown (no rows, or rows that have no identity).
+    new_rows: bool | None = None
 
 
 class FieldSummary(BaseModel):
@@ -146,6 +198,7 @@ class RowStream(BaseModel):
     sample: list[Any] = Field(default_factory=list)
     sample_summaries: list[dict[int, FieldSummary]] = Field(default_factory=list)
     row_type: str | None = None
+    repeated: list[Repeat] = Field(default_factory=list)
 
 
 class UsageTotals(BaseModel):
@@ -182,6 +235,8 @@ class StepRecord(BaseModel):
     those are dicts too. ``show`` names fields whose sample values print in full.
     ``python_gaps`` are rows that changed in plain Python between ops (see
     ``pyforger._rowflow``); a cached step keeps those of the run that cached it.
+    ``repeated`` are phrases and names in a large share of the output rows of
+    a field the step added or changed (see ``pyforger._phrases``).
 
     ``n_in`` sums every rows argument; ``inputs`` names them when there are
     several (``solvable 111 + refusals 42``). A step that returned a dict of
@@ -215,6 +270,7 @@ class StepRecord(BaseModel):
     token_units: float = 0.0
     original: UsageTotals | None = None
     python_gaps: list[PythonGap] = Field(default_factory=list)
+    repeated: list[Repeat] = Field(default_factory=list)
 
 
 class PipelineRecord(BaseModel):
@@ -446,13 +502,26 @@ def check_step_result(result: Any) -> str | None:
     return check(result) if check is not None else None
 
 
+# Score lists longer than this are not stored with a cached result (one
+# number per row; the cached rows themselves are far larger).
+MAX_STORED_SCORES = 100_000
+
+
+def storable_scores(scores: ScoreRecord | None) -> ScoreRecord | None:
+    """``scores`` when it is small enough to store with a cached result."""
+    if scores is None or len(scores.values) > MAX_STORED_SCORES:
+        return None
+    return scores
+
+
 def step_meta(rec: StepRecord, original: UsageTotals) -> str:
     """Serialize the ops a step ran, to store next to its cached result.
 
     On a cache hit ``restore_step_meta`` puts them back (marked cached, with no
-    time, usage, or scores), so the cached step reports the same ops and yield
-    warnings, and ``strict=True`` still sees them. ``original`` (the step's
-    time, tokens, and cost in this run) becomes the cached step's ``original``.
+    time or usage, and with their scores), so the cached step reports the same
+    ops, yield warnings, and score histograms, and ``strict=True`` still sees
+    them. ``original`` (the step's time, tokens, and cost in this run) becomes
+    the cached step's ``original``.
     """
     ops = [
         call.model_copy(
@@ -463,7 +532,7 @@ def step_meta(rec: StepRecord, original: UsageTotals) -> str:
                 "completion_tokens": 0,
                 "cost_usd": 0.0,
                 "token_units": 0.0,
-                "scores": None,
+                "scores": storable_scores(call.scores),
             }
         ).model_dump(mode="json")
         for call in rec.ops
@@ -514,6 +583,10 @@ class _Running:
     usage: Usage
     unattributed: Usage
     flow: PipelineFlow = field(default_factory=PipelineFlow)
+    # Each step's place in the summary (by ``id`` of its record): the order it
+    # was started or submitted in, not the order it finished in.
+    next_seq: int = 0
+    seqs: dict[int, int] = field(default_factory=dict)
 
 
 _RUNNING_PIPELINES: list[_Running] = []
@@ -607,10 +680,33 @@ def pipeline_for_step() -> PipelineRecord | None:
         return _RUNNING_PIPELINES[0].rec if len(_RUNNING_PIPELINES) == 1 else None
 
 
-def _flow_of(rec: PipelineRecord) -> PipelineFlow | None:
+def _running_of(rec: PipelineRecord) -> _Running | None:
     with _RUNNING_LOCK:
-        running = next((r for r in _RUNNING_PIPELINES if r.rec is rec), None)
-    return running.flow if running is not None else None
+        return next((r for r in _RUNNING_PIPELINES if r.rec is rec), None)
+
+
+# The summary place a step run with ``.submit`` reserved when it was submitted;
+# set in the step's copied context, read when the step starts.
+_RESERVED_SEQ: ContextVar[int | None] = ContextVar("forger_reserved_seq", default=None)
+
+
+def reserve_step_seq(rec: PipelineRecord) -> int | None:
+    """Reserve the next place in ``rec``'s summary for a step about to start."""
+    running = _running_of(rec)
+    if running is None:
+        return None
+    with _RUNNING_LOCK:
+        running.next_seq += 1
+        return running.next_seq - 1
+
+
+def run_reserved(seq: int | None, fn: Callable[..., Any], *args: Any) -> Any:
+    """Call ``fn(*args)``; a step it starts takes the place ``seq`` in the summary.
+
+    Run it in the step's own (copied) context.
+    """
+    _RESERVED_SEQ.set(seq)
+    return fn(*args)
 
 
 def step_starting(
@@ -622,8 +718,14 @@ def step_starting(
     the previous step's output (each stream of it, when it returned a dict).
     ``arg_lists`` are all its list arguments.
     """
-    flow = _flow_of(rec)
-    return flow.start(rows_in, arg_lists) if flow is not None else None
+    seq = _RESERVED_SEQ.get()
+    if seq is None:
+        seq = reserve_step_seq(rec)
+    else:
+        _RESERVED_SEQ.set(None)
+    running = _running_of(rec)
+    candidates = running.flow.start(rows_in, arg_lists) if running is not None else None
+    return seq, candidates
 
 
 def join_pipeline(
@@ -633,19 +735,35 @@ def join_pipeline(
 
     ``started`` is what ``step_starting`` returned for it.
     """
-    flow = _flow_of(rec)
+    seq, candidates = started if started is not None else (None, None)
+    running = _running_of(rec)
     with _RUNNING_LOCK:
         rec.steps.append(step)
         position = len(rec.steps) - 1
-    if flow is not None:
-        flow.finish(started, position, step.name, rows_out)
+        if running is not None and seq is not None:
+            running.seqs[id(step)] = seq
+    if running is not None:
+        running.flow.finish(candidates, position, step.name, rows_out)
 
 
 def close_pipeline_flow(rec: PipelineRecord, result: Any) -> None:
-    """Set ``rec.python_gaps`` once the pipeline returned ``result``."""
-    flow = _flow_of(rec)
-    if flow is not None:
-        rec.python_gaps = flow.close(result)
+    """Put ``rec.steps`` in start order; set ``rec.python_gaps`` for ``result``.
+
+    Steps join ``rec`` when they finish; with ``.submit`` that is not the
+    order they started in, so the summary would depend on timing.
+    """
+    running = _running_of(rec)
+    if running is None:
+        return
+    seqs = running.seqs
+    with _RUNNING_LOCK:
+        order = sorted(
+            range(len(rec.steps)),
+            key=lambda i: seqs.get(id(rec.steps[i]), math.inf),
+        )
+        rec.steps[:] = [rec.steps[i] for i in order]
+    moved = {old: new for new, old in enumerate(order) if old != new}
+    rec.python_gaps = running.flow.close(result, moved)
 
 
 _OPS_STARTED = [0]
@@ -766,6 +884,31 @@ def truncation_warnings(op_name: str) -> list[str]:
     ]
 
 
+def scores_meta(scores: list[ScoreRecord]) -> str | None:
+    """Serialize an op's score records, to store next to its cached result.
+
+    None when there is nothing to store (no scores, or too many values).
+    """
+    kept = [s for s in scores if storable_scores(s) is not None]
+    if not kept:
+        return None
+    return json.dumps(
+        {"version": 1, "scores": [s.model_dump(mode="json") for s in kept]}
+    )
+
+
+def restore_scores(text: str) -> None:
+    """Record the scores from ``scores_meta`` for the active op (a cache hit)."""
+    scores = _ACTIVE_SCORES.get()
+    if scores is None:
+        return
+    try:
+        records = [ScoreRecord.model_validate(d) for d in json.loads(text)["scores"]]
+    except (ValueError, KeyError, TypeError):
+        return  # unreadable: the report says the histogram is missing
+    scores.extend(records)
+
+
 def exit_op(
     token: OpToken, call: OpCall | None, rows: tuple[Any, Any] = (None, None)
 ) -> None:
@@ -863,14 +1006,37 @@ def record_scores(
     lower: float | None = None,
     upper: float | None = None,
     pooled: bool = False,
+    notes: list[str | None] | None = None,
+    previews: list[Any] | None = None,
+    note: str | None = None,
 ) -> None:
     """Record one per-row score list for the active op; a no-op outside ops.
 
-    Pass ``pooled=True`` when each score depends on the rows kept so far.
+    Pass ``pooled=True`` when each score depends on the rows kept so far, and
+    ``note`` for a line the report shows under the histogram.
+    ``notes`` (aligned with ``values``) says why each row scored as it did,
+    e.g. a judge's feedback; the report shows the first ``MAX_DROPPED_NOTES``
+    dropped rows that have one, each with its ``previews`` entry (e.g. the
+    judged output), both cut short.
     """
     scores = _ACTIVE_SCORES.get()
     if scores is None:
         return
+    dropped: list[DroppedRow] = []
+    for i, row_note in enumerate(notes or []):
+        if len(dropped) == MAX_DROPPED_NOTES:
+            break
+        value = values[i]
+        if not row_note or _is_kept(value, keep, threshold, lower, upper):
+            continue
+        preview = previews[i] if previews is not None else ""
+        dropped.append(
+            DroppedRow(
+                value=value if isinstance(value, (int, float)) else None,
+                preview=_cut(preview, PREVIEW_CHARS),
+                note=_cut(row_note, NOTE_CHARS),
+            )
+        )
     scores.append(
         ScoreRecord(
             label=label,
@@ -880,8 +1046,39 @@ def record_scores(
             lower=lower,
             upper=upper,
             pooled=pooled,
+            dropped=dropped,
+            note=note,
         )
     )
+
+
+def _is_kept(
+    value: Any,
+    keep: str,
+    threshold: float | None,
+    lower: float | None,
+    upper: float | None,
+) -> bool:
+    """Whether ``value`` passes a score record's rule; None never does."""
+    if keep == "true":
+        return value is True
+    if not isinstance(value, (int, float)) or value != value:  # None or nan
+        return False
+    if keep == "between":
+        return (lower is None or value >= lower) and (upper is None or value <= upper)
+    if threshold is None:
+        return True
+    if keep == "ge":
+        return value >= threshold
+    if keep == "le":
+        return value <= threshold
+    return value < threshold
+
+
+def _cut(value: Any, limit: int) -> str:
+    """``value`` as one line of at most ``limit`` characters, e.g. ``"abc…"``."""
+    text = " ".join(str(value).split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def keep_where(items: list[Any], keep: list[bool]) -> list[Any]:

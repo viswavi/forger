@@ -12,6 +12,7 @@ from typing import Any
 
 import tiktoken
 
+from pyforger.acquire._model_utils import _catch_kwargs, _RequestFailures
 from pyforger.acquire.model import Message, Model, Prompt, _cache_kwargs
 from pyforger.op import op
 from pyforger.utils import get_field, get_formatted_logger
@@ -43,6 +44,8 @@ _DEFAULT_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 _TFIDF_EMBEDDING = "tfidf"
 _TFIDF_MAX_DIM = 256
 _TFIDF_MAX_FEATURES = 50_000
+# With one unique value, the topic is that value cut to this many characters.
+_SINGLE_TOPIC_CHARS = 80
 
 _SUMMARIZE_SYSTEM = (
     "You are an intelligent assistant skilled in summarizing and extracting insights."
@@ -141,7 +144,10 @@ def topic_based_clustering(
     "competition math problems. Topics should describe the technique,
     NOT the numeric answer.". If the LLM still misses ``num_clusters``
     topics after being corrected, a warning is logged and its last
-    codebook is used.
+    codebook is used. With fewer unique values than ``num_clusters``, it
+    uses one cluster per unique value and logs a warning; with a single
+    unique value, every row gets that value (cut to 80 characters) as its
+    topic and the LLM is not called.
 
     Embeddings only guide which rows the LLM summarizes together. They come
     from, in order of precedence:
@@ -240,11 +246,19 @@ def _topic_based_clustering(
     # Perform topic-based clustering.
     row_docs = [str(get_field(item, field, "topic_based_clustering")) for item in items]
     unique_docs = list(dict.fromkeys(row_docs))
-    if len(unique_docs) <= num_clusters:
-        raise ValueError(
-            f"topic_based_clustering: need more than num_clusters "
-            f"({num_clusters}) unique '{field}' values, got {len(unique_docs)}"
+    if len(unique_docs) == 1:
+        # every row says the same thing: one topic, named by the value itself
+        return [_clip(unique_docs[0], _SINGLE_TOPIC_CHARS)] * len(row_docs)
+    if len(unique_docs) < num_clusters:
+        logger.warning(
+            "topic_based_clustering: only %d unique '%s' values, so using %d "
+            "clusters instead of num_clusters=%d",
+            len(unique_docs),
+            field,
+            len(unique_docs),
+            num_clusters,
         )
+        num_clusters = len(unique_docs)
 
     embeddings = _embed(unique_docs, embed_fn, embedding_model, seed)
     shards = _partition(
@@ -256,11 +270,28 @@ def _topic_based_clustering(
         summarize_truncation,
         seed,
     )
-    shard_topics = _summarize_shards(shards, model, context, num_clusters)
-    codebook = _build_codebook(shard_topics, model, context, num_clusters)
+    # A request that fails after the model's retries (a 504, a timeout) is not
+    # asked again: its shard gives no topics, its document gets the fallback
+    # topic, a failed codebook correction keeps the last codebook (a failed
+    # first codebook request raises); one warning at the end names how many.
+    failures = _RequestFailures()
+    shard_topics = _summarize_shards(shards, model, context, num_clusters, failures)
+    codebook = _build_codebook(shard_topics, model, context, num_clusters, failures)
     logger.info("topic_based_clustering: codebook topics: %s", list(codebook))
     topic_of = _assign_topics(
-        unique_docs, model, context, codebook, assign_truncation, max_assign_retries
+        unique_docs,
+        model,
+        context,
+        codebook,
+        assign_truncation,
+        max_assign_retries,
+        failures,
+    )
+    failures.report(
+        f"inspect.topic_based_clustering: {len(failures)} requests failed after "
+        "retries and were not asked again (a failed shard summary was skipped, "
+        "a failed label request gave its document the fallback topic, a failed "
+        "codebook correction kept the last codebook)"
     )
     return [topic_of[doc] for doc in row_docs]
 
@@ -408,9 +439,14 @@ def _partition(
 
 
 def _summarize_shards(
-    shards: list[list[str]], model: Model, context: str, num_clusters: int
+    shards: list[list[str]],
+    model: Model,
+    context: str,
+    num_clusters: int,
+    failures: _RequestFailures | None = None,
 ) -> list[dict[str, str]]:
     """Step 2a: summarize each shard into candidate topics."""
+    failures = failures if failures is not None else _RequestFailures()
     prompts: list[Prompt] = [
         _chat(
             _SUMMARIZE_SYSTEM,
@@ -420,8 +456,11 @@ def _summarize_shards(
         )
         for shard in shards
     ]
-    responses = model.generate_batch(prompts)
-    shard_topics = [_parse_topics(shard_responses[0]) for shard_responses in responses]
+    responses = model.generate_batch(prompts, **_catch_kwargs(model))
+    shard_topics = [
+        {} if failures.failed(shard_responses) else _parse_topics(shard_responses[0])
+        for shard_responses in responses
+    ]
     kept = [topics for topics in shard_topics if topics]
     if not kept:
         raise RuntimeError(
@@ -441,8 +480,10 @@ def _build_codebook(
     model: Model,
     context: str,
     num_clusters: int,
+    failures: _RequestFailures | None = None,
 ) -> dict[str, str]:
     """Step 2b: aggregate candidate topics into a codebook of topics."""
+    failures = failures if failures is not None else _RequestFailures()
     candidates = "\n".join(
         f"- {name}: {description}"
         for topics in shard_topics
@@ -460,12 +501,22 @@ def _build_codebook(
     codebook: dict[str, str] = {}  # latest nonempty attempt
     for retry in range(3):  # retry on unparseable JSON or the wrong topic count
         # The salt gets a new answer, not the cached unparseable one.
-        response = model.generate(
-            messages,
-            **_cache_kwargs(
-                model.generate, cache_salt=f"retry {retry}" if retry else None
-            ),
-        )[0]
+        try:
+            response = model.generate(
+                messages,
+                **_cache_kwargs(
+                    model.generate, cache_salt=f"retry {retry}" if retry else None
+                ),
+            )[0]
+        except Exception as exc:
+            failures.failed(exc)  # raises unless transient
+            # Model already retried the request (num_retries): do not ask again.
+            if not codebook:
+                raise RuntimeError(
+                    "topic_based_clustering: the codebook request failed after "
+                    f"the model's retries: {type(exc).__name__}: {exc}"
+                ) from exc
+            break
         try:
             parsed = _parse_json(response)
         except ValueError:
@@ -508,8 +559,10 @@ def _assign_topics(
     codebook: dict[str, str],
     truncation: int,
     max_retries: int,
+    failures: _RequestFailures | None = None,
 ) -> dict[str, str]:
     """Step 3: classify every document into one codebook topic."""
+    failures = failures if failures is not None else _RequestFailures()
     topics_str = json.dumps(codebook, indent=2)
     prompt_of = {
         doc: _chat(
@@ -522,6 +575,9 @@ def _assign_topics(
     }
     topic_of: dict[str, str] = {}
     pending = list(docs)
+    # Documents whose request failed after the model's retries (num_retries);
+    # not asked again, they get the fallback topic.
+    failed: list[str] = []
     for attempt in range(1 + max_retries):  # rerun documents with invalid labels
         prompts: list[Prompt] = [prompt_of[doc] for doc in pending]
         # Keyed per document; the salt gets a new label, not the invalid one.
@@ -532,9 +588,13 @@ def _assign_topics(
                 cache_rows=pending,
                 cache_salt=f"retry {attempt}" if attempt else None,
             ),
+            **_catch_kwargs(model),
         )
         still_pending = []
         for doc, doc_responses in zip(pending, responses):
+            if failures.failed(doc_responses):
+                failed.append(doc)
+                continue
             try:
                 label = str(_parse_json(doc_responses[0]).get("topic", "")).strip()
             except ValueError:
@@ -547,6 +607,7 @@ def _assign_topics(
         pending = still_pending
         if not pending:
             break
+    pending += failed
     if pending:
         fallback = next(iter(codebook))
         logger.warning(

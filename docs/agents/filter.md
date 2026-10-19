@@ -28,13 +28,21 @@ and thresholds to find the right balance for a given use case. For example, `by_
 produces more diverse outputs but may filter out many rows; `by_llm_score` with multiple judges and a high consensus
 threshold produces higher-quality outputs but at the cost of more LLM calls.
 
+`by_rouge_l` and `by_rouge_l_agreement` give the same scores as `rouge_score`'s `RougeScorer(["rougeL"])` without
+stemming: text is lowercased and split at every character outside `[a-z0-9]` (so accented and non-Latin letters are
+separators, not words), and the score is the F1 of the longest common subsequence of tokens. `by_rouge_l` compares
+each row with every kept row, so its time grows with rows times kept rows; it scores a row against the whole kept pool
+in one bit-parallel pass, e.g. 157 messages of 50–600 words take about 0.2s (2m16s with `rouge_score`).
+
 Every op that takes input rows (alter, filter, inspect) accepts `min_yield=` and `max_yield=`: the expected range of
 output rows over input rows, e.g. `filter.by_llm_score(rows, ..., min_yield=0.3, max_yield=0.8)`. A violation, or an
 empty input with `min_yield`, is a warning in the step report (`strict=True` raises); neither keyword is part of the
 cache key. `acquire.*` ops reject them. Filters also record a score per row, so the step report shows a histogram and
 the fraction of rows each nearby threshold would keep; use it to choose thresholds. `by_rouge_l` and
 `by_n_gram_overlap` are the exception: each score compares a row with the rows kept so far, so another threshold would
-change the scores, and the report shows only the current threshold. With `num_judges > 1`, `by_llm_score` records the
+change the scores, and the report shows only the current threshold. `by_llm_score` and `by_tests` also note why each
+row scored as it did (the judge's feedback, the first failing test), and under the histogram the report shows up to
+three dropped rows with their note. With `num_judges > 1`, `by_llm_score` records the
 fraction of judges scoring at least `score_threshold`, which is what `agreement_threshold` is compared with.
 `by_llm_score` caches the judge scores separately from its thresholds, so re-running it with a different
 `score_threshold` or `agreement_threshold` makes no new judge calls (`_no_cache=True` re-asks the judges;
@@ -63,7 +71,13 @@ Still check the step report's histogram; if it is piled up at the top, the thres
 (tighten `criteria` or the rubric). The criteria matter as much as the prompt: a criterion most outputs meet easily
 ("the scenario is realistic") still scores nearly everything 5, and one worded too literally ("same voice" for a
 rewrite that must drop sarcasm) marks down good outputs, so read a few rows' feedback before trusting a threshold.
+The step report helps: under the histogram it shows up to three dropped rows (their `output_field`, cut to 200
+characters) with the judge's feedback, the lowest-scoring judge's when there are several.
 With several samples per input, `group_by` separates candidates best.
+
+A strong reasoning judge can cost more than the generation it judges: in one trial GLM-5.3 at
+`reasoning_effort="low"` wrote about 7K output tokens per judge call (about 92K token units), more than writing the
+problems did. Judge a few rows first and check the units column of the step report before judging the whole set.
 
 The default rubric, `pyforger.filter.judge.DEFAULT_RUBRIC`, describes the five levels of the default `max_score=5` by
 how serious the output's mistakes are (1: fails the task; 3: a mistake makes part of it wrong, misleading, or
@@ -108,7 +122,16 @@ closed `</think>` block (an unclosed `<think>` is unparseable), then the last JS
 inside code fences or prose (raw newlines in strings allowed), else the last `"score": <number>` pattern (per entry
 for a group, in any key order). Scores keep
 fractions (`4.9` stays `4.9`, so it fails `score_threshold=5`), and a string score gives its leading number (`"4/5"`
-is 4). Unparseable answers count as no vote.
+is 4). Unparseable answers count as no vote, and so does a request that still fails after the model's retries with a
+transient error (a 504, a timeout): one warning in the step report names the count and the last error, and the result
+is not cached, so a rerun asks again. Another warning counts the judge calls that gave no score by cause (failed,
+unparseable, or stopped mid-thought in an unclosed `<think>`) and the rows they left unscored, e.g. with `group_by`
+`2 of 10 judge calls gave no score (...) → 6 rows unscored`. Errors a retry cannot fix (a bad key, a 400, a spending
+cap or token-unit quota) still raise. The same holds for every LLM filter: `by_judged_difficulty` leaves a row whose
+request failed unrated, `by_pass_at_k` and `by_comparative_difficulty` grade a failed sample `None` (excluded), and
+`inspect.topic_based_clustering` does not ask a failed request again, though it asks again after an unparseable answer:
+a failed shard summary is skipped, a failed label request gives its document the fallback topic, and a failed codebook
+request keeps the last codebook, or raises `RuntimeError` when there is none yet.
 
 `prompt_template` replaces the prompt: a format string or a callable taking a dict. The placeholders are the row's
 fields (for a group, its first row's) plus `{input}`, `{output}`, `{criteria}`, `{max_score}`, and `{rubric}` (the
@@ -145,9 +168,18 @@ cache key, since a verifier with wall-clock timeouts (e.g. `program_verifier`) c
 By default the whole answer segment is compared, so for `exact_match` the task or `prompt_template` should ask for a
 bare answer, or pass your own `extract_answer(completion) -> str | None`. It replaces the default and sees the raw
 completion, thinking included; e.g. `lambda t: t.rsplit("ANSWER:", 1)[-1].strip()` keeps what follows the last
-`ANSWER:`. By default an empty answer segment or an unclosed `<think>` block grades `None`, as does
-`extract_answer` or a verifier returning `None`: excluded, not failed. A model that does not return exactly `n`
-completions per prompt raises `ValueError`; missing samples are never padded.
+`ANSWER:`. An empty answer segment grades `None`, as does `extract_answer` or a verifier returning `None`: excluded,
+not failed. A truncated completion (an opening `<think>` and no `</think>`: the model hit `max_tokens`) grades as
+`truncated` says. `by_pass_at_k` defaults to `truncated="fail"`: such a sample grades `False` without calling
+`extract_answer` or the verifier, since a task the model thinks itself to death on is hard, not ungradable. (Before,
+it graded `None`; `truncated="exclude"` restores that.) `by_comparative_difficulty` defaults to `"exclude"`: a weak
+model that ran out of tokens has not shown the row is hard. The step report counts truncated samples under the
+filter's histogram, e.g. `5 of 12 samples truncated (<think> never closed), graded failed`; if that is most of them,
+raise `max_tokens`. A sample whose request failed has no text, so it grades `None` (excluded), never truncated; with a
+`Model` or `TinkerModel` (any model whose `generate_batch` takes `return_exceptions`) this includes fan-out copies
+that failed, so a prompt that came back short is padded with `None`. Otherwise, a model that returns a number of
+completions other than `n` for a prompt raises `ValueError`: a sample missing for any reason other than a failed
+request is never padded.
 `by_pass_at_k` needs all `k` grades valid unless `min_valid` allows fewer, and a row needs both comparative grades.
 With `outcomes_field` set, kept rows carry their grades as `{group: [True | False | None, ...]}`, one grade per
 sample: `{"model": [...]}` for `by_pass_at_k`, `{"weak": [...], "strong": [...]}` for `by_comparative_difficulty`.

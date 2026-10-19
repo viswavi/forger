@@ -86,23 +86,53 @@ def _head(op_name: str) -> str:
     return op_name.split(".", 1)[0]
 
 
-def group_calls(names: list[str], afters: list[list[int]]) -> list[list[int]]:
+def group_calls(
+    names: list[str],
+    afters: list[list[int]],
+    labels: list[str | None] | None = None,
+    new_rows: list[bool | None] | None = None,
+) -> list[list[int]]:
     """Positions of a step's calls, one list per report row, by first call.
 
     A call joins the latest row of its op unless its input rows came from that
     row's output (``afters[i]``, see ``StepFlow``): chunks share a row, while
     two judges in a row, or a refine pass over generated rows, get one each.
+
+    Rows rebuilt in Python (``{**r, ...}``) hide that chain, so two more
+    checks keep calls apart: score labels that differ
+    (``by_predicate(..., label="runs")`` then ``label="3 outputs"``), and
+    input rows new to the step (``new_rows[i]``) after a row of calls that
+    took known rows, or the other way round. None matches anything.
     """
+    n = len(names)
+    labels = labels if labels is not None else [None] * n
+    new_rows = new_rows if new_rows is not None else [None] * n
     groups: list[list[int]] = []
+    # Per group: its first label and new_rows flag that are not None.
+    keys: list[list[Any]] = []
     latest: dict[str, int] = {}  # op name -> index in groups
     for i, (name, after) in enumerate(zip(names, afters)):
         g = latest.get(name)
-        if g is not None and not set(groups[g]) & set(after):
+        if (
+            g is not None
+            and not set(groups[g]) & set(after)
+            and _matches(keys[g][0], labels[i])
+            and _matches(keys[g][1], new_rows[i])
+        ):
             groups[g].append(i)
+            keys[g] = [
+                old if old is not None else new
+                for old, new in zip(keys[g], (labels[i], new_rows[i]))
+            ]
             continue
         latest[name] = len(groups)
         groups.append([i])
+        keys.append([labels[i], new_rows[i]])
     return groups
+
+
+def _matches(a: Any, b: Any) -> bool:
+    return a is None or b is None or a == b
 
 
 @dataclass
@@ -113,6 +143,8 @@ class _Call:
     in_ids: set[int]
     out_ids: set[int]
     after: set[int]
+    label: str | None = None  # the call's score label, e.g. "kept"
+    new_rows: bool | None = None  # see OpCall.new_rows
 
 
 @dataclass
@@ -148,6 +180,8 @@ class StepFlow:
         self.source = list(rows_in) if rows_in is not None else None
         self.arg_rows = [row for rows in arg_lists for row in rows]
         self.calls: list[_Call] = []
+        # Ids of the step's input rows and every call's rows so far.
+        self.seen = _ids(self.arg_rows)
         self.held = len(self.arg_rows)
         self.overflow = self.held > MAX_HELD_ROWS
 
@@ -156,7 +190,7 @@ class StepFlow:
 
         ``call.after`` lists the earlier calls whose output rows this call's
         input rows are, directly or through other ops. Rows copied in plain
-        Python (``{**row}``) start a new lineage.
+        Python (``{**row}``) start a new lineage; ``call.new_rows`` says so.
         """
         head = _head(call.op_name)
         failed = getattr(call, "error", None) is not None
@@ -177,7 +211,9 @@ class StepFlow:
                 self.overflow = True
                 self.calls.clear()
                 self.source, self.arg_rows = None, []
+                self.seen = set()
                 call.after = []
+                call.new_rows = None
                 ops.append(call)
                 return
             self.held += len(ins or []) + len(outs or [])
@@ -186,8 +222,23 @@ class StepFlow:
             for j in parents:
                 after |= self.calls[j].after
             call.after = sorted(after)
+            if ins is not None and in_ids:
+                call.new_rows = not in_ids & self.seen
+            out_ids = _ids(outs or [])
+            # Only held rows: an id of a row let go may name a new row later.
+            self.seen |= (in_ids if ins is not None else set()) | out_ids
+            scores = getattr(call, "scores", None)
             self.calls.append(
-                _Call(call.op_name, ins, outs, in_ids, _ids(outs or []), after)
+                _Call(
+                    call.op_name,
+                    ins,
+                    outs,
+                    in_ids,
+                    out_ids,
+                    after,
+                    scores.label if scores is not None else None,
+                    call.new_rows,
+                )
             )
             ops.append(call)
 
@@ -197,6 +248,7 @@ class StepFlow:
             self.calls.clear()
             self.source = None
             self.arg_rows = []
+            self.seen = set()
 
     def gaps(self, result: list[Any]) -> list[PythonGap]:
         """The (python) rows of this step, given the list it returned."""
@@ -207,7 +259,10 @@ class StepFlow:
         groups = [
             g
             for g in group_calls(
-                [c.name for c in calls], [sorted(c.after) for c in calls]
+                [c.name for c in calls],
+                [sorted(c.after) for c in calls],
+                [c.label for c in calls],
+                [c.new_rows for c in calls],
             )
             if _head(calls[g[0]].name) != "inspect"  # reports, not rows
         ]
@@ -442,17 +497,29 @@ class PipelineFlow:
             self._prev = _streams(rows_out)
             self._prev_index, self._prev_name = position, name
 
-    def close(self, result: Any) -> list[PythonGap]:
-        """The pipeline returned ``result``: the gaps that stand, in step order."""
+    def close(
+        self, result: Any, moved: dict[int, int] | None = None
+    ) -> list[PythonGap]:
+        """The pipeline returned ``result``: the gaps that stand, in step order.
+
+        ``moved`` maps a step's position when it joined to its position in the
+        summary (steps run with ``.submit`` join when they finish, but are
+        listed in the order they were submitted).
+        """
         returned = _returned_ids(result)
+
+        def at(position: int) -> int:
+            return moved.get(position, position) if moved else position
+
         with self._lock:
-            gaps = [
-                c.gap
-                for c in self._candidates
-                if c.gap.position is not None
+            gaps = []
+            for c in self._candidates:
+                if c.gap.position is None or c.missing & returned:
+                    continue
                 # Steps from worker threads may join out of order.
-                and c.after_index == c.gap.position - 1 and not c.missing & returned
-            ]
+                if at(c.after_index) == at(c.gap.position) - 1:
+                    c.gap.position = at(c.gap.position)
+                    gaps.append(c.gap)
             self._candidates.clear()
             self._prev = None
         return sorted(gaps, key=lambda g: g.position or 0)

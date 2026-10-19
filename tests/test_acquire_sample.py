@@ -214,6 +214,15 @@ class TestSchemaValidation:
         )
         assert len(items) == 0
 
+    def test_fenced_json_with_extra_key(self):
+        """A fenced reply parses; a key outside the schema is dropped."""
+        model = MockModel(
+            responses=['```json\n{"answer": "42", "crafted_by": "me"}\n```']
+        )
+        items = sample_from_LLM("Generate", model, n=1, output_schema={"answer": str})
+        assert items == [{"answer": "42"}]
+        assert model._call_count == 1
+
     def test_invalid_json_rejected(self):
         """Non-JSON output is rejected (parse returns None)."""
         model = MockModel(responses=["not json at all"])

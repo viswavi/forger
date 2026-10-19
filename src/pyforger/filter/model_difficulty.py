@@ -15,7 +15,11 @@ Grades are stored as ``{group: [True | False | None, ...]}``, one list per
 model (``"model"``, or ``"weak"`` and ``"strong"``) with one grade per sample,
 where ``None`` is a grade that could not be made (an empty answer, a
 ``<think>`` block that never closes, ``extract_answer`` returning ``None``, or a
-verifier returning ``None``) and is excluded, not failed. Completions are
+verifier returning ``None``) and is excluded, not failed. A truncated
+completion (an opening ``<think>`` and no ``</think>``: cut off at
+``max_tokens``) is the exception when ``truncated="fail"``, the default for
+``by_pass_at_k``: it grades ``False`` without being extracted or verified.
+Completions are
 stored in the same shape. Predictions and grades are cached in separate inner
 ops, so changing only the rate bounds makes no model calls, and changing only
 the metric regrades the cached predictions.
@@ -29,11 +33,11 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Literal, Union
 
-from rouge_score import rouge_scorer
-
 from pyforger import _tracking
+from pyforger.acquire._model_utils import _catch_kwargs, _RequestFailures
 from pyforger.acquire.model import Model, Prompt, _cache_kwargs
 from pyforger.alter.generate import PromptTemplate, _normalized_equal, _resolve_prompt
+from pyforger.filter._rouge import rouge_l
 from pyforger.op import op
 from pyforger.utils import get_field, get_formatted_logger
 
@@ -64,6 +68,30 @@ def answer_segment(text: str) -> str | None:
     return text.strip() or None
 
 
+def _is_truncated(completion: str | None) -> bool:
+    """True for ``"<think>try 3"``: thinking that never closes (out of tokens)."""
+    return (
+        completion is not None
+        and "<think>" in completion
+        and "</think>" not in completion
+    )
+
+
+def _truncation_note(
+    completions: list[list[str | None]], truncated: Literal["fail", "exclude"]
+) -> str | None:
+    """Say how many samples were cut off mid-thought, e.g. for the step report."""
+    total = sum(len(row) for row in completions)
+    cut = sum(_is_truncated(c) for row in completions for c in row)
+    if not cut:
+        return None
+    graded = "graded failed" if truncated == "fail" else "excluded"
+    return (
+        f"{cut} of {total} samples truncated (<think> never closed), {graded}; "
+        "raise max_tokens if that is too many"
+    )
+
+
 @op(name="filter.by_comparative_difficulty")
 def by_comparative_difficulty(
     items: list[dict],
@@ -82,12 +110,13 @@ def by_comparative_difficulty(
     outcomes_field: str | None = None,
     completions_field: str | None = None,
     verifier_workers: int = 8,
+    truncated: Literal["fail", "exclude"] = "exclude",
 ) -> list[dict]:
     r"""Keep rows the strong model answers correctly and the weak model does not.
 
     Each model makes one prediction per row. A row whose weak or strong grade is
-    ``None`` is dropped: e.g. a weak model that ran out of tokens has not shown
-    the row is hard.
+    ``None`` is dropped: e.g. by default a weak model that ran out of tokens has
+    not shown the row is hard (``truncated="fail"`` counts it as wrong).
 
     The prompt is the task text unless ``prompt_template`` is given, and by
     default the whole answer segment (the completion after its closed
@@ -138,6 +167,10 @@ def by_comparative_difficulty(
             under this key (``None`` for an empty completion).
         verifier_workers: Verifier calls run at a time when ``metric`` is a
             verifier; 1 runs them one by one.
+        truncated: What a completion whose ``<think>`` block never closes
+            (cut off at ``max_tokens``) grades: ``"exclude"`` (default)
+            grades it ``None``, so the row is dropped; ``"fail"`` grades it
+            ``False`` without calling ``extract_answer`` or the verifier.
 
     Returns:
         The kept rows, in input order.
@@ -150,6 +183,7 @@ def by_comparative_difficulty(
         outcomes_field,
         completions_field,
         verifier_workers,
+        truncated,
     )
     prompts = _prompts(items, input_field, prompt_template)
     grades: dict[str, list[list[bool | None]]] = {}
@@ -171,6 +205,7 @@ def by_comparative_difficulty(
             rouge_l_threshold=rouge_l_threshold,
             extract_answer=extract_answer,
             verifier_workers=verifier_workers,
+            truncated=truncated,
         )
 
     kept: list[dict] = []
@@ -197,7 +232,19 @@ def by_comparative_difficulty(
             )
     # "between 1 and 1" rather than ">= 1": the report then marks each value
     # kept or not, without what-if columns for thresholds this filter lacks.
-    _tracking.record_scores("strong - weak", gaps, keep="between", lower=1, upper=1)
+    notes = [
+        f"{group}: {note}"
+        for group in ("weak", "strong")
+        if (note := _truncation_note(completions[group], truncated))
+    ]
+    _tracking.record_scores(
+        "strong - weak",
+        gaps,
+        keep="between",
+        lower=1,
+        upper=1,
+        note="; ".join(notes) or None,
+    )
     _logger().info(
         "by_comparative_difficulty: kept %d of %d rows (%d both right, %d ungraded)",
         len(kept),
@@ -229,6 +276,7 @@ def by_pass_at_k(
     outcomes_field: str | None = None,
     completions_field: str | None = None,
     verifier_workers: int = 8,
+    truncated: Literal["fail", "exclude"] = "fail",
 ) -> list[dict]:
     """Keep rows whose pass rate over ``k`` samples is within the bounds.
 
@@ -239,8 +287,14 @@ def by_pass_at_k(
     E.g. with ``k=4``, grades ``[True, False, None, False]`` are dropped by
     default, and kept with ``min_valid=3`` (rate 1/3).
 
+    A sample whose ``<think>`` block never closes (cut off at ``max_tokens``)
+    grades ``False`` by default: a task the model thinks itself to death on is
+    hard, not ungradable. This changed: such samples used to grade ``None``
+    (excluded), which ``truncated="exclude"`` restores.
+
     In a ``@step`` report the per-row score is the pass rate, or ``None`` when
-    too few grades are valid.
+    too few grades are valid; a line under the histogram counts the truncated
+    samples.
 
     The prompt and answer extraction work as in ``by_comparative_difficulty``:
     by default the whole answer segment is compared.
@@ -286,6 +340,10 @@ def by_pass_at_k(
             order as the grades (``None`` for an empty completion).
         verifier_workers: Verifier calls run at a time when ``metric`` is a
             verifier; 1 runs them one by one.
+        truncated: What a sample whose ``<think>`` block never closes grades:
+            ``"fail"`` (default) grades it ``False`` without calling
+            ``extract_answer`` or the verifier; ``"exclude"`` grades it
+            ``None``, like an empty answer.
 
     Returns:
         The kept rows, in input order.
@@ -298,6 +356,7 @@ def by_pass_at_k(
         outcomes_field,
         completions_field,
         verifier_workers,
+        truncated,
     )
     if k < 1:
         raise ValueError("k must be at least 1")
@@ -336,6 +395,7 @@ def by_pass_at_k(
         rouge_l_threshold=rouge_l_threshold,
         extract_answer=extract_answer,
         verifier_workers=verifier_workers,
+        truncated=truncated,
     )
 
     kept: list[dict] = []
@@ -354,12 +414,18 @@ def by_pass_at_k(
                 )
             )
     _tracking.record_scores(
-        "pass rate", rates, keep="between", lower=min_rate, upper=max_rate
+        "pass rate",
+        rates,
+        keep="between",
+        lower=min_rate,
+        upper=max_rate,
+        note=_truncation_note(completions, truncated),
     )
     return kept
 
 
-@op(name="filter.model_difficulty.predictions", samples_arg="n")
+# A sampler, not a filter: its first argument is prompts, and it drops nothing.
+@op(name="filter.model_difficulty.predictions", samples_arg="n", category="other")
 def _predictions(
     prompts: list[Prompt],
     *,
@@ -374,8 +440,14 @@ def _predictions(
     Raises ``ValueError`` when the model returns a different number of results
     than prompts, or of completions than ``n`` (e.g. a provider that ignores
     ``n``): a missing sample is not an empty answer, so it is never padded.
-    Exceptions propagate, so a failed call is not cached.
+    The exception is a request that still fails after the model's retries
+    with a transient error (a 504, a timeout): its samples are ``None``
+    (graded ``None``, so excluded), one warning names the count and the last
+    error, and the result is not cached. Other errors propagate.
     """
+    catch = _catch_kwargs(model)
+    failures = _RequestFailures()
+    lost = 0  # samples missing because their requests failed
     completions: list[list[str | None]] = []
     size = batch_size or max(len(prompts), 1)
     for start in range(0, len(prompts), size):
@@ -387,6 +459,7 @@ def _predictions(
             temperature=temperature,
             max_tokens=max_tokens,
             **_cache_kwargs(model.generate_batch, cache_rows=list(batch)),
+            **catch,
         )
         if len(results) != len(batch):
             raise ValueError(
@@ -394,14 +467,29 @@ def _predictions(
                 f"{len(batch)} prompts (prompts {start} to {start + len(batch) - 1})"
             )
         for i, result in enumerate(results):
-            if len(result) != n:
+            if failures.failed(result):
+                completions.append([None] * n)
+                lost += n
+                continue
+            samples: list[str | None] = list(result)
+            if catch and len(samples) < n:
+                # Some of the prompt's n requests failed (n fan-out or n > 16);
+                # return_exceptions keeps the completions that arrived.
+                failures.missing(n - len(samples))
+                lost += n - len(samples)
+                samples += [None] * (n - len(samples))
+            if len(samples) != n:
                 raise ValueError(
-                    f"{model!r} returned {len(result)} completions for prompt "
+                    f"{model!r} returned {len(samples)} completions for prompt "
                     f"{start + i}, but n={n} were requested"
                 )
             completions.append(
-                [c if isinstance(c, str) and c.strip() else None for c in result]
+                [c if isinstance(c, str) and c.strip() else None for c in samples]
             )
+    failures.report(
+        f"difficulty filter: {lost} of {len(prompts) * n} samples from {model!r} "
+        "are missing (requests failed after retries); they grade None (excluded)"
+    )
     return completions
 
 
@@ -415,23 +503,51 @@ def _grades(
     rouge_l_threshold: float,
     extract_answer: Callable[[str], str | None],
     verifier_workers: int = 1,
+    truncated: Literal["fail", "exclude"] = "exclude",
 ) -> list[list[bool | None]]:
     """Grade each row's completions against its ground truth or a verifier.
 
     A completion grades ``None`` when ``extract_answer`` returns ``None`` for
-    it, e.g. by default a reasoning model cut off mid-thought.
+    it, e.g. by default a reasoning model cut off mid-thought, unless
+    ``truncated="fail"``, which grades such a completion ``False`` first.
     """
-    predictions = [
-        [None if c is None else extract_answer(c) for c in row] for row in completions
+    cut = [
+        [truncated == "fail" and _is_truncated(c) for c in row] for row in completions
     ]
+    predictions = [
+        [
+            None if c is None or is_cut else extract_answer(c)
+            for c, is_cut in zip(row, cuts)
+        ]
+        for row, cuts in zip(completions, cut)
+    ]
+    grades = _grade_predictions(
+        items,
+        predictions,
+        ground_truth_field=ground_truth_field,
+        metric=metric,
+        rouge_l_threshold=rouge_l_threshold,
+        verifier_workers=verifier_workers,
+    )
+    return [
+        [False if is_cut else g for g, is_cut in zip(row, cuts)]
+        for row, cuts in zip(grades, cut)
+    ]
+
+
+def _grade_predictions(
+    items: list[dict],
+    predictions: list[list[str | None]],
+    *,
+    ground_truth_field: str | None,
+    metric: Metric,
+    rouge_l_threshold: float,
+    verifier_workers: int,
+) -> list[list[bool | None]]:
+    """Grade extracted predictions; a ``None`` prediction grades ``None``."""
     if callable(metric):
         return _verify(items, predictions, metric, verifier_workers)
     assert ground_truth_field is not None  # checked by _check_common
-    scorer = (
-        rouge_scorer.RougeScorer(["rougeL"], use_stemmer=False)
-        if metric == "rouge_l"
-        else None
-    )
     out: list[list[bool | None]] = []
     for item, row in zip(items, predictions):
         reference = get_field(item, ground_truth_field, "filter.model_difficulty")
@@ -439,8 +555,8 @@ def _grades(
         for prediction in row:
             if prediction is None:
                 row_grades.append(None)
-            elif scorer is not None:
-                f1 = scorer.score(str(reference), str(prediction))["rougeL"].fmeasure
+            elif metric == "rouge_l":
+                f1 = rouge_l(str(reference), str(prediction))
                 row_grades.append(f1 >= rouge_l_threshold)
             else:
                 row_grades.append(_normalized_equal(prediction, reference))
@@ -546,7 +662,10 @@ def _check_common(
     outcomes_field: str | None,
     completions_field: str | None,
     verifier_workers: int,
+    truncated: str,
 ) -> None:
+    if truncated not in ("fail", "exclude"):
+        raise ValueError(f"truncated must be 'fail' or 'exclude', got {truncated!r}")
     if not callable(metric) and metric not in ("exact_match", "rouge_l"):
         raise ValueError(
             f"metric must be 'exact_match', 'rouge_l', or a callable, got {metric!r}"

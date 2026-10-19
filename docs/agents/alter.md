@@ -13,13 +13,16 @@ Transform rows without removing items.
 | `dynamic_step_source` | Generate or inspect sub-pipeline generated for a single input. |
 
 `generate_from_context` performs `samples_per_item` LLM calls per input and returns parsed dicts, with retry against an
-optional JSON schema. A prompt whose output fails to parse, or whose request fails with a transient provider error
-(timeout, lost connection, 429, or 5xx), is retried up to `max_retries` times; after that its slots are `None` and the
-other prompts' results are kept. Other provider errors (a bad API key, an unknown model, a 400 such as an over-long
-prompt) raise at once, since retrying cannot fix them. When any slot failed at the provider, the op logs one warning
-(`1 of 64 prompts failed after 3 retries; their slots are None: InternalServerError ×1`), shows it in the step report,
-and is not cached (nor is its step), so a rerun re-sends only the failed prompts (the request cache replays the rest).
-Parse-failure `None`s are cached.
+optional JSON schema. A prompt whose output fails to parse (a reply arrived but did not parse) is asked again up to
+`max_retries` times; after that its slots are `None` and the other prompts' results are kept. A request that still
+fails with a transient provider error (timeout, lost connection, 429, or 5xx) after the model's own `num_retries` is
+not asked again, so with `num_retries=2` a request makes at most 3 attempts in all; its slots are `None`. Other
+provider errors (a bad API key, an unknown model, a 400 such as an over-long prompt, an exhausted quota, a spending
+cap) raise at once, since retrying cannot fix them. When any slot failed at the provider, the op logs one warning
+(`1 of 64 prompts failed after the model's retries; their slots are None: InternalServerError ×1`), shows it in the
+step report, and is not cached (nor is its step), so a rerun re-sends only the failed prompts (the request cache
+replays the rest). Parse-failure `None`s are cached. `inspect.topic_based_clustering` does not ask a failed request
+again either (see [LLM judges](filter.md#llm-judges)).
 As with `sample_from_LLM`, reasoning traces are included under a `thinking_trace` key. Inline traces are not extracted:
 `LocalModel` leaves `<think>` blocks in the completion text. Use `split_reasoning` to separate them out.
 
@@ -104,10 +107,14 @@ hard = filter.by_pass_at_k(verified, model=student, input_field="statement",
 ```
 
 `filter.by_tests` keeps rows whose program passes at least `min_pass_rate` (default 1.0) of its graded tests; the runs
-are cached apart from `min_pass_rate`, so a new bound runs nothing. `filter.program_verifier` takes the last fenced
-Python block from each sampled answer (`last_code_block`), runs it on the row's tests until one fails, and grades it
-`True` only if all pass (`None` when the row has no graded tests). `extract_code=last_code_block` does the same for
-`run_programs` and `by_tests` when a field holds a model's answer.
+are cached apart from `min_pass_rate`, so a new bound runs nothing, and the step report shows a few dropped rows
+with their first failing test (`test 2 of 3: wrong_answer, got '4', expected '5'`). `filter.program_verifier` takes
+the last fenced Python block from each sampled answer (`last_code_block`), runs it on the row's tests until one fails,
+and grades it `True` only if all pass. An answer with no code block (or one `extract_code` maps to `None` or blank
+code) grades `False` without running anything; only a row with no graded tests (none with an `"output"`) grades
+`None`. The verifier never sees a `None` answer: the difficulty filter grades an empty answer `None` and, with
+`by_pass_at_k`'s default `truncated="fail"`, an unclosed `<think>` block `False`, before calling it.
+`extract_code=last_code_block` does the same for `run_programs` and `by_tests` when a field holds a model's answer.
 
 Every run is its own process, so the ops are safe to call from threads and run up to `max_workers` (default
 `min(8, cpu count)`) programs at a time. `timeout_s` is wall-clock time, so too many workers on a loaded machine

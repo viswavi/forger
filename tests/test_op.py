@@ -619,7 +619,7 @@ class Judge:
         return [[json.dumps({"score": 4})] * n for _ in prompts]
 
 
-@op(name="alter.make")
+@op(name="alter.make", category="alter")
 def make(k):
     return [{"instruction": f"q{i}", "response": f"a{i}"} for i in range(k)]
 

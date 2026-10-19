@@ -227,7 +227,7 @@ class TestGenerateBatch:
         assert call_args.kwargs["api_key"] == "sk-test"
         assert call_args.kwargs["temperature"] == 0.5
         assert call_args.kwargs["max_tokens"] == 100
-        assert call_args.kwargs["num_retries"] == 3
+        assert call_args.kwargs["num_retries"] == 0  # Model retries, not LiteLLM
         assert call_args.kwargs["n"] == 2
         assert call_args.kwargs["api_base"] == "http://localhost:8080"
 

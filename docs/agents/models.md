@@ -40,6 +40,32 @@ Progress is on by default for a `generate_batch` call that sends more than one r
 terminal, otherwise a log line at most every 30 seconds (`LLM calls (<model>): 120/500 done, 31s`). Turn it off with
 `Model(..., show_progress=False)` (or per call) or the environment variable `FORGER_PROGRESS=0`; an explicit
 `show_progress` wins over the variable. `LocalModel` keeps vLLM's own bar, off unless `show_progress=True`.
+The log line keeps coming every 30 seconds while requests are in flight, also when none finished since the last one.
+
+Each request attempt times out after `Model(timeout=...)` seconds. The default, `"auto"`, is 600 seconds (10 minutes),
+or `max_tokens / 25` when that is longer (`max_tokens=32768` gets 1311 s), so a long reasoning call at a slow 25
+tokens/s still finishes. Pass a number to change it (`Model(..., timeout=1800)`), or `timeout=None` for LiteLLM's
+own default (6000 s). The timeout is not part of the cache key, so changing it keeps cached results.
+
+`Model` retries each request itself, up to `num_retries` times (default 2), and only on transient errors: a timeout,
+a lost connection, a 408/409/425/429, or a 5xx. It waits about 1 s, then 2 s, 4 s, ... between attempts (a 429's
+`Retry-After` header instead, up to 60 s), and logs each retry at INFO. A 400 (e.g. an over-long prompt), 401, 403,
+404, or an exhausted quota, credit balance, or budget (OpenAI's `insufficient_quota`, LiteLLM's or Forger's budget
+errors, a spending cap, the token-unit quota) raises at once; a per-minute rate limit is retried, also Gemini's "You
+exceeded your current quota" 429. The spending caps and the token-unit quota are checked again before each retry.
+LiteLLM is sent `num_retries=0`, so neither it nor the openai client retries on top: a request makes at most
+`num_retries + 1` attempts on every provider, and one that hangs on every attempt waits at most
+`timeout × (num_retries + 1)` (30 minutes with the defaults). Lower `num_retries` or `timeout` to bound it. Ops
+never re-send a request that failed after these retries (their `max_retries` count parse failures only), so the bound
+holds through `generate_from_context`, `sample_from_LLM`, and the LLM filters. Passing `max_retries=` to `Model` turns
+the openai client's own retries back on: that many more attempts inside each of Forger's.
+
+When a request has been in flight much longer than the batch's finished ones (over 2 minutes and over 5 times their
+median), Forger logs one warning for it, in every progress mode:
+`LLM calls (<model>): 1 request in flight for 9m 12s (median of completed requests 41s); each attempt times out after
+10m (Model(timeout=...)) and is retried`. It means the provider is slow on that request or the request is stuck; the
+batch waits for it until it finishes or times out. If such warnings are common, lower `timeout`, or `max_tokens` if
+the long requests are runaway generations.
 
 Importing `pyforger.acquire` sets `litellm.suppress_debug_info = True`, so provider errors no longer print LiteLLM's
 "Give Feedback / Get Help" banner; the raised error is unchanged. Set it back to `False` to see the banner.
@@ -84,6 +110,10 @@ requests come back short too, or a response has more than `n`, it raises a `Valu
   prompt; when every sample is cached, no Tinker client is opened. A new `tinker://` checkpoint is another model id,
   so it never reuses an old checkpoint's samples. Turn it off with `TinkerModel(..., request_cache=False)` or
   `FORGER_REQUEST_CACHE=0`.
+- Retries: each request is retried on Tinker's transient errors (`APIConnectionError`, `RateLimitError`,
+  `InternalServerError`) up to `num_retries` times (default 2), after 1 s, 2 s, ..., so it makes at most
+  `num_retries + 1` attempts; the budgets and spending caps are checked before each attempt and never retried. There
+  is no per-attempt timeout and no in-flight warning: `Model(timeout=)` does not apply.
 - `return_exceptions=True` puts a failed prompt's exception (after Tinker's retries, or a budget refusal) in its slot
   and keeps the others; the default raises the first failure in prompt order. Ctrl-C also stops requests waiting for
   a slot, for budget room, or for a retry.

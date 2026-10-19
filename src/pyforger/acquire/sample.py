@@ -35,9 +35,12 @@ def _generation_loop(
 ) -> Generator[dict[str, Any], None, None]:
     """Yield accepted samples until ``n`` collected or retries exhausted.
 
-    A round whose request fails at the provider with a transient error (e.g. a
-    504) accepts nothing and counts toward ``max_retries``; its error type name
-    is appended to ``errors``. Other errors (a bad key, a 400) raise.
+    A request that fails at the provider with a transient error (e.g. a 504)
+    after the model's own retries is not sent again: the samples it would have
+    returned drop out of the target, and its error type name is appended to
+    ``errors``. Later rounds re-ask only for replies that did not parse (or
+    that a duck-typed model did not return). Other errors (a bad key, a 400)
+    raise.
     """
     # Only Model.generate_batch can hand back an error instead of raising it;
     # duck-typed fakes and models with their own generate keep calling generate.
@@ -46,11 +49,14 @@ def _generation_loop(
         _accepts_kwarg(getattr(model, "generate_batch", None), "return_exceptions")
     )
     accepted: list[dict[str, Any]] = []
+    # Samples whose requests failed at the provider; Model already retried
+    # them (num_retries), so later rounds do not ask for them again.
+    lost = 0
     consecutive_failed_rounds = 0
     round_index = 0
 
-    while len(accepted) < n and consecutive_failed_rounds < max_retries:
-        remaining = n - len(accepted)
+    while len(accepted) + lost < n and consecutive_failed_rounds < max_retries:
+        remaining = n - len(accepted) - lost
         current_batch_size = (
             remaining if batch_size is None else min(batch_size, remaining)
         )
@@ -88,16 +94,21 @@ def _generation_loop(
             logger.warning("sample_from_LLM request failed: %s", raw_responses)
             if errors is not None:
                 errors.append(type(raw_responses).__name__)
-            raw_responses = []
-        elif len(raw_responses) < current_batch_size:
+            lost += current_batch_size
+            continue
+        round_lost = 0
+        if len(raw_responses) < current_batch_size:
             logger.warning(
                 "generate returned %d responses for %d requested",
                 len(raw_responses),
                 current_batch_size,
             )
-            if catch and errors is not None:
+            if catch:
                 # Some of the round's requests failed (n fan-out or n > 16).
-                errors.append("missing completions")
+                if errors is not None:
+                    errors.append("missing completions")
+                round_lost = current_batch_size - len(raw_responses)
+                lost += round_lost
 
         round_accepts = 0
         for raw_text, reasoning_text in zip(
@@ -117,7 +128,10 @@ def _generation_loop(
                 return
 
         # Only count completely failed rounds (zero accepts) towards max_retries.
-        # Partial successes are treated as successes.
+        # Partial successes are treated as successes, and a round whose
+        # requests all failed at the provider counts as neither.
+        if round_lost == current_batch_size:
+            continue
         if round_accepts == 0:
             consecutive_failed_rounds += 1
         else:
@@ -142,12 +156,14 @@ def sample_from_LLM(
         model: Model to call.
         n: Target number of accepted samples.
         output_schema: Optional dict of expected keys; triggers JSON parse + validation.
+            Only the keys are checked, as in ``alter.generate_from_context``.
         temperature: Sampling temperature; None (default) uses the model's own
             default (1.0 for ``Model``, Qwen3's 0.6 for ``TinkerModel``).
-        max_retries: Consecutive zero-acceptance rounds before stopping. A round
-            whose request fails at the provider (e.g. a 504) counts as one; when
-            failures leave fewer than ``n`` samples, the shorter list is
-            returned and not cached.
+        max_retries: Consecutive rounds whose replies all fail to parse before
+            stopping. A request that fails at the provider (e.g. a 504) is
+            retried by ``model`` itself (``Model(num_retries=)``) and not asked
+            for again here; when failures leave fewer than ``n`` samples, the
+            shorter list is returned and not cached.
         batch_size: Number of responses to request per round (one
             ``model.generate`` call with ``n=batch_size``). None (default) requests
             all that are still missing at once.

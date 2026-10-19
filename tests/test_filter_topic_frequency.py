@@ -96,6 +96,9 @@ class _FakeTopicModel(Model):
         user_content = prompt[-1]["content"]
         if "reviewing records" in user_content or "candidate topics" in user_content:
             return json.dumps(_CODEBOOK)
+        if "distinct topics are required" in user_content:
+            # asked for other than 3 topics: still 3, so the op warns and uses them
+            return json.dumps(_CODEBOOK)
         if "classify the record" in user_content:
             return json.dumps({"topic": _topic(user_content.split("Record: ", 1)[1])})
         raise AssertionError(f"unexpected prompt: {user_content[:100]}")
@@ -205,9 +208,10 @@ def test_changing_thresholds_makes_no_new_calls():
     relabeled = [{**row, "id": -row["id"]} for row in _rows()]
     _filter(relabeled, model, embed, max_frequency=0.5)
     assert (model.calls, embed.calls) == calls
-    # A different num_clusters is a different clustering.
-    with pytest.raises(ValueError, match="need more than num_clusters"):
-        _filter(_rows(), model, embed, num_clusters=10)
+    # A different num_clusters is a different clustering (10 is clamped to the
+    # 9 unique values).
+    _filter(_rows(), model, embed, num_clusters=10)
+    assert model.calls > calls[0]
 
 
 def test_changing_clustered_values_reclusters():

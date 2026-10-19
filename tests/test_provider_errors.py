@@ -1,4 +1,8 @@
-"""Provider errors in generate_from_context / sample_from_LLM, and skip_cache_write."""
+"""Provider errors in generate_from_context / sample_from_LLM, and skip_cache_write.
+
+Model retries a transient error itself (num_retries); the ops never ask a
+failed request again, so a request makes at most num_retries + 1 attempts.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +13,7 @@ from unittest.mock import patch
 
 import litellm
 import pytest
+from fixtures import MockModel
 
 from pyforger import _tracking, op
 from pyforger.acquire import sample_from_LLM
@@ -16,7 +21,7 @@ from pyforger.acquire._model_utils import _is_transient
 from pyforger.acquire.model import GenerateResult, Model
 from pyforger.alter import generate_from_context
 from pyforger.op import skip_cache_write, trace
-from pyforger.steps import step
+from pyforger.steps import pipeline, step
 
 
 class InternalServerError(Exception):
@@ -109,24 +114,56 @@ ITEMS = [{"q": "A"}, {"q": "B"}, {"q": "C"}]
 class TestGenerateFromContext:
     """A provider error fails only its own prompt."""
 
-    def test_failure_then_success_is_retried(self):
-        """A prompt that 504s once is re-sent as a salted retry; no None."""
+    def test_failed_prompt_is_not_asked_again(self):
+        """A prompt that 504s (after Model's retries) is None, not re-sent."""
         model = FlakyModel(fail={"B": 1})
         rows = generate_from_context(ITEMS, "{q}", model, max_retries=2)
-        assert rows == [{"text": "A#0"}, {"text": "B#0"}, {"text": "C#0"}]
-        assert model.calls == [
-            ("A", 1, None),
-            ("B", 1, None),
-            ("C", 1, None),
-            ("B", 1, "retry 1, n=1"),
-        ]
+        assert rows == [{"text": "A#0"}, None, {"text": "C#0"}]
+        assert model.calls == [("A", 1, None), ("B", 1, None), ("C", 1, None)]
         assert trace()[-1].cache_hit is False
-        # A complete result is cached.
+        # Not cached, so the next call asks again; a complete result is cached.
+        rows = generate_from_context(ITEMS, "{q}", FlakyModel(), max_retries=2)
+        assert rows == [{"text": "A#0"}, {"text": "B#0"}, {"text": "C#0"}]
+        assert trace()[-1].cache_hit is False
         assert generate_from_context(ITEMS, "{q}", FlakyModel(), max_retries=2) == rows
         assert trace()[-1].cache_hit is True
 
-    def test_failure_beyond_retries_gives_none_and_skips_cache(self, caplog):
-        """After max_retries the slots are None, one warning, and no cache."""
+    def test_parse_failure_is_retried_but_provider_failure_is_not(self):
+        """A reply that does not parse is re-asked; a later 504 ends that slot."""
+
+        class ParseThenFail(FlakyModel):
+            def generate_batch(
+                self,
+                prompts,
+                *,
+                n=1,
+                return_exceptions=False,
+                cache_salt=None,
+                cache_rows=None,
+                **kwargs,
+            ):
+                if cache_salt is None:  # first attempt: an unparseable reply
+                    self.calls.append((prompts[0], n, cache_salt))
+                    return [_result(["not json"] * n) for _ in prompts]
+                self.fail = dict.fromkeys(prompts, 1)  # the retry 504s
+                return super().generate_batch(
+                    prompts,
+                    n=n,
+                    return_exceptions=return_exceptions,
+                    cache_salt=cache_salt,
+                )
+
+        model = ParseThenFail()
+        rows = generate_from_context(
+            [{"q": "A"}], "{q}", model, output_schema={"k": str}, max_retries=3
+        )
+        assert rows == [None]
+        # One parse retry, which 504s; no third attempt.
+        assert [salt for _, _, salt in model.calls] == [None, "retry 1, n=1"]
+        assert trace()[-1].cache_hit is False
+
+    def test_failure_gives_none_and_skips_cache(self, caplog):
+        """A failed prompt's slots are None, one warning, and no cache."""
         model = FlakyModel(fail={"B": 3})
         with caplog.at_level(logging.WARNING):
             rows = generate_from_context(
@@ -140,15 +177,11 @@ class TestGenerateFromContext:
             {"text": "C#0"},
             {"text": "C#1"},
         ]
-        assert [c for c in model.calls if c[0] == "B"] == [
-            ("B", 2, None),
-            ("B", 2, "retry 1, n=2"),
-            ("B", 2, "retry 2, n=2"),
-        ]
+        assert [c for c in model.calls if c[0] == "B"] == [("B", 2, None)]
         warnings = [r.getMessage() for r in caplog.records if "failed after" in r.msg]
         assert warnings == [
-            "alter.generate_from_context: 1 of 3 prompts failed after 2 retries; "
-            "their slots are None: InternalServerError ×1 (result not cached)"
+            "alter.generate_from_context: 1 of 3 prompts failed after the model's "
+            "retries; their slots are None: InternalServerError ×1 (result not cached)"
         ]
         # Not cached: the next call runs again and fills the slots.
         retry = FlakyModel()
@@ -160,13 +193,18 @@ class TestGenerateFromContext:
 
     def test_parse_failures_are_still_cached(self):
         """None slots from unparseable output are cached as before."""
-        model = FlakyModel()
+        # FlakyModel echoes the prompt, whose format example {"k": "<str>"} parses.
+        model = MockModel(responses=["not json"])
         rows = generate_from_context(
             [{"q": "A"}], "{q}", model, output_schema={"k": str}, max_retries=1
         )
         assert rows == [None]
         generate_from_context(
-            [{"q": "A"}], "{q}", FlakyModel(), output_schema={"k": str}, max_retries=1
+            [{"q": "A"}],
+            "{q}",
+            MockModel(responses=["not json"]),
+            output_schema={"k": str},
+            max_retries=1,
         )
         assert trace()[-1].cache_hit is True
 
@@ -179,12 +217,12 @@ class TestGenerateFromContext:
         def answer(rows, model):
             return generate_from_context(rows, "{q}", model, max_retries=1)
 
-        out = answer(ITEMS, FlakyModel(fail={"C": 2}))
+        out = answer(ITEMS, FlakyModel(fail={"C": 1}))
         assert out[2] is None
         rec = _tracking.step_records()["answer"]
         message = (
-            "alter.generate_from_context: 1 of 3 prompts failed after 1 retry; "
-            "their slots are None: InternalServerError ×1 (result not cached)"
+            "alter.generate_from_context: 1 of 3 prompts failed after the model's "
+            "retries; their slots are None: InternalServerError ×1 (result not cached)"
         )
         assert rec.ops[0].warnings == [message]
         assert message in rec.warnings
@@ -274,8 +312,9 @@ def test_rerun_resends_only_failed_prompts(monkeypatch):
     """After a provider failure, a rerun of the step re-sends only that prompt."""
     monkeypatch.setenv("FORGER_STEP_REPORT", "0")
     _tracking.clear_step_records()
-    completions = FailingCompletions(fail={"B": 3})
-    model = Model("gpt-4o", show_progress=False)
+    completions = FailingCompletions(fail={"B": 1})
+    # num_retries=0: one request per prompt, as the counts assume.
+    model = Model("gpt-4o", show_progress=False, num_retries=0)
 
     @step
     def answer(rows, model):
@@ -286,7 +325,7 @@ def test_rerun_resends_only_failed_prompts(monkeypatch):
         litellm.completion.side_effect = completions
         first = answer(ITEMS, model)
         assert first == [{"text": "A!"}, None, {"text": "C!"}]
-        assert sorted(completions.calls) == ["A", "B", "B", "B", "C"]
+        assert sorted(completions.calls) == ["A", "B", "C"]
 
         completions.calls.clear()
         second = answer(ITEMS, model)
@@ -300,8 +339,9 @@ def test_rerun_resends_only_failed_prompts(monkeypatch):
         assert _tracking.step_records()["answer"].cache_hit is True
 
 
-def test_repeated_prompt_retry_gets_its_own_completion():
+def test_repeated_prompt_retry_gets_its_own_completion(monkeypatch):
     """A failed copy of a repeated prompt does not reuse the other copy's answer."""
+    monkeypatch.setattr("pyforger.acquire.model._sleep", lambda seconds: None)
     completions = FailingCompletions(fail={"A": 1}, numbered=True)
     with patch("pyforger.acquire.model.litellm") as litellm:
         litellm.get_supported_openai_params.return_value = None
@@ -309,7 +349,7 @@ def test_repeated_prompt_retry_gets_its_own_completion():
         rows = generate_from_context(
             [{"q": "A"}, {"q": "A"}],
             "{q}",
-            Model("gpt-4o", show_progress=False),
+            Model("gpt-4o", show_progress=False, num_retries=1),
             max_retries=1,
         )
     assert sorted(row["text"] for row in rows) == ["A!0", "A!1"]
@@ -317,27 +357,56 @@ def test_repeated_prompt_retry_gets_its_own_completion():
 
 
 class TestSampleFromLLM:
-    """A failed sample_from_LLM round counts as a zero-acceptance round."""
+    """A failed sample_from_LLM request is not asked for again."""
 
-    def test_failed_round_is_retried(self):
-        """A 504 on the first round is followed by a salted second round."""
+    def test_failed_round_is_not_replaced(self):
+        """A 504 on one round drops its samples; later rounds ask for the rest."""
         model = FlakyModel(fail={"Write.": 1})
-        rows = sample_from_LLM("Write.", model, n=2)
-        assert rows == [{"text": "Write.#0"}, {"text": "Write.#1"}]
-        assert model.calls == [("Write.", 2, None), ("Write.", 2, "round 1")]
-        sample_from_LLM("Write.", FlakyModel(), n=2)
-        assert trace()[-1].cache_hit is True
+        rows = sample_from_LLM("Write.", model, n=3, batch_size=1)
+        assert rows == [{"text": "Write.#0"}, {"text": "Write.#0"}]
+        assert model.calls == [
+            ("Write.", 1, None),
+            ("Write.", 1, "round 1"),
+            ("Write.", 1, "round 2"),
+        ]
+        assert trace()[-1].cache_hit is False
 
-    def test_failures_beyond_retries_return_short_and_skip_cache(self, caplog):
-        """Rounds that all fail return what arrived, warn, and are not cached."""
+    def test_missing_completions_are_not_replaced(self):
+        """A round that returns 1 of 2 (a failed fan-out request) is not topped up."""
+
+        class HalfModel(FlakyModel):
+            def generate_batch(
+                self,
+                prompts,
+                *,
+                n=1,
+                return_exceptions=False,
+                cache_salt=None,
+                **kwargs,
+            ):
+                out = super().generate_batch(
+                    prompts,
+                    n=n,
+                    return_exceptions=return_exceptions,
+                    cache_salt=cache_salt,
+                )
+                return [_result(list(result)[: n // 2]) for result in out]
+
+        model = HalfModel()
+        assert sample_from_LLM("Write.", model, n=2) == [{"text": "Write.#0"}]
+        assert model.calls == [("Write.", 2, None)]
+        assert trace()[-1].cache_hit is False
+
+    def test_failures_return_short_and_skip_cache(self, caplog):
+        """A failed request returns what arrived, warns, and is not cached."""
         model = FlakyModel(fail={"Write.": 5})
         with caplog.at_level(logging.WARNING):
             rows = sample_from_LLM("Write.", model, n=2, max_retries=2)
         assert rows == []
-        assert len(model.calls) == 2
+        assert len(model.calls) == 1
         assert (
-            "acquire.sample_from_LLM: 0 of 2 samples; 2 request(s) failed: "
-            "InternalServerError ×2 (result not cached)"
+            "acquire.sample_from_LLM: 0 of 2 samples; 1 request(s) failed: "
+            "InternalServerError ×1 (result not cached)"
         ) in caplog.text
         healthy = FlakyModel()
         assert len(sample_from_LLM("Write.", healthy, n=2, max_retries=2)) == 2
@@ -360,23 +429,23 @@ class TestSkipCacheWrite:
         """The inner op, its caller, and the caller's caller rerun; siblings hit."""
         runs: list[str] = []
 
-        @op(name="alter.test_inner_flaky")
+        @op(name="alter.test_inner_flaky", category="alter")
         def inner(x):
             runs.append("inner")
             skip_cache_write()
             return x
 
-        @op(name="alter.test_sibling")
+        @op(name="alter.test_sibling", category="alter")
         def sibling(x):
             runs.append("sibling")
             return x
 
-        @op(name="alter.test_middle")
+        @op(name="alter.test_middle", category="alter")
         def middle(x):
             runs.append("middle")
             return inner(x) + sibling(x)
 
-        @op(name="alter.test_outer")
+        @op(name="alter.test_outer", category="alter")
         def outer(x):
             runs.append("outer")
             return middle(x)
@@ -401,12 +470,12 @@ class TestSkipCacheWrite:
         monkeypatch.setenv("FORGER_STEP_REPORT", "0")
         _tracking.clear_step_records()
 
-        @op(name="alter.test_warn_inner")
+        @op(name="alter.test_warn_inner", category="alter")
         def warn_inner(rows):
             _tracking.add_op_warning("inner trouble")
             return rows
 
-        @op(name="alter.test_warn_outer")
+        @op(name="alter.test_warn_outer", category="alter")
         def warn_outer(rows):
             return warn_inner(rows)
 
@@ -470,6 +539,21 @@ class TestFatalErrors:
             generate_from_context(ITEMS, "{q}", model, max_retries=3, merge=True)
         assert [c[0] for c in model.calls] == ["A", "B", "C"]
 
+    def test_generate_from_context_raises_when_out_of_quota(self):
+        """A 429 with OpenAI's insufficient_quota raises: no retry fixes it."""
+
+        def out_of_quota(prompt):
+            return litellm.RateLimitError(
+                message="Error code: 429 - {'error': {'code': 'insufficient_quota'}}",
+                llm_provider="openai",
+                model="m",
+            )
+
+        model = FlakyModel(fail={"B": 9}, error=out_of_quota)
+        with pytest.raises(litellm.RateLimitError):
+            generate_from_context(ITEMS, "{q}", model, max_retries=3)
+        assert [c[0] for c in model.calls] == ["A", "B", "C"]
+
     def test_sample_from_llm_raises_on_unknown_model(self):
         """A NotFoundError (e.g. a typo in the model id) raises."""
         model = FlakyModel(fail={"Hi": 9}, error=_litellm_error(litellm.NotFoundError))
@@ -486,6 +570,72 @@ class TestFatalErrors:
                 generate_from_context(
                     ITEMS, "{q}", Model("gpt-4o", show_progress=False, num_retries=0)
                 )
+
+
+class TimingOut:
+    """Fake litellm.completion: contents in ``hang`` always time out."""
+
+    def __init__(self, hang: set[str], unparseable: set[str]) -> None:
+        """Time out on ``hang``; answer ``unparseable`` once with non-JSON."""
+        self.hang = hang
+        self.unparseable = set(unparseable)
+        self.lock = threading.Lock()
+        self.calls: list[str] = []
+
+    def __call__(self, messages, n=1, **kwargs):
+        """Raise litellm.Timeout, or answer {"k": "<content>"}."""
+        # The prompt's first line is the row's text; the schema hint follows.
+        text = messages[-1]["content"].split("\n")[0]
+        with self.lock:
+            self.calls.append(text)
+            if text in self.hang:
+                raise litellm.Timeout(
+                    f"{text} timed out", model="gpt-4o", llm_provider="openai"
+                )
+            content = "not json" if text in self.unparseable else f'{{"k": "{text}"}}'
+            self.unparseable.discard(text)
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content=content), finish_reason="stop"
+                )
+                for _ in range(n)
+            ],
+            usage=SimpleNamespace(
+                prompt_tokens=1, completion_tokens=1, completion_tokens_details=None
+            ),
+            _hidden_params={"response_cost": 0.0},
+        )
+
+
+@pytest.mark.parametrize("num_retries", [0, 2])
+def test_timed_out_request_makes_num_retries_plus_one_attempts(
+    num_retries, monkeypatch
+):
+    """A request that always times out is sent num_retries + 1 times in all.
+
+    Through Model and a fake litellm.completion, whatever the op's
+    max_retries; a reply that does not parse is still asked again.
+    """
+    sleeps: list[float] = []
+    monkeypatch.setattr("pyforger.acquire.model._sleep", sleeps.append)
+    completions = TimingOut(hang={"B"}, unparseable={"C"})
+    model = Model("gpt-4o", show_progress=False, num_retries=num_retries)
+    with patch("pyforger.acquire.model.litellm") as mock:
+        mock.get_supported_openai_params.return_value = None
+        mock.completion.side_effect = completions
+        rows = generate_from_context(
+            ITEMS, "{q}", model, output_schema={"k": str}, max_retries=3
+        )
+        assert rows == [{"k": "A"}, None, {"k": "C"}]
+        assert completions.calls.count("B") == num_retries + 1
+        assert completions.calls.count("C") == 2  # one parse retry
+        assert len(sleeps) == num_retries
+
+        # sample_from_LLM: the same bound for its one request.
+        completions.calls.clear()
+        assert sample_from_LLM("B", model, n=2, max_retries=3) == []
+        assert completions.calls == ["B"] * (num_retries + 1)
 
 
 def test_plain_thread_pool_step_is_not_cached(monkeypatch):
@@ -525,7 +675,57 @@ def test_plain_thread_pool_step_is_not_cached(monkeypatch):
     assert cached.calls == []
 
 
-@op(name="filter.test_drop_none")
+class _Event(threading.Event):
+    def cache_key(self) -> str:
+        return "event"
+
+
+@pytest.mark.parametrize("where", ["step", "submitted step", "bare op"])
+def test_failure_elsewhere_does_not_uncache_a_submitted_step(monkeypatch, where):
+    """A provider failure outside a submitted step leaves that step cached."""
+    monkeypatch.setenv("FORGER_STEP_REPORT", "0")
+    _tracking.clear_step_records()
+    started, failed = _Event(), _Event()
+    runs: list[int] = []
+
+    @op(name="alter.test_wait_for_failure", category="alter")
+    def wait_for_failure(rows):
+        runs.append(1)
+        started.set()
+        failed.wait(10)  # still running when the other op skips its write
+        return list(rows)
+
+    @step
+    def slow(rows):
+        return filter_none(wait_for_failure(rows))
+
+    @step
+    def flaky(rows, model):
+        return filter_none(generate_from_context(rows, "{q}", model))
+
+    @pipeline
+    def main(rows):
+        future = slow.submit(rows)
+        started.wait(10)
+        model = FlakyModel(fail={"A": 1})
+        if where == "step":
+            flaky(rows, model)
+        elif where == "submitted step":
+            flaky.submit(rows, model).result()
+        else:
+            generate_from_context(rows, "{q}", model)
+        failed.set()
+        return future.result()
+
+    main(ITEMS)
+    rec = _tracking.step_records()["slow"]
+    assert rec.warnings == [] and not rec.cache_hit
+    main(ITEMS)  # both events stay set: slow is a cache hit, nothing waits
+    assert _tracking.step_records()["slow"].cache_hit
+    assert runs == [1]
+
+
+@op(name="filter.test_drop_none", category="filter")
 def filter_none(rows):
     """Drop None slots (a filter, so the step ends with one)."""
     return [row for row in rows if row is not None]

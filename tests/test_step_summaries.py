@@ -77,12 +77,12 @@ class _FakeSummarizer:
         return [f'"{self.reply}"\nextra line'] * n
 
 
-@op(name="alter.test_identity")
+@op(name="alter.test_identity", category="alter")
 def _identity(rows: list[dict]) -> list[dict]:
     return list(rows)
 
 
-@op(name="filter.test_keep_all")
+@op(name="filter.test_keep_all", category="filter")
 def _keep_all(rows: list[dict]) -> list[dict]:
     return _tracking.keep_where(rows, [True] * len(rows))
 
@@ -425,7 +425,9 @@ def test_without_a_model_the_first_report_says_how_to_get_summaries(
     assert "set_report_model" not in caplog.text  # nothing long to summarize
     _make_step()([{"solution": CODE}])
     _make_step()([{"solution": CODE + "\n# again\n"}])
-    assert caplog.text.count("step reports summarize long values by their shape") == 1
+    hints = [r for r in caplog.records if "summarize long values" in r.getMessage()]
+    assert len(hints) == 1
+    assert hints[0].levelname == "INFO"  # a tip, not a problem with the run
 
 
 def test_no_hint_when_summaries_are_turned_off(monkeypatch, caplog):
@@ -436,7 +438,7 @@ def test_no_hint_when_summaries_are_turned_off(monkeypatch, caplog):
     assert "set_report_model" not in caplog.text
 
 
-def test_unbuildable_env_model_falls_back_quietly(monkeypatch, capsys):
+def test_unbuildable_env_model_falls_back_quietly(monkeypatch, capsys, caplog):
     """A model that cannot be built leaves the structural summary in place."""
 
     def broken(*args, **kwargs):
@@ -446,4 +448,10 @@ def test_unbuildable_env_model_falls_back_quietly(monkeypatch, capsys):
     monkeypatch.setenv("FORGER_REPORT_MODEL", "nope/none")
     monkeypatch.setenv("FORGER_STEP_REPORT", "1")
     _make_step()([{"solution": CODE}])
+    _make_step()([{"solution": CODE + "\n# again\n"}])
     assert "python)" in capsys.readouterr().out
+    # one warning naming the model; no "how to set one" hint on top
+    warnings = [r for r in caplog.records if "is unusable" in r.getMessage()]
+    assert [r.levelname for r in warnings] == ["WARNING"]
+    assert "FORGER_REPORT_MODEL=nope/none" in warnings[0].getMessage()
+    assert "summarize long values" not in caplog.text

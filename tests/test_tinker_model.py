@@ -1055,7 +1055,7 @@ class TestReviewFixes:
             time.sleep(0.05)  # let the worker fail once and start its backoff
             raise KeyboardInterrupt
 
-        monkeypatch.setattr(tinker_model_module, "_log_progress", interrupt)
+        monkeypatch.setattr(tinker_model_module, "_watch", interrupt)
         monkeypatch.setattr(tinker_model_module, "_progress_mode", lambda flag: "log")
         with pytest.raises(KeyboardInterrupt):
             model.generate_batch(["a", "b"])

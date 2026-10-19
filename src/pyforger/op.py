@@ -18,9 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
-import io
 import os
-import pickle
 import threading
 import time
 import types
@@ -33,7 +31,7 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
-from pyforger import _tracking
+from pyforger import _blobs, _tracking
 from pyforger.utils import (
     canonical,
     code_names,
@@ -50,7 +48,8 @@ T = TypeVar("T")
 # Part of every cache key. Bump it when what goes into keys changes, so entries
 # written under the old layout are never read as hits. 2: plain-data globals
 # are hashed by value; functions no longer carry their __module__ or docstrings.
-_CACHE_KEY_VERSION = 2
+# 3: keys are _KeyEncoder bytes, not a pickle of canonical(key).
+_CACHE_KEY_VERSION = 3
 
 
 def _cache_dir() -> Path:
@@ -103,26 +102,147 @@ def clear_trace() -> None:
         _TRACE.clear()
 
 
-_HASH_WARN_BYTES = int(os.environ.get("PYFORGER_HASH_WARN_BYTES", 50 * 1024 * 1024))
+# Large str / bytes are hashed by a memoized digest, so time, not size, is what
+# matters: 75 MiB of rows with 47K-char traces hash in about 0.1s.
+_HASH_WARN_BYTES = int(os.environ.get("PYFORGER_HASH_WARN_BYTES", 1024 * 1024 * 1024))
 _HASH_WARN_SECONDS = float(os.environ.get("PYFORGER_HASH_WARN_SECONDS", 1.0))
 _HASH_WARNED: set[str] = set()
 _HASH_WARN_LOCK = threading.Lock()
 
 
 def _hash(obj: Any) -> tuple[str, int]:
-    """Hash ``canonical(obj)``; equal values always hash equally.
+    """Hash obj by value; equal values always hash equally.
 
-    The pickler runs without its memo (``fast``), so the bytes do not depend on
-    which equal strings happen to be the same object. With the memo, a field
-    name typed in the source and the same name read back from a cached result
-    hash differently. ``canonical`` output is acyclic, which fast mode needs.
+    Returns the sha256 hex digest and the number of bytes hashed. The bytes are
+    ``_KeyEncoder``'s encoding of obj, which does not depend on which equal
+    strings happen to be the same object (a field name typed in the source and
+    the same name read back from a cached result hash equally).
     """
-    buf = io.BytesIO()
-    pickler = pickle.Pickler(buf, protocol=4)
-    pickler.fast = True
-    pickler.dump(canonical(obj))
-    payload = buf.getvalue()
-    return hashlib.sha256(payload).hexdigest(), len(payload)
+    enc = _KeyEncoder()
+    enc.feed(obj)
+    payload = b"".join(enc.out)
+    return hashlib.sha256(payload).hexdigest(), len(payload) + enc.digested
+
+
+class _KeyEncoder:
+    """Encode a value for its cache key as type-tagged, length-prefixed bytes.
+
+    The same distinctions as ``canonical``, without building a canonical copy
+    and pickling it: dict items and set elements are sorted by their encoding,
+    so equal values encode equally whatever their order, and lists, tuples,
+    sets, and frozensets have their own tags. A str or bytes of 4K or more is
+    encoded as its sha256 (``b"S"`` + 32 bytes), so a 47K-char thinking trace
+    is read once by sha256 and then memoized for later keys. A container seen
+    earlier in the same key is copied from its first encoding. Other objects
+    are encoded by ``canonical`` (e.g. a ``Model`` by its ``cache_key()``).
+    """
+
+    def __init__(self) -> None:
+        self.out: list[bytes] = []
+        self.digested = 0  # bytes of the large str / bytes hashed by digest
+        # id(container) -> its slice of out. Ids are unique while the key is
+        # encoded: every object is reachable from it or held in _keep.
+        self._seen: dict[int, tuple[int, int]] = {}
+        self._keep: list[Any] = []
+
+    def feed(self, obj: Any) -> None:
+        out = self.out
+        tp = type(obj)
+        # Exact types first: rows are dicts of str, int, and lists of those.
+        if tp is str:
+            if len(obj) >= _blobs.DIGEST_MIN_SIZE:
+                self.digested += len(obj)
+                out.append(b"S" + _blobs.digest(obj))
+            else:
+                data = obj.encode("utf-8", "surrogatepass")
+                out.append(b"s%d:" % len(data))
+                out.append(data)
+        elif tp is dict or tp is list or tp is tuple:
+            self._feed_container(obj, tp)
+        elif tp is int:
+            out.append(b"i%d;" % obj)
+        elif obj is None:
+            out.append(b"N")
+        elif tp is bool:
+            out.append(b"T" if obj else b"F")
+        elif tp is float:
+            out.append(b"f%s;" % float.__repr__(obj).encode())
+        # Subclasses are keyed like their base type, as in canonical, e.g. a
+        # StrEnum member like its str value and an OrderedDict like a dict.
+        elif isinstance(obj, str):
+            self.feed(str.__str__(obj))
+        elif isinstance(obj, bytes):
+            if len(obj) >= _blobs.DIGEST_MIN_SIZE:
+                self.digested += len(obj)
+                out.append(b"B" + _blobs.digest(obj))
+            else:
+                out.append(b"b%d:" % len(obj))
+                out.append(bytes(obj))
+        elif isinstance(obj, int):
+            out.append(b"i%d;" % obj)
+        elif isinstance(obj, float):
+            out.append(b"f%s;" % float.__repr__(obj).encode())
+        elif isinstance(obj, complex):
+            out.append(b"c%s;" % complex.__repr__(obj).encode())
+        elif isinstance(obj, dict):
+            self._feed_container(obj, dict)
+        elif isinstance(obj, list):
+            self._feed_container(obj, list)
+        elif isinstance(obj, tuple):
+            self._feed_container(obj, tuple)
+        elif isinstance(obj, (set, frozenset)):
+            self._feed_container(obj, frozenset if isinstance(obj, frozenset) else set)
+        else:
+            canon = canonical(obj)
+            self._keep.append(canon)
+            out.append(b"o")
+            self.feed(canon)
+
+    def _feed_container(self, obj: Any, tp: type) -> None:
+        out = self.out
+        seen = self._seen.get(id(obj))
+        if seen is not None:
+            out.extend(out[seen[0] : seen[1]])
+            return
+        start = len(out)
+        if tp is dict:
+            out.append(b"d%d:" % len(obj))
+            for k in obj:
+                if type(k) is not str:
+                    break
+            else:
+                # E.g. a row: str keys sort as themselves and are written inline.
+                for k in sorted(obj):
+                    if len(k) < _blobs.DIGEST_MIN_SIZE:
+                        data = k.encode("utf-8", "surrogatepass")
+                        out.append(b"s%d:" % len(data))
+                        out.append(data)
+                    else:
+                        self.feed(k)
+                    self.feed(obj[k])
+                self._seen[id(obj)] = (start, len(out))
+                return
+            for k_bytes, v in sorted(
+                ((self._alone(k), v) for k, v in obj.items()), key=lambda kv: kv[0]
+            ):
+                out.append(k_bytes)
+                self.feed(v)
+        elif tp is list or tp is tuple:
+            out.append(b"%s%d:" % (b"l" if tp is list else b"t", len(obj)))
+            for x in obj:
+                self.feed(x)
+        else:
+            out.append(b"%s%d:" % (b"z" if tp is frozenset else b"e", len(obj)))
+            out.extend(sorted(self._alone(x) for x in obj))
+        self._seen[id(obj)] = (start, len(out))
+
+    def _alone(self, obj: Any) -> bytes:
+        """Encode obj on its own, for sorting dict keys and set elements."""
+        sub = _KeyEncoder()
+        sub._keep = self._keep
+        sub.feed(obj)
+        self.digested += sub.digested
+        return b"".join(sub.out)
 
 
 # True while an op called with ``_no_cache=True`` runs, so the ops it calls
@@ -168,6 +288,18 @@ def _skip_running_calls(origin: _CallState) -> None:
                 state.from_thread = True
 
 
+def _lost_context() -> bool:
+    """True in a worker thread that did not copy the context (plain ``pool.submit``).
+
+    Only there can an op with no enclosing call in its context have one. The
+    main thread, a pipeline, and a step (one run with ``.submit`` too) keep
+    their context, so an op there with no enclosing call has none.
+    """
+    if threading.current_thread() is threading.main_thread():
+        return False
+    return not _tracking.is_reporting()
+
+
 def skip_cache_write() -> None:
     """Do not cache the result of the running op or of any op or step enclosing it.
 
@@ -184,6 +316,8 @@ def skip_cache_write() -> None:
 
 
 _STEP_META_SUFFIX = ".step.json"
+# A filter's per-row scores, so a cache hit still shows its histogram.
+_SCORES_SUFFIX = ".scores.json"
 
 # Set on every @op / tracked wrapper, e.g. {"name": "filter.by_length", "kind":
 # "op", "cache": True}; scripts/gen_op_docs.py reads it to mark cached ops.
@@ -309,8 +443,9 @@ def _maybe_warn_hash_cost(op_name: str, duration: float, size: int) -> None:
             return
         _HASH_WARNED.add(op_name)
     logger.warning(
-        "@op(%s) cache-key hash took %.2fs to hash input and resulted in a %d MiB"
-        " payload; consider adding cache_key() on large inputs for a cheaper key.",
+        "@op(%s) cache-key hash took %.2fs over %d MiB of input; drop row fields"
+        " that later steps do not need (e.g. a thinking trace), or pass large"
+        " objects that define cache_key(), for a cheaper key.",
         op_name,
         duration,
         size // (1024 * 1024),
@@ -382,6 +517,7 @@ def op(
     cache: bool = True,
     samples_arg: str | None = None,
     unkeyed: tuple[str, ...] = (),
+    category: str | None = None,
 ) -> Any:
     """Decorator: cache output on disk, content-addressed by inputs.
 
@@ -417,6 +553,11 @@ def op(
     min_yield=0.5)``. A violation is a warning in the ``@step`` report (or a
     logged warning outside steps). Neither keyword is part of the cache key.
     ``acquire.*`` ops take no input rows and reject both keywords.
+
+    ``category`` ("acquire", "alter", "filter", "inspect", or "other") is what
+    ``@step`` / ``@pipeline`` checks see, e.g. "no quality filter ran". Ops
+    defined in ``pyforger.<category>`` default to that category; any other op
+    defaults to "other", whatever its name.
     """
 
     def decorate(fn: Callable[..., T]) -> Callable[..., T]:
@@ -442,6 +583,7 @@ def op(
                     raise TypeError(f"unkeyed names {param!r}, not a parameter")
 
         op_name = name or f"{fn.__module__}.{fn.__qualname__}"
+        op_category = _tracking.register_op(op_name, fn.__module__, category)
         # Sanitize op_name to be a safe directory name
         safe_op_name = "".join(c if c.isalnum() or c in "._-" else "_" for c in op_name)
         # Code and closure are fixed here; plain-data globals are read per call.
@@ -463,9 +605,9 @@ def op(
             if not _cache_only and _NO_CACHE_SCOPE.get():
                 _no_cache = True
             _check_yield_bounds(min_yield, max_yield)
-            if (min_yield is not None or max_yield is not None) and (
-                _tracking.category_of(op_name) == "acquire"
-            ):
+            if (
+                min_yield is not None or max_yield is not None
+            ) and op_category == "acquire":
                 raise ValueError(
                     f"{op_name} takes no input rows, so min_yield / max_yield do "
                     "not apply; put them on the alter or filter op that follows"
@@ -487,6 +629,7 @@ def op(
                 rows = (first_arg, result)
                 call = _op_call(
                     op_name,
+                    op_category,
                     first_arg,
                     result,
                     cache_hit=cache_hit,
@@ -508,7 +651,7 @@ def op(
                 # op's (and step's) result stale too.
                 if state.skip_write and parent_state is not None:
                     parent_state.skip_write = True
-                elif state.skip_write and not state.from_thread:
+                elif state.skip_write and not state.from_thread and _lost_context():
                     _skip_running_calls(state)
                 if scope_token is not None:
                     _NO_CACHE_SCOPE.reset(scope_token)
@@ -523,7 +666,9 @@ def op(
             state: _CallState,
         ) -> tuple[Any, bool, Any, float]:
             """Run or load the op; return (result, cache_hit, first arg, seconds)."""
-            start = time.time()
+            # perf_counter, like the step and pipeline times: time.time() also
+            # counts a laptop's sleep, so an op could outlast its step.
+            start = time.perf_counter()
             was_bound = False
             if sig is not None:
                 try:
@@ -563,6 +708,7 @@ def op(
             cache_hit = False
             is_step = op_name.startswith(_tracking.STEP_OP_PREFIX)
             meta_path = cache_path.with_name(input_hash + _STEP_META_SUFFIX)
+            scores_path = cache_path.with_name(input_hash + _SCORES_SUFFIX)
 
             if use_cache and cache_path.exists():
                 try:
@@ -575,11 +721,15 @@ def op(
                             f"Cache file {cache_path} is owned by another user."
                         )
 
-                    with cache_path.open("rb") as f:
-                        result = pickle.load(f)
+                    result = _read_result(cache_path, cache_root)
                     cache_hit = True
                     if is_step and meta_path.exists():
                         _tracking.restore_step_meta(meta_path.read_text())
+                    elif not is_step and scores_path.exists():
+                        _tracking.restore_scores(scores_path.read_text())
+                except _blobs.MissingBlobError as exc:
+                    # E.g. blobs/ was deleted but the entry was not: a miss.
+                    logger.debug("cache entry %s is incomplete: %s", cache_path, exc)
                 except Exception as exc:
                     if _cache_only:
                         raise RuntimeError(
@@ -635,16 +785,19 @@ def op(
                     if meta is not None:
                         # Written first, so a cached step always has its ops.
                         _atomic_write(meta_path, meta.encode())
-                    _atomic_write(cache_path, pickle.dumps(result, protocol=4))
+                    if not is_step:
+                        scores = _tracking.scores_meta(_tracking.current_scores())
+                        if scores is not None:
+                            _atomic_write(scores_path, scores.encode())
+                        else:  # no stale scores from an earlier result
+                            scores_path.unlink(missing_ok=True)
+                    _write_result(cache_path, result, cache_root)
 
-            duration = time.time() - start
+            duration = time.perf_counter() - start
             # If tracing is enabled, record this call on the in-memory trace.
             if _TRACE.maxlen is not None and _TRACE.maxlen > 0:
+                output_hash = None if cache_hit else _hash(result)[0]
                 with _TRACE_LOCK:
-                    if cache_hit:
-                        output_hash = None
-                    else:
-                        output_hash, _ = _hash(result)
                     _TRACE.append(
                         CallRecord(
                             op_name=op_name,
@@ -682,6 +835,16 @@ def _atomic_write(path: Path, data: bytes) -> None:
     os.replace(tmp_path, path)
 
 
+def _write_result(cache_path: Path, result: Any, cache_root: Path) -> None:
+    """Pickle result to cache_path, its large values to ``cache_root/blobs``."""
+    _atomic_write(cache_path, _blobs.dumps(result, cache_root / "blobs"))
+
+
+def _read_result(cache_path: Path, cache_root: Path) -> Any:
+    """Load what ``_write_result`` wrote, or an entry pickled without blobs."""
+    return _blobs.loads(cache_path.read_bytes(), cache_root / "blobs")
+
+
 def tracked(op_name: str) -> Callable[[Callable[..., T]], Callable[..., T]]:
     """Report calls in ``@step`` reports like an op, without caching or hashing.
 
@@ -700,6 +863,7 @@ def tracked(op_name: str) -> Callable[[Callable[..., T]], Callable[..., T]]:
                     "Forger functions decorated with @tracked cannot use the "
                     f"reserved argument name '{reserved}'."
                 )
+        op_category = _tracking.register_op(op_name, fn.__module__)
 
         @wraps(fn)
         def wrapper(
@@ -734,6 +898,7 @@ def tracked(op_name: str) -> Callable[[Callable[..., T]], Callable[..., T]]:
                 rows = (rows[0], result)
                 call = _op_call(
                     op_name,
+                    op_category,
                     first_arg,
                     result,
                     cache_hit=False,
@@ -806,6 +971,7 @@ def _check_yield_bounds(min_yield: float | None, max_yield: float | None) -> Non
 
 def _op_call(
     op_name: str,
+    category: str,
     first_arg: Any,
     result: Any,
     *,
@@ -822,7 +988,6 @@ def _op_call(
     ``body_warnings`` come from ``_tracking.add_op_warning`` in the op's body;
     the op logged them already, so they are only added to the report.
     """
-    category = _tracking.category_of(op_name)
     # An acquire op's first argument is a prompt or query, not input rows.
     n_in = (
         len(first_arg)

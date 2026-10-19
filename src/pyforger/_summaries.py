@@ -399,7 +399,7 @@ def _hint_report_model() -> None:
     ):
         return
     _HINTED[0] = True
-    logger.warning(
+    logger.info(
         "step reports summarize long values by their shape only (e.g. "
         "'def solve(n): … (312 lines, python)'). For a one-sentence summary of "
         "what each says, call pyforger.steps.set_report_model(Model(...)) or set "

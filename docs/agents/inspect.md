@@ -10,6 +10,15 @@ producing new rows in the pipeline.
 | `eval_tree` | yes | Hierarchical capability tree and statistical weakness profile for scored outputs. |
 | `inspect_step` | no | Print the full report of the latest run of a `@step` and return its `StepRecord`. |
 | `spend` | no | Print and return the spend ledger's totals by run, pipeline, and step. |
+| `phrase_frequency` | no | Print and return, per string field, the phrases and names the most rows share. No LLM. |
+
+`phrase_frequency(rows, fields=None, *, ngram_range=(2, 4), top_k=10, min_share=0.05, max_rows=2000,
+max_chars=2000)` counts document frequency: the share of rows whose value contains each word n-gram (lowercased) or
+capitalized name, e.g. `rewrite  phrases: "i need" 78/79 (99%) · "i need you to" 46/79 (58%)` and `context  names:
+"Maya" 46/79 (58%)`. It leaves out the same template text as the step report's `repeated:` line, lists a phrase only
+when no longer phrase containing it is in nearly as many rows, and returns a `PhraseReport` (one `FieldPhrases` per
+field, with `skipped` set for categorical, identifier, and code fields). Topic clustering can look balanced while
+every row says "I need"; run both. Rows are not modified.
 
 Topic-based clustering uses the ClusterFusion clustering algorithm ([arXiv:2512.04350](https://arxiv.org/abs/2512.04350)),
 a hybrid method in which embeddings guide how rows are partitioned and an LLM summarizes the partitions into
@@ -30,6 +39,10 @@ clusters = topic_based_clustering(
 ```
 
 `filter.by_topic_frequency` runs this clustering (cached) to downsample over-represented topics.
+
+With fewer unique `field` values than `num_clusters` (e.g. 6 for `num_clusters=20`), the op uses one cluster per
+unique value and logs a warning, so there is no need to shrink `num_clusters` for small inputs yourself. With a single
+unique value, every row gets that value (cut to 80 characters) as its topic, without calling the LLM.
 
 Embeddings only decide which rows the LLM summarizes together. By default they come from the sentence-transformers
 model `embedding_model` (`pip install "pyforger[clustering]"`, GPU when available). `embedding_model="tfidf"` uses a

@@ -41,7 +41,7 @@ by default:
 Typically, the user should set LITELLM_API_KEY environment variable. If none is given, then LiteLLM will fall back to
 provider-specific environment variables (e.g. `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`). When instantiating a `Model` with
 such variables, do not look at or print the key; simply pass it to the client via `os.environ.get("LITELLM_API_KEY")`
-(or equivalent).  Additional `**kwargs` are forwarded to `litellm.completion` (`api_base`, `organization`, `timeout`).
+(or equivalent).  Additional `**kwargs` are forwarded to `litellm.completion` (`api_base`, `organization`).
 
 You can check whether the LITELLM_API_KEY environment variable is provided in Python with:
 
@@ -114,7 +114,8 @@ This includes RANDOM mode, even without a seed: use `_no_cache=True` for a fresh
 Direct calls to source `.fetch()` methods remain uncached.
 
 For the full call signature of every op (parameter names, defaults, field parameters, caching), see
-[OPS.md](OPS.md), which is generated from the code.
+[OPS.md](OPS.md), which is generated from the code. It starts with a table of contents, and each op can be linked as
+`OPS.md#<module>-<op>` in lowercase, e.g. [`OPS.md#filter-by_llm_score`](OPS.md#filter-by_llm_score).
 
 ### Public API summary
 
@@ -128,6 +129,10 @@ For the full call signature of every op (parameter names, defaults, field parame
 | `pyforger.filter` | `src/pyforger/filter/` | Remove rows by criterion. |
 | `pyforger.inspect` | `src/pyforger/inspect/` | Examine rows without modifying them; returns a report. |
 | `pyforger.utils` | `src/pyforger/utils.py` | `get_field`, `get_formatted_logger`, `canonical`. |
+
+Forger's loggers print to stderr themselves and also propagate to the root logger. Once the root logger has a handler
+that prints to the terminal (e.g. after `logging.basicConfig()`), Forger lines are printed by that handler, in its
+format, and not a second time by Forger's own.
 
 ## Reference files
 

@@ -6,23 +6,41 @@ Structure a pipeline as a `@pyforger.pipeline` function that calls `@pyforger.st
 function from rows to rows built from Forger ops (typically acquire or alter, then filter); it may also take several
 lists of rows and return a dict of named row lists (see [Several inputs and output
 streams](#several-inputs-and-output-streams)). Each step is cached like
-an `@op` and, when it returns, prints a report: the fields of its output rows; every op it ran with rows in/out, yield,
-time, tokens, and cost; a histogram of each filter's scores with what other thresholds would have kept; warnings; and
-one sample output row. The pipeline prints a summary table of its steps at the end. Read these reports after every
-run. A cached step prints one line, `step translate · 42 → 40 rows · cached · originally 0.5s · $0.0034`, with the
-number of its warnings if it has any; `inspect_step(name)` prints its full report, which lists the ops of the run that
-cached it, marked `cached`, with that run's warnings.
+an `@op` and, when it returns, prints a report: the fields of its output rows; phrases and names repeated across
+them; every op it ran with rows in/out, yield, time, tokens, and cost; a histogram of each filter's scores with what
+other thresholds would have kept; warnings; and one sample output row. The pipeline prints a summary table of its
+steps at the end. Read these reports after every run. A cached step prints one line,
+`step translate · 42 → 40 rows · cached · originally 0.5s · $0.0034`, with the number of its warnings if it has any;
+`inspect_step(name)` prints its full report, which lists the ops of the run that cached it, marked `cached`, with that
+run's warnings and score histograms (`filter.by_llm_score (cached run) · …`).
+A filter whose own result came from the op cache inside a step that ran also shows the scores of the run that cached
+it, marked the same way (`×5 (2 cached)` when some chunks were cached). Results cached before scores were stored with
+them, and score lists of over 100,000 rows, have none: rerun with `_no_cache=True` to see them.
 
 - Fields line: `fields: seed_id int · topic str · score int|None · twist str?  (+ score, twist; − draft)`. Each field
   of the output rows with the types of its values (from all rows, or 5,000 evenly spaced rows of a longer list); `?`
   marks a field that some rows lack; `+` / `−` are fields added or removed relative to the input rows, when the step's
   rows arguments are lists of dicts.
+- Repeated line: `repeated: rewrite "i need" 78/79 (99%) · context "is writing to" 64/79 (81%) · context "Maya" 46/79
+  (58%)`. For string fields the step added or changed, the phrases (2–4 words) and capitalized names in a large share
+  of the output rows: templating and name collapse that exact-match and ROUGE-L filters pass, since every row is
+  distinct. A phrase needs 30% of the rows for values of up to 100 words, more for longer ones (60% at 200 words, at
+  most 90%), since long values share phrases by chance; a name needs 30%. Each field gives its most repeated phrase,
+  the most repeated name gets a place, and the line has at most 3 items, or is absent. Left out as template text:
+  markup, headings and the section under a heading most rows share (an `## Input` section's "The first line
+  contains"), lines most rows share (an instruction prefix), code (`import sys`), categorical and identifier fields,
+  stopword-only and "the problem"-style phrases, and phrases the input rows had nearly as often (the seed or the
+  template put them there). It reads at most 200 rows (evenly spaced) of 1,000 characters each, from steps with 10 or
+  more output rows, and is skipped when reports are off. For the full lists, call `inspect.phrase_frequency`.
 - Chunks of one op in a step share one row, e.g. `alter.generate_from_context ×5`, with summed rows, time, tokens,
   and cost, and the yield of the sums. Each call is still checked against its own `min_yield` / `max_yield`
   (`LOW 2/5 · min 0.60` means two of five calls missed, `RAISED 1/5` that one raised). Their filter scores pool into
   one histogram when the label, keep rule, and thresholds match, and get one histogram per rule otherwise. A call
   whose input rows are an earlier call's output rows (the same row objects, also through other ops) gets its own
-  row: two `by_llm_score` rubric judges in a row read `10 → 8` and `8 → 4`, not one summed row.
+  row: two `by_llm_score` rubric judges in a row read `10 → 8` and `8 → 4`, not one summed row. Rows rebuilt in
+  Python (`{**r, ...}`) between two calls hide that, so two more things keep calls apart: different score labels
+  (`by_predicate(..., label="runs")`, then `label=">=3 outputs"`), and input rows that are all new to the step after
+  a call that took known rows. A loop over batches with one label still makes one row.
 - `(python)` rows: when rows change between two ops with no op to account for it (e.g. `[r for r in rows if ...]`
   between `generate_from_context` and `by_exact_match`), the op table shows a dim row such as
   `(python)  356 → 330  0.93` between them, or before the first op / after the last one. They are inferred: by row
@@ -41,6 +59,9 @@ cached it, marked `cached`, with that run's warnings.
   `max_yield`; an op's model calls stopped at `max_tokens`; a step's type hints cannot be resolved; `show=` names a
   field no output row has; a pipeline has only one step; no quality filter, no diversity filter, or no inspect op ran
   anywhere; an op was called in the pipeline outside a step.
+- These checks use each op's category, not its name. Ops under `pyforger.acquire/alter/filter/inspect` have their
+  package's category; your own `@op` is `"other"` (even `@op(name="filter.x")`) unless it declares one, e.g.
+  `@op(category="filter")` for a custom quality filter.
 - Filter notes: the pipeline summary lists the steps that ran no filter and the filters that removed nothing (op, step,
   and rows seen). These are notes, not warnings, and `strict=True` does not raise on them: a generate-only step
   followed by a filter step is fine, and a filter that removes nothing may be a check that passed or one that tests
@@ -59,8 +80,8 @@ cached it, marked `cached`, with that run's warnings.
   set `FORGER_REPORT_MODEL=<litellm model id>` (key from `LITELLM_API_KEY`). That costs up to 8 LLM calls per printed
   report, cached on disk and left out of the step and pipeline totals (the spend ledger and `FORGER_MAX_COST_USD`
   still count them); silenced reports make no calls. A cheap model without reasoning is enough. Without a report
-  model, the first report with a long value logs how to set one; `set_report_model(None)` turns summaries off and
-  silences that.
+  model, the first report with a long value logs (at INFO) how to set one; `set_report_model(None)` turns summaries
+  off and silences that.
 - Threads: ops called from `ThreadPoolExecutor` workers are not itemized in the step report (the step gets a warning
   instead of an error) unless submitted as `pool.submit(contextvars.copy_context().run, fn, arg)`. Steps called from
   workers still join the pipeline, and their spend counts toward it (and its cap) as it arrives. Each op, step, and
@@ -68,6 +89,21 @@ cached it, marked `cached`, with that run's warnings.
   `RAISED` with what it spent. LLM calls from workers that did not copy the context and run no step belong to no
   step or pipeline: while exactly one pipeline runs, its report lists them as one `unattributed` line (it may include
   other threads in the process), kept out of its totals and its `max_cost_usd`.
+- Concurrent steps: `my_step.submit(*args, **kwargs)` starts a step in a background thread and returns a
+  `concurrent.futures.Future`; `.result()` returns its rows or re-raises its error. Use it for independent branches:
+
+  ```python
+  impossible = make_impossible.submit(verified[:n], writer, judge)
+  hard = student_difficulty(verified[n:], student)        # runs meanwhile
+  rows = assemble(impossible.result(), hard)
+  ```
+
+  The step runs in a copy of the caller's context, so it joins the pipeline, counts toward its caps, and keeps its own
+  report and usage. At most `pyforger.steps.SUBMIT_WORKERS` (8) submitted steps run at once; the rest queue.
+  `.submit` inside a step raises like a nested call. The summary lists steps in the order they were started or
+  submitted. When the pipeline function returns, it waits for submitted steps still running and raises the error of
+  any whose `.result()` was never called; when it raises (or on Ctrl-C), queued steps are cancelled and running ones
+  are not waited for.
 - Cost: a cached step costs nothing this run; its line shows the time and cost of the run that cached it (`cached ·
   originally 37.9s · $0.50`), and the pipeline summary separates what was spent this run from
   `cached (originally $X)`.

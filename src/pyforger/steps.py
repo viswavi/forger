@@ -16,8 +16,16 @@ report counts ``solvable 111 + refusals 42``) and may return a dict of named
 row lists (``{"train": kept, "refusals": refused}``), each reported as its own
 stream. A later step takes one stream: ``format_train(out["train"])``.
 
+``my_step.submit(rows, ...)`` starts a step in a background thread and returns
+a ``Future``, so independent steps run at the same time::
+
+    impossible = make_impossible.submit(verified[:n], writer, judge)
+    hard = student_difficulty(verified[n:], student)  # runs meanwhile
+    rows = assemble(impossible.result(), hard)
+
 Each step is cached like an ``@op`` and prints a report when it returns: the
-output rows' fields, every op it ran with rows in/out, yield, time, tokens, and
+output rows' fields, phrases and names that many of them repeat (see
+``pyforger._phrases``), every op it ran with rows in/out, yield, time, tokens, and
 cost (repeated calls of one op share a row), a histogram of each filter's
 scores, warnings, and a sample row. Rows that plain Python dropped or added
 between ops, or between steps, show as dim ``(python)`` rows (see
@@ -34,15 +42,20 @@ summary of each; see ``pyforger._summaries``.
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import inspect
 import json
 import os
+import queue
 import re
 import sys
+import threading
 import time
 import typing
 from collections.abc import Callable
+from concurrent.futures import Future
+from concurrent.futures import wait as wait_futures
 from dataclasses import dataclass, field
 from functools import wraps
 from pathlib import Path
@@ -50,7 +63,7 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
-from pyforger import _summaries, _tracking
+from pyforger import _phrases, _summaries, _tracking
 from pyforger._render import (
     print_pipeline,
     print_step,
@@ -84,7 +97,8 @@ _DIVERSITY_FILTERS = frozenset(
         "filter.by_topic_frequency",
     }
 )
-# Every other filter.* op counts as a quality filter. by_length and by_predicate
+# Every other op of category "filter" counts as a quality filter, including a
+# user op declared with @op(category="filter"). by_length and by_predicate
 # check structure ("has ≥3 papers"), and any lambda would pass as a judge.
 _NON_QUALITY_FILTERS = _DIVERSITY_FILTERS | {"filter.by_length", "filter.by_predicate"}
 
@@ -154,6 +168,106 @@ class PipelineContractError(RuntimeError):
 def _reports_enabled(prod: bool) -> bool:
     flag = os.environ.get("FORGER_STEP_REPORT", "").strip().lower()
     return not prod and flag not in {"0", "false", "no"}
+
+
+# --------------------------------------------------------------------------- #
+# Step.submit: steps in background threads
+# --------------------------------------------------------------------------- #
+
+# At most this many submitted steps run at once in the process; later ones
+# wait, in submission order, for a free thread.
+SUBMIT_WORKERS = 8
+
+
+class _StepFuture(Future):  # type: ignore[type-arg]
+    """The Future ``.submit`` returns; it remembers whether its outcome was read."""
+
+    def __init__(self, step_name: str) -> None:
+        """Start pending."""
+        super().__init__()
+        self.step_name = step_name
+        self.read = False
+
+    def result(self, timeout: float | None = None) -> Any:
+        """Wait for the step; return its rows or raise its exception."""
+        self.read = True
+        return super().result(timeout)
+
+    def exception(self, timeout: float | None = None) -> BaseException | None:
+        """Wait for the step; return the exception it raised, if any."""
+        self.read = True
+        return super().exception(timeout)
+
+
+class _StepPool:
+    """``SUBMIT_WORKERS`` daemon threads that run submitted steps in order.
+
+    Not a ``ThreadPoolExecutor``: its threads are joined at interpreter exit,
+    so Ctrl-C during a slow judge step would wait for the step to finish.
+    Daemon threads end with the process.
+    """
+
+    def __init__(self, workers: int) -> None:
+        """Start no threads until the first submission."""
+        self._workers = workers
+        self._queue: queue.SimpleQueue[
+            tuple[Future, Callable[[], Any]]
+        ] = queue.SimpleQueue()
+        self._threads: list[threading.Thread] = []
+        self._lock = threading.Lock()
+
+    def submit(self, future: Future, fn: Callable[[], Any]) -> None:
+        """Run ``fn()`` in a worker thread and set ``future`` to its outcome."""
+        self._queue.put((future, fn))
+        with self._lock:
+            if len(self._threads) < self._workers:
+                thread = threading.Thread(
+                    target=self._work,
+                    name=f"forger-step-{len(self._threads)}",
+                    daemon=True,
+                )
+                thread.start()
+                self._threads.append(thread)
+
+    def _work(self) -> None:
+        while True:
+            future, fn = self._queue.get()
+            if not future.set_running_or_notify_cancel():
+                continue  # cancelled while queued
+            try:
+                value = fn()
+            except BaseException as exc:
+                future.set_exception(exc)
+            else:
+                future.set_result(value)
+            del future, fn  # let go of the step's rows
+
+
+_POOL = _StepPool(SUBMIT_WORKERS)
+# The steps the running pipeline submitted, in submission order.
+_SUBMITTED: contextvars.ContextVar[list[_StepFuture] | None] = contextvars.ContextVar(
+    "forger_submitted_steps", default=None
+)
+
+
+def _await_submitted(submitted: list[_StepFuture]) -> None:
+    """Wait for every submitted step; raise the first error nobody read.
+
+    A step whose ``.result()`` the pipeline never called still finishes before
+    the pipeline does, so its report and usage are in the summary, and its
+    exception is not lost.
+    """
+    wait_futures(submitted)
+    for future in submitted:
+        if future.read or future.cancelled():
+            continue
+        exc = Future.exception(future)
+        if exc is not None:
+            typing.cast(Any, exc).add_note(  # mypy's target predates add_note
+                f"raised by step {future.step_name}, run with .submit() and never "
+                "awaited"
+            )
+            raise exc
 
 
 # --------------------------------------------------------------------------- #
@@ -386,6 +500,10 @@ def step(
     stream holds ``X`` rows) or a ``TypedDict`` whose values are ``list[X]``
     (those streams, each with its own row model).
 
+    ``my_step.submit(*args, **kwargs)`` runs the step in a background thread
+    (at most ``SUBMIT_WORKERS`` at once) and returns a ``Future``; see
+    ``pipeline`` for what happens to submitted steps when the pipeline ends.
+
     Errors (``StepContractError``): the result is neither a list nor a dict of
     lists, rows do not match the annotated row model (or the streams those a
     ``TypedDict`` names), or the step was called inside another step.
@@ -420,14 +538,17 @@ def step(
         doc = inspect.getdoc(fn) or ""
         hints: list[_Hints] = []  # resolved on the first call, when names exist
 
-        @wraps(fn)
-        def wrapper(*args: Any, **kwargs: Any) -> Any:
+        def check_not_nested() -> None:
             outer = _tracking.active_step()
             if outer is not None:
                 raise StepContractError(
                     f"step {step_name} was called inside step {outer.name}; steps "
                     "cannot nest, so call both from the @pipeline"
                 )
+
+        @wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            check_not_nested()
             if not hints or hints[0].warning is not None:
                 hints[:] = [_step_hints(fn, localns)]
             hint = hints[0]
@@ -525,6 +646,8 @@ def step(
                     rec.cost_usd,
                     rec.token_units,
                 ) = usage
+                if _reports_enabled(prod):  # only printed reports pay for it
+                    _add_repeats(rec, result, filled if input_keys is not None else [])
                 _tracking.store_step(rec)
                 if pipeline_rec is not None:
                     _tracking.join_pipeline(pipeline_rec, rec, started, result)
@@ -552,11 +675,52 @@ def step(
                 raise _strict_error(rec)
             return result
 
+        def submit(*args: Any, **kwargs: Any) -> Future:
+            """Start the step in a background thread; return a ``Future`` of its rows.
+
+            The step runs in a copy of the caller's context, so it joins the
+            same pipeline, counts toward its spending caps, and gets its own
+            report. ``.result()`` returns the step's rows or raises its error.
+            """
+            check_not_nested()
+            future = _StepFuture(step_name)
+            pipeline_rec = _tracking.active_pipeline()
+            seq = (
+                _tracking.reserve_step_seq(pipeline_rec)
+                if pipeline_rec is not None
+                else None
+            )
+            submitted = _SUBMITTED.get()
+            if submitted is not None:
+                submitted.append(future)
+            context = contextvars.copy_context()
+            _POOL.submit(
+                future,
+                lambda: context.run(
+                    _tracking.run_reserved, seq, lambda: wrapper(*args, **kwargs)
+                ),
+            )
+            return future
+
+        wrapper.submit = submit  # type: ignore[attr-defined]
         return typing.cast(F, wrapper)
 
     if _fn is not None:
         return decorate(_fn)
     return decorate
+
+
+def _add_repeats(rec: StepRecord, result: Any, inputs: list[list[Any]]) -> None:
+    """Set the ``repeated:`` items of the step's output rows (of each stream).
+
+    ``inputs`` are the step's rows arguments when they are dicts, else empty.
+    """
+    before = [row for rows in inputs for row in rows]
+    if isinstance(result, list):
+        rec.repeated = _phrases.step_repeats(result, before)
+    elif _is_streams(result) and rec.streams:
+        for stream in rec.streams:
+            stream.repeated = _phrases.step_repeats(result.get(stream.name, []), before)
 
 
 def _usage_totals(usage: _tracking.Usage, start: float) -> UsageTotals:
@@ -806,6 +970,12 @@ def pipeline(
     Notes, which are not warnings and never raise: steps that ran no filter,
     and filters that removed nothing (a passed check, or one to tighten).
 
+    Steps run with ``my_step.submit(...)`` are listed in the order they were
+    submitted. When the function returns, the pipeline waits for submitted
+    steps still running, then raises the error of any whose ``.result()`` was
+    never called. When it raises (or on Ctrl-C), submitted steps still queued
+    are cancelled and running ones are not waited for.
+
     Args:
         _fn: The function, when used as ``@pipeline`` without parentheses.
         name: Pipeline name in the report; defaults to the function name.
@@ -851,11 +1021,19 @@ def pipeline(
                 _save_step(step_rec)
 
             scope = _tracking.enter_pipeline(rec, on_dynamic_step)
+            submitted: list[_StepFuture] = []
+            submitted_token = _SUBMITTED.set(submitted)
             try:
                 result = fn(*args, **kwargs)
+                _await_submitted(submitted)
                 _tracking.close_pipeline_flow(rec, result)
                 _count_returned(rec, result)
+            except BaseException:
+                for future in submitted:
+                    future.cancel()  # steps still queued never start
+                raise
             finally:
+                _SUBMITTED.reset(submitted_token)
                 _tracking.exit_pipeline(scope)
             rec.duration_s = time.perf_counter() - start
             _check_pipeline(rec)
@@ -908,18 +1086,18 @@ def _check_pipeline(rec: PipelineRecord) -> None:
     # A step cached by an older Forger version has no record of its ops; skip
     # the checks for which ops ran rather than warn about ops that may have run.
     ops_known = all(s.ops or not s.cache_hit for s in rec.steps)
-    names = {call.op_name for s in rec.steps for call in s.ops}
+    # Categories come from the op registry, not names: a user's
+    # @op(name="filter.keep_all") is "other" and satisfies nothing here.
+    filters = {c.op_name for s in rec.steps for c in s.ops if c.category == "filter"}
     if ops_known:
-        if not any(
-            n.startswith("filter.") and n not in _NON_QUALITY_FILTERS for n in names
-        ):
+        if not filters - _NON_QUALITY_FILTERS:
             rec.warnings.append("no quality filter ran (e.g. filter.by_llm_score)")
-        if not names & _DIVERSITY_FILTERS:
+        if not filters & _DIVERSITY_FILTERS:
             rec.warnings.append(
                 "no diversity filter ran (filter.by_exact_match, by_rouge_l, "
                 "by_n_gram_overlap, or by_topic_frequency)"
             )
-        if not any(n.startswith("inspect.") for n in names):
+        if not any(c.category == "inspect" for s in rec.steps for c in s.ops):
             rec.warnings.append("no inspect op ran")
     _filter_notes(rec)
     bare = [s.ops[0].op_name for s in rec.steps if s.kind == "bare"]

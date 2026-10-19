@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 from pathlib import Path
 from typing import Any
 
@@ -166,3 +167,29 @@ def test_entry_without_returns_section():
 
     assert gen_op_docs._returns_section(plain) is None
     assert "Returns" not in gen_op_docs._entry("plain", "alter.plain", plain)
+
+
+def test_anchor_is_lowercase_module_and_name():
+    """Anchors keep underscores and replace dots, e.g. filter-by_llm_score."""
+    assert gen_op_docs.anchor("acquire.sample_from_LLM") == "acquire-sample_from_llm"
+    assert gen_op_docs.anchor("alter.translate.to_code") == "alter-translate-to_code"
+
+
+def test_entry_heading_has_an_explicit_anchor():
+    """The anchor sits on its own line just before the op's heading."""
+    entry = gen_op_docs._entry("by_fake", "filter.by_fake", _fake_filter)
+    assert entry.startswith('<a name="filter-by_fake"></a>\n\n### `filter.by_fake`\n')
+
+
+def test_contents_links_every_op_to_its_anchor():
+    """The table of contents lists each documented op once, linked to its anchor."""
+    text = gen_op_docs.render()
+    contents = text.split("## Contents\n", 1)[1].split("\n<a name=", 1)[0]
+    targets = re.findall(r"\]\(#([^)]+)\)", contents)
+    anchors = re.findall(r'<a name="([^"]+)"></a>', text)
+    assert sorted(targets) == sorted(anchors)
+    assert len(set(anchors)) == len(anchors)
+    assert "- [`pyforger.filter`](#filter)" in contents
+    assert "  - [`by_length`](#filter-by_length): Keep items whose" in contents
+    # every op heading has an anchor
+    assert text.count("\n### `") == text.count('\n<a name="') - len(gen_op_docs.MODULES)

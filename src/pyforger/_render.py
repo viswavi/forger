@@ -34,6 +34,7 @@ from rich.text import Text
 from pyforger import _summaries
 from pyforger._rowflow import group_calls
 from pyforger._tracking import (
+    MAX_DROPPED_NOTES,
     FieldSummary,
     OpCall,
     PipelineRecord,
@@ -462,7 +463,9 @@ def _histogram(scores: ScoreRecord) -> _Histogram:
     total = len(scores.values)
     good = _finite(scores.values)
     label = _clean(scores.label)
-    hist = _Histogram(label=label, title=label)
+    # One line per note: pooled chunks keep each chunk's (see _merged_scores).
+    note = "\n".join(_clean(line) for line in (scores.note or "").splitlines())
+    hist = _Histogram(label=label, title=label, note=note)
     hist.unparsed = total - len(good)
     if label.startswith("approval >="):
         hist.label = f"judges ≥{label.removeprefix('approval >=')}"
@@ -519,10 +522,11 @@ def _histogram(scores: ScoreRecord) -> _Histogram:
         )
     hist.mode = "pooled" if scores.pooled else "cut"
     if scores.pooled:
-        hist.note = (
+        pooled_note = (
             "No what-if columns: each score depends on the rows kept before it. "
             "Rerun to compare thresholds."
         )
+        hist.note = f"{hist.note}\n{pooled_note}" if hist.note else pooled_note
     for i, r in enumerate(raws):
         is_current = i == marked
         if is_current and current is not None:
@@ -572,6 +576,8 @@ def _histogram_renderable(
         heading.append("█" * n_kept, style="green")
         heading.append("░" * (_SPLIT_CHARS - n_kept), style="red")
     if hist.mode == "none" or not hist.bins:
+        if hist.note:
+            return Group(heading, Padding(Text(hist.note, style="dim"), (0, 0, 0, 2)))
         return heading
 
     def style_of(b: _Bin) -> str:
@@ -701,6 +707,26 @@ def _histogram_renderable(
     return Group(*parts)
 
 
+def _dropped_lines(scores: ScoreRecord) -> list[RenderableType]:
+    """A few dropped rows with the filter's note, under its histogram.
+
+    E.g. ``2 · "Paris is in Italy."`` then ``↳ The output puts Paris in Italy.``
+    """
+    if not scores.dropped:
+        return []
+    lines: list[RenderableType] = [
+        Padding(Text("dropped, with notes:", style="dim"), (0, 0, 0, 2))
+    ]
+    for row in scores.dropped:
+        head = Text()
+        if row.value is not None:
+            head.append(f"{_fmt_value_label(row.value)} · ", style="bold")
+        head.append(_clean(row.preview) or "(no preview)")
+        lines.append(Padding(head, (0, 0, 0, 4)))
+        lines.append(Padding(Text(f"↳ {_clean(row.note)}", style="dim"), (0, 0, 0, 6)))
+    return lines
+
+
 # --------------------------------------------------------------------------- #
 # Step report
 # --------------------------------------------------------------------------- #
@@ -770,10 +796,17 @@ def _group_ops(ops: list[OpCall]) -> list[_OpGroup]:
 
     A call joins the latest row of its op unless its input rows came from that
     row's output (``OpCall.after``): two judges in a row, or a refine pass over
-    generated rows, get a row each, with their own counts and histograms. The
+    generated rows, get a row each, with their own counts and histograms. A
+    call with another score label, or whose rows were rebuilt in Python while
+    the row's took known rows (``OpCall.new_rows``), gets its own row too. The
     (python) rows use the same grouping (``_rowflow.group_calls``).
     """
-    positions = group_calls([c.op_name for c in ops], [c.after for c in ops])
+    positions = group_calls(
+        [c.op_name for c in ops],
+        [c.after for c in ops],
+        [c.scores.label if c.scores is not None else None for c in ops],
+        [c.new_rows for c in ops],
+    )
     return [_OpGroup([ops[i] for i in g], g[0]) for g in positions]
 
 
@@ -840,26 +873,37 @@ def _check_text(group: _OpGroup) -> Text:
     return text
 
 
-def _merged_scores(calls: list[OpCall]) -> list[tuple[ScoreRecord, int]]:
+def _merged_scores(calls: list[OpCall]) -> list[tuple[ScoreRecord, int, int]]:
     """One score record per distinct rule, values concatenated over the calls.
 
     Calls whose scores share a label, keep rule, and thresholds pool into one
-    histogram; returns ``(record, number of calls in it)``, in call order.
+    histogram; returns ``(record, calls in it, cached calls in it)``, in call
+    order. A cached call's scores are those of the run that cached it.
     """
-    merged: dict[tuple[Any, ...], tuple[ScoreRecord, int]] = {}
+    merged: dict[tuple[Any, ...], tuple[ScoreRecord, int, int]] = {}
     for call in calls:
         sc = call.scores
-        if sc is None or call.cache_hit:
+        if sc is None:
             continue
         key = (sc.label, sc.keep, sc.threshold, sc.lower, sc.upper, sc.pooled)
         if key in merged:
-            rec, n = merged[key]
+            rec, n, n_cached = merged[key]
+            dropped = (rec.dropped + sc.dropped)[:MAX_DROPPED_NOTES]
+            # Each chunk's own note, once, e.g. "3 of 12 samples truncated ...".
+            notes = dict.fromkeys(n for n in (rec.note, sc.note) if n)
             merged[key] = (
-                rec.model_copy(update={"values": rec.values + sc.values}),
+                rec.model_copy(
+                    update={
+                        "values": rec.values + sc.values,
+                        "dropped": dropped,
+                        "note": "\n".join(notes) or None,
+                    }
+                ),
                 n + 1,
+                n_cached + call.cache_hit,
             )
         else:
-            merged[key] = (sc, 1)
+            merged[key] = (sc, 1, int(call.cache_hit))
     return list(merged.values())
 
 
@@ -1326,6 +1370,24 @@ def _fields_text(rec: StepRecord | RowStream, label: str = "") -> Text | None:
     return text
 
 
+def _repeated_text(rec: StepRecord | RowStream, label: str = "") -> Text | None:
+    """``repeated: rewrite "i need" 78/79 (99%) · context "Maya" 46/79 (58%)``."""
+    if not rec.repeated:
+        return None
+    text = Text()
+    if label:
+        text.append(f"{_clean(label)} ", style="bold")
+    text.append("repeated: ", style="dim")
+    text.append(
+        " · ".join(
+            f'{_clean(r.field)} "{_clean(r.text)}" {r.rows}/{r.n_rows} '
+            f"({r.rows / r.n_rows:.0%})"
+            for r in rec.repeated
+        )
+    )
+    return text
+
+
 def _cached_line(rec: StepRecord) -> RenderableType:
     """A cached step in one line: ``step x · 5 → 3 rows · cached · originally …``."""
     title = Text()
@@ -1408,6 +1470,11 @@ def step_renderable(
         fields = _fields_text(stream, label=stream.name)
         if fields is not None:
             body.append(fields)
+    for line in [_repeated_text(rec)] + [
+        _repeated_text(s, label=s.name) for s in rec.streams or []
+    ]:
+        if line is not None:
+            body.append(line)
     if rec.input_type or rec.output_type:
         arrow = f"{rec.input_type or 'any'} → {rec.output_type or 'any'}"
         body.append(Text(f"rows validated: {arrow}", style="dim"))
@@ -1421,15 +1488,20 @@ def step_renderable(
             Text("result loaded from the step cache; its ops did not run", style="dim")
         )
     for group in groups:
-        for scores, n in _merged_scores(group.calls):
+        for scores, n, n_cached in _merged_scores(group.calls):
             name = group.op_name + (f" ×{n}" if n > 1 else "")
+            if n_cached:  # e.g. "filter.by_llm_score (cached run)"
+                name += " (cached run)" if n_cached == n else f" ({n_cached} cached)"
             body.append(Text(""))
             body.append(_histogram_renderable(_histogram(scores), name, width - 2))
-        if group.n_cached and group.category == "filter":
-            if group.cache_hit:
+            body.extend(_dropped_lines(scores))
+        # Cached before scores were stored with results, or too many to store.
+        unscored = sum(1 for c in group.calls if c.cache_hit and c.scores is None)
+        if unscored and group.category == "filter":
+            if unscored == len(group.calls):
                 what = "no score histogram for a cached result"
             else:
-                what = f"{group.n_cached} cached calls are not in the histogram"
+                what = f"{unscored} cached calls are not in the histogram"
             body.append(Text(""))
             body.append(
                 Text(
@@ -1670,8 +1742,13 @@ def render_pipeline(rec: PipelineRecord) -> str:
 
 
 def render_scores(scores: ScoreRecord, op_name: str = "scores") -> str:
-    """Render one filter's score histogram as plain text."""
-    return _plain(_histogram_renderable(_histogram(scores), op_name, WIDTH))
+    """Render one filter's score histogram, and its dropped rows, as plain text."""
+    return _plain(
+        Group(
+            _histogram_renderable(_histogram(scores), op_name, WIDTH),
+            *_dropped_lines(scores),
+        )
+    )
 
 
 def _emit(renderable: RenderableType, console: Console) -> None:

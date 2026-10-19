@@ -337,6 +337,27 @@ class TestByTests:
         assert scores.values == [1.0, 0.5, 0.0, None, None]
         assert (scores.keep, scores.threshold) == ("ge", 0.5)
 
+    def test_dropped_rows_show_first_failure(self, monkeypatch):
+        """The report keeps a few dropped rows with their first failing test."""
+        monkeypatch.setenv("FORGER_STEP_REPORT", "0")
+
+        @step
+        def passing(rows):
+            return by_tests(rows, code_field="code")
+
+        passing(self.ROWS)
+        scores = _tracking.step_records()["passing"].ops[0].scores
+        assert scores is not None
+        assert [(d.value, d.preview, d.note) for d in scores.dropped] == [
+            (
+                0.5,
+                "a, b = map(int, input().split()) print(a + b)",
+                "test 2 of 2: wrong_answer, got '4', expected '5'",
+            ),
+            (0.0, "print(0)", "test 1 of 2: wrong_answer, got '0', expected '3'"),
+            (None, "", "no code"),
+        ]
+
     def test_bad_rate(self):
         """min_pass_rate must be in [0, 1]."""
         with pytest.raises(ValueError):

@@ -87,13 +87,18 @@ def generate_from_context(
         model: Model instance used for generation.
         samples_per_item: Number of responses to generate per input item.
         output_schema: Optional dict of expected keys. When set, responses are
-            JSON-parsed and validated; failures are retried. When None, each
-            response is stored as ``{"text": ...}``.
+            JSON-parsed and validated; parse failures are retried. When None,
+            each response is stored as ``{"text": ...}``. Only the keys are checked:
+            a response needs every key, keys outside the schema are dropped, and
+            the values' types are shown to the model but not checked. A ```json
+            fence or prose around the object is tolerated.
         temperature: Sampling temperature passed to the model; None (default)
             uses the model's own default (1.0 for ``Model``, Qwen3's 0.6 for
             ``TinkerModel``).
-        max_retries: Additional attempts for prompts whose output fails to parse
-            or whose request fails at the provider (e.g. a 504). A sample that
+        max_retries: Additional attempts for prompts whose output fails to
+            parse (a reply arrived but did not parse). A request that fails at
+            the provider (e.g. a 504) is retried by ``model`` itself
+            (``Model(num_retries=)``) and not asked again here. A sample that
             fails to parse because it stopped at the model's max_tokens is not
             retried unless ``retry_truncated=True``: at the same max_tokens a
             retry usually stops there again. The step report counts such samples.
@@ -114,9 +119,10 @@ def generate_from_context(
         order, grouped by item (item ``i``'s samples occupy slots
         ``i * samples_per_item`` to ``(i + 1) * samples_per_item``). Each slot
         holds the parsed output dict, or ``None`` if the prompt failed to parse
-        or failed at the provider after ``max_retries``; when any slot failed at
-        the provider, the result is not cached, so a rerun asks again (the
-        request cache replays the completions that arrived). With
+        after ``max_retries`` or failed at the provider after the model's own
+        retries; when any slot failed at the provider, the result is not
+        cached, so a rerun asks again (the request cache replays the
+        completions that arrived). With
         ``merge=True``, the merged rows of the slots that succeeded. When the
         model returns a reasoning trace separately in `GenerateResult.reasoning`,
         it is included under the `thinking_trace` key. Inline `<think>` traces (e.g.
@@ -150,13 +156,14 @@ def generate_from_context(
     )
 
     # Each pending entry is (item index, slots still needed). Retries re-ask
-    # only the missing slots, up to max_retries more attempts.
+    # only the slots that failed to parse, up to max_retries more attempts.
     pending: list[tuple[int, list[int]]] = [
         (i, list(range(i * samples_per_item, (i + 1) * samples_per_item)))
         for i in range(len(prompts))
     ]
     # Item index -> type name of its latest provider failure, e.g.
-    # "InternalServerError"; cleared when a later attempt gets a response.
+    # "InternalServerError". Model already retried the request (num_retries),
+    # so the op does not ask again: those slots stay None.
     provider_errors: dict[int, str] = {}
     # Slots whose output failed to parse after stopping at max_tokens.
     cut_off: set[int] = set()
@@ -177,9 +184,9 @@ def generate_from_context(
             for start in range(0, len(group), chunk):
                 batch = group[start : start + chunk]
                 # Each prompt is keyed on its row, so editing one row re-asks
-                # only that row. A retry (after a parse failure or a provider
-                # error) is salted, e.g. "retry 1, n=2", and gets new
-                # completions, not the same failed ones.
+                # only that row. A retry (after a parse failure) is salted,
+                # e.g. "retry 1, n=2", and gets new completions, not the same
+                # unparseable ones.
                 batch_results = model.generate_batch(
                     [prompts[i] for i, _ in batch],
                     temperature=temperature,
@@ -206,14 +213,14 @@ def generate_from_context(
                         if not _is_transient(completions):
                             raise completions
                         provider_errors[i] = type(completions).__name__
-                        next_pending.append((i, slots))
                         continue
-                    provider_errors.pop(i, None)
-                    unfilled = slots[len(completions) :]
-                    if unfilled and catch:
+                    unfilled: list[int] = []
+                    if len(completions) < len(slots) and catch:
                         # Fewer completions than asked: some of the prompt's
                         # requests failed (return_exceptions keeps the rest).
                         provider_errors[i] = "missing completions"
+                    elif len(completions) < len(slots):
+                        unfilled = slots[len(completions) :]
                     reasons = getattr(completions, "finish_reasons", None) or []
                     for k, (slot, raw_text, reasoning_text) in enumerate(
                         zip(slots, completions, _reasoning_for(completions))
@@ -242,25 +249,20 @@ def generate_from_context(
             "" if retry_truncated else "not retried (retry_truncated=False); ",
         )
     failed_parse = [
-        [slot for slot in slots if slot not in cut_off]
-        for i, slots in pending
-        if i not in provider_errors
+        slot for _, slots in pending for slot in slots if slot not in cut_off
     ]
-    failed_parse = [slots for slots in failed_parse if slots]
     if failed_parse:
         log.warning(
             "%d sample(s) failed to parse after %d retries; "
             "returning None for those slots",
-            sum(len(slots) for slots in failed_parse),
+            len(failed_parse),
             max_retries,
         )
-    failed_provider = [provider_errors[i] for i, _ in pending if i in provider_errors]
-    if failed_provider:
+    if provider_errors:
         _report_provider_failures(
-            f"alter.generate_from_context: {len(failed_provider)} of {len(prompts)} "
-            f"prompts failed after {max_retries} "
-            f"{'retry' if max_retries == 1 else 'retries'}; their slots are None",
-            failed_provider,
+            f"alter.generate_from_context: {len(provider_errors)} of {len(prompts)} "
+            "prompts failed after the model's retries; their slots are None",
+            list(provider_errors.values()),
         )
     if not merge:
         return results
