@@ -520,3 +520,36 @@ Neither operation generates or evaluates samples. Missing grades are excluded;
 all grades must be present unless `min_valid` explicitly permits exclusions.
 Inspect retains reports for rejected rows. Domain-specific attribution, audit,
 replay, and admission policy belong to the caller.
+
+
+
+### Harbor agent execution
+
+`HarborBackend` implements the same `AgentBackend` protocol as `LocalBackend`,
+so the identical agent functions and `alter.dynamic_step` calls run in Harbor
+sandboxes without changing inputs or output handling:
+
+```python
+from pyforger.agent_backend import AgentSpec
+from pyforger.harbor_backend import HarborBackend
+
+outputs = alter.dynamic_step(
+    [{"text": "hello"}], "Return uppercase text",
+    AgentSpec(model), HarborBackend(),
+)
+```
+
+Harbor defaults to Docker; `environment` may select other native backends.
+Program replay uses Oracle without another model call; generated code never
+executes on the host. Cache identity includes backend configuration; source
+caching remains in `dynamic_step_source`, while execution always runs anew.
+Model credentials must be available in a host environment variable named by
+the agent spec's `api_key_env`; replay receives no model credentials.
+Native Harbor task execution (`HarborTaskRunner` in `pyforger.harbor`) remains
+available for immutable Harbor-format task directories; it is an execution
+mechanism, not an agent-function layer.
+
+`harbor.HarborTaskRunner` is the lower-level packaged-task API with
+`HarborRequest`/`HarborResult`, native agent/environment configuration, verified
+trial artifacts, and asynchronous execution. It is deliberately not an agent
+function or backend; `HarborBackend` builds on it internally.

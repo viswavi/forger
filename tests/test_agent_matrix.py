@@ -7,6 +7,8 @@ local backend and on the Harbor backend (Docker).
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from pyforger import agents
@@ -25,13 +27,16 @@ ORACLE_PROGRAM = AgentSpec(
 )
 
 
-@pytest.fixture(params=["local"])
+@pytest.fixture(params=["local", "harbor-docker"])
 def backend(request):
-    """Provide each backend implementation in turn.
+    """Provide each backend implementation in turn."""
+    if request.param == "local":
+        return LocalBackend()
+    if not os.environ.get("PYFORGER_HARBOR_DOCKER_TESTS"):
+        pytest.skip("set PYFORGER_HARBOR_DOCKER_TESTS=1 for Docker backend tests")
+    from pyforger.harbor_backend import HarborBackend
 
-    HarborBackend joins this parametrization when it is introduced.
-    """
-    return LocalBackend()
+    return HarborBackend()
 
 
 def test_backend_replays_program(backend):
