@@ -286,8 +286,8 @@ provider errors (a bad API key, an unknown model, a 400 such as an over-long pro
 once, since retrying cannot fix them. When any slot failed at the provider, the op logs one warning
 (`1 of 64 prompts failed after the model's retries; their slots are None: InternalServerError ×1`), shows it in the
 step report, and is not cached (nor is its step), so a rerun re-sends only the failed prompts (the request cache
-replays the rest). Parse-failure `None`s are cached. `inspect.topic_based_clustering` follows the same rule: a failed
-label request gets the fallback topic instead of being asked again.
+replays the rest). Parse-failure `None`s are cached. `inspect.topic_based_clustering` does not ask a failed request
+again either (see `filter.by_llm_score` below).
 As with `sample_from_LLM`, reasoning traces are included under a `thinking_trace` key. Inline traces are not extracted:
 `LocalModel` leaves `<think>` blocks in the completion text. Use `split_reasoning` to separate them out.
 
@@ -523,7 +523,9 @@ unparseable, or stopped mid-thought in an unclosed `<think>`) and the rows they 
 `2 of 10 judge calls gave no score (...) → 6 rows unscored`. Errors a retry cannot fix (a bad key, a 400, a spending
 cap or token-unit quota) still raise. The same holds for every LLM filter: `by_judged_difficulty` leaves a row whose
 request failed unrated, `by_pass_at_k` and `by_comparative_difficulty` grade a failed sample `None` (excluded), and
-`inspect.topic_based_clustering` treats a failed request as an unparseable answer.
+`inspect.topic_based_clustering` does not ask a failed request again, though it asks again after an unparseable answer:
+a failed shard summary is skipped, a failed label request gives its document the fallback topic, and a failed codebook
+request keeps the last codebook, or raises `RuntimeError` when there is none yet.
 
 `prompt_template` replaces the prompt: a format string or a callable taking a dict. The placeholders are the row's
 fields (for a group, its first row's) plus `{input}`, `{output}`, `{criteria}`, `{max_score}`, and `{rubric}` (the

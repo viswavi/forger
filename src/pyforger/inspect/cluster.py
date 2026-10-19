@@ -250,8 +250,9 @@ def _topic_based_clustering(
         seed,
     )
     # A request that fails after the model's retries (a 504, a timeout) is not
-    # asked again: its shard gives no topics and its document gets the
-    # fallback topic; one warning at the end names how many.
+    # asked again: its shard gives no topics, its document gets the fallback
+    # topic, a failed codebook correction keeps the last codebook (a failed
+    # first codebook request raises); one warning at the end names how many.
     failures = _RequestFailures()
     shard_topics = _summarize_shards(shards, model, context, num_clusters, failures)
     codebook = _build_codebook(shard_topics, model, context, num_clusters, failures)
@@ -267,8 +268,9 @@ def _topic_based_clustering(
     )
     failures.report(
         f"inspect.topic_based_clustering: {len(failures)} requests failed after "
-        "retries; their shards were skipped and their documents got the "
-        "fallback topic"
+        "retries and were not asked again (a failed shard summary was skipped, "
+        "a failed label request gave its document the fallback topic, a failed "
+        "codebook correction kept the last codebook)"
     )
     return [topic_of[doc] for doc in row_docs]
 
