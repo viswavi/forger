@@ -503,6 +503,7 @@ def op(
     cache: bool = True,
     samples_arg: str | None = None,
     unkeyed: tuple[str, ...] = (),
+    category: str | None = None,
 ) -> Any:
     """Decorator: cache output on disk, content-addressed by inputs.
 
@@ -538,6 +539,11 @@ def op(
     min_yield=0.5)``. A violation is a warning in the ``@step`` report (or a
     logged warning outside steps). Neither keyword is part of the cache key.
     ``acquire.*`` ops take no input rows and reject both keywords.
+
+    ``category`` ("acquire", "alter", "filter", "inspect", or "other") is what
+    ``@step`` / ``@pipeline`` checks see, e.g. "no quality filter ran". Ops
+    defined in ``pyforger.<category>`` default to that category; any other op
+    defaults to "other", whatever its name.
     """
 
     def decorate(fn: Callable[..., T]) -> Callable[..., T]:
@@ -563,6 +569,7 @@ def op(
                     raise TypeError(f"unkeyed names {param!r}, not a parameter")
 
         op_name = name or f"{fn.__module__}.{fn.__qualname__}"
+        op_category = _tracking.register_op(op_name, fn.__module__, category)
         # Sanitize op_name to be a safe directory name
         safe_op_name = "".join(c if c.isalnum() or c in "._-" else "_" for c in op_name)
         # Code and closure are fixed here; plain-data globals are read per call.
@@ -584,9 +591,9 @@ def op(
             if not _cache_only and _NO_CACHE_SCOPE.get():
                 _no_cache = True
             _check_yield_bounds(min_yield, max_yield)
-            if (min_yield is not None or max_yield is not None) and (
-                _tracking.category_of(op_name) == "acquire"
-            ):
+            if (
+                min_yield is not None or max_yield is not None
+            ) and op_category == "acquire":
                 raise ValueError(
                     f"{op_name} takes no input rows, so min_yield / max_yield do "
                     "not apply; put them on the alter or filter op that follows"
@@ -608,6 +615,7 @@ def op(
                 rows = (first_arg, result)
                 call = _op_call(
                     op_name,
+                    op_category,
                     first_arg,
                     result,
                     cache_hit=cache_hit,
@@ -828,6 +836,7 @@ def tracked(op_name: str) -> Callable[[Callable[..., T]], Callable[..., T]]:
                     "Forger functions decorated with @tracked cannot use the "
                     f"reserved argument name '{reserved}'."
                 )
+        op_category = _tracking.register_op(op_name, fn.__module__)
 
         @wraps(fn)
         def wrapper(
@@ -862,6 +871,7 @@ def tracked(op_name: str) -> Callable[[Callable[..., T]], Callable[..., T]]:
                 rows = (rows[0], result)
                 call = _op_call(
                     op_name,
+                    op_category,
                     first_arg,
                     result,
                     cache_hit=False,
@@ -934,6 +944,7 @@ def _check_yield_bounds(min_yield: float | None, max_yield: float | None) -> Non
 
 def _op_call(
     op_name: str,
+    category: str,
     first_arg: Any,
     result: Any,
     *,
@@ -950,7 +961,6 @@ def _op_call(
     ``body_warnings`` come from ``_tracking.add_op_warning`` in the op's body;
     the op logged them already, so they are only added to the report.
     """
-    category = _tracking.category_of(op_name)
     # An acquire op's first argument is a prompt or query, not input rows.
     n_in = (
         len(first_arg)

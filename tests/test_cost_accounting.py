@@ -56,7 +56,7 @@ def _response(text: str = "hi", *, cost: float = 0.4) -> SimpleNamespace:
     )
 
 
-@op(name="alter.test_ask")
+@op(name="alter.test_ask", category="alter")
 def _ask(rows: list[dict], model, times: int = 1) -> list[dict]:
     """Make ``times`` single-prompt model calls, one batch each."""
     for _ in range(times):
@@ -71,7 +71,7 @@ def _ask(rows: list[dict], model, times: int = 1) -> list[dict]:
 _N_WORKERS = 5
 
 
-@op(name="alter.test_chunk")
+@op(name="alter.test_chunk", category="alter")
 def _chunk(rows: list[dict], i: int, barrier: threading.Barrier) -> list[dict]:
     """Add usage i+1 times 100 tokens, then wait until every chunk has added."""
     _tracking.add_usage(100 * (i + 1), i + 1, 0.01 * (i + 1))
@@ -133,7 +133,7 @@ def test_usage_from_a_thread_without_context_is_unattributed():
     With one pipeline running, the pipeline report lists it on its own line.
     """
 
-    @op(name="alter.test_detached")
+    @op(name="alter.test_detached", category="alter")
     def detached(rows):
         thread = threading.Thread(target=_tracking.add_usage, args=(70, 30, 0.5))
         thread.start()
@@ -192,7 +192,7 @@ def test_no_unattributed_line_when_every_call_is_attributed():
 def test_step_in_a_worker_thread_counts_toward_its_pipeline():
     """A step called from a thread without context still adds to the pipeline."""
 
-    @op(name="alter.test_spend")
+    @op(name="alter.test_spend", category="alter")
     def spend_op(rows):
         _tracking.add_usage(10, 10, 0.2)
         return list(rows)
@@ -218,7 +218,7 @@ def test_step_in_a_worker_thread_counts_toward_its_pipeline():
 # --------------------------------------------------------------------------- #
 
 
-@op(name="alter.test_costly")
+@op(name="alter.test_costly", category="alter")
 def _costly(rows: list[dict]) -> list[dict]:
     _tracking.add_usage(100, 50, 0.25)
     return list(rows)
@@ -469,7 +469,7 @@ def test_unattributed_usage_does_not_trip_the_pipeline_cap(monkeypatch):
     """
     model = Model("openai/test-model")
 
-    @op(name="alter.test_detached_then_ask")
+    @op(name="alter.test_detached_then_ask", category="alter")
     def detached_then_ask(rows):
         thread = threading.Thread(target=_tracking.add_usage, args=(1, 1, 5.0))
         thread.start()
@@ -617,7 +617,7 @@ def test_worker_step_that_raises_is_still_charged_to_its_pipeline(tmp_path):
     Its ledger lines also name the pipeline (they had pipeline=None).
     """
 
-    @op(name="alter.test_spend_then_fail")
+    @op(name="alter.test_spend_then_fail", category="alter")
     def spend_then_fail(rows):
         _tracking.add_usage(10, 10, 3.0, model_id="m")
         raise RuntimeError("bad batch")
@@ -648,7 +648,7 @@ def test_worker_step_that_raises_is_still_charged_to_its_pipeline(tmp_path):
 def test_op_that_raised_inside_a_step_reports_its_cost():
     """Repro: a step that caught an op's error showed $2 with no op row for it."""
 
-    @op(name="alter.test_parse_fails")
+    @op(name="alter.test_parse_fails", category="alter")
     def parse_fails(rows):
         _tracking.add_usage(20, 5, 2.0)
         raise ValueError("bad JSON")
@@ -676,7 +676,7 @@ def test_op_that_raised_inside_a_step_reports_its_cost():
 def test_op_that_raised_outside_a_step_is_not_a_bare_step():
     """A failed op called directly in a pipeline adds no bare step record."""
 
-    @op(name="alter.test_fails")
+    @op(name="alter.test_fails", category="alter")
     def fails(rows):
         raise ValueError("nope")
 
@@ -714,7 +714,7 @@ def test_progress_batch_writes_the_ledger_per_completed_request(tmp_path):
             seen_while_slow.append(len(_ledger(tmp_path)))
         return _response(cost=1.0)
 
-    @op(name="alter.test_ask_batch")
+    @op(name="alter.test_ask_batch", category="alter")
     def ask_batch(rows):
         model.generate_batch(["a", "b", "c", "slow"])
         return list(rows)

@@ -367,23 +367,23 @@ class TestSkipCacheWrite:
         """The inner op, its caller, and the caller's caller rerun; siblings hit."""
         runs: list[str] = []
 
-        @op(name="alter.test_inner_flaky")
+        @op(name="alter.test_inner_flaky", category="alter")
         def inner(x):
             runs.append("inner")
             skip_cache_write()
             return x
 
-        @op(name="alter.test_sibling")
+        @op(name="alter.test_sibling", category="alter")
         def sibling(x):
             runs.append("sibling")
             return x
 
-        @op(name="alter.test_middle")
+        @op(name="alter.test_middle", category="alter")
         def middle(x):
             runs.append("middle")
             return inner(x) + sibling(x)
 
-        @op(name="alter.test_outer")
+        @op(name="alter.test_outer", category="alter")
         def outer(x):
             runs.append("outer")
             return middle(x)
@@ -408,12 +408,12 @@ class TestSkipCacheWrite:
         monkeypatch.setenv("FORGER_STEP_REPORT", "0")
         _tracking.clear_step_records()
 
-        @op(name="alter.test_warn_inner")
+        @op(name="alter.test_warn_inner", category="alter")
         def warn_inner(rows):
             _tracking.add_op_warning("inner trouble")
             return rows
 
-        @op(name="alter.test_warn_outer")
+        @op(name="alter.test_warn_outer", category="alter")
         def warn_outer(rows):
             return warn_inner(rows)
 
@@ -547,7 +547,7 @@ def test_plain_thread_pool_step_is_not_cached(monkeypatch):
     assert cached.calls == []
 
 
-@op(name="filter.test_drop_none")
+@op(name="filter.test_drop_none", category="filter")
 def filter_none(rows):
     """Drop None slots (a filter, so the step ends with one)."""
     return [row for row in rows if row is not None]

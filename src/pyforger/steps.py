@@ -77,7 +77,8 @@ _DIVERSITY_FILTERS = frozenset(
         "filter.by_topic_frequency",
     }
 )
-# Every other filter.* op counts as a quality filter. by_length and by_predicate
+# Every other op of category "filter" counts as a quality filter, including a
+# user op declared with @op(category="filter"). by_length and by_predicate
 # check structure ("has ≥3 papers"), and any lambda would pass as a judge.
 _NON_QUALITY_FILTERS = _DIVERSITY_FILTERS | {"filter.by_length", "filter.by_predicate"}
 
@@ -840,18 +841,18 @@ def _check_pipeline(rec: PipelineRecord) -> None:
     # A step cached by an older Forger version has no record of its ops; skip
     # the checks for which ops ran rather than warn about ops that may have run.
     ops_known = all(s.ops or not s.cache_hit for s in rec.steps)
-    names = {call.op_name for s in rec.steps for call in s.ops}
+    # Categories come from the op registry, not names: a user's
+    # @op(name="filter.keep_all") is "other" and satisfies nothing here.
+    filters = {c.op_name for s in rec.steps for c in s.ops if c.category == "filter"}
     if ops_known:
-        if not any(
-            n.startswith("filter.") and n not in _NON_QUALITY_FILTERS for n in names
-        ):
+        if not filters - _NON_QUALITY_FILTERS:
             rec.warnings.append("no quality filter ran (e.g. filter.by_llm_score)")
-        if not names & _DIVERSITY_FILTERS:
+        if not filters & _DIVERSITY_FILTERS:
             rec.warnings.append(
                 "no diversity filter ran (filter.by_exact_match, by_rouge_l, "
                 "by_n_gram_overlap, or by_topic_frequency)"
             )
-        if not any(n.startswith("inspect.") for n in names):
+        if not any(c.category == "inspect" for s in rec.steps for c in s.ops):
             rec.warnings.append("no inspect op ran")
     _filter_notes(rec)
     bare = [s.ops[0].op_name for s in rec.steps if s.kind == "bare"]

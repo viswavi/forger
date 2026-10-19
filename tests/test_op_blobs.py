@@ -51,7 +51,7 @@ def test_large_values_round_trip_through_blobs(tmp_path) -> None:
         "small": "kept inline",
     }
 
-    @op(name="alter.payload")
+    @op(name="alter.payload", category="alter")
     def make(n: int) -> dict:
         calls.append(n)
         return payload
@@ -69,7 +69,7 @@ def test_large_values_round_trip_through_blobs(tmp_path) -> None:
 def test_steps_carrying_a_payload_store_it_once(tmp_path) -> None:
     """Six entries (three steps and their ops) share one blob per large value."""
 
-    @op(name="alter.tag")
+    @op(name="alter.tag", category="alter")
     def tag(rows, *, field):
         return [{**r, field: True} for r in rows]
 
@@ -103,7 +103,7 @@ def test_entries_pickled_without_blobs_still_load(tmp_path) -> None:
     """An entry written as a plain pickle (older Forger) is a cache hit."""
     calls = []
 
-    @op(name="alter.old")
+    @op(name="alter.old", category="alter")
     def make(n: int) -> list:
         calls.append(n)
         return _rows()
@@ -120,7 +120,7 @@ def test_a_missing_blob_is_a_cache_miss(tmp_path) -> None:
     """Deleting blobs/ recomputes the result, and _cache_only reports a miss."""
     calls = []
 
-    @op(name="alter.gone")
+    @op(name="alter.gone", category="alter")
     def make(n: int) -> list:
         calls.append(n)
         return _rows()
@@ -142,7 +142,7 @@ def test_a_list_that_contains_itself_round_trips(monkeypatch) -> None:
     # The trace hashes each result, which a cyclic value cannot be.
     monkeypatch.setattr(op_module, "_TRACE", deque(maxlen=0))
 
-    @op(name="alter.cycle")
+    @op(name="alter.cycle", category="alter")
     def make(n: int) -> list:
         inner: list = ["z" * 1_000 for _ in range(20)]
         inner.append(inner)
@@ -158,7 +158,7 @@ def test_large_rows_hash_without_a_cost_warning(caplog) -> None:
     """60 MiB of row payloads hash quickly, so they log no cost warning."""
     rows = [{"id": i, "trace": f"{i}" + "x" * 2**20} for i in range(60)]
 
-    @op(name="alter.count")
+    @op(name="alter.count", category="alter")
     def count(rows: list) -> int:
         return len(rows)
 

@@ -115,7 +115,7 @@ def gpt(**kwargs) -> Model:
     return Model("gpt-4o", show_progress=False, **kwargs)
 
 
-@op(name="alter.ask", cache=False, samples_arg="n")
+@op(name="alter.ask", category="alter", cache=False, samples_arg="n")
 def _ask(prompts, model, n=1, **kwargs):
     """Send `prompts` from inside an op, one row per prompt."""
     return model.generate_batch(prompts, n=n, cache_rows=prompts, **kwargs)
@@ -155,7 +155,7 @@ class TestHitsAndMisses:
         """A worker thread that did not copy the context has no op scope."""
         model = gpt()
 
-        @op(name="alter.threaded", cache=False)
+        @op(name="alter.threaded", category="alter", cache=False)
         def threaded(prompts, model):
             with ThreadPoolExecutor(1) as pool:
                 return pool.submit(model.generate_batch, prompts).result()
@@ -627,13 +627,13 @@ class TestOpScope:
         """Two ops with other bodies but one name and template share nothing."""
         model = gpt()
 
-        @op(name="alter.ask", cache=False)
+        @op(name="alter.ask", category="alter", cache=False)
         def ask(rows, model):
             return model.generate_batch([r["q"] for r in rows], cache_rows=rows)
 
         ask([{"q": "a"}], model)
 
-        @op(name="alter.ask", cache=False)
+        @op(name="alter.ask", category="alter", cache=False)
         def ask(rows, model):  # noqa: F811 - an edited version of the op
             out = model.generate_batch([r["q"] for r in rows], cache_rows=rows)
             return list(out)
@@ -756,7 +756,7 @@ class TestClusterRetries:
         prompt = _assign_prompt("A triangle has three sides.", codebook)
         fake.script = {prompt: ['{"topic": "Nope"}', '{"topic": "Geometry"}']}
 
-        @op(name="inspect.assign", cache=False)
+        @op(name="inspect.assign", category="inspect", cache=False)
         def assign(docs, model):
             return _assign_topics(
                 docs, model, "math", codebook, truncation=1000, max_retries=2

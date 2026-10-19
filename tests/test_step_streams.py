@@ -32,7 +32,7 @@ def _rows(n: int, start: int = 0) -> list[dict]:
     return [{"id": i, "text": f"row number {i}"} for i in range(start, start + n)]
 
 
-@op(name="alter.test_tag")
+@op(name="alter.test_tag", category="alter")
 def _tag(rows: list[Any]) -> list[Any]:
     return [{**r, "tag": "t"} for r in rows]
 

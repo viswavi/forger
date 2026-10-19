@@ -28,18 +28,18 @@ def _rows(n: int) -> list[dict]:
     return [{"id": i, "text": f"row number {i}"} for i in range(n)]
 
 
-@op(name="alter.test_tag")
+@op(name="alter.test_tag", category="alter")
 def _tag(rows: list[dict]) -> list[dict]:
     """New dicts, like an LLM op's output."""
     return [{**r, "tag": "t"} for r in rows]
 
 
-@op(name="acquire.test_sample")
+@op(name="acquire.test_sample", category="acquire")
 def _sample(prompt: str, *, n: int) -> list[dict]:
     return [{"id": i, "text": f"{prompt} {i}"} for i in range(n)]
 
 
-@op(name="alter.test_kw_only")
+@op(name="alter.test_kw_only", category="alter")
 def _kw_only(*, rows: list[dict]) -> list[dict]:
     return list(rows)
 
@@ -280,7 +280,7 @@ def test_string_rows_compare_only_by_count():
 def test_inspect_ops_are_skipped():
     """An inspect op returns a report, not rows; it does not break the stream."""
 
-    @op(name="inspect.test_topics")
+    @op(name="inspect.test_topics", category="inspect")
     def topics(rows):
         return ["topic"] * len(rows)
 
@@ -355,7 +355,7 @@ def test_rows_are_not_held_after_the_step():
         def cache_key(self) -> str:
             return "Row"
 
-    @op(name="alter.test_objects", cache=False)
+    @op(name="alter.test_objects", category="alter", cache=False)
     def objects(rows):
         return [Row() for _ in rows]
 

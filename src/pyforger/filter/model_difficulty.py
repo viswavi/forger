@@ -351,7 +351,8 @@ def by_pass_at_k(
     return kept
 
 
-@op(name="filter.model_difficulty.predictions")
+# A sampler, not a filter: its first argument is prompts, and it drops nothing.
+@op(name="filter.model_difficulty.predictions", category="other")
 def _predictions(
     prompts: list[Prompt],
     *,

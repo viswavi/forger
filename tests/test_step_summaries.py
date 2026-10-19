@@ -77,12 +77,12 @@ class _FakeSummarizer:
         return [f'"{self.reply}"\nextra line'] * n
 
 
-@op(name="alter.test_identity")
+@op(name="alter.test_identity", category="alter")
 def _identity(rows: list[dict]) -> list[dict]:
     return list(rows)
 
 
-@op(name="filter.test_keep_all")
+@op(name="filter.test_keep_all", category="filter")
 def _keep_all(rows: list[dict]) -> list[dict]:
     return _tracking.keep_where(rows, [True] * len(rows))
 

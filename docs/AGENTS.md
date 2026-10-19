@@ -111,6 +111,9 @@ cached it, marked `cached`, with that run's warnings.
 - Warnings: an op misses its `min_yield` / `max_yield`; a step's type hints cannot be resolved; `show=` names a field
   no output row has; a pipeline has only one step; no quality filter, no diversity filter, or no inspect op ran
   anywhere; an op was called in the pipeline outside a step.
+- These checks use each op's category, not its name. Ops under `pyforger.acquire/alter/filter/inspect` have their
+  package's category; your own `@op` is `"other"` (even `@op(name="filter.x")`) unless it declares one, e.g.
+  `@op(category="filter")` for a custom quality filter.
 - Filter notes: the pipeline summary lists the steps that ran no filter and the filters that removed nothing (op, step,
   and rows seen). These are notes, not warnings, and `strict=True` does not raise on them: a generate-only step
   followed by a filter step is fine, and a filter that removes nothing may be a check that passed or one that tests
