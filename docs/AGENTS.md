@@ -199,6 +199,18 @@ them, and score lists of over 100,000 rows, have none: rerun with `_no_cache=Tru
   request batch raises `pyforger.BudgetExceededError`, as does `dynamic_step` before starting an agent or during its
   run. Requests already sent finish and are recorded, so spend can pass a cap by up to one batch (or one agent step)
   per thread sending them.
+- Smoke runs: run every new pipeline version with `FORGER_SMOKE_ROWS=3 python pipeline.py` first (or
+  `@pipeline(smoke=3)`); it exercises every op in about a minute, so a wrong keyword or a missing argument fails at
+  once instead of minutes into the full run. Inside the pipeline, every `@step` call cuts each rows argument (each of
+  several inputs, `*rows` items too) to its first 3 rows. These ops also cap their counts: `acquire.sample_from_LLM`
+  (`n`) and `acquire.retrieve` / `retrieve_from_*` (the first 3 `queries`, `n` at most 3). Other ops keep their
+  counts, so a step that makes rows from nothing in some other way still makes all of them. Step reports say
+  `SMOKE: first 3 of 120 rows`, and the summary ends with `SMOKE RUN: at most 3 rows per step; outputs are not
+  representative`. Smoke results are cached under keys that include the row limit, so a later full run never reads
+  or overwrites them and recomputes every step. A second smoke run of the same code reuses them. The request cache is
+  not keyed on the limit, though, so the full run sends no model request the smoke run already sent for the same rows:
+  `generate_from_context` asks only about rows 4 onward, and `sample_from_LLM(n=100)` asks for 97 more samples.
+  `smoke=0` turns smoke mode off even when the variable is set.
 
 ### Operation reference
 
@@ -876,7 +888,8 @@ def debug_step(rows):
 
 **Cache key.** SHA-256 of: the op name, the function's qualified name and compiled body (bytecode, constants, names,
 varnames, freevars, argcount, applied recursively to nested code objects), the captured closure values, the module
-globals it reads that are plain data or define `cache_key()`, and the call arguments. Plain data is `None`, `bool`,
+globals it reads that are plain data or define `cache_key()`, and the call arguments, plus the row limit in a smoke
+run. Plain data is `None`, `bool`,
 numbers, `str`, `bytes`, and tuples, lists, dicts, and sets of those. A global counts when the body loads it by name,
 including in lambdas, comprehensions, and inner functions (`r.split()` does not read a global `split`). Editing a
 `PROMPT = "..."` constant or a config dict, or pointing `MODEL = Model(...)` at another model, therefore invalidates

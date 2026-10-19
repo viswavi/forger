@@ -31,7 +31,7 @@ _WRAPPER_OF = {
 }
 
 
-@tracked("acquire.retrieve")
+@tracked("acquire.retrieve", smoke=("queries", "n"))
 def retrieve(
     source: RetrievalSource,
     mode: RetrieveMode = RetrieveMode.QUERY,
@@ -48,7 +48,9 @@ def retrieve(
     Calls are not cached; inside a ``@step`` they are listed as
     ``acquire.retrieve``. Inside a ``@pipeline`` the rows' text is
     fingerprinted, and the pipeline warns when none of it reaches a model
-    prompt or the pipeline's output.
+    prompt or the pipeline's output. In a smoke run
+    (``FORGER_SMOKE_ROWS=3``) only the first 3 queries run, with ``n``
+    capped to 3.
 
     Returns:
         The source's rows for each query in turn, each with a ``query`` field
@@ -88,7 +90,7 @@ def _register(source: RetrievalSource, rows: list[dict]) -> None:
     _tracking.register_documents(label, rows)
 
 
-@tracked("acquire.retrieve")
+@tracked("acquire.retrieve", smoke=("queries", "n"))
 def _retrieve_concurrently(
     source: S2RetrievalSource,
     mode: RetrieveMode,

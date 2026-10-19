@@ -145,7 +145,7 @@ def _generation_loop(
             consecutive_failed_rounds = 0
 
 
-@op(name="acquire.sample_from_LLM", samples_arg="n")
+@op(name="acquire.sample_from_LLM", samples_arg="n", smoke=("n",))
 def sample_from_LLM(
     prompt: Prompt,
     model: Model,
@@ -194,6 +194,7 @@ def sample_from_LLM(
         model's request cache follows the same rule: a call that differs in any
         argument but `n` draws new samples, and raising `n` keeps the samples
         already drawn and requests only the extra ones.
+        In a smoke run (``FORGER_SMOKE_ROWS=3``), `n` is capped to the row limit.
     """
     if batch_size is not None and batch_size <= 0:
         raise ValueError("batch_size must be positive")
