@@ -9,13 +9,14 @@ import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import httpx
 import litellm
 import openai
 import pytest
 
 import pyforger.acquire.model as model_module
 from pyforger import op
-from pyforger.acquire.model import Model, _duration
+from pyforger.acquire.model import Model, _duration, _is_transient
 
 _LOGGER = "pyforger.acquire.model"
 
@@ -119,12 +120,14 @@ class TestDefaultTimeout:
         pickle.loads(pickle.dumps(model)).generate_batch(["A"])
         assert sent_timeouts(mock_litellm) == [600.0]
 
-    def test_timed_out_attempt_is_retried(self):
-        """A timed-out attempt raises litellm.Timeout (transient) and is retried.
+    @pytest.mark.parametrize("num_retries", [0, 1, 2])
+    def test_timed_out_attempt_is_retried(self, num_retries, monkeypatch):
+        """A timed-out attempt is retried: num_retries + 1 attempts in all.
 
-        Real litellm with mock_timeout: no request leaves the process. One
-        attempt plus num_retries=2 retries.
+        Real litellm with mock_timeout: no request leaves the process. LiteLLM
+        gets num_retries=0, so only Model retries.
         """
+        monkeypatch.setattr(model_module, "_sleep", lambda seconds: None)
         attempts = []
         handle = litellm.main._handle_mock_timeout
 
@@ -133,13 +136,161 @@ class TestDefaultTimeout:
             return handle(*args, **kwargs)
 
         model = Model(
-            "openai/gpt-4o", api_key="sk-test", timeout=0.01, mock_timeout=True
+            "openai/gpt-4o",
+            api_key="sk-test",
+            timeout=0.01,
+            num_retries=num_retries,
+            mock_timeout=True,
         )
         with patch.object(litellm.main, "_handle_mock_timeout", count):
             with pytest.raises(litellm.Timeout) as excinfo:
                 model.generate_batch(["A"])
         assert isinstance(excinfo.value, openai.APITimeoutError)
-        assert attempts == [0.01, 0.01, 0.01]
+        assert attempts == [0.01] * (num_retries + 1)
+
+
+def rate_limit(message="slow down", retry_after=None):
+    """A litellm 429, optionally with a Retry-After header."""
+    headers = {} if retry_after is None else {"retry-after": retry_after}
+    response = httpx.Response(
+        429, headers=headers, request=httpx.Request("POST", "http://test")
+    )
+    return litellm.RateLimitError(
+        message, llm_provider="openai", model="gpt-4o", response=response
+    )
+
+
+class Failing:
+    """Fake completion: raises the errors in order, then answers."""
+
+    def __init__(self, *errors):
+        """Raise `errors` on the first calls."""
+        self.errors = list(errors)
+        self.calls = 0
+
+    def __call__(self, messages, **kwargs):
+        """Fake litellm.completion."""
+        self.calls += 1
+        if self.errors:
+            raise self.errors.pop(0)
+        return make_response(messages[0]["content"])
+
+
+@pytest.fixture
+def sleeps(monkeypatch):
+    """The backoff delays Model sleeps, without sleeping."""
+    delays: list[float] = []
+    monkeypatch.setattr(model_module, "_sleep", delays.append)
+    return delays
+
+
+class TestRetries:
+    """Model retries transient errors itself; LiteLLM is told not to."""
+
+    def test_litellm_gets_num_retries_zero(self, mock_litellm):
+        """Neither LiteLLM's wrapper nor the openai client retries."""
+        Model("gpt-4o", num_retries=5).generate_batch(["A"])
+        kwargs = mock_litellm.completion.call_args.kwargs
+        assert kwargs["num_retries"] == 0
+        assert "max_retries" not in kwargs
+
+    def test_explicit_max_retries_reaches_the_client(self, mock_litellm):
+        """A caller's max_retries is sent, without the num_retries that overrides it."""
+        Model("gpt-4o", max_retries=4).generate_batch(["A"])
+        kwargs = mock_litellm.completion.call_args.kwargs
+        assert kwargs["max_retries"] == 4
+        assert "num_retries" not in kwargs
+
+    def test_429_retried_with_backoff(self, mock_litellm, sleeps):
+        """Two 429s, then an answer: 3 attempts, waits of about 1s then 2s."""
+        fake = Failing(rate_limit(), rate_limit())
+        mock_litellm.completion.side_effect = fake
+        assert Model("gpt-4o").generate_batch(["A"]) == [["A"]]
+        assert fake.calls == 3
+        assert 0.5 <= sleeps[0] <= 1.0 and 1.0 <= sleeps[1] <= 2.0
+
+    def test_retry_after_is_honoured(self, mock_litellm, sleeps):
+        """A 429 with Retry-After: 7 waits 7s; a huge one is capped at 60s."""
+        fake = Failing(rate_limit(retry_after="7"), rate_limit(retry_after="3600"))
+        mock_litellm.completion.side_effect = fake
+        Model("gpt-4o").generate_batch(["A"])
+        assert sleeps == [7.0, 60.0]
+
+    def test_gives_up_after_num_retries(self, mock_litellm, sleeps):
+        """num_retries=2: the third 503 is raised, with no fourth attempt."""
+        errors = [
+            litellm.ServiceUnavailableError("busy", llm_provider="openai", model="m")
+            for _ in range(4)
+        ]
+        fake = Failing(*errors)
+        mock_litellm.completion.side_effect = fake
+        with pytest.raises(litellm.ServiceUnavailableError):
+            Model("gpt-4o", num_retries=2).generate_batch(["A"])
+        assert fake.calls == 3
+        assert len(sleeps) == 2
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            litellm.BadRequestError("too long", model="m", llm_provider="openai"),
+            litellm.AuthenticationError("bad key", llm_provider="openai", model="m"),
+            litellm.NotFoundError("no model", model="m", llm_provider="openai"),
+            litellm.PermissionDeniedError(
+                "denied",
+                llm_provider="openai",
+                model="m",
+                response=httpx.Response(403, request=httpx.Request("POST", "http://t")),
+            ),
+            rate_limit("You exceeded your current quota (insufficient_quota)"),
+            litellm.BudgetExceededError(current_cost=2.0, max_budget=1.0),
+        ],
+        ids=["400", "401", "404", "403", "quota-429", "budget"],
+    )
+    def test_permanent_errors_are_not_retried(self, mock_litellm, sleeps, error):
+        """A bad request, key, model, permission, or exhausted quota: one attempt."""
+        fake = Failing(error)
+        mock_litellm.completion.side_effect = fake
+        with pytest.raises(type(error)):
+            Model("gpt-4o").generate_batch(["A"])
+        assert fake.calls == 1
+        assert sleeps == []
+
+    def test_retried_inside_a_batch(self, mock_litellm, sleeps):
+        """In a batch, only the failing request is asked again."""
+        calls: list[str] = []
+        failed: set[str] = set()
+
+        def fake(messages, **kwargs):
+            text = messages[0]["content"]
+            calls.append(text)
+            if text == "B" and text not in failed:
+                failed.add(text)
+                raise litellm.InternalServerError("504", llm_provider="o", model="m")
+            return make_response(text)
+
+        mock_litellm.completion.side_effect = fake
+        model = Model("gpt-4o", show_progress=False)
+        assert model.generate_batch(["A", "B", "C"]) == [["A"], ["B"], ["C"]]
+        assert sorted(calls) == ["A", "B", "B", "C"]
+        assert len(sleeps) == 1
+
+
+@pytest.mark.parametrize(
+    "error, transient",
+    [
+        (litellm.Timeout("t", model="m", llm_provider="openai"), True),
+        (litellm.APIConnectionError("reset", llm_provider="openai", model="m"), True),
+        (litellm.InternalServerError("ise", llm_provider="openai", model="m"), True),
+        (TimeoutError(), True),
+        (ConnectionResetError(), True),
+        (rate_limit(), True),
+        (rate_limit("insufficient_quota"), False),
+        (RuntimeError("no status"), False),
+    ],
+)
+def test_is_transient(error, transient):
+    """Timeouts, lost connections, 429s and 5xx are transient; quota is not."""
+    assert _is_transient(error) is transient
 
 
 class TestHeartbeat:

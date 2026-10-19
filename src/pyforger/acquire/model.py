@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import os
+import random
 import statistics
 import sys
 import threading
@@ -45,6 +46,24 @@ _STRAGGLER_FACTOR = 5.0
 # LiteLLM's own default is 6000s, so a stuck request blocks for 100 minutes.
 _DEFAULT_TIMEOUT_S = 600.0
 _SLOW_TOKENS_PER_S = 25.0
+# Model(num_retries=) waits before retry k (0, 1, ...) about this many seconds
+# times 2**k, at most _RETRY_MAX_S: 1s, 2s, 4s, ... A 429's Retry-After header
+# is honoured up to _RETRY_AFTER_MAX_S.
+_RETRY_BASE_S = 1.0
+_RETRY_MAX_S = 30.0
+_RETRY_AFTER_MAX_S = 60.0
+# Status codes worth asking again: request timeout, conflict, too early, rate
+# limit. Every 5xx is too.
+_TRANSIENT_STATUS = frozenset({408, 409, 425, 429})
+# A 429 (or other error) that means the account is out of quota or budget,
+# which no retry fixes, e.g. OpenAI's "insufficient_quota".
+_QUOTA_MARKERS = (
+    "insufficient_quota",
+    "exceeded your current quota",
+    "budget",
+    "credit balance",
+    "billing",
+)
 
 _logger = get_formatted_logger(__name__)
 
@@ -70,6 +89,69 @@ def _request_timeout(timeout: Any, max_tokens: int | None) -> Any:
     if max_tokens is None:
         return _DEFAULT_TIMEOUT_S
     return max(_DEFAULT_TIMEOUT_S, float(round(max_tokens / _SLOW_TOKENS_PER_S)))
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """True for provider errors a retry can fix: timeouts, 429s, 5xx, lost connections.
+
+    litellm's and openai's ``Timeout`` / ``APIConnectionError`` and builtin
+    ``TimeoutError`` / ``ConnectionError`` are transient; other errors are judged
+    by their ``status_code``. A bad key (401), unknown model (404), or bad
+    request (400, e.g. context length) is not, nor is an error with no status,
+    nor an exhausted quota or budget (a 429 with "insufficient_quota").
+    """
+    text = f"{type(exc).__name__} {getattr(exc, 'code', '')} {exc}".lower()
+    if any(marker in text for marker in _QUOTA_MARKERS):
+        return False
+    if isinstance(exc, (TimeoutError, ConnectionError)):
+        return True
+    try:
+        import openai
+    except ImportError:  # pragma: no cover - openai ships with litellm
+        pass
+    else:
+        if isinstance(exc, (openai.APITimeoutError, openai.APIConnectionError)):
+            return True
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        return status in _TRANSIENT_STATUS or status >= 500
+    return False
+
+
+def _retry_after(exc: BaseException) -> float | None:
+    """Seconds from the error's Retry-After header, or None without one.
+
+    openai errors carry the httpx response; litellm's also copy its headers
+    to ``litellm_response_headers``. An HTTP-date value is ignored.
+    """
+    response = getattr(exc, "response", None)
+    for headers in (
+        getattr(response, "headers", None),
+        getattr(exc, "litellm_response_headers", None),
+    ):
+        if headers is None:
+            continue
+        try:
+            value = headers.get("retry-after") or headers.get("Retry-After")
+            return max(0.0, float(value))
+        except (AttributeError, TypeError, ValueError):
+            continue
+    return None
+
+
+def _retry_delay(retry: int, exc: BaseException) -> float:
+    """Seconds to wait before retry `retry` (0, 1, ...) after `exc`."""
+    after = _retry_after(exc)
+    if after is not None:
+        return min(after, _RETRY_AFTER_MAX_S)
+    # Half to full backoff, so 100 requests that hit one 429 do not return
+    # together.
+    backoff = min(_RETRY_BASE_S * 2**retry, _RETRY_MAX_S)
+    return backoff * (0.5 + random.random() / 2)
+
+
+# Patched in tests, which also sleep in their fake completions.
+_sleep = time.sleep
 
 
 def _duration(seconds: float) -> str:
@@ -101,15 +183,18 @@ class _RequestClock:
         n: int,
         call_kwargs: dict[str, Any],
         semaphore: threading.BoundedSemaphore | None,
+        retries: int = 0,
     ) -> Any:
-        """`_complete` for request `i`, timed from when it holds its slot."""
+        """`_complete` for request `i`, timed from when it first holds a slot."""
 
         def start() -> None:
             with self.lock:
-                self.started[i] = time.monotonic()
+                self.started.setdefault(i, time.monotonic())
 
         try:
-            return _complete(messages, n, call_kwargs, semaphore, on_start=start)
+            return _complete(
+                messages, n, call_kwargs, semaphore, on_start=start, retries=retries
+            )
         finally:
             with self.lock:
                 self.ended[i] = time.monotonic()
@@ -140,8 +225,8 @@ class _RequestClock:
             return
         self.warned.update(i for i, _ in late)
         if isinstance(self.timeout, (int, float)):
-            # litellm retries a timed-out attempt (num_retries), so a request
-            # can stay in flight past its timeout.
+            # A timed-out attempt is retried (num_retries), so a request can
+            # stay in flight past its timeout.
             limit_text = (
                 f"each attempt times out after {_duration(self.timeout)} "
                 "(Model(timeout=...)) and is retried"
@@ -232,20 +317,44 @@ def _complete(
     call_kwargs: dict[str, Any],
     semaphore: threading.BoundedSemaphore | None,
     on_start: Callable[[], None] | None = None,
+    retries: int = 0,
 ) -> Any:
     """One litellm.completion call, holding a `max_concurrency` slot if any.
 
+    A transient error (`_is_transient`: a timeout, 429, 5xx, lost connection)
+    is retried up to `retries` times after a short backoff, without holding
+    the slot; any other error, or the last one, is raised. So a request makes
+    at most `retries + 1` attempts (LiteLLM itself is told not to retry).
+
     The response's usage is recorded here, in the worker, before the caller
     sees it: a batch that later raises or is interrupted keeps every
-    finished request in the step report. `on_start` runs once the request
-    holds its slot, just before it is sent.
+    finished request in the step report. `on_start` runs each time the
+    request holds its slot, just before it is sent.
     """
-    with contextlib.ExitStack() as slot:
-        if semaphore is not None:
-            slot.enter_context(semaphore)
-        if on_start is not None:
-            on_start()
-        response = litellm.completion(messages=messages, n=n, **call_kwargs)
+    retry = 0
+    while True:
+        try:
+            with contextlib.ExitStack() as slot:
+                if semaphore is not None:
+                    slot.enter_context(semaphore)
+                if on_start is not None:
+                    on_start()
+                response = litellm.completion(messages=messages, n=n, **call_kwargs)
+            break
+        except Exception as exc:
+            if retry >= retries or not _is_transient(exc):
+                raise
+            delay = _retry_delay(retry, exc)
+            retry += 1
+            _logger.info(
+                "LLM request (%s) failed with %s; retry %d of %d in %.1fs",
+                call_kwargs.get("model", "?"),
+                type(exc).__name__,
+                retry,
+                retries,
+                delay,
+            )
+            _sleep(delay)
     _add_response_usage(response, call_kwargs.get("model", "?"))
     return response
 
@@ -257,10 +366,12 @@ def _batch_completion_with_progress(
     semaphore: threading.BoundedSemaphore | None = None,
     max_workers: int = _DEFAULT_MAX_WORKERS,
     progress: str = "bar",
+    retries: int = 0,
 ) -> list[Any]:
     """Send (messages, n) requests concurrently; return responses or errors.
 
-    Results are in request order.
+    Results are in request order. Each request retries transient errors up
+    to `retries` times (see `_complete`).
 
     A replacement for `litellm.batch_completion`, which retrieves
     `future.result()` in submission order, so the whole call looks frozen until
@@ -281,7 +392,9 @@ def _batch_completion_with_progress(
             # One context copy per request, so add_usage in the worker sees the
             # caller's op / step / pipeline contextvars.
             run: Callable[..., Any] = contextvars.copy_context().run
-            future = executor.submit(run, clock.run, i, msgs, n, call_kwargs, semaphore)
+            future = executor.submit(
+                run, clock.run, i, msgs, n, call_kwargs, semaphore, retries
+            )
             future_to_idx[future] = i
         finished: Iterable[Future] = _watch(
             future_to_idx, total, desc, progress == "log", clock
@@ -632,8 +745,12 @@ class Model:
                 (OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.) when None.
             temperature: Default sampling temperature.
             max_tokens: Default max tokens. None lets the provider decide.
-            num_retries: Retries with exponential backoff on transient
-                failures.
+            num_retries: Retries per request on transient failures (a
+                timeout, 429, 5xx, or lost connection), after a 1s, 2s, ...
+                backoff or a 429's Retry-After. A request makes at most
+                num_retries + 1 attempts: LiteLLM is sent num_retries=0, so
+                neither it nor the openai client retries on top. A 400, 401,
+                403, 404, or an exhausted quota is not retried.
             show_progress: Progress for a generate_batch() call that sends
                 more than one request (several prompts, or n > 1 on a model
                 that does not support n): a tqdm bar when stderr is a
@@ -644,8 +761,8 @@ class Model:
                 copy counts). None (default) caps each call at 100 requests.
                 Not part of cache_key().
             timeout: Seconds one request attempt may take before it fails
-                with a timeout, which litellm retries like other transient
-                errors (num_retries). "auto" (default) is 600, or
+                with a timeout, which is retried like other transient errors
+                (num_retries). "auto" (default) is 600, or
                 max_tokens / 25 when that is longer (32768 tokens get 1311).
                 None leaves LiteLLM's default (6000). Not part of cache_key().
             **kwargs: Passed through to litellm.completion()
@@ -835,9 +952,14 @@ class Model:
             max_tokens=max_tokens,
             stop=stop,
             api_key=self._api_key,
-            num_retries=self._num_retries,
             **self._kwargs,
         )
+        # Model retries in _complete, so LiteLLM must not: num_retries=0 turns
+        # off its retries and sets the openai client's max_retries to 0. A
+        # max_retries the caller passed would be overwritten by it, so then
+        # only the openai client retries, as asked.
+        if "max_retries" not in self._kwargs:
+            call_kwargs["num_retries"] = 0
         timeout = _request_timeout(self._timeout, max_tokens)
         if timeout is not None:
             call_kwargs["timeout"] = timeout
@@ -908,7 +1030,15 @@ class Model:
         if len(requests) == 1:
             messages, size = requests[0]
             try:
-                responses = [_complete(messages, size, call_kwargs, self._semaphore)]
+                responses = [
+                    _complete(
+                        messages,
+                        size,
+                        call_kwargs,
+                        self._semaphore,
+                        retries=self._num_retries,
+                    )
+                ]
             except Exception as exc:
                 if not return_exceptions:
                     raise
@@ -920,6 +1050,7 @@ class Model:
                 semaphore=self._semaphore,
                 max_workers=self._max_concurrency or _DEFAULT_MAX_WORKERS,
                 progress=progress,
+                retries=self._num_retries,
             )
         if not return_exceptions:
             for response in responses:

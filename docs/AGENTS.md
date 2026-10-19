@@ -282,13 +282,17 @@ The log line keeps coming every 30 seconds while requests are in flight, also wh
 
 Each request attempt times out after `Model(timeout=...)` seconds. The default, `"auto"`, is 600 seconds (10 minutes),
 or `max_tokens / 25` when that is longer (`max_tokens=32768` gets 1311 s), so a long reasoning call at a slow 25
-tokens/s still finishes. A timed-out attempt is a transient error: LiteLLM retries it like a 429 or a 5xx
-(`num_retries`). Pass a number to change it (`Model(..., timeout=1800)`), or `timeout=None` for LiteLLM's own
-default (6000 s). The timeout is not part of the cache key, so changing it keeps cached results.
-A request that hangs on every attempt is retried by both LiteLLM's wrapper and the openai client, so it can wait up
-to `timeout × (2 × num_retries + 1)` on OpenAI-client providers (`openai/`, `azure/`, `litellm_proxy/`, and
-OpenAI-compatible gateways): 50 minutes with the defaults (600 s, `num_retries=2`). Other providers wait up to
-`timeout × (num_retries + 1)`. Lower `num_retries` or `timeout` to bound it.
+tokens/s still finishes. Pass a number to change it (`Model(..., timeout=1800)`), or `timeout=None` for LiteLLM's
+own default (6000 s). The timeout is not part of the cache key, so changing it keeps cached results.
+
+`Model` retries each request itself, up to `num_retries` times (default 2), and only on transient errors: a timeout,
+a lost connection, a 408/409/425/429, or a 5xx. It waits about 1 s, then 2 s, 4 s, ... between attempts (a 429's
+`Retry-After` header instead, up to 60 s), and logs each retry at INFO. A 400 (e.g. an over-long prompt), 401, 403,
+404, or an exhausted quota or budget (`insufficient_quota`) raises at once. LiteLLM is sent `num_retries=0`, so
+neither it nor the openai client retries on top: a request makes at most `num_retries + 1` attempts on every
+provider, and one that hangs on every attempt waits at most `timeout × (num_retries + 1)` (30 minutes with the
+defaults). Lower `num_retries` or `timeout` to bound it. Passing `max_retries=` to `Model` turns the openai client's
+own retries back on: that many more attempts inside each of Forger's.
 
 When a request has been in flight much longer than the batch's finished ones (over 2 minutes and over 5 times their
 median), Forger logs one warning for it, in every progress mode:
