@@ -774,6 +774,12 @@ key layout makes existing cache entries miss once.
 **Cache location.** `$FORGER_CACHE` if set, otherwise `~/.cache/forger`. The variable is read at call time, so tests
 can redirect it.
 
+**Large values are stored once.** A cached result's `str` or `bytes` values of 16K or more, and lists or tuples of that
+total size (e.g. a row's tests), are written once to `$FORGER_CACHE/blobs/<sha256>`, and the entry keeps a reference.
+A 47K-char thinking trace carried through six steps is then stored once, not in every step's entry. Cache keys hash
+each `str` or `bytes` of 4K or more by its SHA-256, computed once per string object. Deleting `$FORGER_CACHE` still
+clears everything; an entry whose blob is gone is a cache miss and is recomputed.
+
 **Per-call bypass.** Pass `_no_cache=True` at the call site to skip the cache for a single invocation, including the
 ops it calls. Pass `_cache_only=True` to retrieve an existing result without executing the function;
 a miss raises `FileNotFoundError`.
