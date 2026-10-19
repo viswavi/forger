@@ -8,6 +8,7 @@ import pytest
 
 from pyforger.agent_backend import AgentSpec, WorkspaceTask
 from pyforger.agents import generate_files
+from pyforger.harbor_backend import HarborBackend
 from pyforger.local_backend import LocalBackend
 from pyforger.measurements import Measurement
 from pyforger.structured import GenerationInconclusive, ValidationExhausted
@@ -139,6 +140,17 @@ def test_walltime_cancels_shell_children(tmp_path):
     assert not marker.exists()
 
 
+def test_harbor_explicitly_rejects_inner_without_launch():
+    """Unsupported Harbor capability fails before contacting any infrastructure."""
+    with pytest.raises(NotImplementedError, match="harbor"):
+        generate_files(
+            "write",
+            {},
+            (),
+            agent=AgentSpec(kind="nop"),
+            backend=HarborBackend(),
+            validate=lambda _: Measurement(passed=True),
+        )
 
 
 @pytest.mark.parametrize("repairs", [-1, True, 1.5])
