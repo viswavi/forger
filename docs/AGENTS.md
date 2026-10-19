@@ -285,6 +285,10 @@ or `max_tokens / 25` when that is longer (`max_tokens=32768` gets 1311 s), so a 
 tokens/s still finishes. A timed-out attempt is a transient error: LiteLLM retries it like a 429 or a 5xx
 (`num_retries`). Pass a number to change it (`Model(..., timeout=1800)`), or `timeout=None` for LiteLLM's own
 default (6000 s). The timeout is not part of the cache key, so changing it keeps cached results.
+A request that hangs on every attempt is retried by both LiteLLM's wrapper and the openai client, so it can wait up
+to `timeout × (2 × num_retries + 1)` on OpenAI-client providers (`openai/`, `azure/`, `litellm_proxy/`, and
+OpenAI-compatible gateways): 50 minutes with the defaults (600 s, `num_retries=2`). Other providers wait up to
+`timeout × (num_retries + 1)`. Lower `num_retries` or `timeout` to bound it.
 
 When a request has been in flight much longer than the batch's finished ones (over 2 minutes and over 5 times their
 median), Forger logs one warning for it, in every progress mode:
