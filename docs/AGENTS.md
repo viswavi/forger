@@ -362,6 +362,12 @@ and thresholds to find the right balance for a given use case. For example, `by_
 produces more diverse outputs but may filter out many rows; `by_llm_score` with multiple judges and a high consensus
 threshold produces higher-quality outputs but at the cost of more LLM calls.
 
+`by_rouge_l` and `by_rouge_l_agreement` give the same scores as `rouge_score`'s `RougeScorer(["rougeL"])` without
+stemming: text is lowercased and split at every character outside `[a-z0-9]` (so accented and non-Latin letters are
+separators, not words), and the score is the F1 of the longest common subsequence of tokens. `by_rouge_l` compares
+each row with every kept row, so its time grows with rows times kept rows; it scores a row against the whole kept pool
+in one bit-parallel pass, e.g. 157 messages of 50–600 words take about 0.2s (2m16s with `rouge_score`).
+
 Every op that takes input rows (alter, filter, inspect) accepts `min_yield=` and `max_yield=`: the expected range of
 output rows over input rows, e.g. `filter.by_llm_score(rows, ..., min_yield=0.3, max_yield=0.8)`. A violation, or an
 empty input with `min_yield`, is a warning in the step report (`strict=True` raises); neither keyword is part of the

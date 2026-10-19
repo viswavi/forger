@@ -29,12 +29,11 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Literal, Union
 
-from rouge_score import rouge_scorer
-
 from pyforger import _tracking
 from pyforger.acquire._model_utils import _catch_kwargs, _RequestFailures
 from pyforger.acquire.model import Model, Prompt
 from pyforger.alter.generate import PromptTemplate, _normalized_equal, _resolve_prompt
+from pyforger.filter._rouge import rouge_l
 from pyforger.op import op
 from pyforger.utils import get_field, get_formatted_logger
 
@@ -435,11 +434,6 @@ def _grades(
     if callable(metric):
         return _verify(items, predictions, metric, verifier_workers)
     assert ground_truth_field is not None  # checked by _check_common
-    scorer = (
-        rouge_scorer.RougeScorer(["rougeL"], use_stemmer=False)
-        if metric == "rouge_l"
-        else None
-    )
     out: list[list[bool | None]] = []
     for item, row in zip(items, predictions):
         reference = get_field(item, ground_truth_field, "filter.model_difficulty")
@@ -447,8 +441,8 @@ def _grades(
         for prediction in row:
             if prediction is None:
                 row_grades.append(None)
-            elif scorer is not None:
-                f1 = scorer.score(str(reference), str(prediction))["rougeL"].fmeasure
+            elif metric == "rouge_l":
+                f1 = rouge_l(str(reference), str(prediction))
                 row_grades.append(f1 >= rouge_l_threshold)
             else:
                 row_grades.append(_normalized_equal(prediction, reference))

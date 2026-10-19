@@ -6,6 +6,7 @@ similarity, or n-gram overlap against the kept pool.
 from __future__ import annotations
 
 from pyforger import _tracking
+from pyforger.filter._rouge import RougePool, RougeText
 from pyforger.op import op
 from pyforger.utils import get_field
 
@@ -49,29 +50,18 @@ def by_rouge_l(
     Returns:
         The kept rows, in input order and unchanged.
     """
-    try:
-        from rouge_score import rouge_scorer
-    except ImportError:
-        raise ImportError(
-            "rouge-score is required for by_rouge_l. "
-            "Install it with: pip install rouge-score"
-        ) from None
-    scorer = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=False)
     kept: list[dict] = []
-    kept_texts: list[str] = []
+    pool = RougePool()
     max_scores: list[float] = []
     for item in items:
-        text = get_field(item, field, "by_rouge_l")
+        text = RougeText(get_field(item, field, "by_rouge_l"))
         # Max similarity to the kept pool; 0.0 for the first item.
-        max_score = max(
-            (scorer.score(other, text)["rougeL"].fmeasure for other in kept_texts),
-            default=0.0,
-        )
+        max_score = pool.max_f_measure(text)
         max_scores.append(max_score)
         # The first item is always kept, even with threshold <= 0.
-        if not kept_texts or max_score < threshold:
+        if not kept or max_score < threshold:
             kept.append(item)
-            kept_texts.append(text)
+            pool.add(text)
     _tracking.record_scores(
         "rouge_l", max_scores, keep="lt", threshold=threshold, pooled=True
     )
