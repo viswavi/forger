@@ -408,3 +408,107 @@ def test_native_env_literals_redacted_before_trial_creation(
                 for value in literals.values()
             )
     task.verify()
+
+
+class _FakeException:
+    def __init__(self, type_, message="", traceback_=""):
+        self.exception_type = type_
+        self.exception_message = message
+        self.exception_traceback = traceback_
+
+
+def _fake_result(exception=None, agent_result=None):
+    from types import SimpleNamespace
+
+    payload = SimpleNamespace(
+        exception_info=exception,
+        agent_result=agent_result,
+        model_dump=lambda mode: {"exception_info": None},
+        compute_token_cost_totals=lambda: (None, None, None, None),
+    )
+    return payload
+
+
+def test_transient_startup_failure_classification():
+    """Only pre-agent transient provider failures qualify for infra retry."""
+    from pyforger.harbor import _transient_startup_failure
+
+    assert _transient_startup_failure(
+        _fake_result(_FakeException("ApiError", "upload failed: HTTP 503"))
+    )
+    assert _transient_startup_failure(
+        _fake_result(_FakeException("ServiceUnavailableError"))
+    )
+    # Agent already produced a result: never retry, work was consumed.
+    assert not _transient_startup_failure(
+        _fake_result(_FakeException("ApiError", "HTTP 503"), agent_result=object())
+    )
+    # Deterministic failures are not transient.
+    assert not _transient_startup_failure(
+        _fake_result(_FakeException("AuthenticationError", "bad key"))
+    )
+    assert not _transient_startup_failure(_fake_result())
+
+
+def _install_flaky_trial(monkeypatch, outcomes):
+    """Substitute Trial.create/run with scripted outcomes; real runner logic stays."""
+    from types import SimpleNamespace
+
+    from harbor.trial.trial import Trial
+
+    calls = []
+
+    async def create(cls, config):
+        index = len(calls)
+        calls.append(config.trial_name)
+        directory = config.trials_dir / config.trial_name
+        directory.mkdir(parents=True, exist_ok=True)
+
+        async def run():
+            return outcomes[index]
+
+        return SimpleNamespace(paths=SimpleNamespace(trial_dir=directory), run=run)
+
+    monkeypatch.setattr(Trial, "create", classmethod(create))
+    # Zero the backoff so the retry path runs at test speed.
+    import pyforger.harbor as harbor_module
+
+    monkeypatch.setattr(harbor_module, "_STARTUP_BACKOFF_S", (0.0, 0.0))
+    return calls
+
+
+def test_runner_retries_transient_startup_failure(task, tmp_path, monkeypatch):
+    """A transient pre-agent 503 is retried and the later success returned."""
+    outcomes = [
+        _fake_result(_FakeException("ApiError", "upload failed: HTTP 503")),
+        _fake_result(),
+    ]
+    calls = _install_flaky_trial(monkeypatch, outcomes)
+    runner = HarborTaskRunner(agent={"name": "nop"}, environment={"type": "docker"})
+    result = runner.run(HarborRequest(trial_id="retry", task=task), tmp_path / "native")
+    assert result.status == "completed"
+    assert len(calls) == 2
+
+
+def test_runner_does_not_retry_deterministic_failure(task, tmp_path, monkeypatch):
+    """A deterministic failure is returned after a single attempt."""
+    outcomes = [_fake_result(_FakeException("AuthenticationError", "bad key"))]
+    calls = _install_flaky_trial(monkeypatch, outcomes)
+    runner = HarborTaskRunner(agent={"name": "nop"}, environment={"type": "docker"})
+    result = runner.run(
+        HarborRequest(trial_id="no-retry", task=task), tmp_path / "native"
+    )
+    assert result.status == "failed"
+    assert len(calls) == 1
+
+
+def test_runner_bounds_transient_retries(task, tmp_path, monkeypatch):
+    """Persistent transient failures stop after the bounded attempts."""
+    outcomes = [_fake_result(_FakeException("ApiError", "HTTP 503")) for _ in range(5)]
+    calls = _install_flaky_trial(monkeypatch, outcomes)
+    runner = HarborTaskRunner(agent={"name": "nop"}, environment={"type": "docker"})
+    result = runner.run(
+        HarborRequest(trial_id="bounded", task=task), tmp_path / "native"
+    )
+    assert result.status == "failed"
+    assert len(calls) == 3

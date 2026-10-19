@@ -554,3 +554,19 @@ mechanism, not an agent-function layer.
 `HarborRequest`/`HarborResult`, native agent/environment configuration, verified
 trial artifacts, and asynchronous execution. It is deliberately not an agent
 function or backend; `HarborBackend` builds on it internally.
+
+
+
+### Task and command execution
+
+`agent_tasks.run_task` runs a `TaskSpec` (instruction, workspace files,
+declared outputs, optional verifier) with any agent on any backend and returns
+status, pass/fail, collected files, and diagnostics. `agent_tasks.run_command(task, command)`
+runs a caller-supplied shell command unchanged, without a model call, then runs
+the task verifier and collects declared outputs. Commands can invoke any available
+program; they are not restricted to Python scripts. Review is an ordinary
+`TaskSpec`: the caller supplies the rubric, instructions, declared report output,
+and report interpretation. Verifier files and solution files in a `TaskSpec` are hidden
+from the agent: verifier files materialize only for the verifier phase, and
+solution files only for `oracle` agents. Domain-specific admission policy
+remains in the application.
