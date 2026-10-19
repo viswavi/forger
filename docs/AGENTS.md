@@ -394,26 +394,31 @@ prefer the cheap answer check first.
 
 ### Dynamic input-specific pipelines
 
-`alter.dynamic_step(inputs, goal, model, max_parallel=4, max_iterations=20)`
+`alter.dynamic_step(inputs, goal, agent, backend=None, max_parallel=10)`
 returns a `list[list[str]]` in input order. Each inner list contains the strings
 produced for one input and may be empty. The default `pyforger` install includes
 OpenHands SDK and its dynamic-step dependencies; Python 3.12+ and Unix signal
 timers are required for execution.
 Inputs are JSON-compatible records (`list[dict]`). Each uncached unique input
-gets its own bare-metal OpenHands conversation with
-restricted Python, resource inspection, Git inspection, and finish tools. Agents revise code
-against execution feedback and submit a function accepting one dict and
-returning a list of strings. The last defined function is the entry point.
+gets its own agent run on the selected backend. By default, `LocalBackend` runs
+an OpenHands SDK conversation in a temporary host workspace with terminal, file
+editor, and finish tools. The agent writes `program.py`; Forger replays that
+source and feeds validation failures back for another attempt. The last defined
+function accepts one dict and returns a list of strings.
 
 ```python
+from pyforger.agent_backend import AgentSpec
+
+agent = AgentSpec(model, max_iterations=20)
 outputs = alter.dynamic_step(
     [{"text": "Alice <alice@example.org>"}, {"text": "Bob <bob@example.net>"}],
-    "Return a list containing the email address's domain", model, max_parallel=2,
+    "Return a list containing the email address's domain",
+    agent, max_parallel=2,
 )
 # Example output: [["example.org"], ["example.net"]]
 ```
 
-`dynamic_step_source(item, goal, model)` stores generated source through standard
+`dynamic_step_source(item, goal, agent, backend=None)` stores generated source through standard
 `@op` caching under `$FORGER_CACHE` (otherwise `~/.cache/forger`). Use `trace()`
 to inspect hits and `_cache_only=True` to inspect source without launching an
 agent on a miss. Reordered or overlapping batches reuse source, and cached code
@@ -431,8 +436,8 @@ previously cached string-input programs are regenerated on first use.
 Pass a new `source_version` to either operation to generate and cache a fresh
 program for an input when its earlier source is stale.
 
-`max_parallel` bounds active sessions, `max_iterations` bounds agent steps,
-and `execution_timeout_s` bounds each generated-code execution in a subprocess. `dynamic_step` works best with fast models
+`max_parallel` bounds active sessions, `AgentSpec.max_iterations` bounds agent steps,
+and `timeout_s` bounds each generated-code replay. `dynamic_step` works best with fast models
 suited to agent workflows (e.g. DeepSeek-v4-flash or gpt-5.6-luna) to avoid timeouts.
 All model information (LiteLLM model ID, base URL, and API key, as well as hyperparameters) can come from the Model class.
 Credentials and base URL fall back to the LiteLLM environment, which reads `.env` from the current working directory without
@@ -446,8 +451,8 @@ files. The generated function receives a dict with `kind`, `url`, and either
 `content` (HTML/PDF/plain text) or `files` (Git). Records with other fields,
 including a retrieved row with `text` and `url`, pass through unchanged and
 do not trigger another fetch.
-OpenHands has read-only resource and Git list/read tools to inspect the same
-snapshot during construction. The Git snapshot includes at most 200 files,
+The prepared input is supplied to the agent in `request.json`. The Git snapshot
+includes at most 200 files,
 64 KiB per file, and 1 MiB total text. HTTP downloads have a 10 MiB body cap;
 Git clones have a 60-second timeout, a 32 MiB tunnel transfer cap, and a
 64 MiB monitored temporary disk cap. Source remains
@@ -472,3 +477,47 @@ the callable may use an LLM, an agent, or code. `concurrency` bounds simultaneou
 calls across rows and sample IDs while preserving input order.
 Every alter operation uses `@op`; identical identified samples can be reused,
 while distinct IDs or `no_cache` request fresh work.
+
+### Local agent execution
+
+Agent functionality and execution backends are separate layers.
+`pyforger.agents` provides backend-agnostic functions (`generate_source`,
+`generate_files`, `execute_source`). Generation functions take an `AgentSpec`
+(what the agent is) and an optional `AgentBackend` (where it runs; defaults to
+`LocalBackend`). `execute_source` replays retained code with a backend and does
+not take an agent or call a model. Additional backends implement the same protocol.
+Backends implement only `run_agent(task, agent)` and
+`execute_program(code, item, timeout_s)`; they never receive agent functionality and
+agent functions never know which backend executes them. There is no fallback
+path: an incompatible composition fails instead of silently switching
+backends. `LocalBackend` runs SDK agents in a host workspace and replays
+retained programs through the restricted-Python worker (an
+accidental-damage guardrail, not hostile-code isolation). Source caching
+remains in the decorated alter operation.
+
+Generated files can be validated on the host and repaired in the same
+session. `agents.generate_files(..., validate=..., max_repairs=...)` runs the
+caller's `Measurement` callback against each produced snapshot: `True`
+accepts, `False` feeds the exact feedback back into the same conversation and
+workspace for repair, and `None` stops inconclusively. Backends that cannot
+run host validation inside a persistent session reject the request before
+launch. `agents.generate_object` layers caller-owned parsing on top: it
+returns the parsed object, retains rejected raw files as `previous-N/` inputs
+on fresh attempts, and preserves exact parse feedback. Session iteration and
+wall-time budgets are shared across generation and every repair turn.
+
+
+### Independent evaluation and success-rate filtering
+
+`inspect.measure(rows, evaluate)` reports `Measurement` values for existing data.
+`filter.by_evaluation(rows, evaluate)` selects explicit passes using the same
+measurements. Evaluators may be deterministic, LLM-based, or agent-based; an
+exception propagates instead of being recorded as an incorrect answer.
+
+`inspect.success_rates(rows)` summarizes an `evaluations` mapping from group labels
+to existing boolean or missing grades. `filter.by_success_rate(rows)` selects rows
+whose rate in every group falls within inclusive bounds (default 0.2–0.8).
+Neither operation generates or evaluates samples. Missing grades are excluded;
+all grades must be present unless `min_valid` explicitly permits exclusions.
+Inspect retains reports for rejected rows. Domain-specific attribution, audit,
+replay, and admission policy belong to the caller.
