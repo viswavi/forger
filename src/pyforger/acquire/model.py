@@ -604,27 +604,30 @@ def _note_truncation(
 
     Outside any op the count is logged here, since no report will show it.
     ``advice`` is the warning's tail (see ``_tracking.truncation_message``).
-    Inside ``_tracking.reporting_unclosed_think`` a completion that stops
-    mid-thought (``"<think>still thinking"``) is left out: the op reports it.
+    The warning also says how many stopped mid-thought
+    (``"<think>still thinking"``); inside ``_tracking.reporting_unclosed_think``
+    those are left out, since the op warns about them itself.
     """
     done = [r for r in results if isinstance(r, GenerateResult)]
-    skip_unclosed = _tracking.reports_unclosed_think()
-    truncated = sum(
-        reason == "length"
-        and not (
-            skip_unclosed
-            and isinstance(text, str)
-            and "<think>" in text
-            and "</think>" not in text
-        )
+    cut = [
+        isinstance(text, str) and "<think>" in text and "</think>" not in text
         for r in done
         for text, reason in zip(r, r.finish_reasons)
-    )
+        if reason == "length"
+    ]
+    mid_thought = sum(cut)
+    truncated = len(cut)
+    if _tracking.reports_unclosed_think():
+        truncated, mid_thought = truncated - mid_thought, 0
     total = sum(len(r) for r in done)
-    noted = _tracking.add_truncation(model_id, max_tokens, truncated, total, advice)
+    noted = _tracking.add_truncation(
+        model_id, max_tokens, truncated, total, advice, mid_thought
+    )
     if truncated and not noted:
         _logger.warning(
-            _tracking.truncation_message(model_id, max_tokens, truncated, total, advice)
+            _tracking.truncation_message(
+                model_id, max_tokens, truncated, total, advice, mid_thought
+            )
         )
 
 

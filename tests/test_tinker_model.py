@@ -1086,35 +1086,72 @@ def _cut_mid_thought(text: str) -> str:
 class TestTruncation:
     """Samples cut off at max_tokens are reported once, with Tinker's advice."""
 
-    def test_pass_at_k_reports_unclosed_think_only_in_its_note(
-        self, world, monkeypatch
-    ):
-        """The note grades them failed; no warning, so strict=True passes."""
+    def test_pass_at_k_warning_counts_samples_cut_mid_thought(self, world, monkeypatch):
+        """The warning counts every max_tokens stop and agrees with the note.
+
+        A bare op's note is never shown, and the pipeline summary shows only
+        warnings: one that left out the mid-thought cuts said "2 of 8" when 6
+        of 8 hit max_tokens.
+        """
         monkeypatch.setenv("FORGER_STEP_REPORT", "0")
-        world.respond = lambda call: ["<think>still thinking", "<think>x</think>4"]
-        world.stop_reason = _cut_mid_thought
+        world.respond = lambda call: [
+            "<think>still thinking",
+            "<think>still thinking",
+            "<think>x</think>4 and",
+            "<think>x</think>4",
+        ]
+        world.stop_reason = lambda text: "stop" if text.endswith("4") else "length"
         model = TinkerModel(QWEN, max_tokens=50)
 
-        @step(strict=True)
+        @step
         def hard(rows: list[dict]) -> list[dict]:
             return by_pass_at_k(
                 rows,
                 model=model,
                 input_field="task",
                 ground_truth_field="answer",
-                k=2,
+                k=4,
                 min_rate=0.0,
                 max_rate=1.0,
             )
 
-        rows = [{"task": "2+2", "answer": "4"}, {"task": "3+1", "answer": "4"}]
-        assert hard(rows) == rows
+        hard([{"task": "2+2", "answer": "4"}, {"task": "3+1", "answer": "4"}])
+        assert sum(r.truncated for r in model.history) == 6
         call = _tracking.step_records()["hard"].ops[0]
-        assert call.warnings == []
+        assert call.warnings == [
+            "filter.by_pass_at_k: 6 of 8 completions from Qwen/Qwen3-8B stopped at "
+            "max_tokens=50 (finish_reason=length; 4 of them mid-thought, <think> "
+            "never closed), so their text is cut off; raise the TinkerModel's "
+            "max_tokens"
+        ]
         assert call.scores.note == (
-            "2 of 4 samples truncated (<think> never closed), graded failed; "
+            "4 of 8 samples truncated (<think> never closed), graded failed; "
             "raise max_tokens if that is too many"
         )
+
+    def test_finish_reasons_follow_their_slots_through_the_cache(self, world):
+        """With n > 1 and some samples cached, each text keeps its own reason."""
+
+        @op(name="test.tinker_reasons", samples_arg="n")
+        def ask(rows, model, n=2):
+            results = model.generate_batch([r["q"] for r in rows], n=n, cache_rows=rows)
+            return [list(zip(r, r.finish_reasons)) for r in results]
+
+        world.respond = lambda call: [
+            f"<think>t{j}" if j % 2 else f"<think>t{j}</think>a"
+            for j in range(call.num_samples)
+        ]
+        world.stop_reason = _cut_mid_thought
+        ask([{"q": "a"}], TinkerModel(QWEN), n=2)
+        world.calls.clear()
+        (pairs,) = ask([{"q": "a"}], TinkerModel(QWEN), n=4)
+        assert [c.num_samples for c in world.calls] == [2]  # slots 2 and 3 are new
+        assert pairs == [
+            ("<think>t0</think>a", "stop"),
+            ("<think>t1", "length"),
+            ("<think>t0</think>a", "stop"),
+            ("<think>t1", "length"),
+        ]
 
     def test_answer_cut_after_thinking_is_still_warned(self, world, monkeypatch):
         """A cut-off answer is not in the note, so the warning counts it."""
@@ -1165,7 +1202,7 @@ class TestTruncation:
         ]
 
     def test_other_ops_still_warn_about_unclosed_think(self, world, monkeypatch):
-        """Outside the filters that report it, a cut-off thought is warned."""
+        """Outside the judge, which reports it, a cut-off thought is warned."""
         monkeypatch.setenv("FORGER_STEP_REPORT", "0")
         world.respond = lambda call: ["<think>hmm"] * call.num_samples
         world.stop_reason = _cut_mid_thought
@@ -1180,6 +1217,7 @@ class TestTruncation:
         warnings = _tracking.step_records()["gen"].ops[0].warnings
         assert warnings == [
             "alter.generate_from_context: 1 of 1 completions from Qwen/Qwen3-8B "
-            "stopped at max_tokens=50 (finish_reason=length), so their text is cut "
-            "off; raise the TinkerModel's max_tokens"
+            "stopped at max_tokens=50 (finish_reason=length; 1 of them mid-thought, "
+            "<think> never closed), so their text is cut off; raise the "
+            "TinkerModel's max_tokens"
         ]

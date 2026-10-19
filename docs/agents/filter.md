@@ -176,13 +176,13 @@ not failed. A truncated completion (an opening `<think>` and no `</think>`: the 
 it graded `None`; `truncated="exclude"` restores that.) `by_comparative_difficulty` defaults to `"exclude"`: a weak
 model that ran out of tokens has not shown the row is hard. The step report counts truncated samples under the
 filter's histogram, e.g. `5 of 12 samples truncated (<think> never closed), graded failed`; if that is most of them,
-raise `max_tokens`. This note is their only report: the op's warning about completions that stopped at `max_tokens`
-leaves them out, so `strict=True` does not fail on them. A sample whose request failed has no text, so it grades `None`
-(excluded), never truncated; with a
-`Model` or `TinkerModel` (any model whose `generate_batch` takes `return_exceptions`) this includes fan-out copies
-that failed, so a prompt that came back short is padded with `None`. Otherwise, a model that returns a number of
-completions other than `n` for a prompt raises `ValueError`: a sample missing for any reason other than a failed
-request is never padded.
+raise `max_tokens`. The op's warning about completions that stopped at `max_tokens` counts them too, since a bare op's
+note is never shown, e.g. `78 of 264 completions ... (finish_reason=length; 72 of them mid-thought, <think> never
+closed)`; so `strict=True` fails on them. A sample whose request failed has no text, so it grades `None` (excluded),
+never truncated; with a `Model` or `TinkerModel` (any model whose `generate_batch` takes `return_exceptions`) this
+includes fan-out copies that failed, so a prompt that came back short is padded with `None`. Otherwise, a model that
+returns a number of completions other than `n` for a prompt raises `ValueError`: a sample missing for any reason other
+than a failed request is never padded.
 `by_pass_at_k` needs all `k` grades valid unless `min_valid` allows fewer, and a row needs both comparative grades.
 With `outcomes_field` set, kept rows carry their grades as `{group: [True | False | None, ...]}`, one grade per
 sample: `{"model": [...]}` for `by_pass_at_k`, `{"weak": [...], "strong": [...]}` for `by_comparative_difficulty`.
