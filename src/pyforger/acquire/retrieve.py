@@ -19,7 +19,7 @@ from pyforger.acquire.sources import (
 from pyforger.op import tracked
 
 
-@tracked("acquire.retrieve")
+@tracked("acquire.retrieve", smoke=("queries", "n"))
 def retrieve(
     source: RetrievalSource,
     mode: RetrieveMode = RetrieveMode.QUERY,
@@ -34,7 +34,8 @@ def retrieve(
     Each row is stamped with a ``"query"`` field. With ``queries=None``,
     a single fetch with no query is performed (e.g. random sampling).
     Calls are not cached; inside a ``@step`` they are listed as
-    ``acquire.retrieve``.
+    ``acquire.retrieve``. In a smoke run (``FORGER_SMOKE_ROWS=3``) only the
+    first 3 queries run, with ``n`` capped to 3.
     """
     resolved_queries: list[str | None] = (
         list(queries) if queries is not None else [None]

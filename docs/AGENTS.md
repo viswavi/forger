@@ -149,6 +149,16 @@ cached it, marked `cached`, with that run's warnings.
   request batch raises `pyforger.BudgetExceededError`, as does `dynamic_step` before starting an agent or during its
   run. Requests already sent finish and are recorded, so spend can pass a cap by up to one batch (or one agent step)
   per thread sending them.
+- Smoke runs: run every new pipeline version with `FORGER_SMOKE_ROWS=3 python pipeline.py` first (or
+  `@pipeline(smoke=3)`); it exercises every op in about a minute, so a wrong keyword or a missing argument fails at
+  once instead of minutes into the full run. Inside the pipeline, every `@step` call cuts each rows argument (each of
+  several inputs, `*rows` items too) to its first 3 rows. These ops also cap their counts: `acquire.sample_from_LLM`
+  (`n`) and `acquire.retrieve` / `retrieve_from_*` (the first 3 `queries`, `n` at most 3). Other ops keep their
+  counts, so a step that makes rows from nothing in some other way still makes all of them. Step reports say
+  `SMOKE: first 3 of 120 rows`, and the summary ends with `SMOKE RUN: at most 3 rows per step; outputs are not
+  representative`. Smoke results are cached under keys that include the row limit, so a later full run never reads
+  or overwrites them and recomputes every step. A second smoke run of the same code reuses them. `smoke=0` turns
+  smoke mode off even when the variable is set.
 
 ### Operation reference
 
@@ -368,8 +378,8 @@ def debug_step(rows):
 
 **Cache key.** SHA-256 of: the op name, a canonical representation of the function's compiled body (bytecode,
 constants, names, varnames, freevars, argcount, applied recursively to nested code objects), the captured closure
-values, and the call arguments. Editing the decorated function's body invalidates that function's cache; editing an
-unrelated helper does not.
+values, and the call arguments, plus the row limit in a smoke run. Editing the decorated function's body invalidates
+that function's cache; editing an unrelated helper does not.
 
 **Cache location.** `$FORGER_CACHE` if set, otherwise `~/.cache/forger`. The variable is read at call time, so tests
 can redirect it.

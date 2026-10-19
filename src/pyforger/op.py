@@ -184,6 +184,7 @@ def op(
     *,
     name: str | None = None,
     cache: bool = True,
+    smoke: tuple[str, ...] = (),
 ) -> Any:
     """Decorator: cache output on disk, content-addressed by inputs.
 
@@ -205,6 +206,12 @@ def op(
     min_yield=0.5)``. A violation is a warning in the ``@step`` report (or a
     logged warning outside steps). Neither keyword is part of the cache key.
     ``acquire.*`` ops take no input rows and reject both keywords.
+
+    In a smoke run (``@pipeline(smoke=3)`` or ``FORGER_SMOKE_ROWS=3``) the
+    cache key also holds the row limit, so smoke results never mix with a
+    full run's. ``smoke`` names count parameters capped to the limit: an int
+    above it is lowered (``n=100`` → ``n=3``), a list is cut to its first
+    rows, e.g. ``@op(name="acquire.sample_from_LLM", smoke=("n",))``.
     """
 
     def decorate(fn: Callable[..., T]) -> Callable[..., T]:
@@ -223,6 +230,7 @@ def op(
                         "Forger functions decorated with @op cannot use the reserved "
                         + f"argument name '{reserved}'."
                     )
+            _check_smoke_params(sig, smoke)
 
         op_name = name or f"{fn.__module__}.{fn.__qualname__}"
         # Sanitize op_name to be a safe directory name
@@ -252,6 +260,7 @@ def op(
                     f"{op_name} takes no input rows, so min_yield / max_yield do "
                     "not apply; put them on the alter or filter op that follows"
                 )
+            args, kwargs = _smoke_capped(sig, smoke, args, kwargs)
             token = _tracking.enter_op(op_name)
             scope_token = _NO_CACHE_SCOPE.set(True) if _no_cache else None
             call: _tracking.OpCall | None = None
@@ -307,6 +316,9 @@ def op(
             else:
                 normalized = {"args": list(args), "kwargs": dict(kwargs)}
             key = [op_name, body_key, normalized]
+            smoke_rows = _tracking.smoke_rows()
+            if smoke_rows is not None:  # never read or overwrite a full run's entry
+                key.append(["smoke", smoke_rows])
             t0 = time.perf_counter()
             input_hash, hash_size = _hash(key)
             _maybe_warn_hash_cost(op_name, time.perf_counter() - t0, hash_size)
@@ -444,7 +456,9 @@ def _adopt_legacy_entry(op_dir: Path, key: Any, cache_path: Path) -> None:
         logger.debug("legacy cache lookup failed in %s: %s", op_dir, exc)
 
 
-def tracked(op_name: str) -> Callable[[Callable[..., T]], Callable[..., T]]:
+def tracked(
+    op_name: str, *, smoke: tuple[str, ...] = ()
+) -> Callable[[Callable[..., T]], Callable[..., T]]:
     """Report calls in ``@step`` reports like an op, without caching or hashing.
 
     For functions whose arguments cannot be hashed into a cache key, e.g.
@@ -452,6 +466,7 @@ def tracked(op_name: str) -> Callable[[Callable[..., T]], Callable[..., T]]:
     and for cheap ops not worth caching, e.g. ``filter.by_predicate``. Calls
     take ``min_yield=`` / ``max_yield=`` like ``@op`` calls; ``_no_cache=True``
     is accepted (nothing is cached) and ``_cache_only=True`` raises.
+    ``smoke`` names count parameters capped in a smoke run, as for ``@op``.
     """
 
     def decorate(fn: Callable[..., T]) -> Callable[..., T]:
@@ -462,6 +477,7 @@ def tracked(op_name: str) -> Callable[[Callable[..., T]], Callable[..., T]]:
                     "Forger functions decorated with @tracked cannot use the "
                     f"reserved argument name '{reserved}'."
                 )
+        _check_smoke_params(sig, smoke)
 
         @wraps(fn)
         def wrapper(
@@ -482,6 +498,7 @@ def tracked(op_name: str) -> Callable[[Callable[..., T]], Callable[..., T]]:
                     f"{op_name} takes no input rows, so min_yield / max_yield do "
                     "not apply; put them on the alter or filter op that follows"
                 )
+            args, kwargs = _smoke_capped(sig, smoke, args, kwargs)
             # The rows, also when passed by keyword: by_predicate(items=rows, ...).
             try:
                 first_arg = next(iter(sig.bind(*args, **kwargs).arguments.values()))
@@ -515,6 +532,43 @@ def tracked(op_name: str) -> Callable[[Callable[..., T]], Callable[..., T]]:
         return wrapper
 
     return decorate
+
+
+def _check_smoke_params(sig: inspect.Signature | None, smoke: tuple[str, ...]) -> None:
+    """Raise TypeError when ``smoke`` names a parameter the function lacks."""
+    missing = [p for p in smoke if sig is None or p not in sig.parameters]
+    if missing:
+        raise TypeError(f"smoke= names parameters the function lacks: {missing}")
+
+
+def _smoke_capped(
+    sig: inspect.Signature | None,
+    smoke: tuple[str, ...],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    """Cap the ``smoke`` parameters to the smoke run's row limit, if one is active.
+
+    An int above the limit becomes the limit (``n=100`` → ``n=3``); a list is
+    cut to its first rows. Calls whose arguments do not bind pass unchanged.
+    """
+    if not smoke or sig is None:
+        return args, kwargs
+    limit = _tracking.smoke_rows()
+    if limit is None:
+        return args, kwargs
+    try:
+        bound = sig.bind(*args, **kwargs)
+    except TypeError:
+        return args, kwargs  # the call itself raises
+    bound.apply_defaults()
+    for param in smoke:
+        value = bound.arguments.get(param)
+        if isinstance(value, int) and not isinstance(value, bool) and value > limit:
+            bound.arguments[param] = limit
+        elif isinstance(value, list) and len(value) > limit:
+            bound.arguments[param] = value[:limit]
+    return bound.args, bound.kwargs
 
 
 def _failed_call(
