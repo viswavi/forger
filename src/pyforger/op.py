@@ -124,6 +124,8 @@ def _legacy_hash(obj: Any) -> str:
 _NO_CACHE_SCOPE: ContextVar[bool] = ContextVar("forger_no_cache_scope", default=False)
 
 _STEP_META_SUFFIX = ".step.json"
+# What the call added to the pipeline's retrieval check (see _tracking.ReachLog).
+_REACH_SUFFIX = ".reach.json"
 
 
 def _maybe_warn_hash_cost(op_name: str, duration: float, size: int) -> None:
@@ -323,6 +325,7 @@ def op(
             cache_hit = False
             is_step = op_name.startswith(_tracking.STEP_OP_PREFIX)
             meta_path = cache_path.with_name(input_hash + _STEP_META_SUFFIX)
+            reach_path = cache_path.with_name(input_hash + _REACH_SUFFIX)
 
             if use_cache and not cache_path.exists():
                 _adopt_legacy_entry(cache_root / safe_op_name, key, cache_path)
@@ -357,13 +360,16 @@ def op(
                         type(exc).__name__,
                         exc,
                     )
+            if cache_hit:
+                _replay_reach(reach_path)
 
             if not cache_hit:
                 if _cache_only:
                     raise FileNotFoundError(
                         f"No cached result for {op_name} with these arguments"
                     )
-                result = fn(*args, **kwargs)
+                with _tracking.reach_scope() as reach:
+                    result = fn(*args, **kwargs)
                 meta = None
                 if is_step:
                     # Raises before caching when a @step breaks its contract.
@@ -374,6 +380,11 @@ def op(
                     if meta is not None:
                         # Written first, so a cached step always has its ops.
                         _atomic_write(meta_path, meta.encode())
+                    if reach is not None:
+                        # Written even when empty: a missing file means the
+                        # result was cached outside a pipeline or by an older
+                        # Forger, so its prompts are unknown (see _replay_reach).
+                        _atomic_write(reach_path, reach.dumps().encode())
                     _atomic_write(cache_path, pickle.dumps(result, protocol=4))
 
             duration = time.time() - start
@@ -418,6 +429,20 @@ def _atomic_write(path: Path, data: bytes) -> None:
     tmp_path = path.parent / f"{path.name}.tmp.{os.getpid()}.{threading.get_ident()}"
     tmp_path.write_bytes(data)
     os.replace(tmp_path, path)
+
+
+def _replay_reach(path: Path) -> None:
+    """Replay what a cached call added to the pipeline's retrieval check."""
+    if not _tracking.reach_active():
+        return
+    try:
+        text = path.read_text()
+    except OSError:
+        # Cached outside a pipeline or before this check existed: its prompts
+        # are unknown, so the pipeline must not claim retrieved text went unused.
+        _tracking.mark_reach_blind()
+        return
+    _tracking.replay_reach(text)
 
 
 def _adopt_legacy_entry(op_dir: Path, key: Any, cache_path: Path) -> None:

@@ -24,12 +24,13 @@ usage, and it counts only toward the process total.
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import json
 import math
 import os
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -227,7 +228,8 @@ class PipelineRecord(BaseModel):
     ``no_filter_steps`` and ``noop_filters`` (``(op, step, rows)``) are notes,
     not warnings: a filter that removed nothing may be a check that passed.
     ``python_gaps`` are rows dropped in plain Python between two steps, found
-    by row identity (see ``pyforger._rowflow``).
+    by row identity (see ``pyforger._rowflow``). ``notes`` are other
+    informational lines (see ``close_retrieval_reach``).
 
     ``returned`` says what the pipeline returned: ``"rows"`` (a list of
     ``n_out`` rows), ``"streams"`` (a dict of row lists, in ``out_streams``,
@@ -252,6 +254,8 @@ class PipelineRecord(BaseModel):
     unattributed: UsageTotals = Field(default_factory=UsageTotals)
     max_cost_usd: float | None = None
     python_gaps: list[PythonGap] = Field(default_factory=list)
+    # Informational lines, e.g. how few retrieved documents reached a prompt.
+    notes: list[str] = Field(default_factory=list)
 
     @property
     def cached_cost_usd(self) -> float:
@@ -504,6 +508,7 @@ class _Running:
     usage: Usage
     unattributed: Usage
     flow: PipelineFlow = field(default_factory=PipelineFlow)
+    reach: _Reach = field(default_factory=lambda: _Reach())
 
 
 _RUNNING_PIPELINES: list[_Running] = []
@@ -935,6 +940,362 @@ def check_budget() -> None:
             f"pipeline {running.rec.name} spent ${spent:.4f}, reaching its "
             f"max_cost_usd=${running.rec.max_cost_usd:g}; no further LLM requests "
             "are sent"
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Retrieval reach: did retrieved text get into a prompt or the output?
+# --------------------------------------------------------------------------- #
+
+_SHINGLE_CHARS = 60  # one fingerprint is 60 characters of a document's text
+_SHINGLES_PER_DOC = 3
+_MIN_DOC_CHARS = 200  # shorter documents (titles, snippets) are not fingerprinted
+_SHINGLE_SPAN = 1500  # fingerprints come from a document's first 1,500 characters
+_MAX_DOCS = 2000  # documents fingerprinted per pipeline run
+_MAX_SCAN_CHARS = 200_000  # characters of one prompt or returned value checked
+_MAX_SCAN_VALUES = 100_000  # string values of the returned rows checked
+_FEW_USED = 0.10  # under this share of documents used, the summary notes it
+
+
+def _squash(text: str) -> str:
+    """Collapse whitespace runs, so a prompt's ``"a  b"`` matches ``"a b"``."""
+    return " ".join(text[:_MAX_SCAN_CHARS].split())
+
+
+def _main_text(row: Any) -> str | None:
+    """A document's main text: its ``text`` field, else its longest string."""
+    if isinstance(row, str):
+        return row
+    if not isinstance(row, dict):
+        return None
+    text = row.get("text")
+    if isinstance(text, str):
+        return text
+    strings = [v for v in row.values() if isinstance(v, str)]
+    return max(strings, key=len) if strings else None
+
+
+def fingerprints(text: str) -> list[str]:
+    """Up to three 60-character pieces of ``text``, each starting at a word.
+
+    They are spread over the first 1,500 characters, whitespace collapsed, so
+    a prompt that quotes the document's opening (``doc[:1000]``) holds one.
+    Texts shorter than 200 characters get none.
+    """
+    flat = _squash(text[: 2 * _SHINGLE_SPAN])
+    if len(flat) < _MIN_DOC_CHARS:
+        return []
+    last = min(len(flat), _SHINGLE_SPAN) - _SHINGLE_CHARS
+    out: list[str] = []
+    for k in range(_SHINGLES_PER_DOC):
+        space = flat.find(" ", last * k // _SHINGLES_PER_DOC, last)
+        if space < 0:
+            break
+        piece = flat[space + 1 : space + 1 + _SHINGLE_CHARS]
+        if piece not in out:
+            out.append(piece)
+    return out
+
+
+def _found_in(text: str, pending: set[str]) -> set[str]:
+    """The fingerprints in ``pending`` that occur in ``text`` (after a space)."""
+    flat = _squash(text)
+    found: set[str] = set()
+    at = flat.find(" ") + 1
+    while at:
+        piece = flat[at : at + _SHINGLE_CHARS]
+        if piece in pending:
+            found.add(piece)
+        at = flat.find(" ", at) + 1
+    return found
+
+
+def _prompt_text(prompt: Any) -> str:
+    """The text of a string prompt or of a chat-message list's contents."""
+    if isinstance(prompt, str):
+        return prompt
+    parts: list[str] = []
+    for message in prompt if isinstance(prompt, (list, tuple)) else ():
+        content = message.get("content") if isinstance(message, dict) else message
+        if isinstance(content, str):
+            parts.append(content)
+        elif isinstance(content, list):  # [{"type": "text", "text": "..."}]
+            parts.extend(
+                p["text"]
+                for p in content
+                if isinstance(p, dict) and isinstance(p.get("text"), str)
+            )
+    return "\n".join(parts)
+
+
+class ReachLog:
+    """What one op or step call added to its pipeline's retrieval check.
+
+    ``op.py`` caches it next to the call's result, and a cache hit replays it:
+    the documents a cached retrieval returned, and the fingerprints a cached
+    op's prompts held. ``blind`` is True when the call sent prompts while
+    every registered fingerprint had already been found, so they were not
+    checked; replaying it makes the check inconclusive.
+    """
+
+    __slots__ = ("returned", "docs", "found", "prompts", "blind")
+
+    def __init__(self) -> None:
+        """Start empty."""
+        self.returned: dict[str, int] = {}  # op label -> documents returned
+        self.docs: list[tuple[str, list[str]]] = []  # (op label, fingerprints)
+        self.found: set[str] = set()
+        self.prompts = 0
+        self.blind = False
+
+    def dumps(self) -> str:
+        """Serialize, to store next to the call's cached result."""
+        return json.dumps(
+            {
+                "version": 1,
+                "returned": self.returned,
+                "docs": self.docs,
+                "found": sorted(self.found),
+                "prompts": self.prompts,
+                "blind": self.blind,
+            }
+        )
+
+
+class _Reach:
+    """The retrieved documents of one pipeline run, and which reached a prompt."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.returned: dict[str, int] = {}  # op label -> documents returned
+        self.docs: dict[tuple[str, ...], int] = {}  # fingerprints -> document
+        self.pending: dict[str, int] = {}  # fingerprint -> document not yet seen
+        self.used: set[int] = set()
+        self.seen: set[str] = set()  # also fingerprints replayed before their doc
+        self.prompts = 0
+        self.blind = False
+
+    def add(
+        self,
+        logs: Iterable[ReachLog],
+        *,
+        returned: dict[str, int] | None = None,
+        docs: Iterable[tuple[str, list[str]]] = (),
+        found: Iterable[str] = (),
+        prompts: int = 0,
+        blind: bool = False,
+    ) -> None:
+        """Add documents, found fingerprints, and prompts; ``logs`` get them too."""
+        returned = returned or {}
+        found = set(found)
+        with self.lock:
+            kept: list[tuple[str, list[str]]] = []
+            for label, n in returned.items():
+                self.returned[label] = self.returned.get(label, 0) + n
+            for label, fps in docs:
+                key = tuple(fps)
+                if not fps or key in self.docs or len(self.docs) >= _MAX_DOCS:
+                    continue
+                index = self.docs[key] = len(self.docs)
+                kept.append((label, fps))
+                if self.seen.intersection(fps):
+                    self.used.add(index)
+                else:
+                    self.pending.update((fp, index) for fp in fps)
+            self.seen |= found
+            for fp in found:
+                used = self.pending.get(fp)
+                if used is not None:  # the document is used: stop looking for it
+                    self.used.add(used)
+                    for other in [k for k, v in self.pending.items() if v == used]:
+                        del self.pending[other]
+            self.prompts += prompts
+            self.blind = self.blind or blind
+            for log in logs:
+                for label, n in returned.items():
+                    log.returned[label] = log.returned.get(label, 0) + n
+                log.docs.extend(kept)
+                log.found |= found
+                log.prompts += prompts
+                log.blind = log.blind or blind
+
+
+_REACH_LOGS: ContextVar[tuple[ReachLog, ...]] = ContextVar(
+    "forger_reach_logs", default=()
+)
+
+
+def _active_reach() -> _Reach | None:
+    running = _running_for_context()
+    return running.reach if running is not None else None
+
+
+def reach_active() -> bool:
+    """Return True when this context's calls count toward a pipeline's check."""
+    return _active_reach() is not None
+
+
+@contextlib.contextmanager
+def reach_scope() -> Iterator[ReachLog | None]:
+    """Collect what the calls inside add to the retrieval check (None outside)."""
+    if _active_reach() is None:
+        yield None
+        return
+    log = ReachLog()
+    token = _REACH_LOGS.set(_REACH_LOGS.get() + (log,))
+    try:
+        yield log
+    finally:
+        _REACH_LOGS.reset(token)
+
+
+def replay_reach(text: str) -> None:
+    """Add a cached call's ``ReachLog.dumps()`` to the running pipeline's check."""
+    reach = _active_reach()
+    if reach is None:
+        return
+    try:
+        data = json.loads(text)
+        returned = {str(k): int(v) for k, v in data.get("returned", {}).items()}
+        docs = [(str(label), [str(fp) for fp in fps]) for label, fps in data["docs"]]
+        found = [str(fp) for fp in data.get("found", [])]
+        prompts = int(data.get("prompts", 0))
+        blind = bool(data.get("blind", False))
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return  # unreadable: the call counts as adding nothing
+    reach.add(
+        _REACH_LOGS.get(),
+        returned=returned,
+        docs=docs,
+        found=found,
+        prompts=prompts,
+        blind=blind,
+    )
+
+
+def mark_reach_blind() -> None:
+    """Say a cached call's prompts are unknown, so the check stays silent.
+
+    e.g. a generation op cached before the check existed: it may well have sent
+    the retrieved text, and a "none of their text appeared" warning would be
+    false.
+    """
+    reach = _active_reach()
+    if reach is not None:
+        reach.add(_REACH_LOGS.get(), blind=True)
+
+
+def register_documents(label: str, rows: list[Any]) -> None:
+    """Fingerprint the documents a retrieval op returned, for the pipeline's check.
+
+    ``label`` names the op, e.g. ``acquire.retrieve_from_web``. When the
+    pipeline returns, ``close_retrieval_reach`` warns if none of their text
+    reached a model prompt (see ``note_prompt_texts``) or the returned rows.
+    Does nothing outside a pipeline. At most 2,000 documents per pipeline run
+    are fingerprinted; the others are only counted.
+    """
+    reach = _active_reach()
+    if reach is None or not rows:
+        return
+    room = _MAX_DOCS - len(reach.docs)
+    docs: list[tuple[str, list[str]]] = []
+    for row in rows:
+        if len(docs) >= room:
+            break
+        text = _main_text(row)
+        fps = fingerprints(text) if text else []
+        if fps:
+            docs.append((label, fps))
+    reach.add(_REACH_LOGS.get(), returned={label: len(rows)}, docs=docs)
+
+
+def note_prompt_texts(prompts: Iterable[Any]) -> None:
+    """Check prompts about to be sent for retrieved text (see ``register_documents``).
+
+    Backend-agnostic: each model class calls it once per batch, before it
+    sends the prompts or looks them up in a cache, as one line:
+    ``_tracking.note_prompt_texts(prompts)``. Prompts are strings or
+    chat-message lists. Outside a pipeline it does nothing; when no retrieved
+    document is left unseen, it only counts the prompts.
+    """
+    reach = _active_reach()
+    if reach is None:
+        return
+    prompts = list(prompts)
+    with reach.lock:
+        pending = set(reach.pending)
+        blind = bool(prompts) and not pending and bool(reach.docs)
+    found: set[str] = set()
+    for prompt in prompts:
+        if not pending:
+            break
+        hits = _found_in(_prompt_text(prompt), pending)
+        found |= hits
+        pending -= hits  # a found fingerprint is not looked for again
+    reach.add(_REACH_LOGS.get(), found=found, prompts=len(prompts), blind=blind)
+
+
+def _strings(value: Any, budget: list[int]) -> Iterator[str]:
+    """String values in ``value`` (also in dicts and lists), ``budget[0]`` at most."""
+    if budget[0] <= 0:
+        return
+    if isinstance(value, str):
+        budget[0] -= 1
+        yield value
+    elif isinstance(value, dict):
+        for v in value.values():
+            yield from _strings(v, budget)
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            yield from _strings(v, budget)
+
+
+def close_retrieval_reach(rec: PipelineRecord, result: Any) -> None:
+    """Warn when no retrieved document reached a model prompt or ``result``.
+
+    Called when the pipeline returns ``result``; its string values count as
+    use too (retrieved text kept as data). Adds a warning to ``rec`` when
+    retrieval ops returned fingerprinted documents and none was seen, and a
+    note when under 10% were. Adds nothing when a cached call could not look
+    (``ReachLog.blind``).
+    """
+    with _RUNNING_LOCK:
+        running = next((r for r in _RUNNING_PIPELINES if r.rec is rec), None)
+    if running is None or not running.reach.docs:
+        return
+    reach = running.reach
+    with reach.lock:
+        pending = set(reach.pending)
+    found: set[str] = set()
+    for text in _strings(result, [_MAX_SCAN_VALUES]):
+        if not pending:
+            break
+        hits = _found_in(text, pending)
+        found |= hits
+        pending -= hits
+    reach.add((), found=found)
+    labels = list(reach.returned)
+    who = " and ".join(
+        [", ".join(labels[:-1]), labels[-1]] if len(labels) > 1 else labels
+    )
+    if not reach.used:
+        if reach.blind:
+            return
+        sent = (
+            "the 1 model prompt"
+            if reach.prompts == 1
+            else f"any of the {reach.prompts:,} model prompts"
+        )
+        rec.warnings.append(
+            f"{who} returned {sum(reach.returned.values()):,} documents, but none "
+            f"of their text appeared in {sent} or in the pipeline's output; to "
+            "ground generation on them, format the retrieved text into your prompts"
+        )
+    elif len(reach.used) < _FEW_USED * len(reach.docs):
+        rec.notes.append(
+            f"{len(reach.used):,} of {len(reach.docs):,} documents from {who} "
+            f"({len(reach.used) / len(reach.docs):.0%}) appeared in a model prompt "
+            "or the pipeline's output"
         )
 
 

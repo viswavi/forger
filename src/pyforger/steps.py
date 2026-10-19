@@ -739,9 +739,11 @@ def pipeline(
 
     Errors (``PipelineContractError``): no step ran, or the pipeline was called
     inside another pipeline. Warnings: only one step ran; no quality filter, no
-    diversity filter, or no inspect op ran anywhere; ops ran outside a step.
-    Notes, which are not warnings and never raise: steps that ran no filter,
-    and filters that removed nothing (a passed check, or one to tighten).
+    diversity filter, or no inspect op ran anywhere; ops ran outside a step;
+    retrieval ops returned documents whose text reached no model prompt and
+    not the returned rows. Notes, which are not warnings and never raise:
+    steps that ran no filter, filters that removed nothing (a passed check, or
+    one to tighten), and under 10% of retrieved documents used.
 
     Args:
         _fn: The function, when used as ``@pipeline`` without parentheses.
@@ -781,6 +783,7 @@ def pipeline(
             try:
                 result = fn(*args, **kwargs)
                 _tracking.close_pipeline_flow(rec, result)
+                _tracking.close_retrieval_reach(rec, result)
                 _count_returned(rec, result)
             finally:
                 _tracking.exit_pipeline(scope)

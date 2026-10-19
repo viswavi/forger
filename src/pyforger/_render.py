@@ -1613,6 +1613,10 @@ def pipeline_renderable(rec: PipelineRecord, *, width: int = WIDTH) -> Renderabl
             )
         )
     body.extend(_filter_notes(rec))
+    if rec.notes:
+        body.append(Text(""))
+        body.append(Text("notes", style="bold"))
+        body.extend(Text(_clean(note)) for note in dict.fromkeys(rec.notes))
     step_warnings = [
         line for s in rec.steps for line in _warning_lines(s.warnings, prefix=s.name)
     ]

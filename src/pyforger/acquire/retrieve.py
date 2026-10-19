@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from pyforger import _tracking
 from pyforger.acquire.sources import (
     ArxivRetrievalSource,
     HFRetrievalSource,
@@ -17,6 +18,16 @@ from pyforger.acquire.sources import (
     WikiRetrievalSource,
 )
 from pyforger.op import tracked
+
+# The wrapper that builds each source, named in the pipeline's warning when
+# retrieved text reaches no prompt.
+_WRAPPER_OF = {
+    WebRetrievalSource: "acquire.retrieve_from_web",
+    WikiRetrievalSource: "acquire.retrieve_from_wiki",
+    HFRetrievalSource: "acquire.retrieve_from_hf",
+    ArxivRetrievalSource: "acquire.retrieve_from_arxiv",
+    S2RetrievalSource: "acquire.retrieve_from_s2",
+}
 
 
 @tracked("acquire.retrieve")
@@ -34,7 +45,9 @@ def retrieve(
     Each row is stamped with a ``"query"`` field. With ``queries=None``,
     a single fetch with no query is performed (e.g. random sampling).
     Calls are not cached; inside a ``@step`` they are listed as
-    ``acquire.retrieve``.
+    ``acquire.retrieve``. Inside a ``@pipeline`` the rows' text is
+    fingerprinted, and the pipeline warns when none of it reaches a model
+    prompt or the pipeline's output.
     """
     resolved_queries: list[str | None] = (
         list(queries) if queries is not None else [None]
@@ -45,6 +58,11 @@ def retrieve(
         for row in rows:
             row["query"] = q
         all_rows.extend(rows)
+    label = next(
+        (name for cls, name in _WRAPPER_OF.items() if isinstance(source, cls)),
+        "acquire.retrieve",
+    )
+    _tracking.register_documents(label, all_rows)
     return all_rows
 
 
