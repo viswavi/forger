@@ -4,6 +4,7 @@ from __future__ import annotations
 import pytest
 from fixtures import MockModel, RecordingMockModel
 
+from pyforger.acquire._model_utils import _schema_format_instructions
 from pyforger.alter import generate_from_context
 from pyforger.alter.generate import _resolve_prompt
 
@@ -186,8 +187,9 @@ class TestPromptBuilding:
         sent_prompt = model.recorded_prompts[0][0]
         assert isinstance(sent_prompt, str)
         # Check that the final prompt sent to the model includes schema instructions.
-        assert "Required keys" in sent_prompt
-        assert "answer" in sent_prompt
+        assert sent_prompt == "Question: hi\n\n" + _schema_format_instructions(
+            {"answer": str}
+        )
 
     def test_schema_instructions_appended_to_message_list_prompt(self):
         """Schema instructions are still added when prompt is a list of messages."""
@@ -208,8 +210,7 @@ class TestPromptBuilding:
         # Last message should be a user message with schema instructions
         last_message = sent_prompt[-1]
         assert last_message["role"] == "user"
-        assert "Required keys" in last_message["content"]
-        assert "answer" in last_message["content"]
+        assert last_message["content"] == _schema_format_instructions({"answer": str})
 
     def test_samples_per_item_requests_n_completions(self):
         """samples_per_item completions of the filled prompt are requested."""
@@ -281,18 +282,47 @@ class TestTolerantSchemaParsing:
             'Here is the JSON:\n```json\n{"answer": "42"}\n```\nHope this helps.',
             'Sure! {"answer": "42"} Let me know if you need more.',
             '<think>maybe {"answer": "41"}?</think>\n{"answer": "42"}',
-            # The first object lacks "answer"; the second has it.
-            'Draft: {"note": "x"} Final: {"answer": "42"} Also {"answer": "43"}',
+            # Reasoning, then the final object.
+            'Since 6*7 = 42, the answer is 42.\n{"answer": "42"}',
+            # An example object in the reasoning, then the final object.
+            'The format is {"answer": "<str>"}. 6*7 = 42.\n{"answer": "42"}',
+            '```json\n{"answer": "<str>"}\n```\nSo:\n```json\n{"answer": "42"}\n```',
+            # The last object lacks "answer"; the one before it has it.
+            'Draft: {"answer": "41"} Final: {"answer": "42"} Notes: {"note": "x"}',
         ],
     )
     def test_object_is_found(self, response):
-        """The first object with every schema key is parsed, without a retry."""
+        """The last object with every schema key is parsed, without a retry."""
         model = MockModel(responses=[response])
         result = generate_from_context(
             [{"text": "a"}], "p: {text}", model, output_schema={"answer": str}
         )
         assert result == [{"answer": "42"}]
         assert model._call_count == 1
+
+    def test_fence_then_trailing_prose(self):
+        """A fenced final object followed by prose without objects still parses."""
+        model = MockModel(
+            responses=[
+                'Work: 6*7 = 42.\n```json\n{"answer": "42"}\n```\nHope this helps!'
+            ]
+        )
+        result = generate_from_context(
+            [{"text": "a"}], "p: {text}", model, output_schema={"answer": str}
+        )
+        assert result == [{"answer": "42"}]
+
+    def test_code_block_then_object(self):
+        """A code block with braces before the final object is skipped."""
+        response = (
+            "Reasoning first.\n```python\ndef f(d):\n    return {k: 1 for k in d}\n"
+            '```\n{"solution_code": "def f(d):\\n    return {k: 1 for k in d}"}'
+        )
+        model = MockModel(responses=[response])
+        result = generate_from_context(
+            [{"text": "a"}], "p: {text}", model, output_schema={"solution_code": str}
+        )
+        assert result == [{"solution_code": "def f(d):\n    return {k: 1 for k in d}"}]
 
     def test_raw_newline_in_string(self):
         """A value with unescaped newlines (multi-line code) parses."""

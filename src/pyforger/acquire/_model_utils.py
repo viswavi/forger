@@ -26,7 +26,12 @@ logger = get_formatted_logger(__name__)
 
 
 def _schema_format_instructions(output_schema: dict[str, Any]) -> str:
-    """Build a short JSON-format instruction for the prompt."""
+    """Build a short JSON-format instruction for the prompt.
+
+    It asks for the object at the end and does not forbid text before it, so it
+    does not contradict a prompt that asks for visible reasoning or a code
+    block; `_find_json_object` takes the last matching object.
+    """
     keys = list(output_schema.keys())
     placeholders: dict[str, str] = {}
     for k, v in output_schema.items():
@@ -36,10 +41,9 @@ def _schema_format_instructions(output_schema: dict[str, Any]) -> str:
             placeholders[k] = "<value>"
         else:
             placeholders[k] = "<value>"
-    example_fmt = json.dumps(placeholders)
     return (
-        f"Respond with a JSON object only, with no additional text. "
-        f"Required keys: {keys}. Example format: {example_fmt}."
+        f"End your response with a JSON object with these keys: {json.dumps(keys)}, "
+        f"for example {json.dumps(placeholders)}. Put nothing after the JSON object."
     )
 
 
@@ -66,19 +70,21 @@ def _reasoning_for(completions: Any) -> list[str | None]:
     return reasoning if reasoning is not None else [None] * len(completions)
 
 
-# A ``` or ```json fence; group 1 is its content.
-_FENCE_RE = re.compile(r"```[\w-]*[^\S\n]*\n?(.*?)```", re.DOTALL)
 # An inline reasoning block before the answer, e.g. "<think>...</think>{...}".
 _THINK_RE = re.compile(r"^\s*<think>.*?</think>", re.DOTALL)
 
 
 def _find_json_object(text: str, keys: set[str]) -> dict[str, Any] | None:
-    """The JSON object in a completion that has all of ``keys``, else None.
+    r"""The last JSON object in a completion that has all of ``keys``, else None.
 
-    Tries the whole text, then each ``` fence's content, then every object
-    embedded in the text (e.g. 'Here it is: {...} Hope this helps'), first
-    match wins. Text that is valid JSON but not an object (e.g. a list) fails.
-    Raw newlines inside strings are allowed (e.g. multi-line code in a value).
+    When the whole text is JSON, it must be such an object. Otherwise every
+    top-level object in the text counts, fenced or not, and the last match wins:
+    the prompt asks for the object at the end, and reasoning before it may quote
+    an example. E.g. with ``keys={"answer"}``,
+    'Format: {"answer": "<str>"}. 6*7=42. ```json\n{"answer": "42"}\n```'
+    gives ``{"answer": "42"}``. Objects nested in another are not candidates,
+    and text that is valid JSON but not an object (e.g. a list) fails. Raw
+    newlines inside strings are allowed (e.g. multi-line code in a value).
     """
     text = _THINK_RE.sub("", text, count=1)
     decoder = json.JSONDecoder(strict=False)
@@ -88,13 +94,7 @@ def _find_json_object(text: str, keys: set[str]) -> dict[str, Any] | None:
         pass
     else:
         return loaded if isinstance(loaded, dict) and keys <= loaded.keys() else None
-    for fence in _FENCE_RE.finditer(text):
-        try:
-            loaded = decoder.decode(fence.group(1))
-        except json.JSONDecodeError:
-            continue
-        if isinstance(loaded, dict) and keys <= loaded.keys():
-            return loaded
+    found = None
     start = text.find("{")
     while start != -1:
         try:
@@ -103,10 +103,10 @@ def _find_json_object(text: str, keys: set[str]) -> dict[str, Any] | None:
             start = text.find("{", start + 1)
             continue
         if keys <= loaded.keys():
-            return loaded
+            found = loaded
         # Skip the objects nested in this one: {"a": {"answer": 1}} is not a match.
         start = text.find("{", end)
-    return None
+    return found
 
 
 def _parse_output(
