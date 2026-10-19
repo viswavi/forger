@@ -8,6 +8,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+from pyforger import _tracking
 from pyforger.acquire.sources import (
     ArxivRetrievalSource,
     HFRetrievalSource,
@@ -18,6 +19,16 @@ from pyforger.acquire.sources import (
     WikiRetrievalSource,
 )
 from pyforger.op import tracked
+
+# The wrapper that builds each source, named in the pipeline's warning when
+# retrieved text reaches no prompt.
+_WRAPPER_OF = {
+    WebRetrievalSource: "acquire.retrieve_from_web",
+    WikiRetrievalSource: "acquire.retrieve_from_wiki",
+    HFRetrievalSource: "acquire.retrieve_from_hf",
+    ArxivRetrievalSource: "acquire.retrieve_from_arxiv",
+    S2RetrievalSource: "acquire.retrieve_from_s2",
+}
 
 
 @tracked("acquire.retrieve")
@@ -35,7 +46,9 @@ def retrieve(
     Each row is stamped with a ``"query"`` field. With ``queries=None``,
     a single fetch with no query is performed (e.g. random sampling).
     Calls are not cached; inside a ``@step`` they are listed as
-    ``acquire.retrieve``.
+    ``acquire.retrieve``. Inside a ``@pipeline`` the rows' text is
+    fingerprinted, and the pipeline warns when none of it reaches a model
+    prompt or the pipeline's output.
 
     Returns:
         The source's rows for each query in turn, each with a ``query`` field
@@ -47,6 +60,7 @@ def retrieve(
     all_rows: list[dict[str, Any]] = []
     for q in resolved_queries:
         all_rows.extend(_fetch(source, mode, q, n, seed, kwargs))
+    _register(source, all_rows)
     return all_rows
 
 
@@ -63,6 +77,15 @@ def _fetch(
     for row in rows:
         row["query"] = query
     return rows
+
+
+def _register(source: RetrievalSource, rows: list[dict]) -> None:
+    """Fingerprint ``rows`` for the pipeline's check, under the wrapper's name."""
+    label = next(
+        (name for cls, name in _WRAPPER_OF.items() if isinstance(source, cls)),
+        "acquire.retrieve",
+    )
+    _tracking.register_documents(label, rows)
 
 
 @tracked("acquire.retrieve")
@@ -83,7 +106,9 @@ def _retrieve_concurrently(
         return _fetch(source, mode, query, n, seed, kwargs)
 
     with ThreadPoolExecutor(max_workers=min(max_workers, len(queries))) as pool:
-        return [row for rows in pool.map(fetch, queries) for row in rows]
+        all_rows = [row for rows in pool.map(fetch, queries) for row in rows]
+    _register(source, all_rows)
+    return all_rows
 
 
 def retrieve_from_web(

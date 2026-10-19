@@ -1183,6 +1183,7 @@ class Model:
                 f"cache_rows has {len(cache_rows)} entries for {len(prompts)} prompts"
             )
         _tracking.check_budget()  # raises BudgetExceededError at a spending cap
+        _tracking.note_prompt_texts(prompts)  # did retrieved text reach a prompt?
 
         temperature = temperature if temperature is not None else self._temperature
         max_tokens = max_tokens if max_tokens is not None else self._max_tokens
@@ -1627,6 +1628,7 @@ class LocalModel(Model):
         if not prompts:
             return []
         _tracking.check_budget()  # raises BudgetExceededError at a spending cap
+        _tracking.note_prompt_texts(prompts)  # did retrieved text reach a prompt?
 
         vllm = _import_vllm()
 

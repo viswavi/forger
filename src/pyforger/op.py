@@ -319,6 +319,8 @@ def skip_cache_write() -> None:
 _STEP_META_SUFFIX = ".step.json"
 # A filter's per-row scores, so a cache hit still shows its histogram.
 _SCORES_SUFFIX = ".scores.json"
+# What the call added to the pipeline's retrieval check (see _tracking.ReachLog).
+_REACH_SUFFIX = ".reach.json"
 
 # Set on every @op / tracked wrapper, e.g. {"name": "filter.by_length", "kind":
 # "op", "cache": True}; scripts/gen_op_docs.py reads it to mark cached ops.
@@ -709,6 +711,7 @@ def op(
             is_step = op_name.startswith(_tracking.STEP_OP_PREFIX)
             meta_path = cache_path.with_name(input_hash + _STEP_META_SUFFIX)
             scores_path = cache_path.with_name(input_hash + _SCORES_SUFFIX)
+            reach_path = cache_path.with_name(input_hash + _REACH_SUFFIX)
 
             if use_cache and cache_path.exists():
                 try:
@@ -744,6 +747,8 @@ def op(
                         type(exc).__name__,
                         exc,
                     )
+            if cache_hit:
+                _replay_reach(reach_path)
 
             if not cache_hit:
                 if _cache_only:
@@ -755,7 +760,8 @@ def op(
                 )
                 scope_token = _REQUEST_SCOPE.set(scope)
                 try:
-                    result = fn(*args, **kwargs)
+                    with _tracking.reach_scope() as reach:
+                        result = fn(*args, **kwargs)
                 finally:
                     _REQUEST_SCOPE.reset(scope_token)
                     if scope.reused:
@@ -789,6 +795,13 @@ def op(
                             _atomic_write(scores_path, scores.encode())
                         else:  # no stale scores from an earlier result
                             scores_path.unlink(missing_ok=True)
+                    if reach is not None:
+                        # Written even when empty: a missing file means the
+                        # result was cached outside a pipeline or by an older
+                        # Forger, so its prompts are unknown (see _replay_reach).
+                        _atomic_write(reach_path, reach.dumps().encode())
+                    else:  # no log from an earlier run describing another result
+                        reach_path.unlink(missing_ok=True)
                     _write_result(cache_path, result, cache_root)
 
             duration = time.perf_counter() - start
@@ -914,6 +927,20 @@ def _atomic_write(path: Path, data: bytes) -> None:
 def _write_result(cache_path: Path, result: Any, cache_root: Path) -> None:
     """Pickle result to cache_path, its large values to ``cache_root/blobs``."""
     _atomic_write(cache_path, _blobs.dumps(result, cache_root / "blobs"))
+
+
+def _replay_reach(path: Path) -> None:
+    """Replay what a cached call added to the pipeline's retrieval check."""
+    if not _tracking.reach_active():
+        return
+    try:
+        text = path.read_text()
+    except OSError:
+        # Cached outside a pipeline or before this check existed: its prompts
+        # are unknown, so the pipeline must not claim retrieved text went unused.
+        _tracking.mark_reach_blind()
+        return
+    _tracking.replay_reach(text)
 
 
 def _read_result(cache_path: Path, cache_root: Path) -> Any:
