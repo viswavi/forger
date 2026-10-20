@@ -35,6 +35,12 @@ runtime), and closure values changed after decoration. `@op` logs a warning at d
 and typing objects excepted) or for `os.environ`. When one of these changes, pass `_no_cache=True`. Upgrading to this
 key layout makes existing cache entries miss once.
 
+The opposite problem, a cache that always misses: built-in `hash()` gives a `str` or `bytes` a new value in every
+Python process unless `PYTHONHASHSEED` is set to a number. Rows built from it (e.g. `"stdin" if hash(topic) % 2 else
+"functional"`) change on every run, so the ops that read them miss the request cache and pay again. An `@op` that calls
+`hash()` logs a warning at decoration; a `@step` gets a suggestion in its report and the pipeline summary. Use
+`zlib.crc32(text.encode())` for a number that stays the same.
+
 **Cache location.** `$FORGER_CACHE` if set, otherwise `~/.cache/forger`. The variable is read at call time, so tests
 can redirect it.
 

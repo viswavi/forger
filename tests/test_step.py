@@ -302,6 +302,21 @@ def test_yield_names_are_reserved_at_decoration(reserved):
 # --------------------------------------------------------------------------- #
 
 
+def test_step_calling_hash_gets_a_suggestion(monkeypatch):
+    """A step whose rows depend on hash() of a str is told why its cache misses."""
+    monkeypatch.delenv("PYTHONHASHSEED", raising=False)
+
+    @step
+    def assign(rows):
+        rows = [{**r, "fmt": "a" if hash(r["text"]) % 2 else "b"} for r in rows]
+        return filter.by_exact_match(rows, field="text")
+
+    assign(_rows(*TEXTS))
+    rec = _tracking.step_records()["assign"]
+    assert rec.warnings == []
+    assert any("calls hash()" in s and "zlib.crc32" in s for s in rec.suggestions)
+
+
 def test_step_without_ops_warns():
     """A step that calls no Forger op gets a suggestion; strict=True raises."""
 
