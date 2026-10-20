@@ -239,7 +239,8 @@ def test_llm_summaries_are_opt_in_and_context_sensitive(monkeypatch, capsys):
     assert 'step "write_code"' in prompt
     assert "Write a solver for each problem." in prompt
     assert "def solve(n: int) -> int:" in prompt
-    assert "A Python solver that counts squares mod 7. · " in out
+    assert "LLM: A Python solver that counts squares mod 7." in out
+    assert "def solve(n: int) -> int:" in out  # the value itself still shows
     assert "extra line" not in out
 
 
