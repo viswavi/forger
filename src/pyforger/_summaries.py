@@ -410,18 +410,26 @@ def _hint_report_model() -> None:
 
 
 def summary_prompt(step: str, doc: str, field: str, shape: str, text: str) -> str:
-    """The prompt asking for one sentence on ``text``, the ``field`` of a row."""
+    """The prompt asking for one sentence on ``text``, the ``field`` of a row.
+
+    It asks for what this value says (e.g. "King's Ruler problem: sum over all
+    intervals of length × max height, modulo 1,000,000,007, N up to 100000"),
+    not what kind of value it is ("This value contains a fully specified
+    problem statement"), which reads like a verdict and says nothing.
+    """
     doc = doc.strip()
     if len(doc) > _SUMMARY_DOC_CHARS:
         doc = doc[:_SUMMARY_DOC_CHARS] + " …"
     return (
-        "You are helping someone review the output of a data pipeline. Below is "
+        "You are helping someone check the output of a data pipeline. Below is "
         f'one field of one output row of the step "{step}".\n\n'
         f"What the step does:\n{doc or '(no description)'}\n\n"
         f"Field: {field}\nShape: {shape}\n\n<value>\n{text}\n</value>\n\n"
-        "In one short sentence (under 25 words), say what this value contains so "
-        "the reviewer can judge it without reading it. Describe its content, not "
-        "its formatting. Reply with the sentence only."
+        "In one sentence (under 25 words), say what this particular value says: "
+        "its specific task, method, numbers, names, or claims, so the reviewer "
+        "can tell it apart from other rows. Start with that content itself, not "
+        'with "This value", "This is", or "Contains". Do not judge whether it is '
+        "complete, correct, or well-formed. Reply with the sentence only."
     )
 
 
