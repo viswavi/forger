@@ -241,7 +241,8 @@ def test_llm_summaries_are_opt_in_and_context_sensitive(monkeypatch, capsys):
     assert 'step "write_code"' in prompt
     assert "Write a solver for each problem." in prompt
     assert "def solve(n: int) -> int:" in prompt
-    assert "A Python solver that counts squares mod 7. · " in out
+    assert "LLM: A Python solver that counts squares mod 7." in out
+    assert "def solve(n: int) -> int:" in out  # the value itself still shows
     assert "extra line" not in out
 
 
@@ -368,7 +369,7 @@ def test_stream_samples_get_llm_summaries(monkeypatch, capsys):
     split([{"solution": CODE}])
     assert fake.calls == 2  # one long value in each stream's sample row
     out = capsys.readouterr().out
-    assert out.count("A Python solver that counts squares mod 7. · ") == 2
+    assert out.count("LLM: A Python solver that counts squares mod 7.") == 2
     rec = _tracking.step_records()["split"]
     assert rec.streams is not None
     assert all(s.sample_summaries[0][0].llm for s in rec.streams)
