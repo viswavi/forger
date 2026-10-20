@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 import threading
+import zlib
 from pathlib import Path
 
 import pytest
@@ -124,6 +125,33 @@ def test_op_warns_on_closure(caplog: pytest.LogCaptureFixture) -> None:
     assert any(
         "closure_op" in m and "closes over" in m and "config" in m for m in messages
     )
+
+
+def test_op_warns_on_unseeded_hash(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """hash() of a str differs per process: @op warns unless PYTHONHASHSEED is set."""
+    monkeypatch.delenv("PYTHONHASHSEED", raising=False)
+    with caplog.at_level(logging.WARNING, logger="forger.op"):
+
+        @op
+        def pick_format(topics: list[str]) -> list[str]:
+            return ["stdin" if hash(t) % 2 else "functional" for t in topics]
+
+        @op
+        def pick_stable(topics: list[str]) -> list[str]:
+            return ["stdin" if zlib.crc32(t.encode()) % 2 else "fn" for t in topics]
+
+    monkeypatch.setenv("PYTHONHASHSEED", "0")
+    with caplog.at_level(logging.WARNING, logger="forger.op"):
+
+        @op
+        def pick_seeded(topics: list[str]) -> list[str]:
+            return ["stdin" if hash(t) % 2 else "functional" for t in topics]
+
+    messages = [r.message for r in caplog.records]
+    assert any("pick_format" in m and "calls hash()" in m for m in messages)
+    assert not any("pick_stable" in m or "pick_seeded" in m for m in messages)
 
 
 @pytest.mark.parametrize(

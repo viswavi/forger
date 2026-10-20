@@ -34,6 +34,7 @@ from pydantic import BaseModel
 
 from pyforger import _blobs, _tracking
 from pyforger.utils import (
+    calls_unseeded_hash,
     canonical,
     code_names,
     function_key,
@@ -455,6 +456,15 @@ def _maybe_warn_hash_cost(op_name: str, duration: float, size: int) -> None:
     )
 
 
+# Why a step or op that calls hash() misses the cache, e.g. in
+# "@op(write) calls hash(), which ...".
+UNSEEDED_HASH = (
+    "calls hash(), which gives a str or bytes a new value in every Python "
+    "process, so rows built from it change on every run and later ops miss the "
+    "cache; for a number that stays the same, use zlib.crc32(text.encode())"
+)
+
+
 # Globals of these types need no warning: loggers and typing objects (e.g. a
 # TypeVar) do not change what an op returns.
 _STABLE_TYPE_MODULES = ("logging", "typing", "typing_extensions")
@@ -603,6 +613,10 @@ def op(
         body_key = function_key(fn)
         if cache:
             _warn_unstable_refs(fn, op_name)
+        # A step reports this itself, in its report and the pipeline summary.
+        is_step = op_name.startswith(_tracking.STEP_OP_PREFIX)
+        if not is_step and calls_unseeded_hash(fn):
+            logger.warning("@op(%s) %s.", op_name, UNSEEDED_HASH)
 
         @wraps(fn)
         def wrapper(

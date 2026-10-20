@@ -6,6 +6,7 @@ import dis
 import functools
 import inspect
 import logging
+import os
 import pickle
 import sys
 import types
@@ -171,6 +172,21 @@ def global_names(code: Any) -> tuple[str, ...]:
         if isinstance(const, _CODE_T):
             names.update(global_names(const))
     return tuple(sorted(names))
+
+
+def calls_unseeded_hash(fn: Any) -> bool:
+    """True if ``fn`` (or code nested in it) calls the built-in ``hash``, unseeded.
+
+    ``hash("tree-dp")`` differs in every Python process unless PYTHONHASHSEED
+    is set to a number, so a value built from it, e.g. ``"stdin" if
+    hash(topic) % 2 else "functional"``, changes from run to run.
+    """
+    code = getattr(fn, "__code__", None)
+    g = getattr(fn, "__globals__", None)
+    if code is None or not isinstance(g, dict) or "hash" in g:  # its own hash()
+        return False
+    seeded = os.environ.get("PYTHONHASHSEED", "").isdigit()
+    return not seeded and "hash" in global_names(code)
 
 
 @functools.lru_cache(maxsize=4096)

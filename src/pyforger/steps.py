@@ -92,8 +92,8 @@ from pyforger._tracking import (
     StepRecord,
     UsageTotals,
 )
-from pyforger.op import _cache_dir, op
-from pyforger.utils import get_formatted_logger
+from pyforger.op import UNSEEDED_HASH, _cache_dir, op
+from pyforger.utils import calls_unseeded_hash, get_formatted_logger
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -570,6 +570,7 @@ def step(
         cached = op(fn, name=f"{_tracking.STEP_OP_PREFIX}{step_name}", cache=cache)
         signature = inspect.signature(fn)
         doc = inspect.getdoc(fn) or ""
+        unseeded_hash = calls_unseeded_hash(fn)
         hints: list[_Hints] = []  # resolved on the first call, when names exist
 
         def check_not_nested() -> None:
@@ -618,6 +619,10 @@ def step(
             )
             if hint.warning:
                 _tracking.add_problem(rec, "type_hints", hint.warning, suggestion=True)
+            if unseeded_hash:
+                _tracking.add_problem(
+                    rec, "unseeded_hash", f"this step {UNSEEDED_HASH}", suggestion=True
+                )
             if row_args:
                 rec.n_in = sum(len(rows) for _, _, rows in row_args)
             if smoke is not None:
