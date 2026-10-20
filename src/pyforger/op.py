@@ -796,9 +796,11 @@ def op(
                     logger.debug("not caching %s %s", op_name, input_hash[:8])
                     step_rec = _tracking.active_step() if is_step else None
                     if state.from_thread and step_rec is not None:
-                        step_rec.warnings.append(
+                        _tracking.add_problem(
+                            step_rec,
+                            "not_cached",
                             "not cached: an op in a worker thread kept its result "
-                            "out of the cache (e.g. provider errors)"
+                            "out of the cache (e.g. provider errors)",
                         )
                 elif use_cache:
                     cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1102,7 +1104,7 @@ def _failed_call(
     error = f"{type(exc).__name__}: {exc}"
     if len(error) > 120:
         error = error[:119] + "…"
-    return _tracking.OpCall(
+    call = _tracking.OpCall(
         op_name=op_name,
         category=category,
         n_in=len(first) if isinstance(first, list) and category != "acquire" else None,
@@ -1115,8 +1117,9 @@ def _failed_call(
         cost_usd=usage[2],
         token_units=usage[3],
         error=error,
-        warnings=[f"{op_name} raised {error}"],
     )
+    _tracking.add_problem(call, "op_error", f"{op_name} raised {error}")
+    return call
 
 
 def _check_yield_bounds(min_yield: float | None, max_yield: float | None) -> None:
@@ -1142,12 +1145,13 @@ def _op_call(
     scores: list[_tracking.ScoreRecord],
     min_yield: float | None,
     max_yield: float | None,
-    body_warnings: list[str] | None = None,
+    body_warnings: list[tuple[str, str]] | None = None,
 ) -> _tracking.OpCall:
     """Build the step-report entry for one op call and apply its yield bounds.
 
-    ``body_warnings`` come from ``_tracking.add_op_warning`` in the op's body;
-    the op logged them already, so they are only added to the report.
+    ``body_warnings`` are (kind, message) from ``_tracking.add_op_warning`` in
+    the op's body; the op logged them already, so they are only added to the
+    report.
     """
     # An acquire op's first argument is a prompt or query, not input rows.
     n_in = (
@@ -1175,35 +1179,42 @@ def _op_call(
     )
     # A smoke run's yield on 3 rows says little, so a miss is only a suggestion.
     smoke = _tracking.smoke_rows() is not None
-    missed = call.suggestions if smoke else call.warnings
     prefix = "smoke run: " if smoke else ""
+
+    def missed(message: str) -> None:
+        _tracking.add_problem(call, "yield_bounds", message, suggestion=smoke)
+
     if (min_yield is not None or max_yield is not None) and yield_ratio is None:
         if n_in == 0 and n_out is not None:
             if min_yield:
-                missed.append(
+                missed(
                     f"{prefix}{op_name}: no input rows, so yield is 0 and below "
                     f"min_yield {min_yield:.2f}"
                 )
         else:
-            call.warnings.append(
+            _tracking.add_problem(
+                call,
+                "yield_unchecked",
                 f"{op_name}: yield unchecked; min_yield / max_yield need a list of "
-                "rows in and a list out"
+                "rows in and a list out",
             )
     if yield_ratio is not None:
         if min_yield is not None and yield_ratio < min_yield:
-            missed.append(
+            missed(
                 f"{prefix}{op_name}: yield {yield_ratio:.2f} below min_yield "
                 f"{min_yield:.2f}"
             )
         if max_yield is not None and yield_ratio > max_yield:
-            missed.append(
+            missed(
                 f"{prefix}{op_name}: yield {yield_ratio:.2f} above max_yield "
                 f"{max_yield:.2f}"
             )
     # Completions cut off at max_tokens, from any model call the op made.
-    call.warnings.extend(_tracking.truncation_warnings(op_name))
+    for warning, size in _tracking.truncation_warnings(op_name):
+        _tracking.add_problem(call, "truncation", warning, size=size)
     if not _tracking.is_reporting():
         for warning in call.warnings:
             logger.warning(warning)
-    call.warnings.extend(body_warnings or [])
+    for kind, warning in body_warnings or []:
+        _tracking.add_problem(call, kind, warning)
     return call

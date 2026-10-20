@@ -318,7 +318,7 @@ def eval_tree(
             "report['lowest'] lists the subtrees with the lowest accuracy bounds"
         )
         logger.warning(message)
-        _tracking.add_op_warning(message)
+        _tracking.add_op_warning(message, "eval_tree_no_weakness")
     return {
         "tree": tree,
         "weaknesses": weaknesses,
@@ -369,5 +369,5 @@ def _phrases(model: Model, prompts: list[Prompt], stage: str) -> list[str | None
                 "were not a phrase; those nodes list their children's descriptions"
             )
         logger.warning(message)
-        _tracking.add_op_warning(message)
+        _tracking.add_op_warning(message, "eval_tree_unannotated")
     return phrases

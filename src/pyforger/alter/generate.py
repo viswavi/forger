@@ -311,7 +311,7 @@ def generate_from_context(
             f"parse after {max_retries} retries → {lost(len(failed_parse))}"
         )
         log.warning(message)
-        _tracking.add_op_warning(message)
+        _tracking.add_op_warning(message, "parse_failure")
     _report_format_talk(format_talk, log)
     _raise_if_systemic(list(row_errors.values()), len(prompts))
     if provider_errors:
@@ -362,7 +362,7 @@ def _report_format_talk(format_talk: dict[int, str], log: logging.Logger) -> Non
         "without output_schema and parse the answer yourself"
     )
     log.warning(message)
-    _tracking.add_op_warning(message)
+    _tracking.add_op_warning(message, "format_talk")
 
 
 def _merge_outputs(
@@ -402,7 +402,7 @@ def _merge_outputs(
             "keys) to keep both"
         )
         log.warning(message)
-        _tracking.add_op_warning(message)
+        _tracking.add_op_warning(message, "merge_clash")
     return merged
 
 

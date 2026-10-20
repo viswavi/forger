@@ -62,12 +62,43 @@ them, and score lists of over 100,000 rows, have none: rerun with `_no_cache=Tru
   prompt (below). In a smoke run a `min_yield` / `max_yield` miss is a suggestion instead (`smoke run: ...`), since 3
   rows say little about yield. The pipeline summary ends with `notes`, then the suggestions, then every step's data
   problems under `data problems (N)` (or `data problems: none reported`), so the last lines of a log show them; a smoke
-  run's banner comes after them. Fix each one, or decide it does not matter for your data and say why in your notes.
+  run's banner comes after them. Fix each one; a few can be suppressed with the reason they do not matter for your
+  data (below).
 - Suggestions (dim `suggestion:` lines) are about how the code is written, not the rows: a step calls no Forger ops
   (its report cannot show what it kept or changed: write its checks as ops such as `filter.by_predicate`, and never
   add a no-op filter only to quiet it); a step's type hints cannot be resolved; `show=` names a field no output row
   has; a pipeline has only one step; no quality filter, no diversity filter, or no inspect op ran anywhere; an op was
   called in the pipeline outside a step.
+- Suppressing a warning: a few problems may not matter for your data. For those, and only those, set a flag whose
+  value says why these rows are still fine:
+
+  ```python
+  @step(suppress_truncation_warning="<why these rows are still fine>")
+  def draft(rows, model): ...
+
+  @pipeline(suppress_no_diversity_filter_warning="<why these rows are still fine>")
+  def main(model): ...
+  ```
+
+  Step flags: `suppress_truncation_warning` (completions cut off at `max_tokens`) and `suppress_no_ops_warning` (the
+  step called no Forger ops). Pipeline flags: `suppress_no_quality_filter_warning`,
+  `suppress_no_diversity_filter_warning`, `suppress_no_inspect_warning`, and `suppress_retrieval_warning` (retrieved
+  text reached no prompt). Nothing else can be suppressed: parse failures, provider errors, and judge calls with no
+  score lose rows a fix gets back, and a yield miss means `min_yield` / `max_yield` should say the yield you expect.
+  A step's problem is suppressed on that step, never pipeline-wide: truncation in a draft step that is regenerated
+  later may not matter, while truncation in the answer step does. A suppressed suggestion prints as one dim line,
+  `suppressed: no_inspect in pipeline main — <reason>`. A suppressed data problem keeps its size, `suppressed:
+  truncation in draft (10 of 50 completions cut off, 10 rows dropped) — <reason>`, and stays in the last block of the
+  summary, which then reads `data problems: 0 open, 1 suppressed`. Suppressed problems do not count for `strict=True`.
+  Suppress only what you checked in the rows; when a fix exists (a larger `max_tokens`, a filter), make the fix
+  instead, and do not set a flag next to a fix "in case". A misspelled flag raises `TypeError` (with the closest
+  flag); a reason under 3 words, or a placeholder or example reason, raises `ValueError`. A flag whose problem never
+  fired in any run of that step (or the pipeline) is reported so it cannot hide a later problem: as a warning for
+  `suppress_truncation_warning` and `suppress_retrieval_warning` (`suppress_truncation_warning is set on draft, but no
+  truncation occurred; remove it ...`), as a suggestion for the others; smoke runs skip this check. The report names
+  the flag where it applies: a suggestion ends with `(does not apply? say why with
+  @pipeline(suppress_no_inspect_warning=...))`, and when an open data problem has a flag, a dim line after the data
+  problems names it and its steps, starting "Fix these if they matter".
 - Retrieved text that reaches no prompt: inside a pipeline, each `acquire.retrieve*` call fingerprints the documents it
   returns (three 60-character pieces of each document's `text`, or its longest string; documents under 200 characters
   are skipped, and at most 2,000 per run are fingerprinted). Every `Model` / `LocalModel` / `TinkerModel` prompt is

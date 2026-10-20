@@ -160,7 +160,9 @@ class TestReport:
 
         assert run() == [{"q": "S", "x": 1}]
 
-        warnings = _tracking.step_records()["gen"].ops[0].warnings
+        call = _tracking.step_records()["gen"].ops[0]
+        warnings = call.warnings
+        assert call.kinds == {warnings[0]: "truncation"}  # what accept= names
         # The warning leads with what happened to the rows.
         assert warnings == [
             "alter.generate_from_context: 2 rows dropped (no parseable output), "
