@@ -32,6 +32,13 @@ remaining rows form both the SFT and RL training set. No benchmark test data is
 used in this split. Duplicate prompts and targets exceeding 18,800 tokens are
 rejected. File reordering does not change the split.
 
+If the agent ends its session with fewer than `--min-rows-nudge` rows (default
+1000; 0 disables) and at least 30 minutes left, the launcher sends it one
+message with the row count, how often final RL would revisit each prompt, and
+how to grow the dataset without breaking its current submission, then lets the
+conversation continue. Finishing again keeps the dataset as it is; the message
+is sent at most once (`agent_nudges.py`).
+
 ## Agent iteration
 
 From the sandbox's `coding/` directory, check the submission format before SFT,

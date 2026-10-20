@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TextIO, cast
 
 from agent_boundary import model_cache_bind
+from agent_nudges import low_rows_message
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument(
@@ -98,6 +99,13 @@ parser.add_argument(
     help="Interpreter with OpenHands, used if the current environment lacks it",
 )
 parser.add_argument("--training-mode", choices=["sft", "sft-rl"], default="sft-rl")
+parser.add_argument(
+    "--min-rows-nudge",
+    type=int,
+    default=1000,
+    help="If the agent finishes with fewer dataset rows than this, tell it once "
+    "and let it continue (finishing again ends the session); 0 disables",
+)
 parser.add_argument(
     "--host-python",
     default=os.environ.get("PDB_HOST_PYTHON", sys.executable),
@@ -1002,6 +1010,7 @@ def _timeout_handler(signum, frame):
 # Bound only the agent block with SIGALRM; disarm before host subprocesses.
 signal.signal(signal.SIGALRM, _timeout_handler)
 signal.alarm(int(TIMEOUT * 3600))
+AGENT_ALARM_AT = time.time() + TIMEOUT * 3600  # when SIGALRM fires, in time.time()
 try:
     with ApptainerWorkspace(
         sif_file=CUSTOM_SIF,
@@ -1115,6 +1124,16 @@ try:
             try:
                 conversation.send_message(INSTRUCTIONS)
                 conversation.run(timeout=TIMEOUT * 3600)
+                # One nudge if it finished with a small dataset; finishing
+                # again (or running out of time) ends the session.
+                seconds_left = AGENT_ALARM_AT - time.time()
+                nudge = low_rows_message(
+                    RAW_DATA_PATH, args.min_rows_nudge, seconds_left
+                )
+                if nudge is not None:
+                    logger.info(f"Low-row nudge sent to the agent: {nudge}")
+                    conversation.send_message(nudge)
+                    conversation.run(timeout=seconds_left)
             except (AgentTimeoutError, TimeoutError, ConversationRunError) as exc:
                 timed_out = isinstance(
                     exc, (AgentTimeoutError, TimeoutError)
