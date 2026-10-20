@@ -1103,9 +1103,12 @@ def _fmt_value(
                 text = "\n".join(text.split("\n")[:_FULL_FIELD_LINES] + ["…"])
             shown = _cut_value(text, limit, full=True)
         shown = _cut_value(shown, 2 * limit, full=True)
-        return f"{_clean(llm)}\n{shown}" if llm else shown
-    if llm and summary is not None and shown is not None:
-        return _cut_value(f"{llm} · {summary.shape}", 3 * limit, full=False)
+        return f"{shown}\nLLM: {_clean(llm)}" if llm else shown
+    # The value's own text comes first; the LLM sentence is a second line, so
+    # it adds to what the row says instead of standing in for it.
+    if llm and shown is not None:
+        shown = _cut_value(shown, 2 * limit, full=False)
+        return f"{shown}\nLLM: {_cut_value(llm, 2 * limit, full=False)}"
     if shown is not None:
         return _cut_value(shown, 2 * limit, full=False)
     return _cut_value(_value_text(value, full=False)[0], limit, full=False)
