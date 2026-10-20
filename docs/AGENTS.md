@@ -81,7 +81,8 @@ streams](#several-inputs-and-output-streams)). Each step is cached like
 an `@op` and, when it returns, prints a report: the fields of its output rows; phrases and names repeated across
 them; every op it ran with rows in/out, yield, time, tokens, and cost; a histogram of each filter's scores with what
 other thresholds would have kept; warnings; and one sample output row. The pipeline prints a summary table of its
-steps at the end. Read these reports after every run. A cached step prints one line,
+steps at the end. Read these reports after every run. Run each new pipeline version with `FORGER_SMOKE_ROWS=3`
+first: it runs every op on three rows in about a minute (see "Smoke runs" below). A cached step prints one line,
 `step translate · 42 → 40 rows · cached · originally 0.5s · $0.0034`, with the number of its warnings if it has any;
 `inspect_step(name)` prints its full report, which lists the ops of the run that cached it, marked `cached`, with that
 run's warnings and score histograms (`filter.by_llm_score (cached run) · …`).
