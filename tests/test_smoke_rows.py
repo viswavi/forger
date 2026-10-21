@@ -124,13 +124,14 @@ def test_smoke_yield_miss_is_a_suggestion(monkeypatch, capsys):
     assert only.warnings == [] and only.suggestions == [expected]
     lines = [line.strip() for line in capsys.readouterr().out.splitlines()]
     lines = [line for line in lines if line]
-    # The data-problems block, then the banner as the very last line.
-    assert lines[-2:] == ["data problems: none reported", BANNER]
-    assert f"suggestion: picky: {expected}" in lines
+    # No warnings, and the banner as the very last line.
+    assert lines[-1] == BANNER
+    assert not any(line.startswith("WARNING") for line in lines)
+    assert f"INFO: picky: {expected}" in lines
 
 
 def test_full_run_yield_miss_is_a_data_problem():
-    """Outside a smoke run the same miss is a warning, listed under data problems."""
+    """Outside a smoke run the same miss is a warning, the summary's last line."""
 
     @pipeline
     def build() -> list[dict]:
@@ -141,7 +142,9 @@ def test_full_run_yield_miss_is_a_data_problem():
     assert only.warnings == ["filter.by_length: yield 0.33 below min_yield 0.90"]
     assert not any("min_yield" in s for s in only.suggestions)
     summary = render_pipeline(_last())
-    assert "data problems (1)" in summary
+    assert summary.rstrip().splitlines()[-1].strip() == (
+        "WARNING: picky: filter.by_length: yield 0.33 below min_yield 0.90"
+    )
     assert not summary.rstrip().endswith(BANNER)
 
 

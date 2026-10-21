@@ -165,11 +165,8 @@ class TestReport:
         assert call.kinds == {warnings[0]: "truncation"}  # what accept= names
         # The warning leads with what happened to the rows.
         assert warnings == [
-            "alter.generate_from_context: 2 rows dropped (no parseable output), "
-            "because 2 of 3 completions from gpt-4o stopped at max_tokens=100 "
-            "(finish_reason=length) (a reasoning model's is often empty: the budget "
-            "went to thinking); raise the Model's max_tokens or lower its "
-            "reasoning_effort"
+            "alter.generate_from_context: 2 rows dropped: 2 of 3 completions from "
+            "gpt-4o hit max_tokens=100; raise max_tokens or lower reasoning_effort"
         ]
 
     def test_logged_outside_ops(self, fake, caplog):
@@ -177,7 +174,7 @@ class TestReport:
         fake.script = {"Q": [("partial", "length")]}
         with caplog.at_level(logging.WARNING, logger="pyforger.acquire.model"):
             gpt().generate_batch(["Q", "R"])
-        assert "1 of 2 completions from gpt-4o stopped at max_tokens=100" in caplog.text
+        assert "1 of 2 completions from gpt-4o hit max_tokens=100" in caplog.text
 
     def test_no_warning_without_truncation(self, fake, monkeypatch):
         """Normal stops add nothing."""
@@ -206,7 +203,7 @@ class TestRetries:
         assert fake.calls.count("Q") == 1
         assert fake.calls.count("R") == 4  # 1 + max_retries
         assert "1 sample(s) stopped at max_tokens" in caplog.text
-        assert "1 sample(s) failed to parse after 3 retries" in caplog.text
+        assert "1 sample did not parse after 3 retries" in caplog.text
 
     def test_retry_truncated_retries_them(self, fake):
         """retry_truncated=True re-asks, and a later full answer is kept."""
@@ -237,8 +234,8 @@ class TestRowOutcomes:
         assert gen([{"q": "Q"}, {"q": "R"}])[0]["text"] == "partial code"
         warning = _tracking.step_records()["gen"].ops[0].warnings[0]
         assert warning.startswith(
-            "alter.generate_from_context: 1 row kept with cut-off text, because 1 "
-            "of 2 completions from gpt-4o stopped at max_tokens=100"
+            "alter.generate_from_context: 1 row kept with cut-off text: 1 of 2 "
+            "completions from gpt-4o hit max_tokens=100"
         )
 
     def test_dropped_and_kept_in_one_warning(self, fake, monkeypatch):
@@ -255,8 +252,8 @@ class TestRowOutcomes:
         assert gen([{"q": "Q"}, {"q": "R"}]) == [{"q": "R", "x": 3}]
         warning = _tracking.step_records()["gen"].ops[0].warnings[0]
         assert warning.startswith(
-            "alter.generate_from_context: 1 row dropped (no parseable output), 1 row "
-            "kept with cut-off text, because 2 of 2 completions"
+            "alter.generate_from_context: 1 row dropped, 1 row kept with cut-off "
+            "text: 2 of 2 completions"
         )
 
     def test_outcome_leads_and_mid_thought_is_counted(self, fake, monkeypatch):
@@ -273,10 +270,8 @@ class TestRowOutcomes:
         assert gen([{"q": "Q"}]) == []
         warning = _tracking.step_records()["gen"].ops[0].warnings[0]
         assert warning.startswith(
-            "alter.generate_from_context: 1 row dropped (no parseable output), "
-            "because 1 of 1 completions from gpt-4o stopped at max_tokens=100 "
-            "(finish_reason=length; 1 of them mid-thought, <think> never closed) "
-            "(a reasoning model's is often empty"
+            "alter.generate_from_context: 1 row dropped: 1 of 1 completions from "
+            "gpt-4o hit max_tokens=100 (1 mid-thought); raise max_tokens"
         )
 
     def test_message_takes_outcome_and_mid_thought(self):
@@ -291,13 +286,13 @@ class TestRowOutcomes:
             mid_thought=72,
         )
         assert message == (
-            "20 rows dropped, because 78 of 264 completions from qwen stopped at "
-            "max_tokens=16384 (finish_reason=length; 72 of them mid-thought, <think> "
-            "never closed); raise the TinkerModel's max_tokens"
+            "20 rows dropped: 78 of 264 completions from qwen hit max_tokens=16384 "
+            "(72 mid-thought); raise the TinkerModel's max_tokens"
         )
         plain = _tracking.truncation_message("qwen", 16384, 78, 264, "; raise it")
-        assert plain.endswith(
-            "(finish_reason=length), so their text is cut off; raise it"
+        assert plain == (
+            "78 of 264 completions from qwen hit max_tokens=16384, so their text is "
+            "cut off; raise it"
         )
 
     def test_parse_failures_reach_the_report(self, fake, monkeypatch):
@@ -313,8 +308,8 @@ class TestRowOutcomes:
 
         gen([{"q": "Q"}, {"q": "R"}])
         assert _tracking.step_records()["gen"].ops[0].warnings == [
-            "alter.generate_from_context: 1 sample(s) failed to parse after 3 "
-            "retries → 1 row dropped"
+            "alter.generate_from_context: 1 row dropped: 1 sample did not parse "
+            "after 3 retries"
         ]
 
 

@@ -155,7 +155,9 @@ def test_few_documents_used_is_a_note(model):
         "acquire.retrieve_from_web: only 1 of 30 retrieved documents (3%) were used "
         "in a prompt or the output"
     ]
-    assert "notes" in render_pipeline(rec)
+    assert f"INFO: {rec.notes[0]}" in " ".join(
+        line.strip() for line in render_pipeline(rec).splitlines()
+    )
 
 
 def test_no_warning_without_retrieval(model):
