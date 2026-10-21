@@ -276,6 +276,22 @@ and checkpoints are saved every 5 steps. Unlike Slime, there is no KL penalty
 (Slime used 1e-3). Probes run 2 steps of 16 prompts.
 Thinking is enabled throughout training and final test evaluation.
 
+To see how a finished run trained, plot its learning curves (one line per run;
+matplotlib is in the `trl` env, not in `host_venv`):
+
+```bash
+cd coding
+R=/data/user_data/vijayv/pdb_tinker/runs
+python -m rl.plot_training $R/pdb-forger-v4_10861894.out $R/pdb-native-v4_10860388.out \
+  --out training.png
+```
+
+Each argument is a job log, an agent run directory, or a final directory. The
+panels show the submitted SFT trial's loss; RL reward per step with the
+held-out reward; the share of RL prompts whose samples all got the same reward
+(no signal); the share every sample solved and every sample failed (from
+`rollouts.jsonl`); mean response length; and the truncated share.
+
 Use `--prepare-final-only` to freeze without starting final RL. To finalize
 an existing agent submission (without starting OpenHands):
 
