@@ -1524,20 +1524,19 @@ def close_retrieval_reach(rec: PipelineRecord, result: Any) -> None:
         if reach.blind:
             return
         sent = (
-            "the 1 model prompt"
+            "the 1 prompt"
             if reach.prompts == 1
-            else f"any of the {reach.prompts:,} model prompts"
+            else f"any of the {reach.prompts:,} prompts"
         )
         rec.warnings.append(
-            f"{who} returned {sum(reach.returned.values()):,} documents, but none "
-            f"of their text appeared in {sent} or in the pipeline's output; to "
-            "ground generation on them, format the retrieved text into your prompts"
+            f"{who}: none of the {sum(reach.returned.values()):,} retrieved documents "
+            f"were used in {sent} or the output; put their text in your prompts"
         )
     elif len(reach.used) < _FEW_USED * len(reach.docs):
         rec.notes.append(
-            f"{len(reach.used):,} of {len(reach.docs):,} documents from {who} "
-            f"({len(reach.used) / len(reach.docs):.0%}) appeared in a model prompt "
-            "or the pipeline's output"
+            f"{who}: only {len(reach.used):,} of {len(reach.docs):,} retrieved "
+            f"documents ({len(reach.used) / len(reach.docs):.0%}) were used in a "
+            "prompt or the output"
         )
 
 
