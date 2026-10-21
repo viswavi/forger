@@ -109,11 +109,11 @@ def test_unused_retrieval_warns(pages, model):
     rec = _run("Write a question about {query}.", model)
     assert len(model.sent) == 3
     assert _reach_warnings(rec) == [
-        "acquire.retrieve_from_web returned 3 documents, but none of their text "
-        "appeared in any of the 3 model prompts or in the pipeline's output; to "
-        "ground generation on them, format the retrieved text into your prompts"
+        "acquire.retrieve_from_web: none of the 3 retrieved documents were used in "
+        "any of the 3 prompts or the output; put their text in your prompts"
     ]
-    assert "format the retrieved text" in render_pipeline(rec)
+    text = " ".join(line.strip() for line in render_pipeline(rec).splitlines())
+    assert "put their text in your prompts" in text  # a line wraps at 120 columns
 
 
 def test_text_in_a_prompt_counts_as_used(pages, model):
@@ -152,8 +152,8 @@ def test_few_documents_used_is_a_note(model):
         )
     assert _reach_warnings(rec) == []
     assert rec.notes == [
-        "1 of 30 documents from acquire.retrieve_from_web (3%) appeared in a model "
-        "prompt or the pipeline's output"
+        "acquire.retrieve_from_web: only 1 of 30 retrieved documents (3%) were used "
+        "in a prompt or the output"
     ]
     assert f"INFO: {rec.notes[0]}" in " ".join(
         line.strip() for line in render_pipeline(rec).splitlines()
@@ -276,9 +276,8 @@ def test_request_cache_hits_still_count_their_prompts(pages, model, prompt, warn
     assert not rec.steps[1].cache_hit and not rec.steps[1].ops[0].cache_hit
     if warns:  # the 3 prompts were counted, not replayed from an op cache sidecar
         assert _reach_warnings(rec) == [
-            "acquire.retrieve_from_web returned 3 documents, but none of their text "
-            "appeared in any of the 3 model prompts or in the pipeline's output; to "
-            "ground generation on them, format the retrieved text into your prompts"
+            "acquire.retrieve_from_web: none of the 3 retrieved documents were used "
+            "in any of the 3 prompts or the output; put their text in your prompts"
         ]
     else:
         assert _reach_warnings(rec) == [] and not rec.notes
@@ -311,7 +310,6 @@ def test_concurrent_s2_queries_are_fingerprinted(model):
     rec = _tracking.last_pipeline()
     assert rec is not None
     assert [w for w in rec.warnings if "retrieve_from_s2" in w] == [
-        "acquire.retrieve_from_s2 returned 2 documents, but none of their text "
-        "appeared in any of the 2 model prompts or in the pipeline's output; to "
-        "ground generation on them, format the retrieved text into your prompts"
+        "acquire.retrieve_from_s2: none of the 2 retrieved documents were used in "
+        "any of the 2 prompts or the output; put their text in your prompts"
     ]
