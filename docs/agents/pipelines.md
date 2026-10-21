@@ -54,17 +54,16 @@ them, and score lists of over 100,000 rows, have none: rerun with `_no_cache=Tru
 - Hard errors (`StepContractError` / `PipelineContractError`): a step returns neither a list nor a dict of row lists,
   a step is called inside another step, a pipeline calls no steps, or rows do not match a `list[X]` type hint where
   `X` is a pydantic model (rows stay dicts).
-- Warnings (`⚠`) are data problems: something happened to this run's rows, and the warning says what. Examples: an op
-  misses its `min_yield` / `max_yield`; model calls stopped at `max_tokens` ("20 rows dropped (no parseable output),
-  because 34 of 120 completions ... stopped at max_tokens=16384"); samples failed to parse; requests failed at the
-  provider; a judge gave no score; reasoning traces open by discussing the output format (`output_schema` and the
+- `WARNING:` lines are data problems: something happened to this run's rows, and the line says what. Examples: an op
+  misses its `min_yield` / `max_yield`; model calls stopped at `max_tokens` ("20 rows dropped: 34 of 120 completions
+  ... hit max_tokens=16384; raise max_tokens or lower reasoning_effort"); samples failed to parse; requests failed at
+  the provider; a judge gave no score; reasoning traces open by discussing the output format (`output_schema` and the
   prompt's own format instructions disagree, so the reasoning is a poor training target); retrieved text reached no
-  prompt (below). In a smoke run a `min_yield` / `max_yield` miss is a suggestion instead (`smoke run: ...`), since 3
-  rows say little about yield. The pipeline summary ends with `notes`, then the suggestions, then every step's data
-  problems under `data problems (N)` (or `data problems: none reported`), so the last lines of a log show them; a smoke
-  run's banner comes after them. Fix each one; a few can be suppressed with the reason they do not matter for your
-  data (below).
-- Suggestions (dim `suggestion:` lines) are about how the code is written, not the rows: a step calls no Forger ops
+  prompt (below). In a smoke run a `min_yield` / `max_yield` miss is an `INFO:` line instead (`smoke run: ...`), since
+  3 rows say little about yield. The pipeline summary ends with its `INFO:` lines, then every step's `WARNING:` lines,
+  so the last lines of a log show them; a smoke run's banner comes after them. Fix each one; a few can be suppressed
+  with the reason they do not matter for your data (below).
+- `INFO:` lines (dim) are about how the code is written, not the rows: a step calls no Forger ops
   (its report cannot show what it kept or changed: write its checks as ops such as `filter.by_predicate`, and never
   add a no-op filter only to quiet it); a step's type hints cannot be resolved; `show=` names a field no output row
   has; a pipeline has only one step; no quality filter, no diversity filter, or no inspect op ran anywhere; an op was
@@ -86,30 +85,29 @@ them, and score lists of over 100,000 rows, have none: rerun with `_no_cache=Tru
   text reached no prompt). Nothing else can be suppressed: parse failures, provider errors, and judge calls with no
   score lose rows a fix gets back, and a yield miss means `min_yield` / `max_yield` should say the yield you expect.
   A step's problem is suppressed on that step, never pipeline-wide: truncation in a draft step that is regenerated
-  later may not matter, while truncation in the answer step does. A suppressed suggestion prints as one dim line,
-  `suppressed: no_inspect in pipeline main — <reason>`. A suppressed data problem keeps its size, `suppressed:
-  truncation in draft (10 of 50 completions cut off, 10 rows dropped) — <reason>`, and stays in the last block of the
-  summary, which then reads `data problems: 0 open, 1 suppressed`. Suppressed problems do not count for `strict=True`.
+  later may not matter, while truncation in the answer step does. A suppressed problem is not printed; the step's or
+  pipeline's record keeps it, with its size and your reason, in `.suppressed` (e.g. `inspect_step("draft").suppressed`).
+  Suppressed problems do not count for `strict=True`.
   Suppress only what you checked in the rows; when a fix exists (a larger `max_tokens`, a filter), make the fix
   instead, and do not set a flag next to a fix "in case". A misspelled flag raises `TypeError` (with the closest
   flag); a reason under 3 words, or a placeholder or example reason, raises `ValueError`. A flag whose problem never
   fired in any run of that step (or the pipeline) is reported so it cannot hide a later problem: as a warning for
-  `suppress_truncation_warning` and `suppress_retrieval_warning` (`suppress_truncation_warning is set on draft, but no
-  truncation occurred; remove it ...`), as a suggestion for the others; smoke runs skip this check. The report names
-  the flag where it applies: a suggestion ends with `(does not apply? say why with
-  @pipeline(suppress_no_inspect_warning=...))`, and when an open data problem has a flag, a dim line after the data
-  problems names it and its steps, starting "Fix these if they matter".
+  `suppress_truncation_warning` and `suppress_retrieval_warning` (`suppress_truncation_warning on draft suppressed
+  nothing (no truncation occurred); remove it`), as an `INFO:` line for the others; smoke runs skip this check. A line
+  whose problem has a flag ends with it in brackets, e.g. `INFO: no inspect op ran
+  [@pipeline(suppress_no_inspect_warning=...)]`.
 - Retrieved text that reaches no prompt: inside a pipeline, each `acquire.retrieve*` call fingerprints the documents it
   returns (three 60-character pieces of each document's `text`, or its longest string; documents under 200 characters
   are skipped, and at most 2,000 per run are fingerprinted). Every `Model` / `LocalModel` / `TinkerModel` prompt is
   checked for them, ignoring whitespace, also one answered from the request cache, and so are the string values of the
-  rows the pipeline returns. If none appears anywhere, the pipeline warns: `acquire.retrieve_from_web returned 223
-  documents, but none of their text appeared in any of the 1,840 model prompts or in the pipeline's output; to ground
-  generation on them, format the retrieved text into your prompts`. A field that carries the documents but that no
-  prompt formats does not count, unless the pipeline returns the rows that hold it. When fewer than 10% of the documents
-  were used, the summary's `notes` section says so instead. Cached ops and steps replay what their first run saw, so a
-  cached rerun gives the same verdict. A result cached outside a pipeline, or by an older Forger, has unknown prompts,
-  so the check says nothing for that run rather than warn falsely. Direct `source.fetch()` calls are not tracked.
+  rows the pipeline returns. If none appears anywhere, the pipeline warns: `acquire.retrieve_from_web: none of the 223
+  retrieved documents were used in any of the 1,840 prompts or the output; put their text in your prompts`. A field
+  that carries the documents but that no prompt formats does not count, unless the pipeline returns the rows that hold
+  it. When fewer than 10% of the documents were used, an `INFO:` line says so instead: `acquire.retrieve_from_web: only
+  3 of 77 retrieved documents (4%) were used in a prompt or the output`. Cached ops and steps replay what their first
+  run saw, so a cached rerun gives the same verdict. A result cached outside a pipeline, or by an older Forger, has
+  unknown prompts, so the check says nothing for that run rather than warn falsely. Direct `source.fetch()` calls are
+  not tracked.
 - These checks use each op's category, not its name. Ops under `pyforger.acquire/alter/filter/inspect` have their
   package's category; your own `@op` is `"other"` (even `@op(name="filter.x")`) unless it declares one, e.g.
   `@op(category="filter")` for a custom quality filter.
@@ -117,7 +115,7 @@ them, and score lists of over 100,000 rows, have none: rerun with `_no_cache=Tru
   and rows seen). These are notes, not warnings, and `strict=True` does not raise on them: a generate-only step
   followed by a filter step is fine, and a filter that removes nothing may be a check that passed or one that tests
   nothing. Do not add a filter only to quiet them.
-- `strict=True` on `@step` or `@pipeline` turns warnings and suggestions into errors, also on cached runs; a step that
+- `strict=True` on `@step` or `@pipeline` turns `WARNING:` and `INFO:` lines into errors, also on cached runs; a step that
   fails strict mode is not cached. `prod=True` or the environment variable `FORGER_STEP_REPORT=0` silences the reports.
   `pyforger.inspect.inspect_step(name)` re-prints the full report of the latest run of a step, with up to 10 sample
   rows. It also works from another process (e.g. a shell, while the pipeline runs under `nohup`): every step saves its
@@ -135,7 +133,7 @@ them, and score lists of over 100,000 rows, have none: rerun with `_no_cache=Tru
   still count them); silenced reports make no calls. A cheap model without reasoning is enough. Without a report
   model, the first report with a long value logs (at INFO) how to set one; `set_report_model(None)` turns summaries
   off and silences that.
-- Threads: ops called from `ThreadPoolExecutor` workers are not itemized in the step report (the step gets a suggestion
+- Threads: ops called from `ThreadPoolExecutor` workers are not itemized in the step report (the step gets an `INFO:` line
   instead of an error) unless submitted as `pool.submit(contextvars.copy_context().run, fn, arg)`. Steps called from
   workers still join the pipeline, and their spend counts toward it (and its cap) as it arrives. Each op, step, and
   pipeline counts only its own LLM calls, also when several run at the same time. An op that raised is listed as
@@ -264,10 +262,8 @@ pipeline main ──────────────────────
   translate   42    40    0.95   0.5s   $0.0034
   dedupe      40    27    0.68   0.0s         -
 
-  suggestion: no quality filter ran, so nothing checked the rows' quality (e.g. filter.by_llm_score)
-  suggestion: no inspect op ran, so nothing looked at what the rows cover (e.g. inspect.topic_based_clustering)
-
-  data problems: none reported
+  INFO: no quality filter ran [@pipeline(suppress_no_quality_filter_warning=...)]
+  INFO: no inspect op ran [@pipeline(suppress_no_inspect_warning=...)]
 ```
 
 Run again and both steps come from the cache, one line each, before the same summary:

@@ -1187,10 +1187,9 @@ class TestTruncation:
         assert sum(r.truncated for r in model.history) == 6
         call = _tracking.step_records()["hard"].ops[0]
         assert call.warnings == [
-            "filter.by_pass_at_k: 6 of 8 completions from Qwen/Qwen3-8B stopped at "
-            "max_tokens=50 (finish_reason=length; 4 of them mid-thought, <think> "
-            "never closed), so their text is cut off; raise the TinkerModel's "
-            "max_tokens"
+            "filter.by_pass_at_k: 6 of 8 completions from Qwen/Qwen3-8B hit "
+            "max_tokens=50 (4 mid-thought), so their text is cut off; raise the "
+            "TinkerModel's max_tokens"
         ]
         assert call.scores.note == (
             "4 of 8 samples truncated (<think> never closed), graded failed; "
@@ -1242,9 +1241,9 @@ class TestTruncation:
         hard([{"task": "2+2", "answer": "4"}])
         call = _tracking.step_records()["hard"].ops[0]
         assert call.warnings == [
-            "filter.by_pass_at_k: 2 of 2 completions from Qwen/Qwen3-8B stopped at "
-            "max_tokens=50 (finish_reason=length), so their text is cut off; raise "
-            "the TinkerModel's max_tokens"
+            "filter.by_pass_at_k: 2 of 2 completions from Qwen/Qwen3-8B hit "
+            "max_tokens=50, so their text is cut off; raise the TinkerModel's "
+            "max_tokens"
         ]
         assert call.scores.note is None
 
@@ -1285,8 +1284,7 @@ class TestTruncation:
         warnings = _tracking.step_records()["gen"].ops[0].warnings
         # output_schema=None keeps any text, so the row stays, cut off.
         assert warnings == [
-            "alter.generate_from_context: 1 row kept with cut-off text, because 1 "
-            "of 1 completions from Qwen/Qwen3-8B stopped at max_tokens=50 "
-            "(finish_reason=length; 1 of them mid-thought, <think> never closed); "
-            "raise the TinkerModel's max_tokens"
+            "alter.generate_from_context: 1 row kept with cut-off text: 1 of 1 "
+            "completions from Qwen/Qwen3-8B hit max_tokens=50 (1 mid-thought); raise "
+            "the TinkerModel's max_tokens"
         ]

@@ -99,14 +99,15 @@ Control flow (`for`, `if`, comprehensions, helper functions) in plain Python can
 Structure a pipeline as a `@pyforger.pipeline` function that calls `@pyforger.step` functions. A step is a named
 function from rows to rows built from Forger ops (typically acquire or alter, then filter); it may also take several
 lists of rows and return a dict of named row lists. Each step is cached like an `@op` and, when it returns, prints a
-report; the pipeline prints a summary table of its steps at the end. Read these reports after every run. Warnings
-(`⚠`) are data problems: each says what happened to your rows (e.g. "20 rows dropped, because 34 of 120 completions
-... stopped at max_tokens"), and the summary ends with all of them under `data problems (N)`. Fix each one; a few
-that may not matter for your data (e.g. truncation in a draft step) can be suppressed with a reason, e.g.
-`@step(suppress_truncation_warning="<why these rows are still fine>")`. Dim `suggestion:` lines are about how the
-code is written. Run each new pipeline version with `FORGER_SMOKE_ROWS=3` first: it runs every op on three rows in
-about a minute (see "Smoke runs" in `pipelines.md`). See [`docs/agents/pipelines.md`](agents/pipelines.md) for the
-reports, warnings, suppression flags, spend ledger, and spending caps.
+report; the pipeline prints a summary table of its steps at the end. Read these reports after every run.
+`WARNING:` lines are data problems: each says what happened to your rows (e.g. "20 rows dropped: 34 of 120
+completions ... hit max_tokens=16384"), and the summary ends with all of them. Fix each one; a few that may not matter
+for your data (e.g. truncation in a draft step) can be suppressed with a reason, e.g.
+`@step(suppress_truncation_warning="<why these rows are still fine>")`; a line that can be suppressed ends with its
+flag in brackets. Dim `INFO:` lines are about how the code is written. Run each new pipeline version with
+`FORGER_SMOKE_ROWS=3` first: it runs every op on three rows in about a minute (see "Smoke runs" in `pipelines.md`).
+See [`docs/agents/pipelines.md`](agents/pipelines.md) for the reports, warnings, suppression flags, spend ledger, and
+spending caps.
 
 ### Operation reference
 

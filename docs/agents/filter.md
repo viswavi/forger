@@ -184,8 +184,8 @@ it graded `None`; `truncated="exclude"` restores that.) `by_comparative_difficul
 model that ran out of tokens has not shown the row is hard. The step report counts truncated samples under the
 filter's histogram, e.g. `5 of 12 samples truncated (<think> never closed), graded failed`; if that is most of them,
 raise `max_tokens`. The op's warning about completions that stopped at `max_tokens` counts them too, since a bare op's
-note is never shown, e.g. `78 of 264 completions ... (finish_reason=length; 72 of them mid-thought, <think> never
-closed)`; so `strict=True` fails on them. A sample whose request failed has no text, so it grades `None` (excluded),
+note is never shown, e.g. `78 of 264 completions ... hit max_tokens=16384 (72 mid-thought)`; so `strict=True` fails
+on them. A sample whose request failed has no text, so it grades `None` (excluded),
 never truncated; with a `Model` or `TinkerModel` (any model whose `generate_batch` takes `return_exceptions`) this
 includes fan-out copies that failed, so a prompt that came back short is padded with `None`. Otherwise, a model that
 returns a number of completions other than `n` for a prompt raises `ValueError`: a sample missing for any reason other

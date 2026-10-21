@@ -42,7 +42,6 @@ from pyforger._tracking import (
     RowStream,
     ScoreRecord,
     StepRecord,
-    Suppression,
 )
 
 WIDTH = 120  # reports never exceed this many columns
@@ -1321,14 +1320,21 @@ def _samples(
     return Group(*blocks)
 
 
-def _warning_lines(warnings: Iterable[str], prefix: str = "") -> list[Text]:
+def _warning_lines(
+    warnings: Iterable[str], prefix: str = "", kinds: dict[str, str] | None = None
+) -> list[Text]:
+    """``WARNING: solve: 3 rows dropped: ... [@step(suppress_truncation_warning=...)]``.
+
+    A warning that has a flag ends with it in brackets.
+    """
     out: list[Text] = []
     for w in dict.fromkeys(warnings):
         line = Text()
-        line.append("⚠ ", style="yellow")
+        line.append("WARNING: ", style="bold yellow")
         if prefix:
             line.append(f"{_clean(prefix)}: ", style="bold")
         line.append(_clean(w))
+        line.append(_flag_tag((kinds or {}).get(w)), style="dim")
         out.append(line)
     return out
 
@@ -1345,47 +1351,26 @@ def _flag_for(kind: str | None) -> str | None:
     return None
 
 
+def _flag_tag(kind: str | None) -> str:
+    """`` [@pipeline(suppress_no_inspect_warning=...)]``, or "" when no flag applies."""
+    flag = _flag_for(kind)
+    return f" [{flag}]" if flag is not None else ""
+
+
 def _suggestion_lines(
     suggestions: Iterable[str], prefix: str = "", kinds: dict[str, str] | None = None
 ) -> list[Text]:
-    """Dim lines: ``suggestion: no inspect op ran, so ...``.
-
-    A suggestion that has a flag names it, e.g. "... (does not apply? say why
-    with @pipeline(suppress_no_inspect_warning=...))".
-    """
+    """Dim lines: ``INFO: no inspect op ran [@pipeline(suppress_...=...)]``."""
     out: list[Text] = []
     for s in dict.fromkeys(suggestions):
         line = Text(style="dim")
-        line.append("suggestion: ")
+        line.append("INFO: ")
         if prefix:
             line.append(f"{_clean(prefix)}: ")
         line.append(_clean(s))
-        flag = _flag_for((kinds or {}).get(s))
-        if flag is not None:
-            line.append(f" (does not apply? say why with {flag})")
+        line.append(_flag_tag((kinds or {}).get(s)))
         out.append(line)
     return out
-
-
-def _suppressed_lines(suppressed: Iterable[Suppression]) -> list[Text]:
-    """Dim lines: ``suppressed: truncation in solve (10 of 50 cut off) — <why>``.
-
-    One per kind and place, also when a step ran several times; a data
-    problem keeps its size.
-    """
-    seen: dict[tuple[str, str, str], list[str]] = {}
-    for x in suppressed:
-        sizes = seen.setdefault((x.kind, x.where, x.reason), [])
-        sizes.extend(z for z in x.sizes if z not in sizes)
-    return [
-        Text(
-            f"suppressed: {kind} in {_clean(where)}"
-            + (f" ({_clean('; '.join(sizes))})" if sizes else "")
-            + f" — {_clean(reason)}",
-            style="dim",
-        )
-        for (kind, where, reason), sizes in seen.items()
-    ]
 
 
 def _rule(kind: str, name: str) -> Rule:
@@ -1553,9 +1538,8 @@ def step_renderable(
     if rec.input_type or rec.output_type:
         arrow = f"{rec.input_type or 'any'} → {rec.output_type or 'any'}"
         body.append(Text(f"rows validated: {arrow}", style="dim"))
-    body.extend(_warning_lines(rec.warnings))
+    body.extend(_warning_lines(rec.warnings, kinds=rec.kinds))
     body.extend(_suggestion_lines(rec.suggestions, kinds=rec.kinds))
-    body.extend(_suppressed_lines(rec.suppressed))
 
     if rec.ops and not one_plain_op:
         body.append(Text(""))
@@ -1621,12 +1605,7 @@ def _filter_notes(rec: PipelineRecord) -> list[RenderableType]:
         names = ", ".join(_clean(n) for n in rec.no_filter_steps)
         out.append(Text(f"steps without a filter: {names}"))
     if rec.noop_filters:
-        out.append(
-            Text(
-                "filters that removed nothing (a check that passed, or one that "
-                "tests nothing):"
-            )
-        )
+        out.append(Text("filters that removed nothing:"))
         for op_name, step_name, n in rec.noop_filters[:_MAX_NOOP_FILTERS]:
             out.append(
                 Text(f"  {_clean(op_name)} in {_clean(step_name)} · {fmt_int(n)} rows")
@@ -1672,35 +1651,9 @@ def _stream_cells(s: StepRecord, n_cells: int) -> list[list[Text]]:
     return out
 
 
-def _suppress_hint(rec: PipelineRecord) -> Text | None:
-    """One dim line naming the flags for the open data problems that have one.
-
-    e.g. "Fix these if they matter; if one does not matter for your data, say
-    why with its flag and a reason: @step(suppress_truncation_warning=...) on
-    draft". None when no open data problem has a flag (suggestions name their
-    own flag on their line).
-    """
-    found: dict[str, list[str]] = {}  # flag -> steps it applies to
-    for s in rec.steps:
-        for message in s.warnings:
-            flag = _flag_for(s.kinds.get(message))
-            if flag is not None and s.kind == "step":
-                found.setdefault(flag, []).append(s.name)
-    for message in rec.warnings:
-        flag = _flag_for(rec.kinds.get(message))
-        if flag is not None:
-            found.setdefault(flag, [])
-    if not found:
-        return None
-    parts = [
-        f"{flag} on {', '.join(dict.fromkeys(where))}" if where else flag
-        for flag, where in found.items()
-    ]
-    return Text(
-        "Fix these if they matter; if one does not matter for your data, say why "
-        f"with its flag and a reason: {'; '.join(parts)}",
-        style="dim",
-    )
+def _step_kinds(rec: StepRecord) -> dict[str, str] | None:
+    """A step's problem kinds, for naming its flags; None for a bare op."""
+    return rec.kinds if rec.kind == "step" else None
 
 
 def pipeline_renderable(rec: PipelineRecord, *, width: int = WIDTH) -> RenderableType:
@@ -1795,49 +1748,33 @@ def pipeline_renderable(rec: PipelineRecord, *, width: int = WIDTH) -> Renderabl
             )
         )
     body.extend(_filter_notes(rec))
-    if rec.notes:
-        body.append(Text(""))
-        body.append(Text("notes", style="bold"))
-        body.extend(Text(_clean(note)) for note in dict.fromkeys(rec.notes))
-    suggestions = [
-        line
-        for s in rec.steps
-        for line in _suggestion_lines(s.suggestions, prefix=s.name, kinds=s.kinds)
-    ] + _suggestion_lines(rec.suggestions, kinds=rec.kinds)
-    if suggestions:
-        body.append(Text(""))
-        body.extend(suggestions)
-    # Every suppression with its reason, so a reader can audit them: the
-    # suggestions' here, the data problems' (with their size) in the last block.
-    hidden = [x for s in rec.steps for x in s.suppressed] + rec.suppressed
-    hidden_suggestions = _suppressed_lines(x for x in hidden if not x.warning)
-    if hidden_suggestions:
-        if not suggestions:
-            body.append(Text(""))
-        body.extend(hidden_suggestions)
-    # Data problems come last: agents often read only the end of a log.
-    problems = [
-        line for s in rec.steps for line in _warning_lines(s.warnings, prefix=s.name)
-    ] + _warning_lines(rec.warnings)
-    hidden_problems = _suppressed_lines(x for x in hidden if x.warning)
-    body.append(Text(""))
-    if hidden_problems:
-        body.append(
-            Text(
-                f"data problems: {len(problems)} open, {len(hidden_problems)} "
-                "suppressed",
-                style="bold",
+    # Suppressed problems are not shown; their reasons stay in the record.
+    info = (
+        [
+            Text(f"INFO: {_clean(note)}", style="dim")
+            for note in dict.fromkeys(rec.notes)
+        ]
+        + [
+            line
+            for st in rec.steps
+            for line in _suggestion_lines(
+                st.suggestions, prefix=st.name, kinds=_step_kinds(st)
             )
-        )
-        body.extend(problems + hidden_problems)
-    elif problems:
-        body.append(Text(f"data problems ({len(problems)})", style="bold"))
+        ]
+        + _suggestion_lines(rec.suggestions, kinds=rec.kinds)
+    )
+    if info:
+        body.append(Text(""))
+        body.extend(info)
+    # Warnings come last: agents often read only the end of a log.
+    problems = [
+        line
+        for st in rec.steps
+        for line in _warning_lines(st.warnings, prefix=st.name, kinds=_step_kinds(st))
+    ] + _warning_lines(rec.warnings, kinds=rec.kinds)
+    if problems:
+        body.append(Text(""))
         body.extend(problems)
-    else:
-        body.append(Text("data problems: none reported", style="dim"))
-    hint = _suppress_hint(rec)
-    if hint is not None:
-        body.append(hint)
     if rec.smoke_rows is not None:  # last, where `tail` sees it
         body.append(Text(""))
         body.append(Text(smoke_banner(rec.smoke_rows), style="bold yellow"))
