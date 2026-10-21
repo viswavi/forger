@@ -115,13 +115,13 @@ cached it, marked `cached`, with that run's warnings.
   it returns (three 60-character pieces of each document's `text`, or its longest string; documents under 200
   characters are skipped, and at most 2,000 per run are fingerprinted). Every `Model` / `LocalModel` prompt is
   checked for them, ignoring whitespace, and so are the string values of the rows the pipeline returns. If none
-  appears anywhere, the pipeline warns: `acquire.retrieve_from_web returned 223 documents, but none of their text
-  appeared in any of the 1,840 model prompts or in the pipeline's output; to ground generation on them, format the
-  retrieved text into your prompts`. A field that carries the documents but that no prompt formats does not count,
-  unless the pipeline returns the rows that hold it. When fewer than 10% of the documents were used, the summary's
-  `notes` section says so instead. Cached ops and steps replay what their first run saw, so a cached rerun gives the
-  same verdict. A result cached outside a pipeline, or by an older Forger, has unknown prompts, so the check says
-  nothing for that run rather than warn falsely. Direct `source.fetch()` calls are not tracked.
+  appears anywhere, the pipeline warns: `acquire.retrieve_from_web: none of the 223 retrieved documents were used in
+  any of the 1,840 prompts or the output; put their text in your prompts`. A field that carries the documents but
+  that no prompt formats does not count, unless the pipeline returns the rows that hold it. When fewer than 10% of
+  the documents were used, the summary notes it instead: `acquire.retrieve_from_web: only 3 of 77 retrieved documents
+  (4%) were used in a prompt or the output`. Cached ops and steps replay what their first run saw, so a cached rerun
+  gives the same verdict. A result cached outside a pipeline, or by an older Forger, has unknown prompts, so the
+  check says nothing for that run rather than warn falsely. Direct `source.fetch()` calls are not tracked.
 - Filter notes: the pipeline summary lists the steps that ran no filter and the filters that removed nothing (op, step,
   and rows seen). These are notes, not warnings, and `strict=True` does not raise on them: a generate-only step
   followed by a filter step is fine, and a filter that removes nothing may be a check that passed or one that tests
