@@ -445,7 +445,7 @@ def test_step_without_a_filter_is_a_pipeline_note_not_a_warning(capsys, monkeypa
     out = capsys.readouterr().out
     pipeline_text = out[out.index("pipeline main") :]
     assert "steps without a filter: shout" in pipeline_text
-    assert "filters that removed nothing (a check that passed" in pipeline_text
+    assert "filters that removed nothing:" in pipeline_text
     assert "filter.by_keyword_blocklist in check · 5 rows" in pipeline_text
     assert "ends without a filter" not in out
 
@@ -714,13 +714,12 @@ def test_pipeline_records_steps_and_warns(capsys, monkeypatch):
     assert "no inspect op ran" in joined
     out = capsys.readouterr().out
     assert "pipeline one_step" in out and "1 step · 5 → 3 rows" in out
-    assert "suggestion: no inspect op ran" in out
-    # The summary always ends with the data problems, here none.
-    assert out.rstrip().endswith("data problems: none reported")
+    assert "INFO: no inspect op ran" in out
+    assert "WARNING" not in out
 
 
 def test_pipeline_summary_ends_with_data_problems(capsys, monkeypatch):
-    """Suggestions print first; data problems are the summary's last lines."""
+    """INFO lines print first; warnings are the summary's last lines."""
     monkeypatch.delenv("FORGER_STEP_REPORT")
 
     @step
@@ -734,14 +733,13 @@ def test_pipeline_summary_ends_with_data_problems(capsys, monkeypatch):
     run(_rows("a b", "a b", "c d e", "f g h i"))  # one duplicate: yield 0.75
     out = capsys.readouterr().out
     summary = out[out.index("pipeline run") :].rstrip().splitlines()
-    assert summary[-2].strip() == "data problems (1)"
     assert (
-        summary[-1].strip().startswith("⚠ strict_dedupe: filter.by_exact_match: yield")
+        summary[-1]
+        .strip()
+        .startswith("WARNING: strict_dedupe: filter.by_exact_match: yield")
     )
-    first_suggestion = next(
-        i for i, line in enumerate(summary) if "suggestion:" in line
-    )
-    assert first_suggestion < len(summary) - 2
+    first_info = next(i for i, line in enumerate(summary) if "INFO:" in line)
+    assert first_info < len(summary) - 2
 
 
 def test_pipeline_bare_op_warns():
@@ -1485,14 +1483,16 @@ def test_long_names_and_totals_fit_in_120_columns():
     assert all(len(line) <= 120 for line in step_text.splitlines())
     assert "1,234,567 in / 7,654,321 out tokens · $12.34" in step_text
     assert "LOW · min 0.80" in step_text
-    assert "⚠ filter.by_llm_score: yield 0.43 below min_yield 0.50" in step_text
+    assert "WARNING: filter.by_llm_score: yield 0.43 below min_yield 0.50" in step_text
     pipe = PipelineRecord(name="p" * 40, steps=[rec], duration_s=1.0, cost_usd=12.34)
     pipe_text = render_pipeline(pipe)
     assert all(len(line) <= 120 for line in pipe_text.splitlines())
     flat = _flat(pipe_text)
     name = rec.name
-    assert f"⚠ {name}: filter.by_llm_score: yield 0.43 below min_yield 0.50" in flat
-    assert f"⚠ {name}: ends w/o" in flat
+    assert (
+        f"WARNING: {name}: filter.by_llm_score: yield 0.43 below min_yield 0.50" in flat
+    )
+    assert f"WARNING: {name}: ends w/o" in flat
 
 
 _FILTER_SCORE_CASES = [
@@ -1814,7 +1814,7 @@ def test_repeated_op_calls_share_one_row_and_one_histogram():
     assert re.search(r"inspect\.test_report\s+3", text)
     # One histogram over all 5 rows, headed with the call count.
     assert text.count("filter.by_length ×3 · words · keeps 2 to 10k: 3 of 5") == 1
-    assert len(re.findall(r"⚠ filter\.by_length: yield 0\.50", text)) == 1
+    assert len(re.findall(r"WARNING: filter\.by_length: yield 0\.50", text)) == 1
 
 
 def test_differing_score_rules_get_one_histogram_each():

@@ -30,7 +30,6 @@ import difflib
 import json
 import math
 import os
-import re
 import threading
 from collections.abc import Callable, Iterable, Iterator
 from contextvars import ContextVar, Token
@@ -555,16 +554,15 @@ def stale_suppressions(
 def add_stale(rec: StepRecord | PipelineRecord, kind: str, where: str) -> None:
     """Report a flag whose problem never fired: a warning for a data problem.
 
-    e.g. "suppress_truncation_warning is set on solve, but no truncation
-    occurred; remove it so it cannot hide a later one".
+    e.g. "suppress_truncation_warning on solve suppressed nothing (no
+    truncation occurred); remove it".
     """
     flags = {**STEP_SUPPRESS_FLAGS, **PIPELINE_SUPPRESS_FLAGS}
     flag = next(f for f, k in flags.items() if k == kind)
     add_problem(
         rec,
         STALE_SUPPRESSION,
-        f"{flag} is set on {where}, but {_INSTEAD[kind]}; remove it so it cannot "
-        "hide a later one",
+        f"{flag} on {where} suppressed nothing ({_INSTEAD[kind]}); remove it",
         suggestion=kind not in _DATA_KINDS,
     )
 
@@ -1131,38 +1129,30 @@ def truncation_message(
 ) -> str:
     """Say how many completions hit max_tokens, and what to change.
 
-    e.g. "349 of 768 completions from deepseek stopped at max_tokens=24000
-    (finish_reason=length) ...". ``advice`` replaces the default tail, which
-    is for a ``Model`` (e.g. "; raise the TinkerModel's max_tokens").
-    ``outcome`` says what that did to the op's rows and leads the message:
-    "20 rows dropped (no parseable output), because 34 of 120 completions ...".
-    ``mid_thought`` of them never closed their ``<think>``, e.g.
-    "(finish_reason=length; 72 of them mid-thought, <think> never closed)".
+    e.g. "349 of 768 completions from deepseek hit max_tokens=24000, so their
+    text is cut off; raise max_tokens or lower reasoning_effort". ``advice``
+    replaces the default tail, which is for a ``Model`` (e.g. "; raise the
+    TinkerModel's max_tokens"). ``outcome`` says what that did to the op's rows
+    and leads the message: "20 rows dropped: 34 of 120 completions ... hit
+    max_tokens=24000; ...". ``mid_thought`` of them never closed their
+    ``<think>``: "... hit max_tokens=24000 (72 mid-thought)".
     """
     limit = f"max_tokens={max_tokens}" if max_tokens is not None else "max_tokens"
     if advice is None:
-        advice = (
-            " (a reasoning model's is often empty: the budget went to thinking); "
-            "raise the Model's max_tokens or lower its reasoning_effort"
-        )
-    reason = "finish_reason=length"
-    if mid_thought:
-        reason += f"; {mid_thought} of them mid-thought, <think> never closed"
-    stopped = (
-        f"{truncated} of {total} completions from {model_id} stopped at {limit} "
-        f"({reason})"
-    )
+        advice = "; raise max_tokens or lower reasoning_effort"
+    mid = f" ({mid_thought} mid-thought)" if mid_thought else ""
+    stopped = f"{truncated} of {total} completions from {model_id} hit {limit}{mid}"
     if outcome:
-        return f"{outcome}, because {stopped}{advice}"
+        return f"{outcome}: {stopped}{advice}"
     return f"{stopped}, so their text is cut off{advice}"
 
 
 def add_truncation_outcome(text: str) -> None:
     """Say what cut-off completions did to the running op's rows.
 
-    e.g. ``add_truncation_outcome("20 rows dropped (no parseable output)")``;
-    the op's max_tokens warning then reads "20 rows dropped (no parseable
-    output), because 34 of 120 completions ... stopped at max_tokens=...".
+    e.g. ``add_truncation_outcome("20 rows dropped")``; the op's max_tokens
+    warning then reads "20 rows dropped: 34 of 120 completions ... hit
+    max_tokens=...".
     A no-op outside ops.
     """
     outcomes = _ACTIVE_TRUNCATION_OUTCOME.get()
@@ -1199,8 +1189,6 @@ def truncation_warnings(op_name: str) -> list[tuple[str, str]]:
     dropped", which a suppressed warning still shows.
     """
     outcome = "; ".join(_ACTIVE_TRUNCATION_OUTCOME.get() or []) or None
-    # "10 rows dropped (no parseable output)" -> "10 rows dropped"
-    lost = re.sub(r" \([^)]*\)", "", outcome) if outcome else None
     return [
         (
             f"{op_name}: "
@@ -1214,7 +1202,7 @@ def truncation_warnings(op_name: str) -> list[tuple[str, str]]:
                 mid_thought=mid,
             ),
             f"{truncated} of {total} completions cut off"
-            + (f", {lost}" if lost else ""),
+            + (f", {outcome}" if outcome else ""),
         )
         for (model_id, max_tokens, advice), (truncated, total, mid) in (
             _ACTIVE_TRUNCATION.get() or {}

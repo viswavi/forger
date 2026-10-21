@@ -298,7 +298,7 @@ def generate_from_context(
         # Leads the op's max_tokens warning: "20 rows dropped (...), because ...".
         outcome = []
         if cut_off:
-            outcome.append(f"{lost(len(cut_off))} (no parseable output)")
+            outcome.append(lost(len(cut_off)))
         if cut_kept:
             outcome.append(kept(len(cut_kept)))
         _tracking.add_truncation_outcome(", ".join(outcome))
@@ -306,9 +306,10 @@ def generate_from_context(
         slot for _, slots in pending for slot in slots if slot not in cut_off
     ]
     if failed_parse:
+        n = len(failed_parse)
         message = (
-            f"alter.generate_from_context: {len(failed_parse)} sample(s) failed to "
-            f"parse after {max_retries} retries → {lost(len(failed_parse))}"
+            f"alter.generate_from_context: {lost(n)}: {n} sample"
+            f"{'' if n == 1 else 's'} did not parse after {max_retries} retries"
         )
         log.warning(message)
         _tracking.add_op_warning(message, "parse_failure")

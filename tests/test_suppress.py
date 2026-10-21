@@ -117,10 +117,10 @@ class TestGuardRails:
 
 
 class TestStepSuppression:
-    """A suppressed problem leaves the warnings but keeps its size."""
+    """A suppressed problem leaves the report; the record keeps its size and reason."""
 
     def test_truncation_is_suppressed_with_its_size(self, cut_off):
-        """One dim line with the size and reason; strict=True passes."""
+        """Nothing is printed for it; strict=True passes."""
 
         @step(suppress_truncation_warning=_REASON, strict=True)
         def draft(rows: list[dict]) -> list[dict]:
@@ -136,13 +136,11 @@ class TestStepSuppression:
             _REASON,
         )
         assert hidden.sizes == ["2 of 4 completions cut off, 2 rows dropped"]
-        assert "stopped at max_tokens=100" in hidden.messages[0]
+        assert "hit max_tokens=100" in hidden.messages[0]
         text = render_step(rec)
-        assert (
-            "suppressed: truncation in draft (2 of 4 completions cut off, 2 rows "
-            f"dropped) — {_REASON}"
-        ) in text
-        assert "⚠" not in text
+        assert "max_tokens" not in text
+        assert _REASON not in text
+        assert "WARNING" not in text
 
     def test_cached_step_keeps_its_suppression(self, cut_off):
         """Kinds and sizes are stored with the cached ops."""
@@ -193,16 +191,16 @@ class TestStepSuppression:
         copy(_qs("a"))
         rec = _tracking.step_records()["copy"]
         assert rec.warnings == [
-            "suppress_truncation_warning is set on copy, but no truncation occurred; "
-            "remove it so it cannot hide a later one"
+            "suppress_truncation_warning on copy suppressed nothing (no truncation "
+            "occurred); remove it"
         ]
 
 
 class TestPipelineSuppression:
     """Pipeline flags, the summary's lists, and stale flags."""
 
-    def test_summary_names_the_flags_of_open_problems(self, cut_off):
-        """One dim line after the data problems names each open problem's flag."""
+    def test_each_line_names_its_flag(self, cut_off):
+        """A warning or an INFO line that has a flag ends with it in brackets."""
 
         @step
         def draft(rows: list[dict]) -> list[dict]:
@@ -217,34 +215,27 @@ class TestPipelineSuppression:
             return keep(draft(_qs("long a", "b")))
 
         run()
-        rec = _tracking.last_pipeline()
-        lines = [line.strip() for line in render_pipeline(rec).strip().splitlines()]
-        start = next(i for i, line in enumerate(lines) if line.startswith("Fix these"))
-        last = " ".join(
-            lines[start:]
-        )  # the hint wraps at 120 columns, and ends the summary
-        assert "@step(suppress_truncation_warning=...) on draft" in last
-        # A suggestion names its flag on its own line, not in the closing hint.
-        assert "suppress_no_inspect_warning" not in last
+        text = " ".join(
+            line.strip()
+            for line in render_pipeline(_tracking.last_pipeline()).splitlines()
+        )  # a line wraps at 120 columns
+        assert "WARNING: draft: alter.generate_from_context: 1 row dropped: " in text
+        assert "lower reasoning_effort [@step(suppress_truncation_warning=...)]" in text
         assert (
-            "suggestion: no inspect op ran, so nothing looked at what the rows cover "
-            "(e.g. inspect.topic_based_clustering) (does not apply? say why with "
-            "@pipeline(suppress_no_inspect_warning=...))"
-        ) in " ".join(lines[:start])
+            "INFO: no inspect op ran [@pipeline(suppress_no_inspect_warning=...)]"
+        ) in text
+        assert "Fix these" not in text
 
-    def test_no_hint_without_flaggable_problems(self):
-        """Only problems without a flag (a yield miss) are open: no hint line."""
-        from pyforger._render import _suppress_hint
-        from pyforger._tracking import PipelineRecord, StepRecord
+    def test_no_flag_on_problems_without_one(self):
+        """A yield miss has no flag, so its line has no brackets."""
+        from pyforger._render import _warning_lines
 
         miss = "filter.by_predicate: yield 0.50 below min_yield 0.90"
-        step_rec = StepRecord(
-            name="keep", warnings=[miss], kinds={miss: "yield_bounds"}
-        )
-        assert _suppress_hint(PipelineRecord(name="run", steps=[step_rec])) is None
+        [line] = _warning_lines([miss], prefix="keep", kinds={miss: "yield_bounds"})
+        assert line.plain == f"WARNING: keep: {miss}"
 
-    def test_summary_lists_suppressions_last(self, cut_off):
-        """The last block counts open and suppressed problems and lists both."""
+    def test_suppressed_problems_are_not_shown(self, cut_off):
+        """Only open problems are printed; the record keeps the suppressed ones."""
 
         @step(suppress_truncation_warning=_REASON)
         def draft(rows: list[dict]) -> list[dict]:
@@ -263,17 +254,14 @@ class TestPipelineSuppression:
         run()
         rec = _tracking.last_pipeline()
         assert not any("no diversity filter" in s for s in rec.suggestions)
+        assert [x.kind for x in rec.suppressed] == ["no_diversity_filter"]
+        assert [x.kind for x in rec.steps[0].suppressed] == ["truncation"]
         lines = [line.strip() for line in render_pipeline(rec).splitlines()]
-        assert (
-            "suppressed: no_diversity_filter in pipeline run — one row per seed "
-            "question, no repeats"
-        ) in lines
-        end = lines.index("data problems: 1 open, 1 suppressed")
-        assert lines[end + 1].startswith("⚠ keep: filter.by_predicate: yield 0.50")
-        assert lines[end + 2] == (
-            "suppressed: truncation in draft (1 of 3 completions cut off, 1 row "
-            f"dropped) — {_REASON}"
-        )
+        assert lines[-1].startswith("WARNING: keep: filter.by_predicate: yield 0.50")
+        text = "\n".join(lines)
+        assert "no diversity filter" not in text
+        assert "max_tokens" not in text
+        assert "suppressed" not in text
 
     def test_stale_flags(self):
         """A stale data-problem flag warns, a stale suggestion flag suggests."""
@@ -298,12 +286,12 @@ class TestPipelineSuppression:
             run()
         rec = _tracking.last_pipeline()
         assert rec.warnings == [
-            "suppress_truncation_warning is set on copy, but no truncation occurred; "
-            "remove it so it cannot hide a later one"
+            "suppress_truncation_warning on copy suppressed nothing (no truncation "
+            "occurred); remove it"
         ]
         assert (
-            "suppress_no_diversity_filter_warning is set on pipeline run, but a "
-            "diversity filter ran; remove it so it cannot hide a later one"
+            "suppress_no_diversity_filter_warning on pipeline run suppressed nothing "
+            "(a diversity filter ran); remove it"
         ) in rec.suggestions
 
     def test_one_run_of_a_step_is_enough(self, cut_off):

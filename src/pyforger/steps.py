@@ -1252,25 +1252,21 @@ def _check_pipeline(rec: PipelineRecord) -> None:
             _tracking.add_problem(
                 rec,
                 "no_quality_filter",
-                "no quality filter ran, so nothing checked the rows' quality "
-                "(e.g. filter.by_llm_score)",
+                "no quality filter ran",
                 suggestion=True,
             )
         if not filters & _DIVERSITY_FILTERS:
             _tracking.add_problem(
                 rec,
                 "no_diversity_filter",
-                "no diversity filter ran, so near-duplicate rows were not removed "
-                "(filter.by_exact_match, by_rouge_l, by_n_gram_overlap, or "
-                "by_topic_frequency)",
+                "no diversity filter ran",
                 suggestion=True,
             )
         if not any(c.category == "inspect" for s in rec.steps for c in s.ops):
             _tracking.add_problem(
                 rec,
                 "no_inspect",
-                "no inspect op ran, so nothing looked at what the rows cover "
-                "(e.g. inspect.topic_based_clustering)",
+                "no inspect op ran",
                 suggestion=True,
             )
     _filter_notes(rec)
