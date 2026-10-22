@@ -52,6 +52,12 @@ _DEFAULT_MAX_WORKERS = 100
 # Most completions asked of one request. A larger n is split into concurrent
 # requests, e.g. n=40 on gpt-4o sends n=14, 13 and 13.
 _MAX_N_PER_REQUEST = 16
+# A batch projects its spend once this share of its completions (and at least
+# _PROJECT_MIN_DONE requests) has finished, e.g. after 160 of 3,200; batches
+# under _PROJECT_MIN_TOTAL completions are not projected.
+_PROJECT_MIN_SHARE = 0.05
+_PROJECT_MIN_DONE = 10
+_PROJECT_MIN_TOTAL = 40
 # Without a terminal (stderr redirected to a log file), progress is a plain log
 # line this often instead of a redrawn bar, also while nothing finishes.
 _PROGRESS_LOG_INTERVAL_S = 30.0
@@ -367,6 +373,127 @@ def _watch(
         )
 
 
+def _fmt_spend(amount: float, unit: str) -> str:
+    return f"${amount:,.2f}" if unit == "usd" else f"{amount:,.0f} token units"
+
+
+class _SpendProjection:
+    """Stop a batch early when its finished requests show the rest won't fit a cap.
+
+    Each completion weighs one, e.g. 400 prompts with n=8 weigh 3,200. Once
+    ``_PROJECT_MIN_SHARE`` of them (and ``_PROJECT_MIN_DONE`` requests) have
+    finished, each new request first checks that the rest fits what is left
+    under every spending cap and the shared token-unit quota, even at the 95%
+    lower bound of the cost per completion so far. If not, it raises
+    ``SpendProjectionError``, and so does every request after it; requests in
+    flight finish and are recorded.
+
+    The lower bound keeps a few expensive early rows from stopping a batch
+    that would fit, e.g. 3 long answers in the first 20 of 400. The batch is
+    also sent in a fixed shuffled order (``_send_order``), so rows sorted by
+    difficulty do not all come first.
+    """
+
+    def __init__(self, model: Model, total: int, shuffle: bool = True) -> None:
+        self.model = model
+        self.total = total
+        # Send in _send_order; pointless for the parts of a single prompt.
+        self.shuffle = shuffle
+        self.done = 0
+        self.requests = 0
+        self.cost = 0.0
+        self.units = 0.0
+        # Sums of completions × (cost per completion)², for the spread.
+        self.cost_sq = 0.0
+        self.units_sq = 0.0
+        self.lock = threading.Lock()
+        self.error: _tracking.SpendProjectionError | None = None
+        self.where = _tracking.spend_where()
+
+    def add(self, completions: int, cost: float, units: float) -> None:
+        """Count one finished request."""
+        units = units if math.isfinite(units) else 0.0
+        with self.lock:
+            self.done += completions
+            self.requests += 1
+            self.cost += cost
+            self.units += units
+            if completions:
+                self.cost_sq += cost * cost / completions
+                self.units_sq += units * units / completions
+
+    def _low(self, spent: float, spent_sq: float, done: int, requests: int) -> float:
+        """95% lower bound of the cost per completion (requests as the samples)."""
+        mean = spent / done
+        var = max(spent_sq / done - mean * mean, 0.0)
+        return max(mean - 1.96 * math.sqrt(var / max(requests, 1)), 0.0)
+
+    def check(self) -> None:
+        """Raise ``SpendProjectionError`` if the rest of the batch would pass a cap."""
+        with self.lock:
+            if self.error is not None:
+                raise self.error
+            done, requests, cost, units = (
+                self.done,
+                self.requests,
+                self.cost,
+                self.units,
+            )
+            sums_sq = {"usd": self.cost_sq, "units": self.units_sq}
+        if requests < _PROJECT_MIN_DONE or done < _PROJECT_MIN_SHARE * self.total:
+            return
+        rest = self.total - done
+        if rest <= 0:
+            return
+        headroom = _tracking.cap_headroom()
+        budget = self.model._token_budget
+        if budget is not None:
+            left = budget.snapshot()["remaining_token_units"]
+            headroom.append(
+                ("the token-unit quota (FORGER_TOKEN_UNIT_LIMIT)", left, "units")
+            )
+        for label, left, unit in headroom:
+            spent = cost if unit == "usd" else units
+            need = rest * spent / done
+            low = rest * self._low(spent, sums_sq[unit], done, requests)
+            if low <= max(left, 0.0):
+                continue
+            left_text = _fmt_spend(max(left, 0.0), unit)
+            at_least = (
+                f" (at least {_fmt_spend(low, unit)})"
+                if _fmt_spend(low, unit) != _fmt_spend(need, unit)
+                else ""
+            )
+            error = _tracking.SpendProjectionError(
+                f"{self.where}: the first {done:,} of {self.total:,} completions "
+                f"cost {_fmt_spend(spent, unit)}; the other {rest:,} would cost "
+                f"about {_fmt_spend(need, unit)}{at_least}, but {label} has "
+                f"{left_text} left. Stopped before sending them; inside an op, "
+                "the finished requests are in the request cache, so a rerun "
+                "does not pay for them again. Make this op cheaper (fewer "
+                "samples or judges, a cheaper model, shorter outputs) or give it "
+                "fewer rows. "
+                "FORGER_PROJECT_SPEND=0 turns this check off."
+            )
+            with self.lock:
+                self.error = self.error or error
+                raise self.error
+        return
+
+
+def _projecting() -> bool:
+    return os.environ.get("FORGER_PROJECT_SPEND", "").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+    )
+
+
+_PROJECTION: contextvars.ContextVar[_SpendProjection | None] = contextvars.ContextVar(
+    "forger_spend_projection", default=None
+)
+
+
 def _make_semaphore(max_concurrency: int | None) -> threading.BoundedSemaphore | None:
     """The per-Model request cap, or None for no cap."""
     if max_concurrency is None:
@@ -494,6 +621,13 @@ def _complete_and_report(
     return response
 
 
+def _send_order(total: int) -> list[int]:
+    """A fixed shuffle of ``range(total)``: the same batch is sent the same way."""
+    order = list(range(total))
+    random.Random(total).shuffle(order)
+    return order
+
+
 def _batch_completion_with_progress(
     requests: list[tuple[list[Message], int]],
     call_kwargs: dict[str, Any],
@@ -504,6 +638,7 @@ def _batch_completion_with_progress(
     on_response: Callable[[int, Any], None] | None = None,
     model: Model | None = None,
     retries: int = 0,
+    shuffle: bool = False,
 ) -> list[Any]:
     """Send (messages, n) requests concurrently; return responses or errors.
 
@@ -518,7 +653,8 @@ def _batch_completion_with_progress(
     call actually finishes: a tqdm bar (`progress="bar"`), a log line every 30s
     (`"log"`), or nothing (`"off"`). Each request holds a slot of `semaphore`
     (the Model's `max_concurrency`) while in flight. In every mode, a request
-    in flight far longer than the finished ones gets one warning.
+    in flight far longer than the finished ones gets one warning. With
+    `shuffle`, requests start in `_send_order` (for the spend projection).
     """
     results: list[Any] = [None] * len(requests)
     total = len(requests)
@@ -527,7 +663,8 @@ def _batch_completion_with_progress(
     executor = ThreadPoolExecutor(max_workers=min(max_workers, total))
     try:
         future_to_idx: dict[Future, int] = {}
-        for i, (msgs, n) in enumerate(requests):
+        for i in _send_order(total) if shuffle else range(total):
+            msgs, n = requests[i]
             # One context copy per request, so add_usage in the worker sees the
             # caller's op / step / pipeline contextvars.
             run: Callable[..., Any] = contextvars.copy_context().run
@@ -1329,6 +1466,9 @@ class Model:
         if self._token_budget is not None:
             token_units(self._model_id, 0, 0)  # unweighted models fail closed
             self._token_budget.check()
+        projection = _PROJECTION.get()
+        if projection is not None:
+            projection.check()
 
     def _add_totals(self, usage: dict[str, Any], cost_usd: float, units: float) -> None:
         """Add one response's usage to the instance totals; log every 1M units."""
@@ -1389,6 +1529,11 @@ class Model:
         finally:
             cost_usd = cost if cost is not None else 0.0
             self._add_totals(usage, cost_usd, units)
+            projection = _PROJECTION.get()
+            if projection is not None:
+                projection.add(
+                    len(getattr(response, "choices", None) or [1]), cost_usd, units
+                )
             _tracking.add_usage(
                 usage["prompt_tokens"],
                 usage["completion_tokens"],
@@ -1662,9 +1807,20 @@ class Model:
         progress = _progress_mode(
             self._show_progress if show_progress is None else show_progress
         )
-        responses = self._send(
-            requests, call_kwargs, progress, return_exceptions, store
+        # Workers copy this context, so their requests see the projection.
+        weight = sum(size for _, size in requests)
+        projection = (
+            _SpendProjection(self, weight, shuffle=len(prompts) > 1)
+            if _projecting() and weight >= _PROJECT_MIN_TOTAL
+            else None
         )
+        projection_token = _PROJECTION.set(projection)
+        try:
+            responses = self._send(
+                requests, call_kwargs, progress, return_exceptions, store
+            )
+        finally:
+            _PROJECTION.reset(projection_token)
 
         # A model that should support n but returned fewer completions (e.g. a
         # gateway alias that ignores n): send each missing slot as an n=1
@@ -1782,6 +1938,7 @@ class Model:
                 on_response=on_response,
                 model=self,
                 retries=self._num_retries,
+                shuffle=getattr(_PROJECTION.get(), "shuffle", False),
             )
         if not return_exceptions:
             for response in responses:

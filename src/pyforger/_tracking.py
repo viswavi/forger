@@ -1548,6 +1548,55 @@ class BudgetExceededError(RuntimeError):
     """
 
 
+class SpendProjectionError(BudgetExceededError):
+    """A batch of requests would pass a spending cap or quota if it finished.
+
+    Raised by ``Model.generate_batch`` once the requests it has finished
+    show that the rest would cost more than is left (see ``_SpendProjection``
+    in ``pyforger.acquire.model``). ``FORGER_PROJECT_SPEND=0`` turns it off.
+    """
+
+
+def cap_headroom() -> list[tuple[str, float, str]]:
+    """What is left under each spending cap in force, as ``(label, left, unit)``.
+
+    ``unit`` is ``"usd"`` or ``"units"``; e.g. ``("FORGER_MAX_COST_USD=40",
+    12.5, "usd")``. The caps are those ``check_budget`` enforces.
+    """
+    out: list[tuple[str, float, str]] = []
+    process = _PROCESS_USAGE.totals()
+    for env, index, unit in (
+        ("FORGER_MAX_COST_USD", 2, "usd"),
+        ("FORGER_MAX_TOKEN_UNITS", 3, "units"),
+    ):
+        cap = _env_cap(env)
+        if cap is not None:
+            out.append((f"{env}={cap:g}", cap - process[index], unit))
+    running = _running_for_context()
+    if running is not None:
+        spent = running.usage.totals()
+        for label, cap, index, unit in (
+            ("max_cost_usd", running.rec.max_cost_usd, 2, "usd"),
+            ("max_token_units", running.rec.max_token_units, 3, "units"),
+        ):
+            if cap is not None:
+                name = f"pipeline {running.rec.name}'s {label}={cap:g}"
+                out.append((name, cap - spent[index], unit))
+    return out
+
+
+def spend_where() -> str:
+    """The op and step the current requests belong to, e.g. ``"filter.x in step y"``."""
+    names: dict[str, str] = {}
+    for usage in _ACCUMULATORS.get():  # outermost first: the step's own op
+        if usage.kind in ("op", "step"):
+            names.setdefault(usage.kind, usage.name)
+    where = names.get("op", "")
+    if "step" in names:
+        where = f"{where} in step {names['step']}" if where else f"step {names['step']}"
+    return where or "this batch"
+
+
 def _env_cap(name: str = "FORGER_MAX_COST_USD") -> float | None:
     raw = os.environ.get(name, "").strip()
     if not raw:

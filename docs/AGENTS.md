@@ -106,6 +106,8 @@ for your data (e.g. truncation in a draft step) can be suppressed with a reason,
 `@step(suppress_truncation_warning="<why these rows are still fine>")`; a line that can be suppressed ends with its
 flag in brackets. Dim `INFO:` lines are about how the code is written. Run each new pipeline version with
 `FORGER_LIMIT=3` first: it runs every op on three rows in about a minute (see "Limited runs" in `pipelines.md`).
+A batch of model requests that would not fit a cap or quota stops early, after about 5% of it
+(`SpendProjectionError`; see "Spend projection").
 See [`docs/agents/pipelines.md`](agents/pipelines.md) for the reports, warnings, suppression flags, spend ledger, and
 spending caps.
 

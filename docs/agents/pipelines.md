@@ -179,6 +179,17 @@ them, and score lists of over 100,000 rows, have none: rerun with `_no_cache=Tru
   `TokenUnitQuotaExceeded`; `dynamic_step` agents are charged to it and checked against it like `Model` requests)
   and `TinkerModel`'s dollar ledger (`FORGER_TINKER_USAGE_FILE`, which raises
   `TinkerBudgetExceeded`). The caps count this process's spend; the quotas count every process sharing the file.
+- Spend projection: a batch of model requests that would not fit stops early instead of spending what is left. Once
+  5% of a batch's completions have finished (at least 10 requests; batches under 40 completions are skipped), every
+  new request checks that the rest fits what is left under each cap above and the token-unit quota, even at the 95%
+  lower bound of the cost per completion so far. If not, it raises `pyforger.SpendProjectionError` (a
+  `BudgetExceededError`), e.g. "alter.generate_from_context in step solve: the first 160 of 3,200 completions cost
+  1,210,000 token units; the other 3,040 would cost about 22,990,000 token units (at least 20,100,000), but the
+  token-unit quota (FORGER_TOKEN_UNIT_LIMIT) has 18,000,000 token units left". A batch of several prompts is sent in
+  a fixed shuffled order (results keep the input order), so rows sorted hardest-first do not make the first requests
+  look typical. Finished requests are in the request cache, so after making the op cheaper (fewer samples or judges,
+  a cheaper model, shorter outputs, fewer rows) the rerun does not pay for them again. `FORGER_PROJECT_SPEND=0`
+  turns the check off.
 - Limited runs: `FORGER_LIMIT=3 python pipeline.py` (or `@pipeline(limit=3)`) runs every step on at most 3 rows.
   Run every new pipeline version this way first (a smoke run): it exercises every op in about a minute, so a wrong
   keyword or a missing argument fails at once instead of minutes into the full run. A larger limit is a pilot:
