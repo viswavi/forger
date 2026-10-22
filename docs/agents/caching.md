@@ -29,11 +29,17 @@ Callable arguments are keyed by value too: a `functools.partial` by its function
 with `__call__` by `cache_key()` if it has one, else by its type, `__call__` code, and attributes (pickled, with a
 warning, when they are not plain data).
 
-Not in the key: the bodies of helper functions and classes the op calls (only their names), files read from disk,
-environment variables, other objects held in globals (e.g. a client, a retrieval source, or an object mutated at
-runtime), and closure values changed after decoration. `@op` logs a warning at decoration for such a global (loggers
-and typing objects excepted) or for `os.environ`. When one of these changes, pass `_no_cache=True`. Upgrading to this
-key layout makes existing cache entries miss once.
+Your own helper functions that an op or step calls by name are keyed by their code and the globals they read, so
+editing `tag` in `rows = [tag(r) for r in rows]` recomputes the step. This covers functions in your pipeline file and
+in your other files, imported by name (`from helpers import tag`) or used through their module (`helpers.tag(r)`,
+`helpers.PROMPT`), and `@op` helpers by the function they wrap. Functions of the standard library, installed
+packages, and Forger are keyed by name.
+
+Not in the key: classes and their methods (only their names), files read from disk, environment variables, other
+objects held in globals (e.g. a client, a retrieval source, or an object mutated at runtime), and closure values
+changed after decoration. `@op` logs a warning at decoration for such a global (loggers and typing objects excepted)
+or for `os.environ`. When one of these changes, pass `_no_cache=True`. Upgrading to this key layout makes existing
+cache entries miss once.
 
 **Cache location.** `$FORGER_CACHE` if set, otherwise `~/.cache/forger`. The variable is read at call time, so tests
 can redirect it.
