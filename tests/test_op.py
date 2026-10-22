@@ -547,6 +547,100 @@ def test_attribute_names_are_not_read_as_globals() -> None:
     assert keyed_globals(reads) == {"split": "train"}
 
 
+_HELPER_SOURCE = """
+def tag(row):
+    return row + SUFFIX
+
+def f(rows):
+    return [tag(r) for r in rows]
+"""
+
+
+def test_editing_a_helper_misses_the_cache() -> None:
+    """A helper's body and the globals it reads are part of the caller's key."""
+    fn, namespace = _module_fn(_HELPER_SOURCE, SUFFIX="-v1")
+    wrapped = op(fn, name="test.helper_edit")
+    assert wrapped(["a"]) == ["a-v1"]
+    assert wrapped(["a"]) == ["a-v1"] and trace()[-1].cache_hit
+
+    exec("def tag(row):\n    return row.upper() + SUFFIX", namespace)
+    assert wrapped(["a"]) == ["A-v1"] and not trace()[-1].cache_hit
+
+    namespace["SUFFIX"] = "-v2"  # read by the helper, not by f
+    assert wrapped(["a"]) == ["A-v2"] and not trace()[-1].cache_hit
+
+
+def test_recursive_and_wrapped_helpers_are_keyed() -> None:
+    """Recursion keys the inner reference by name; @op helpers by the code they wrap."""
+    from pyforger.utils import keyed_globals
+
+    source = (
+        "def fib(n):\n    return n if n < 2 else fib(n - 1) + fib(n - 2)\n"
+        "def even(n):\n    return n == 0 or odd(n - 1)\n"
+        "def odd(n):\n    return n != 0 and even(n - 1)\n"
+        "def f(rows):\n    return [fib(r) + even(r) for r in rows]\n"
+    )
+    fn, namespace = _module_fn(source)
+    assert set(keyed_globals(fn)) == {"fib", "even"}
+    before = canonical(fn)
+    exec("def odd(n):\n    return n % 2 == 1", namespace)
+    assert canonical(fn) != before
+
+    fn, namespace = _module_fn(_HELPER_SOURCE, SUFFIX="")
+    namespace["tag"] = op(namespace["tag"], name="test.inner_helper")
+    before = canonical(fn)
+    exec("def tag(row):\n    return row * 2", namespace)
+    namespace["tag"] = op(namespace["tag"], name="test.inner_helper")
+    assert canonical(fn) != before
+
+
+def test_helpers_in_your_modules_are_keyed(tmp_path: Path, monkeypatch) -> None:
+    """``harness.make_row(r)`` keys make_row's code and globals; os.path does not."""
+    import importlib
+
+    from pyforger.utils import keyed_globals
+
+    (tmp_path / "harness_t.py").write_text(
+        "PROMPT = 'v1'\ndef make_row(r):\n    return r + PROMPT\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    harness = importlib.import_module("harness_t")
+    fn, _ = _module_fn(
+        "def f(rows):\n    return [harness_t.make_row(os.path.join(r)) for r in rows]",
+        harness_t=harness,
+        os=os,
+    )
+    assert set(keyed_globals(fn)) == {"harness_t.make_row"}
+    before = canonical(fn)
+    setattr(harness, "PROMPT", "v2")  # read by make_row
+    assert canonical(fn) != before
+
+
+def test_library_functions_are_keyed_by_name(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Standard-library and Forger functions stay out; unkeyable helpers warn."""
+    from pyforger.utils import keyed_globals
+
+    fn, _ = _module_fn(
+        "def f(rows):\n    return [join(r, 'x') for r in get_field(rows)]",
+        join=os.path.join,
+        get_field=pyforger.utils.get_field,
+    )
+    assert keyed_globals(fn) == {}
+
+    lock = threading.Lock()
+    fn, namespace = _module_fn(
+        "def make(lock):\n"
+        "    def tag(row):\n        return lock and row\n    return tag\n"
+        "def f(rows):\n    return [tag(r) for r in rows]\n"
+    )
+    namespace["tag"] = namespace["make"](lock)
+    with caplog.at_level(logging.WARNING, logger="forger.op"):
+        assert keyed_globals(fn) == {"tag": ["__callable__", "make.<locals>.tag"]}
+    assert any("cannot key helper" in r.message for r in caplog.records)
+
+
 def test_importing_pyforger_logs_no_unstable_ref_warnings() -> None:
     """Library ops read only data, loggers, and helpers, so import is quiet."""
     script = (
