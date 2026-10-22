@@ -255,7 +255,7 @@ class PipelineRecord(BaseModel):
     unattributed: UsageTotals = Field(default_factory=UsageTotals)
     max_cost_usd: float | None = None
     python_gaps: list[PythonGap] = Field(default_factory=list)
-    # Set in a smoke run (``@pipeline(smoke=3)`` or ``FORGER_SMOKE_ROWS=3``).
+    # Set in a limited run (``@pipeline(limit=3)`` or ``FORGER_LIMIT=3``).
     smoke_rows: int | None = None
 
     @property

@@ -207,8 +207,8 @@ def op(
     logged warning outside steps). Neither keyword is part of the cache key.
     ``acquire.*`` ops take no input rows and reject both keywords.
 
-    In a smoke run (``@pipeline(smoke=3)`` or ``FORGER_SMOKE_ROWS=3``) the
-    cache key also holds the row limit, so smoke results never mix with a
+    In a limited run (``@pipeline(limit=3)`` or ``FORGER_LIMIT=3``) the
+    cache key also holds the row limit, so limited results never mix with a
     full run's. ``smoke`` names count parameters capped to the limit: an int
     above it is lowered (``n=100`` → ``n=3``), a list is cut to its first
     rows, e.g. ``@op(name="acquire.sample_from_LLM", smoke=("n",))``.

@@ -34,7 +34,7 @@ def retrieve(
     Each row is stamped with a ``"query"`` field. With ``queries=None``,
     a single fetch with no query is performed (e.g. random sampling).
     Calls are not cached; inside a ``@step`` they are listed as
-    ``acquire.retrieve``. In a smoke run (``FORGER_SMOKE_ROWS=3``) only the
+    ``acquire.retrieve``. In a limited run (``FORGER_LIMIT=3``) only the
     first 3 queries run, with ``n`` capped to 3.
     """
     resolved_queries: list[str | None] = (

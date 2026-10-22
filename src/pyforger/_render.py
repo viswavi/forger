@@ -1330,15 +1330,23 @@ def _fields_text(rec: StepRecord | RowStream, label: str = "") -> Text | None:
 
 
 def _smoke_mark(rec: StepRecord) -> str:
-    """``SMOKE: first 3 of 120 rows``, or ``SMOKE: ≤3 rows`` when nothing was cut."""
+    """``LIMIT: first 3 of 120 rows``, or ``LIMIT: ≤3 rows`` when nothing was cut."""
     if rec.smoke_n_in is not None and rec.smoke_n_in != rec.n_in:
-        return f"SMOKE: first {fmt_int(rec.n_in)} of {fmt_int(rec.smoke_n_in)} rows"
-    return f"SMOKE: ≤{rec.smoke_rows} rows"
+        return f"LIMIT: first {fmt_int(rec.n_in)} of {fmt_int(rec.smoke_n_in)} rows"
+    return f"LIMIT: ≤{rec.smoke_rows} rows"
 
 
 def smoke_banner(rows: int) -> str:
-    """The line that marks a smoke run's pipeline summary."""
-    return f"SMOKE RUN: at most {rows} rows per step; outputs are not representative"
+    """The line that marks a limited run's pipeline summary."""
+    if rows < 20:
+        return (
+            f"LIMITED RUN (limit={rows}): at most {rows} rows per step; outputs are "
+            "not representative"
+        )
+    return (
+        f"LIMITED RUN (limit={rows}): at most {rows} rows per step; a sample of the "
+        "full run, cached apart from it"
+    )
 
 
 def _cached_line(rec: StepRecord) -> RenderableType:
@@ -1563,7 +1571,7 @@ def pipeline_renderable(rec: PipelineRecord, *, width: int = WIDTH) -> Renderabl
     elif usage:
         stats.append(f" · {usage}")
     if rec.smoke_rows is not None:
-        stats.append(" · SMOKE RUN", style="bold yellow")
+        stats.append(" · LIMITED RUN", style="bold yellow")
 
     def original_cost(s: StepRecord) -> float:
         return s.original.cost_usd if s.cache_hit and s.original else 0.0

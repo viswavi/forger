@@ -321,8 +321,8 @@ def step(
     e.g. ``solvable 111 + refusals 42 → 153 rows``, and the yield uses the sum.
     It returns a list of rows or a dict of named row lists (streams), e.g.
     ``{"train": kept, "refusals": refused}``; each stream gets its own count,
-    fields line, and sample rows. In a smoke run (``@pipeline(smoke=3)`` or
-    ``FORGER_SMOKE_ROWS=3``) each rows argument is cut to its first 3 rows
+    fields line, and sample rows. In a limited run (``@pipeline(limit=3)`` or
+    ``FORGER_LIMIT=3``) each rows argument is cut to its first 3 rows
     before the call.
 
     If a parameter or the return value is annotated ``list[X]`` with ``X`` a
@@ -761,6 +761,7 @@ def pipeline(
     prod: bool = False,
     strict: bool = False,
     max_cost_usd: float | None = None,
+    limit: int | None = None,
     smoke: int | None = None,
 ) -> Any:
     """Decorate a function that calls ``@step`` functions; print a summary at the end.
@@ -786,19 +787,27 @@ def pipeline(
         max_cost_usd: Stop when this run has spent this many dollars: the next
             model request batch raises ``BudgetExceededError``. Requests already
             sent finish, so spend can pass the cap by up to one batch.
-        smoke: Run as a smoke test with at most this many rows per step: every
-            step's rows arguments are cut to their first ``smoke`` rows, and
+        limit: Run on at most this many rows per step: every step's rows
+            arguments are cut to their first ``limit`` rows, and
             ``acquire.sample_from_LLM`` / ``acquire.retrieve*`` cap their counts
-            to it. Defaults to ``FORGER_SMOKE_ROWS`` (unset or 0: off);
-            ``smoke=0`` turns it off whatever the variable says. Smoke results
-            are cached apart from a full run's.
+            to it. ``limit=3`` is a smoke test of every op; ``limit=50`` a
+            pilot whose yields mean something. Defaults to ``FORGER_LIMIT``
+            (unset or 0: off); ``limit=0`` turns it off whatever the variable
+            says. Limited results are cached apart from a full run's.
+        smoke: The old name of ``limit`` (and ``FORGER_SMOKE_ROWS`` of
+            ``FORGER_LIMIT``); still accepted.
     """
     if max_cost_usd is not None and not max_cost_usd >= 0:
         raise ValueError(
             f"max_cost_usd must be a number of dollars >= 0, got {max_cost_usd}"
         )
+    if limit is not None and smoke is not None:
+        raise ValueError("pass limit= or its old name smoke=, not both")
     if smoke is not None:
         _check_smoke(smoke, "smoke")
+        limit = smoke
+    if limit is not None:
+        _check_smoke(limit, "limit")
 
     def decorate(fn: F) -> F:
         pipeline_name = name or fn.__name__
@@ -814,7 +823,7 @@ def pipeline(
             rec = PipelineRecord(
                 name=pipeline_name,
                 max_cost_usd=max_cost_usd,
-                smoke_rows=(smoke or None) if smoke is not None else _env_smoke(),
+                smoke_rows=(limit or None) if limit is not None else _env_smoke(),
             )
             start = time.perf_counter()
 
@@ -855,15 +864,19 @@ def _check_smoke(value: Any, label: str) -> None:
 
 
 def _env_smoke() -> int | None:
-    """``FORGER_SMOKE_ROWS`` as a row limit; None when unset, empty, or 0."""
-    raw = os.environ.get("FORGER_SMOKE_ROWS", "").strip()
+    """``FORGER_LIMIT`` (or its old name ``FORGER_SMOKE_ROWS``) as a row limit.
+
+    None when unset, empty, or 0.
+    """
+    name = "FORGER_LIMIT" if os.environ.get("FORGER_LIMIT") else "FORGER_SMOKE_ROWS"
+    raw = os.environ.get(name, "").strip()
     if not raw:
         return None
     try:
         value: Any = int(raw)
     except ValueError:
         value = raw
-    _check_smoke(value, "FORGER_SMOKE_ROWS")
+    _check_smoke(value, name)
     return value or None
 
 
