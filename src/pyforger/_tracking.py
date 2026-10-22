@@ -1140,6 +1140,45 @@ class BudgetExceededError(RuntimeError):
     """Spend reached ``@pipeline(max_cost_usd=...)`` or ``FORGER_MAX_COST_USD``."""
 
 
+class SpendProjectionError(BudgetExceededError):
+    """A batch of requests would pass a spending cap if it finished.
+
+    Raised by ``Model.generate_batch`` once the requests it has finished
+    show that the rest would cost more than is left (see ``_SpendProjection``
+    in ``pyforger.acquire.model``). ``FORGER_PROJECT_SPEND=0`` turns it off.
+    """
+
+
+def cap_headroom() -> list[tuple[str, float]]:
+    """Dollars left under each spending cap in force, as ``(label, left)``.
+
+    e.g. ``("FORGER_MAX_COST_USD=40", 12.5)``. The caps are those
+    ``check_budget`` enforces.
+    """
+    out: list[tuple[str, float]] = []
+    cap = _env_cap()
+    if cap is not None:
+        out.append((f"FORGER_MAX_COST_USD={cap:g}", cap - _PROCESS_USAGE.totals()[2]))
+    running = _running_for_context()
+    if running is not None and running.rec.max_cost_usd is not None:
+        cap = running.rec.max_cost_usd
+        spent = running.usage.totals()[2]
+        out.append((f"pipeline {running.rec.name}'s max_cost_usd={cap:g}", cap - spent))
+    return out
+
+
+def spend_where() -> str:
+    """The op and step the current requests belong to, e.g. ``"filter.x in step y"``."""
+    names: dict[str, str] = {}
+    for usage in _ACCUMULATORS.get():  # outermost first: the step's own op
+        if usage.kind in ("op", "step"):
+            names.setdefault(usage.kind, usage.name)
+    where = names.get("op", "")
+    if "step" in names:
+        where = f"{where} in step {names['step']}" if where else f"step {names['step']}"
+    return where or "this batch"
+
+
 def _env_cap() -> float | None:
     raw = os.environ.get("FORGER_MAX_COST_USD", "").strip()
     if not raw:
