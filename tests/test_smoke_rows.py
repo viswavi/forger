@@ -13,7 +13,9 @@ from pyforger import _tracking, alter, filter, op
 from pyforger.acquire import Model, retrieve_from_s2, retrieve_from_web, sample_from_LLM
 from pyforger.steps import pipeline, render_pipeline, render_step, step
 
-BANNER = "SMOKE RUN: at most 3 rows per step; outputs are not representative"
+BANNER = (
+    "LIMITED RUN (limit=3): at most 3 rows per step; outputs are not representative"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -80,7 +82,7 @@ def test_step_inputs_are_cut_to_the_first_rows():
     assert (first.n_in, first.smoke_n_in, first.smoke_rows) == (3, 10, 3)
     assert [s.n_rows for s in second.inputs] == [3, 3, 1, 3]
     assert second.smoke_n_in == 3 + 5 + 1 + 4
-    assert "SMOKE: first 3 of 10 rows" in render_step(first)
+    assert "LIMIT: first 3 of 10 rows" in render_step(first)
     # The cut is not shown as rows dropped in plain Python between steps.
     assert rec.python_gaps == []
 
@@ -96,8 +98,8 @@ def test_banner_ends_the_summary_and_marks_step_reports(monkeypatch, capsys):
     build()
     printed = capsys.readouterr().out
     assert printed.rstrip().splitlines()[-1].strip() == BANNER
-    assert "SMOKE: ≤3 rows" in printed  # nothing to cut: 2 rows
-    assert "SMOKE RUN" in render_pipeline(_last()).splitlines()[1]
+    assert "LIMIT: ≤3 rows" in printed  # nothing to cut: 2 rows
+    assert "LIMITED RUN" in render_pipeline(_last()).splitlines()[1]
 
 
 @step
@@ -121,7 +123,7 @@ def test_smoke_yield_miss_is_a_suggestion(monkeypatch, capsys):
     assert [r["id"] for r in build()] == [0]
     rec = _last()
     (only,) = rec.steps
-    expected = "smoke run: filter.by_length: yield 0.33 below min_yield 0.90"
+    expected = "limited run: filter.by_length: yield 0.33 below min_yield 0.90"
     assert only.warnings == [] and only.suggestions == [expected]
     lines = [line.strip() for line in capsys.readouterr().out.splitlines()]
     lines = [line for line in lines if line]
@@ -159,8 +161,57 @@ def test_no_banner_in_a_full_run():
     build()
     rec = _last()
     assert rec.smoke_rows is None
-    assert "SMOKE" not in render_pipeline(rec)
+    assert "LIMIT" not in render_pipeline(rec)
     assert all(s.smoke_rows is None for s in rec.steps)
+
+
+def test_limit_is_the_new_name_and_env_var(monkeypatch):
+    """limit= and FORGER_LIMIT cut rows like smoke= and FORGER_SMOKE_ROWS."""
+
+    @pipeline(limit=3)
+    def build() -> list[dict]:
+        return tag(_rows(10))
+
+    assert len(build()) == 3
+    monkeypatch.setenv("FORGER_LIMIT", "2")
+
+    @pipeline
+    def from_env() -> list[dict]:
+        return tag(_rows(10))
+
+    assert len(from_env()) == 2
+    with pytest.raises(ValueError, match="not both"):
+        pipeline(limit=3, smoke=3)
+
+
+def test_limited_yield_miss_on_enough_rows_is_a_warning():
+    """At limit=30 a min_yield miss is a data problem, as in a full run."""
+    many = [{"id": i, "text": "short" if i % 3 else "a longer text"} for i in range(60)]
+
+    @pipeline(limit=30)
+    def build() -> list[dict]:
+        return picky(many)
+
+    build()
+    (only,) = _last().steps
+    assert only.warnings == ["filter.by_length: yield 0.33 below min_yield 0.90"]
+
+
+def test_limited_step_that_drops_every_row_warns():
+    """A limited step returning nothing leaves later steps nothing to check."""
+
+    @step
+    def drop_all(rows: list[dict]) -> list[dict]:
+        """Keep nothing."""
+        return filter.by_length(rows, instruction_field="text", min_len=50)
+
+    @pipeline(limit=3)
+    def build() -> list[dict]:
+        return tag(drop_all(_rows(10)))
+
+    build()
+    first = _last().steps[0]
+    assert any("returned 0 of 3 rows in a limited run" in w for w in first.warnings)
 
 
 def test_sample_from_llm_count_is_capped():
