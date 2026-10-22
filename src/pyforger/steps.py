@@ -497,8 +497,8 @@ def step(
     e.g. ``solvable 111 + refusals 42 → 153 rows``, and the yield uses the sum.
     It returns a list of rows or a dict of named row lists (streams), e.g.
     ``{"train": kept, "refusals": refused}``; each stream gets its own count,
-    fields line, and sample rows. In a smoke run (``@pipeline(smoke=3)`` or
-    ``FORGER_SMOKE_ROWS=3``) each rows argument is cut to its first 3 rows
+    fields line, and sample rows. In a limited run (``@pipeline(limit=3)`` or
+    ``FORGER_LIMIT=3``) each rows argument is cut to its first 3 rows
     before the call.
 
     If a parameter or the return value is annotated ``list[X]`` with ``X`` a
@@ -515,7 +515,8 @@ def step(
     lists, rows do not match the annotated row model (or the streams those a
     ``TypedDict`` names), or the step was called inside another step.
     Warnings (data problems): an op missed its ``min_yield`` / ``max_yield``
-    (a suggestion in a smoke run), or its completions stopped at max_tokens.
+    (a suggestion in a limited run on < 20 rows), or its completions stopped at
+    max_tokens.
     Suggestions: the step called no Forger ops, the rows are not dicts,
     ``show`` names a field no output row has, or the type hints could not be
     resolved.
@@ -688,6 +689,12 @@ def step(
 
             if not checked:  # a cache hit
                 _check_step_result(rec, result, hint.out, 0, input_keys)
+            if smoke is not None and rec.n_in and result == []:
+                rec.warnings.append(
+                    f"step {step_name} returned 0 of {rec.n_in} rows in a limited "
+                    f"run (limit={smoke}), so the steps after it check nothing; fix "
+                    "this step or raise the limit"
+                )
             finish(result)
             if strict and (rec.warnings or rec.suggestions):
                 raise _strict_error(rec)
@@ -1001,6 +1008,7 @@ def pipeline(
     strict: bool = False,
     max_cost_usd: float | None = None,
     max_token_units: float | None = None,
+    limit: int | None = None,
     smoke: int | None = None,
 ) -> Any:
     """Decorate a function that calls ``@step`` functions; print a summary at the end.
@@ -1040,12 +1048,15 @@ def pipeline(
         max_token_units: The same cap in token units (``pyforger.token_units``),
             for models priced in units rather than dollars. Calls to models
             without fixed weights add no units.
-        smoke: Run as a smoke test with at most this many rows per step: every
-            step's rows arguments are cut to their first ``smoke`` rows, and
+        limit: Run on at most this many rows per step: every step's rows
+            arguments are cut to their first ``limit`` rows, and
             ``acquire.sample_from_LLM`` / ``acquire.retrieve*`` cap their counts
-            to it. Defaults to ``FORGER_SMOKE_ROWS`` (unset or 0: off);
-            ``smoke=0`` turns it off whatever the variable says. Smoke results
-            are cached apart from a full run's.
+            to it. ``limit=3`` is a smoke test of every op; ``limit=50`` a
+            pilot whose yields mean something. Defaults to ``FORGER_LIMIT``
+            (unset or 0: off); ``limit=0`` turns it off whatever the variable
+            says. Limited results are cached apart from a full run's.
+        smoke: The old name of ``limit`` (and ``FORGER_SMOKE_ROWS`` of
+            ``FORGER_LIMIT``); still accepted.
     """
     for label, cap in (
         ("max_cost_usd", max_cost_usd),
@@ -1053,8 +1064,13 @@ def pipeline(
     ):
         if cap is not None and not cap >= 0:
             raise ValueError(f"{label} must be a number >= 0, got {cap}")
+    if limit is not None and smoke is not None:
+        raise ValueError("pass limit= or its old name smoke=, not both")
     if smoke is not None:
         _check_smoke(smoke, "smoke")
+        limit = smoke
+    if limit is not None:
+        _check_smoke(limit, "limit")
 
     def decorate(fn: F) -> F:
         pipeline_name = name or fn.__name__
@@ -1071,7 +1087,7 @@ def pipeline(
                 name=pipeline_name,
                 max_cost_usd=max_cost_usd,
                 max_token_units=max_token_units,
-                smoke_rows=(smoke or None) if smoke is not None else _env_smoke(),
+                smoke_rows=(limit or None) if limit is not None else _env_smoke(),
             )
             start = time.perf_counter()
 
@@ -1122,15 +1138,19 @@ def _check_smoke(value: Any, label: str) -> None:
 
 
 def _env_smoke() -> int | None:
-    """``FORGER_SMOKE_ROWS`` as a row limit; None when unset, empty, or 0."""
-    raw = os.environ.get("FORGER_SMOKE_ROWS", "").strip()
+    """``FORGER_LIMIT`` (or its old name ``FORGER_SMOKE_ROWS``) as a row limit.
+
+    None when unset, empty, or 0.
+    """
+    name = "FORGER_LIMIT" if os.environ.get("FORGER_LIMIT") else "FORGER_SMOKE_ROWS"
+    raw = os.environ.get(name, "").strip()
     if not raw:
         return None
     try:
         value: Any = int(raw)
     except ValueError:
         value = raw
-    _check_smoke(value, "FORGER_SMOKE_ROWS")
+    _check_smoke(value, name)
     return value or None
 
 

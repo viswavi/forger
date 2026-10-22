@@ -59,10 +59,11 @@ them, and score lists of over 100,000 rows, have none: rerun with `_no_cache=Tru
   because 34 of 120 completions ... stopped at max_tokens=16384"); samples failed to parse; requests failed at the
   provider; a judge gave no score; reasoning traces open by discussing the output format (`output_schema` and the
   prompt's own format instructions disagree, so the reasoning is a poor training target); retrieved text reached no
-  prompt (below). In a smoke run a `min_yield` / `max_yield` miss is a suggestion instead (`smoke run: ...`), since 3
-  rows say little about yield. The pipeline summary ends with `notes`, then the suggestions, then every step's data
-  problems under `data problems (N)` (or `data problems: none reported`), so the last lines of a log show them; a smoke
-  run's banner comes after them. Fix each one, or decide it does not matter for your data and say why in your notes.
+  prompt (below). In a limited run, a `min_yield` / `max_yield` miss on fewer than 20 rows is a suggestion instead
+  (`limited run: ...`), since 3 rows say little about yield. The pipeline summary ends with `notes`, then the
+  suggestions, then every step's data problems under `data problems (N)` (or `data problems: none reported`), so the
+  last lines of a log show them; a limited run's banner comes after them. Fix each one, or decide it does not matter
+  for your data and say why in your notes.
 - Suggestions (dim `suggestion:` lines) are about how the code is written, not the rows: a step calls no Forger ops
   (its report cannot show what it kept or changed: write its checks as ops such as `filter.by_predicate`, and never
   add a no-op filter only to quiet it); a step's type hints cannot be resolved; `show=` names a field no output row
@@ -151,18 +152,21 @@ them, and score lists of over 100,000 rows, have none: rerun with `_no_cache=Tru
   `TokenUnitQuotaExceeded`; `dynamic_step` agents are charged to it and checked against it like `Model` requests)
   and `TinkerModel`'s dollar ledger (`FORGER_TINKER_USAGE_FILE`, which raises
   `TinkerBudgetExceeded`). The caps count this process's spend; the quotas count every process sharing the file.
-- Smoke runs: run every new pipeline version with `FORGER_SMOKE_ROWS=3 python pipeline.py` first (or
-  `@pipeline(smoke=3)`); it exercises every op in about a minute, so a wrong keyword or a missing argument fails at
-  once instead of minutes into the full run. Inside the pipeline, every `@step` call cuts each rows argument (each of
-  several inputs, `*rows` items too) to its first 3 rows. These ops also cap their counts: `acquire.sample_from_LLM`
-  (`n`) and `acquire.retrieve` / `retrieve_from_*` (the first 3 `queries`, `n` at most 3). Other ops keep their
-  counts, so a step that makes rows from nothing in some other way still makes all of them. Step reports say
-  `SMOKE: first 3 of 120 rows`, and the summary ends with `SMOKE RUN: at most 3 rows per step; outputs are not
-  representative`. Smoke results are cached under keys that include the row limit, so a later full run never reads
-  or overwrites them and recomputes every step. A second smoke run of the same code reuses them. The request cache is
-  not keyed on the limit, though, so the full run sends no model request the smoke run already sent for the same rows:
-  `generate_from_context` asks only about rows 4 onward, and `sample_from_LLM(n=100)` asks for 97 more samples.
-  `smoke=0` turns smoke mode off even when the variable is set.
+- Limited runs: `FORGER_LIMIT=3 python pipeline.py` (or `@pipeline(limit=3)`) runs every step on at most 3 rows.
+  Run every new pipeline version this way first (a smoke run): it exercises every op in about a minute, so a wrong
+  keyword or a missing argument fails at once instead of minutes into the full run. A larger limit is a pilot:
+  `FORGER_LIMIT=50` shows each filter's yield and the cost per row on a sample before you pay for every row. Inside
+  the pipeline, every `@step` call cuts each rows argument (each of several inputs, `*rows` items too) to its first
+  N rows. These ops also cap their counts: `acquire.sample_from_LLM` (`n`) and `acquire.retrieve` /
+  `retrieve_from_*` (the first N `queries`, `n` at most N). Other ops keep their counts, so a step that makes rows
+  from nothing in some other way still makes all of them. Step reports say `LIMIT: first 3 of 120 rows`, and the
+  summary ends with `LIMITED RUN (limit=3): at most 3 rows per step; outputs are not representative`. A step that
+  drops every row of a limited run is a warning, since the steps after it then check nothing. Limited results are
+  cached under keys that include the limit, so a later full run never reads or overwrites them and recomputes every
+  step. A second limited run of the same code reuses them. The request cache is not keyed on the limit, though, so
+  the full run sends no model request the limited run already sent for the same rows: `generate_from_context` asks
+  only about rows 4 onward, and `sample_from_LLM(n=100)` asks for 97 more samples. `limit=0` turns it off even when
+  the variable is set. The old names `@pipeline(smoke=3)` and `FORGER_SMOKE_ROWS=3` still work.
 
 ## Composing a pipeline
 

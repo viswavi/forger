@@ -329,7 +329,7 @@ class PipelineRecord(BaseModel):
     python_gaps: list[PythonGap] = Field(default_factory=list)
     # Informational lines, e.g. how few retrieved documents reached a prompt.
     notes: list[str] = Field(default_factory=list)
-    # Set in a smoke run (``@pipeline(smoke=3)`` or ``FORGER_SMOKE_ROWS=3``).
+    # Set in a limited run (``@pipeline(limit=3)`` or ``FORGER_LIMIT=3``).
     smoke_rows: int | None = None
 
     @property
