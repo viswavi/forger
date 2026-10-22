@@ -10,10 +10,13 @@ import pytest
 from fixtures import MockModel
 
 from pyforger import _tracking, alter, filter, op
+from pyforger._render import smoke_banner as _render_banner
 from pyforger.acquire import Model, retrieve_from_s2, retrieve_from_web, sample_from_LLM
 from pyforger.steps import pipeline, render_pipeline, render_step, step
 
-BANNER = "SMOKE RUN: at most 3 rows per step; outputs are not representative"
+BANNER = (
+    "LIMITED RUN (limit=3): at most 3 rows per step; outputs are not representative"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -80,7 +83,7 @@ def test_step_inputs_are_cut_to_the_first_rows():
     assert (first.n_in, first.smoke_n_in, first.smoke_rows) == (3, 10, 3)
     assert [s.n_rows for s in second.inputs] == [3, 3, 1, 3]
     assert second.smoke_n_in == 3 + 5 + 1 + 4
-    assert "SMOKE: first 3 of 10 rows" in render_step(first)
+    assert "LIMIT: first 3 of 10 rows" in render_step(first)
     # The cut is not shown as rows dropped in plain Python between steps.
     assert rec.python_gaps == []
 
@@ -96,8 +99,8 @@ def test_banner_ends_the_summary_and_marks_step_reports(monkeypatch, capsys):
     build()
     printed = capsys.readouterr().out
     assert printed.rstrip().splitlines()[-1].strip() == BANNER
-    assert "SMOKE: ≤3 rows" in printed  # nothing to cut: 2 rows
-    assert "SMOKE RUN" in render_pipeline(_last()).splitlines()[1]
+    assert "LIMIT: ≤3 rows" in printed  # nothing to cut: 2 rows
+    assert "LIMITED RUN" in render_pipeline(_last()).splitlines()[1]
 
 
 def test_no_banner_in_a_full_run():
@@ -110,8 +113,35 @@ def test_no_banner_in_a_full_run():
     build()
     rec = _last()
     assert rec.smoke_rows is None
-    assert "SMOKE" not in render_pipeline(rec)
+    assert "LIMIT" not in render_pipeline(rec)
     assert all(s.smoke_rows is None for s in rec.steps)
+
+
+def test_limit_is_the_new_name_and_env_var(monkeypatch):
+    """limit= and FORGER_LIMIT cut rows like smoke= and FORGER_SMOKE_ROWS."""
+
+    @pipeline(limit=3)
+    def build() -> list[dict]:
+        return tag(_rows(10))
+
+    assert len(build()) == 3
+    monkeypatch.setenv("FORGER_LIMIT", "2")
+
+    @pipeline
+    def from_env() -> list[dict]:
+        return tag(_rows(10))
+
+    assert len(from_env()) == 2
+    with pytest.raises(ValueError, match="not both"):
+        pipeline(limit=3, smoke=3)
+
+
+def test_pilot_banner_says_it_is_a_sample():
+    """From 20 rows up the banner calls the run a sample, not unrepresentative."""
+    assert _render_banner(50) == (
+        "LIMITED RUN (limit=50): at most 50 rows per step; a sample of the full run, "
+        "cached apart from it"
+    )
 
 
 def test_sample_from_llm_count_is_capped():

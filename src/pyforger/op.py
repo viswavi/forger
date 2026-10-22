@@ -563,13 +563,13 @@ def op(
     defined in ``pyforger.<category>`` default to that category; any other op
     defaults to "other", whatever its name.
 
-    In a smoke run (``@pipeline(smoke=3)`` or ``FORGER_SMOKE_ROWS=3``) the
-    cache key also holds the row limit, so smoke results never mix with a
+    In a limited run (``@pipeline(limit=3)`` or ``FORGER_LIMIT=3``) the
+    cache key also holds the row limit, so limited results never mix with a
     full run's. ``smoke`` names count parameters capped to the limit: an int
     above it is lowered (``n=100`` → ``n=3``), a list is cut to its first
     rows, e.g. ``@op(name="acquire.sample_from_LLM", smoke=("n",))``. The
     request cache is not keyed on the limit, so the full run reuses the
-    completions the smoke run got for the same rows.
+    completions the limited run got for the same rows.
     """
 
     def decorate(fn: Callable[..., T]) -> Callable[..., T]:

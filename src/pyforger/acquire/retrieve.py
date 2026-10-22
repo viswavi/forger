@@ -48,8 +48,8 @@ def retrieve(
     Calls are not cached; inside a ``@step`` they are listed as
     ``acquire.retrieve``. Inside a ``@pipeline`` the rows' text is
     fingerprinted, and the pipeline warns when none of it reaches a model
-    prompt or the pipeline's output. In a smoke run
-    (``FORGER_SMOKE_ROWS=3``) only the first 3 queries run, with ``n``
+    prompt or the pipeline's output. In a limited run
+    (``FORGER_LIMIT=3``) only the first 3 queries run, with ``n``
     capped to 3.
 
     Returns:

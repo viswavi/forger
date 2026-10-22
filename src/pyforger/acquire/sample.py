@@ -194,7 +194,7 @@ def sample_from_LLM(
         model's request cache follows the same rule: a call that differs in any
         argument but `n` draws new samples, and raising `n` keeps the samples
         already drawn and requests only the extra ones.
-        In a smoke run (``FORGER_SMOKE_ROWS=3``), `n` is capped to the row limit.
+        In a limited run (``FORGER_LIMIT=3``), `n` is capped to the row limit.
     """
     if batch_size is not None and batch_size <= 0:
         raise ValueError("batch_size must be positive")
