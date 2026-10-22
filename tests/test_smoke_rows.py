@@ -35,7 +35,8 @@ SEEN: list[int] = []  # rows each _tag call got
 
 @op(name="alter.test_smoke_tag")
 def _tag(rows: list[Any]) -> list[Any]:
-    SEEN.append(len(rows))
+    # Through globals(), so the growing counter is not part of the steps' keys.
+    globals()["SEEN"].append(len(rows))
     return [{**r, "tag": "t"} for r in rows]
 
 
