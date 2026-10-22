@@ -573,13 +573,13 @@ def op(
     defined in ``pyforger.<category>`` default to that category; any other op
     defaults to "other", whatever its name.
 
-    In a smoke run (``@pipeline(smoke=3)`` or ``FORGER_SMOKE_ROWS=3``) the
-    cache key also holds the row limit, so smoke results never mix with a
+    In a limited run (``@pipeline(limit=3)`` or ``FORGER_LIMIT=3``) the
+    cache key also holds the row limit, so limited results never mix with a
     full run's. ``smoke`` names count parameters capped to the limit: an int
     above it is lowered (``n=100`` → ``n=3``), a list is cut to its first
     rows, e.g. ``@op(name="acquire.sample_from_LLM", smoke=("n",))``. The
     request cache is not keyed on the limit, so the full run reuses the
-    completions the smoke run got for the same rows.
+    completions the limited run got for the same rows.
     """
 
     def decorate(fn: Callable[..., T]) -> Callable[..., T]:
@@ -1147,6 +1147,10 @@ def _check_yield_bounds(min_yield: float | None, max_yield: float | None) -> Non
         )
 
 
+# Input rows under which a limited run's yield misses are only suggestions.
+_SMALL_SAMPLE = 20
+
+
 def _op_call(
     op_name: str,
     category: str,
@@ -1191,12 +1195,13 @@ def _op_call(
         token_units=usage[3],
         scores=scores[0] if scores else None,
     )
-    # A smoke run's yield on 3 rows says little, so a miss is only a suggestion.
-    smoke = _tracking.smoke_rows() is not None
-    prefix = "smoke run: " if smoke else ""
+    # A limited run's yield on a few rows (limit=3) says little, so a miss
+    # there is only a suggestion; on 20 or more rows (limit=50) it counts.
+    small = _tracking.smoke_rows() is not None and (n_in or 0) < _SMALL_SAMPLE
+    prefix = "limited run: " if small else ""
 
     def missed(message: str) -> None:
-        _tracking.add_problem(call, "yield_bounds", message, suggestion=smoke)
+        _tracking.add_problem(call, "yield_bounds", message, suggestion=small)
 
     if (min_yield is not None or max_yield is not None) and yield_ratio is None:
         if n_in == 0 and n_out is not None:

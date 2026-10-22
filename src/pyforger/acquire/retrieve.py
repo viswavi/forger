@@ -89,7 +89,7 @@ def retrieve(
     a single fetch with no query is performed (e.g. random sampling).
     Inside a ``@pipeline`` the rows' text is fingerprinted, and the pipeline
     warns when none of it reaches a model prompt or the pipeline's output.
-    In a smoke run (``FORGER_SMOKE_ROWS=3``) only the first 3 queries run,
+    In a limited run (``FORGER_LIMIT=3``) only the first 3 queries run,
     with ``n`` capped to 3.
 
     Returns:

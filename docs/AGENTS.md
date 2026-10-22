@@ -105,7 +105,7 @@ completions ... hit max_tokens=16384"), and the summary ends with all of them. F
 for your data (e.g. truncation in a draft step) can be suppressed with a reason, e.g.
 `@step(suppress_truncation_warning="<why these rows are still fine>")`; a line that can be suppressed ends with its
 flag in brackets. Dim `INFO:` lines are about how the code is written. Run each new pipeline version with
-`FORGER_SMOKE_ROWS=3` first: it runs every op on three rows in about a minute (see "Smoke runs" in `pipelines.md`).
+`FORGER_LIMIT=3` first: it runs every op on three rows in about a minute (see "Limited runs" in `pipelines.md`).
 See [`docs/agents/pipelines.md`](agents/pipelines.md) for the reports, warnings, suppression flags, spend ledger, and
 spending caps.
 
