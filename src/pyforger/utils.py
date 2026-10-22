@@ -6,7 +6,10 @@ import dis
 import functools
 import inspect
 import logging
+import os
 import pickle
+import sys
+import threading
 import types
 from typing import Any
 
@@ -126,6 +129,26 @@ def global_names(code: Any) -> tuple[str, ...]:
 
 
 @functools.lru_cache(maxsize=4096)
+def global_attrs(code: Any) -> tuple[tuple[str, str], ...]:
+    """Sorted ``(global, attribute)`` pairs read as ``name.attr`` in code.
+
+    Nested code counts, as in ``global_names``.
+
+    E.g. ``harness.make_row(r)`` gives ``("harness", "make_row")``.
+    """
+    pairs: set[tuple[str, str]] = set()
+    previous = None
+    for ins in dis.get_instructions(code):
+        if ins.opname == "LOAD_ATTR" and previous is not None:
+            pairs.add((previous, ins.argval))
+        previous = ins.argval if ins.opname in _GLOBAL_LOADS else None
+    for const in code.co_consts:
+        if isinstance(const, _CODE_T):
+            pairs.update(global_attrs(const))
+    return tuple(sorted(pairs))
+
+
+@functools.lru_cache(maxsize=4096)
 def code_names(code: Any) -> frozenset[str]:
     """All of ``co_names`` (globals and attributes) in code and its nested code."""
     names = set(code.co_names)
@@ -168,22 +191,117 @@ def has_cache_key(obj: Any) -> bool:
 def keyed_globals(fn: Any) -> dict[str, Any]:
     """The module globals ``fn``'s code reads that go into its cache key, by name.
 
-    These are plain data (``PROMPT = "..."``) and objects with ``cache_key()``
-    (``MODEL = Model(...)``). Dunder names (``__name__``, ``__file__``) are
-    skipped: they differ between ``python pipeline.py`` and ``import pipeline``
-    without changing behavior.
+    These are plain data (``PROMPT = "..."``), objects with ``cache_key()``
+    (``MODEL = Model(...)``), and your own functions that ``fn`` calls by name
+    (``tag(row)``), keyed by their code and in turn by the globals they read.
+    Dunder names (``__name__``, ``__file__``) are skipped: they differ between
+    ``python pipeline.py`` and ``import pipeline`` without changing behavior.
     """
     code = getattr(fn, "__code__", None)
     g = getattr(fn, "__globals__", None)
     if code is None or not isinstance(g, dict):
         return {}
-    return {
-        n: g[n]
-        for n in global_names(code)
-        if n in g
-        and not (n.startswith("__") and n.endswith("__"))
-        and (is_plain_data(g[n]) or has_cache_key(g[n]))
-    }
+    keyed: dict[str, Any] = {}
+    mine: bool | None = None  # is fn your code? Forger's ops key no helpers
+    for n in global_names(code):
+        if n not in g or (n.startswith("__") and n.endswith("__")):
+            continue
+        if is_plain_data(g[n]) or has_cache_key(g[n]):
+            keyed[n] = g[n]
+        elif isinstance(g[n], (types.FunctionType, types.ModuleType)):
+            if mine is None:
+                mine = is_user_function(fn)
+            if not mine:
+                continue
+            if is_user_function(g[n]):
+                keyed[n] = _helper_key(inspect.unwrap(g[n]))
+            elif _is_user_module(g[n]):  # harness.make_row(r), harness.PROMPT
+                for name, attr in global_attrs(code):
+                    value = getattr(g[n], attr, None) if name == n else None
+                    if value is not None and is_user_function(value):
+                        keyed[f"{n}.{attr}"] = _helper_key(inspect.unwrap(value))
+                    elif value is not None and (
+                        is_plain_data(value) or has_cache_key(value)
+                    ):
+                        keyed[f"{n}.{attr}"] = value
+    return keyed
+
+
+# Python file paths of the standard library and installed packages: their
+# functions are keyed by name, yours by code (see ``is_user_function``).
+_LIBRARY_PREFIXES = tuple(
+    {os.path.realpath(p) + os.sep for p in (sys.prefix, sys.base_prefix)}
+)
+# ids of the helpers being keyed in this thread, so ``def fib(n): ... fib(n-1)``
+# or two helpers calling each other key the inner reference by name.
+_KEYING = threading.local()
+_WARNED_HELPERS: set[str] = set()
+
+
+def is_user_function(obj: Any) -> bool:
+    """True for a Python function you wrote, in your pipeline file or another.
+
+    E.g. ``tag`` in ``rows = [tag(r) for r in rows]``. False for functions of
+    the standard library, installed packages, and Forger itself, whose code
+    does not change between your runs. ``@op`` and ``@step`` functions count,
+    by the function they wrap.
+    """
+    if not isinstance(obj, types.FunctionType):
+        return False
+    fn = inspect.unwrap(obj)
+    path = getattr(getattr(fn, "__code__", None), "co_filename", "")
+    return _is_user_code(getattr(fn, "__module__", None) or "", path)
+
+
+def _is_user_module(obj: Any) -> bool:
+    """True for a module you wrote, e.g. ``harness`` in ``import harness``."""
+    return isinstance(obj, types.ModuleType) and _is_user_code(
+        obj.__name__, getattr(obj, "__file__", None) or ""
+    )
+
+
+def _is_user_code(module: str, path: str) -> bool:
+    """True unless ``path`` is in the standard library, a package, or Forger."""
+    if module == "pyforger" or module.startswith("pyforger."):
+        return False
+    if not path or path.startswith("<frozen"):
+        return False
+    if path.startswith("<"):  # e.g. <stdin> or a notebook cell
+        return True
+    real = os.path.realpath(path)
+    return not real.startswith(_LIBRARY_PREFIXES) and not any(
+        part in ("site-packages", "dist-packages") for part in real.split(os.sep)
+    )
+
+
+def _helper_key(fn: Any) -> Any:
+    """The key of a helper ``fn``: its code, closure, and keyed globals.
+
+    A helper already being keyed (recursion) is keyed by name. A helper whose
+    closure cannot be keyed is keyed by name too, with a warning once, as
+    before helpers were keyed by code.
+    """
+    active = getattr(_KEYING, "ids", None)
+    if active is None:
+        active = _KEYING.ids = set()
+    name = getattr(fn, "__qualname__", repr(fn))
+    if id(fn) in active:
+        return ["__recursive__", name]
+    active.add(id(fn))
+    try:
+        return [*function_key(fn), canonical(keyed_globals(fn))]
+    except TypeError as exc:
+        if name not in _WARNED_HELPERS:
+            _WARNED_HELPERS.add(name)
+            logging.getLogger("forger.op").warning(
+                "@op cannot key helper %s by its code (%s); changes to its body "
+                "will not invalidate cached results.",
+                name,
+                exc,
+            )
+        return ["__callable__", name]
+    finally:
+        active.discard(id(fn))
 
 
 def function_key(fn: Any) -> list[Any]:
