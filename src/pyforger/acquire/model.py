@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import inspect
+import math
 import os
 import random
 import statistics
@@ -64,6 +65,18 @@ _SLOW_TOKENS_PER_S = 25.0
 _RETRY_BASE_S = 1.0
 _RETRY_MAX_S = 30.0
 _RETRY_AFTER_MAX_S = 60.0
+# A rate-limit 429 (one that does not say the quota or budget is spent) gets at
+# least this many retries, about 5s, 10s, 20s, 40s, 60s, 60s apart: a
+# per-minute limit needs a minute to reset, and 3 attempts within 3 seconds
+# only add to the load. num_retries=0 still means no retries at all.
+_RATE_LIMIT_RETRIES = 6
+_RATE_LIMIT_BASE_S = 5.0
+_RATE_LIMIT_MAX_S = 60.0
+# After a 429, requests to that model (from any Model instance in the process)
+# are held to half as many in flight as when it hit, never fewer than
+# _MIN_IN_FLIGHT; each success after that allows _IN_FLIGHT_GROWTH more.
+_MIN_IN_FLIGHT = 4
+_IN_FLIGHT_GROWTH = 0.25
 # Status codes worth asking again: request timeout, conflict, too early, rate
 # limit. Every 5xx is too.
 _TRANSIENT_STATUS = frozenset({408, 409, 425, 429})
@@ -179,6 +192,13 @@ def _is_transient(exc: BaseException) -> bool:
     return False
 
 
+def _is_rate_limit(exc: BaseException) -> bool:
+    """True for a 429 that a later retry can fix (not a spent quota or budget)."""
+    status = getattr(exc, "status_code", None)
+    named = type(exc).__name__ == "RateLimitError"
+    return (status == 429 or named) and _is_transient(exc)
+
+
 def _retry_after(exc: BaseException) -> float | None:
     """Seconds from the error's Retry-After header, or None without one.
 
@@ -205,10 +225,86 @@ def _retry_delay(retry: int, exc: BaseException) -> float:
     after = _retry_after(exc)
     if after is not None:
         return min(after, _RETRY_AFTER_MAX_S)
+    if _is_rate_limit(exc):
+        backoff = min(_RATE_LIMIT_BASE_S * 2**retry, _RATE_LIMIT_MAX_S)
+    else:
+        backoff = min(_RETRY_BASE_S * 2**retry, _RETRY_MAX_S)
     # Half to full backoff, so 100 requests that hit one 429 do not return
     # together.
-    backoff = min(_RETRY_BASE_S * 2**retry, _RETRY_MAX_S)
     return backoff * (0.5 + random.random() / 2)
+
+
+def _retry_limit(retries: int, exc: BaseException) -> int:
+    """How many retries a request gets when `exc` is its latest error."""
+    if retries > 0 and _is_rate_limit(exc):
+        return max(retries, _RATE_LIMIT_RETRIES)
+    return retries
+
+
+class _InFlightLimit:
+    """How many requests to one model may be in flight, lowered by 429s.
+
+    Unlimited until the first 429. A 429 halves the limit (from the number in
+    flight when it hit, at most once per burst: only a request sent after the
+    last cut can cut again), never below ``_MIN_IN_FLIGHT``; each success
+    raises it by ``_IN_FLIGHT_GROWTH``. Shared by every Model instance for the
+    same model and endpoint in the process, since a step often builds its own.
+    """
+
+    def __init__(self) -> None:
+        self.cond = threading.Condition()
+        self.limit = math.inf
+        self.in_flight = 0
+        self.last_cut = -math.inf
+
+    @contextlib.contextmanager
+    def slot(self) -> Any:
+        """Hold one in-flight slot; yields the time the request was sent."""
+        with self.cond:
+            while self.in_flight >= self.limit:
+                self.cond.wait()
+            self.in_flight += 1
+        try:
+            yield time.monotonic()
+        finally:
+            with self.cond:
+                self.in_flight -= 1
+                self.cond.notify()
+
+    def rate_limited(self, sent: float, model: str) -> None:
+        """A request sent at `sent` got a 429: halve the limit once per burst."""
+        with self.cond:
+            if sent <= self.last_cut:
+                return
+            self.limit = max(_MIN_IN_FLIGHT, min(self.limit, self.in_flight + 1) // 2)
+            self.last_cut = time.monotonic()
+            limit = self.limit
+        _logger.info(
+            "%s is rate-limiting requests: at most %d in flight until requests "
+            "succeed again",
+            model,
+            limit,
+        )
+
+    def succeeded(self) -> None:
+        """A request got through: allow a little more."""
+        with self.cond:
+            if self.limit != math.inf:
+                self.limit += _IN_FLIGHT_GROWTH
+                self.cond.notify()
+
+
+_IN_FLIGHT: dict[tuple[str, str], _InFlightLimit] = {}
+_IN_FLIGHT_LOCK = threading.Lock()
+
+
+def _in_flight_limit(call_kwargs: dict[str, Any]) -> _InFlightLimit:
+    """The process-wide limit for the model and endpoint of `call_kwargs`."""
+    key = (str(call_kwargs.get("model", "?")), str(call_kwargs.get("api_base") or ""))
+    with _IN_FLIGHT_LOCK:
+        if key not in _IN_FLIGHT:
+            _IN_FLIGHT[key] = _InFlightLimit()
+        return _IN_FLIGHT[key]
 
 
 # Patched in tests, which also sleep in their fake completions.
@@ -394,34 +490,45 @@ def _complete(
     A transient error (`_is_transient`: a timeout, 429, 5xx, lost connection)
     is retried up to `retries` times after a short backoff, without holding
     the slot; any other error, or the last one, is raised. So a request makes
-    at most `retries + 1` attempts (LiteLLM itself is told not to retry).
+    at most `retries + 1` attempts (LiteLLM itself is told not to retry). A
+    rate-limit 429 gets at least ``_RATE_LIMIT_RETRIES`` retries with a longer
+    backoff (`_retry_limit`), and lowers how many requests to this model may
+    be in flight at once (`_InFlightLimit`).
 
     The response's usage is recorded here, in the worker, before the caller
     sees it: a batch that later raises or is interrupted keeps every
     finished request in the step report. `on_start` runs each time the
     request holds its slot, just before it is sent.
     """
+    limit = _in_flight_limit(call_kwargs)
+    model = str(call_kwargs.get("model", "?"))
     retry = 0
     while True:
+        sent = -math.inf
         try:
             with contextlib.ExitStack() as slot:
                 if semaphore is not None:
                     slot.enter_context(semaphore)
+                sent = slot.enter_context(limit.slot())
                 if on_start is not None:
                     on_start()
                 response = litellm.completion(messages=messages, n=n, **call_kwargs)
+            limit.succeeded()
             break
         except Exception as exc:
-            if retry >= retries or not _is_transient(exc):
+            if _is_rate_limit(exc):
+                limit.rate_limited(sent, model)
+            allowed = _retry_limit(retries, exc)
+            if retry >= allowed or not _is_transient(exc):
                 raise
             delay = _retry_delay(retry, exc)
             retry += 1
             _logger.info(
                 "LLM request (%s) failed with %s; retry %d of %d in %.1fs",
-                call_kwargs.get("model", "?"),
+                model,
                 type(exc).__name__,
                 retry,
-                retries,
+                allowed,
                 delay,
             )
             _sleep(delay)
@@ -924,8 +1031,11 @@ class Model:
                 timeout, 429, 5xx, or lost connection), after a 1s, 2s, ...
                 backoff or a 429's Retry-After. A request makes at most
                 num_retries + 1 attempts: LiteLLM is sent num_retries=0, so
-                neither it nor the openai client retries on top. A 400, 401,
-                403, 404, or an exhausted quota is not retried.
+                neither it nor the openai client retries on top. A rate-limit
+                429 gets at least 6 retries, about 5s, 10s, 20s, 40s, 60s, 60s
+                apart, and lowers how many requests to the model are in
+                flight (0 still retries nothing). A 400, 401, 403, 404, or an
+                exhausted quota is not retried.
             show_progress: Progress for a generate_batch() call that sends
                 more than one request (several prompts, or n > 1 on a model
                 that does not support n): a tqdm bar when stderr is a
