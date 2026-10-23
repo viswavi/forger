@@ -447,9 +447,18 @@ class TestStragglers:
             "and is retried"
         ]
 
-    def test_two_stragglers_one_warning(self, mock_litellm, fast_clock, caplog):
-        """Requests that turn late at the same check share one warning."""
-        mock_litellm.completion.side_effect = Delayed({"x": 0.3, "y": 0.3})
+    def test_two_stragglers_one_warning(
+        self, mock_litellm, fast_clock, caplog, monkeypatch
+    ):
+        """Requests that turn late at the same check share one warning.
+
+        x and y start a few milliseconds apart, so they turn late a few
+        milliseconds apart: with a check every 20ms one check in a few would
+        fall between them. Checking every 200ms, both are late at the first
+        check after they pass 100ms.
+        """
+        monkeypatch.setattr(model_module, "_PROGRESS_LOG_INTERVAL_S", 0.2)
+        mock_litellm.completion.side_effect = Delayed({"x": 0.6, "y": 0.6})
         with caplog.at_level(logging.WARNING, logger=_LOGGER):
             Model("gpt-4o", timeout=None, show_progress=False).generate_batch(
                 ["a", "b", "x", "y"]
