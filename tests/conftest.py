@@ -26,6 +26,14 @@ def _isolate_op_cache(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _forget_in_flight_limits():
+    """A 429 in one test must not throttle the next test's requests."""
+    _model._IN_FLIGHT.clear()
+    yield
+    _model._IN_FLIGHT.clear()
+
+
+@pytest.fixture(autouse=True)
 def _forget_learned_no_n():
     """Forget models that generate_batch learned to fan out in an earlier test."""
     _model._LEARNED_NO_N.clear()
