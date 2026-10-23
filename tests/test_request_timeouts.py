@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import pickle
 import sys
+import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -216,12 +217,44 @@ class TestRetries:
         assert "num_retries" not in kwargs
 
     def test_429_retried_with_backoff(self, mock_litellm, sleeps):
-        """Two 429s, then an answer: 3 attempts, waits of about 1s then 2s."""
+        """Two 429s, then an answer: 3 attempts, waits of about 5s then 10s."""
         fake = Failing(rate_limit(), rate_limit())
         mock_litellm.completion.side_effect = fake
         assert Model("gpt-4o").generate_batch(["A"]) == [["A"]]
         assert fake.calls == 3
-        assert 0.5 <= sleeps[0] <= 1.0 and 1.0 <= sleeps[1] <= 2.0
+        assert 2.5 <= sleeps[0] <= 5.0 and 5.0 <= sleeps[1] <= 10.0
+
+    def test_429_gets_six_retries_other_errors_num_retries(self, mock_litellm, sleeps):
+        """A per-minute limit needs minutes: 6 retries at num_retries=2, up to 60s.
+
+        A 503 still stops after num_retries, and num_retries=0 retries nothing.
+        """
+        fake = Failing(*[rate_limit() for _ in range(6)])
+        mock_litellm.completion.side_effect = fake
+        assert Model("gpt-4o", num_retries=2).generate_batch(["A"]) == [["A"]]
+        assert fake.calls == 7 and len(sleeps) == 6
+        assert 30.0 <= sleeps[-1] <= 60.0  # capped at 60s, with jitter
+
+        sleeps.clear()
+        fake = Failing(*[rate_limit() for _ in range(7)])
+        mock_litellm.completion.side_effect = fake
+        with pytest.raises(litellm.RateLimitError):
+            Model("gpt-4o", num_retries=2).generate_batch(["A"])
+        assert fake.calls == 7
+
+        fake = Failing(rate_limit())
+        mock_litellm.completion.side_effect = fake
+        with pytest.raises(litellm.RateLimitError):
+            Model("gpt-4o", num_retries=0).generate_batch(["A"])
+        assert fake.calls == 1
+
+    def test_spent_budget_429_is_not_retried(self, mock_litellm, sleeps):
+        """The proxy's "Budget has been exceeded!" 429 is final: one attempt."""
+        fake = Failing(rate_limit("Budget has been exceeded! Key=k Current cost: 102"))
+        mock_litellm.completion.side_effect = fake
+        with pytest.raises(litellm.RateLimitError):
+            Model("gpt-4o").generate_batch(["A"])
+        assert fake.calls == 1 and sleeps == []
 
     def test_retry_after_is_honoured(self, mock_litellm, sleeps):
         """A 429 with Retry-After: 7 waits 7s; a huge one is capped at 60s."""
@@ -318,6 +351,62 @@ class TestRetries:
 def test_is_transient(error, transient):
     """Timeouts, lost connections, 429s and 5xx are transient; quota is not."""
     assert _is_transient(error) is transient
+
+
+class TestInFlightLimit:
+    """429s lower how many requests to a model may be in flight at once."""
+
+    def test_halves_once_per_burst_and_grows_back(self):
+        """40 in flight and a 429 → 20; 429s sent before that cut do not cut again."""
+        limit = model_module._InFlightLimit()
+        sent = []
+        slots = [limit.slot() for _ in range(40)]
+        for s in slots:
+            sent.append(s.__enter__())
+        limit.rate_limited(sent[0], "m")
+        assert limit.limit == 20
+        limit.rate_limited(sent[1], "m")  # same burst: no second cut
+        assert limit.limit == 20
+        for s in slots:
+            s.__exit__(None, None, None)
+        with limit.slot() as later:
+            limit.rate_limited(later, "m")  # sent after the cut: cuts again
+        assert limit.limit == model_module._MIN_IN_FLIGHT  # 1 in flight → floor 4
+        for _ in range(8):
+            limit.succeeded()
+        assert limit.limit == model_module._MIN_IN_FLIGHT + 2
+
+    def test_a_throttling_provider_gets_every_answer(
+        self, mock_litellm, sleeps, monkeypatch
+    ):
+        """A provider that 429s above 6 concurrent requests still answers 60 prompts."""
+        lock = threading.Lock()
+        state = {"now": 0, "peak_after_cut": 0, "rejected": 0}
+
+        def throttled(messages, **kwargs):
+            with lock:
+                state["now"] += 1
+                now = state["now"]
+            try:
+                time.sleep(0.005)
+                if now > 6:
+                    with lock:
+                        state["rejected"] += 1
+                    raise rate_limit()
+                return make_response(messages[0]["content"])
+            finally:
+                with lock:
+                    state["now"] -= 1
+
+        mock_litellm.completion.side_effect = throttled
+        # Retries do not sleep here, so give each request room while the limit
+        # comes down; how many retries a 429 gets is tested above.
+        monkeypatch.setattr(model_module, "_RATE_LIMIT_RETRIES", 20)
+        prompts = [f"p{i}" for i in range(60)]
+        out = Model("gpt-4o", show_progress=False).generate_batch(prompts)
+        assert out == [[p] for p in prompts]
+        assert state["rejected"] > 0
+        assert model_module._IN_FLIGHT[("gpt-4o", "")].limit < 60
 
 
 class TestHeartbeat:
