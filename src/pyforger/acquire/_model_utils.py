@@ -169,6 +169,13 @@ def _report_provider_failures(
             detail = detail[:199] + "…"
         summary += f"; last error: {type(last_error).__name__}: {detail}"
     text = f"{message}: {summary} (result not cached)"
+    if counts["RateLimitError"] * 2 >= len(error_types):
+        # Mostly rate limits: they outlasted minutes of retries (see Model).
+        text += (
+            "; the provider is rate-limiting: rerun the step (only the failed "
+            "prompts are sent again), lower Model(max_concurrency=...), or run "
+            "fewer pipelines at once"
+        )
     logger.warning(text)
     _tracking.add_op_warning(text)
     skip_cache_write()
