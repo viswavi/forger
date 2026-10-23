@@ -828,12 +828,18 @@ a lost connection, a 408/409/425/429, or a 5xx. It waits about 1 s, then 2 s, 4 
 content-filter block, which ops treat as row errors; see `generate_from_context`), 401, 403,
 404, or an exhausted quota, credit balance, or budget (OpenAI's `insufficient_quota`, LiteLLM's or Forger's budget
 errors) raises at once; a per-minute rate limit is retried, also Gemini's "You exceeded your current quota" 429.
+A rate limit gets at least 6 retries, about 5 s, 10 s, 20 s, 40 s, 60 s, 60 s apart (2 to 3 minutes in all), since a
+per-minute limit needs that long to reset. It also slows the model down: after a 429, requests to that model and
+endpoint (from every `Model` in the process) are held to half as many in flight as when it hit, never fewer than 4,
+and each success allows a quarter more, so a burst settles at what the provider allows. Pipelines run in parallel
+processes each slow down on their own; when a step still reports rate-limit failures, lower
+`Model(max_concurrency=...)` or run fewer pipelines at once.
 LiteLLM is sent `num_retries=0`, so neither it nor the openai client retries on top: a request makes at most
-`num_retries + 1` attempts on every provider, and one that hangs on every attempt waits at most
-`timeout × (num_retries + 1)` (30 minutes with the defaults). Lower `num_retries` or `timeout` to bound it. Ops
-never re-send a request that failed after these retries (their `max_retries` count parse failures only), so the bound
-holds through `generate_from_context`, `sample_from_LLM`, and the LLM filters. Passing `max_retries=` to `Model` turns
-the openai client's own retries back on: that many more attempts inside each of Forger's.
+`num_retries + 1` attempts on every provider (at least 7 for a rate limit), and one that hangs on every attempt waits
+at most `timeout × (num_retries + 1)` (30 minutes with the defaults). Lower `num_retries` or `timeout` to bound it.
+Ops never re-send a request that failed after these retries (their `max_retries` count parse failures only), so the
+bound holds through `generate_from_context`, `sample_from_LLM`, and the LLM filters. Passing `max_retries=` to `Model`
+turns the openai client's own retries back on: that many more attempts inside each of Forger's.
 
 When a request has been in flight much longer than the batch's finished ones (over 2 minutes and over 5 times their
 median), Forger logs one warning for it, in every progress mode:

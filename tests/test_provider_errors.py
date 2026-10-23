@@ -890,3 +890,24 @@ class TestRowErrors:
             "acquire.sample_from_LLM: 2 of 3 samples; 1 request(s) failed: "
             "1 prompt blocked by the provider's content filter (result not cached)"
         ) in caplog.text
+
+
+def test_mostly_rate_limits_say_what_to_do(caplog):
+    """A warning about mostly-429 failures says to rerun or send fewer at once."""
+    from pyforger.acquire._model_utils import _report_provider_failures
+
+    with caplog.at_level(logging.WARNING):
+        _report_provider_failures(
+            "x: 4 of 9 prompts failed", ["RateLimitError"] * 3 + ["Timeout"]
+        )
+        _report_provider_failures(
+            "y: 3 of 9 prompts failed", ["Timeout"] * 2 + ["RateLimitError"]
+        )
+    first, second = (r.getMessage() for r in caplog.records)
+    assert first.startswith("x: 4 of 9 prompts failed: RateLimitError ×3, Timeout ×1")
+    assert first.endswith(
+        "(result not cached); the provider is rate-limiting: rerun the step (only "
+        "the failed prompts are sent again), lower Model(max_concurrency=...), or "
+        "run fewer pipelines at once"
+    )
+    assert second.endswith("(result not cached)")
