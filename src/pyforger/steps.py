@@ -150,6 +150,40 @@ def _save_step(rec: StepRecord) -> None:
         _logger.debug("could not save the report of step %s: %s", rec.name, exc)
 
 
+def _save_run(rec: PipelineRecord) -> None:
+    """Save a finished pipeline run, for ``inspect.runs``.
+
+    Each run gets its own file, ``pipeline_runs/<name>-<time>-<pid>.json``, so
+    two variants of a pipeline never overwrite each other's record. Sets
+    ``rec.run_id`` to the file's stem. Never raises.
+    """
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", rec.name)[:80]
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    rec.run_id = f"{safe}-{stamp}-{os.getpid()}-{time.perf_counter_ns() % 10_000:04d}"
+    path = _cache_dir() / "pipeline_runs" / f"{rec.run_id}.json"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.tmp")
+        tmp.write_text(json.dumps(rec.model_dump(), default=repr))
+        os.replace(tmp, path)
+    except Exception as exc:
+        _logger.debug("could not save the run of pipeline %s: %s", rec.name, exc)
+
+
+def saved_runs() -> list[PipelineRecord]:
+    """Every saved pipeline run under ``FORGER_CACHE``, oldest first."""
+    folder = _cache_dir() / "pipeline_runs"
+    runs: list[PipelineRecord] = []
+    for path in sorted(folder.glob("*.json"), key=lambda p: p.stat().st_mtime):
+        try:
+            if hasattr(os, "getuid") and path.stat().st_uid != os.getuid():
+                continue
+            runs.append(PipelineRecord.model_validate_json(path.read_text()))
+        except (OSError, ValueError) as exc:
+            _logger.debug("skipping saved run %s: %s", path, exc)
+    return runs
+
+
 def saved_step_records() -> dict[str, StepRecord]:
     """The saved latest record of every step under ``FORGER_CACHE``, oldest first.
 
@@ -1169,6 +1203,7 @@ def pipeline(
                 max_cost_usd=max_cost_usd,
                 max_token_units=max_token_units,
                 smoke_rows=(limit or None) if limit is not None else _env_smoke(),
+                started_at=time.strftime("%Y-%m-%d %H:%M:%S"),
             )
             start = time.perf_counter()
 
@@ -1198,6 +1233,7 @@ def pipeline(
             _check_pipeline(rec)
             _suppress_pipeline(rec, suppress)
             _tracking.store_pipeline(rec)
+            _save_run(rec)
             if _reports_enabled(prod):
                 print_pipeline(rec)
             if strict and (rec.warnings or rec.suggestions):

@@ -394,6 +394,10 @@ class PipelineRecord(BaseModel):
     notes: list[str] = Field(default_factory=list)
     # Set in a limited run (``@pipeline(limit=3)`` or ``FORGER_LIMIT=3``).
     smoke_rows: int | None = None
+    # When the run started (local time, e.g. "2026-10-22 13:05:12") and its id
+    # under ``$FORGER_CACHE/pipeline_runs`` (see ``inspect.runs``).
+    started_at: str | None = None
+    run_id: str | None = None
 
     @property
     def cached_cost_usd(self) -> float:

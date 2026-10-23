@@ -10,6 +10,7 @@ producing new rows in the pipeline.
 | `eval_tree` | yes | Hierarchical capability tree and statistical weakness profile for scored outputs. |
 | `inspect_step` | no | Print the full report of the latest run of a `@step` and return its `StepRecord`. |
 | `spend` | no | Print and return the spend ledger's totals by run, pipeline, and step. |
+| `runs` | no | Print and return the saved `@pipeline` runs with step yields, e.g. `runs("main")`. |
 | `phrase_frequency` | no | Print and return, per string field, the phrases and names the most rows share. No LLM. |
 
 `phrase_frequency(rows, fields=None, *, ngram_range=(2, 4), top_k=10, min_share=0.05, max_rows=2000,
@@ -92,3 +93,15 @@ default embedding backend is the same as `topic_based_clustering` (`pyforger[clu
 provide another backend. `threshold`, `alpha`, `min_ci_size`, `min_child_size`, `max_children`, and `seed`
 control weakness extraction and tree construction. The result contains only ordinary Python dicts and lists
 and is JSON serializable.
+
+## Saved pipeline runs
+
+Every finished `@pipeline` run is saved under `$FORGER_CACHE/pipeline_runs`, one file per run, so two variants of a
+pipeline never overwrite each other's record. `runs(name=None, last=10)` prints the latest runs (of pipeline `name`
+if given), two lines per run, oldest first: its id, time, rows, cost, and warnings, then the yields of steps that
+dropped rows (with 95% intervals) and the mean of the last filter score. It returns the `PipelineRecord`s.
+
+```text
+  main-20261022-130510-4242  13:05:10  2 steps → 20 rows  $0.60  LIMIT 50
+      judge 0.40 (0.28–0.54) · mean filter.by_llm_score score 3.20 ± 0.20
+```
