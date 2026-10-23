@@ -26,7 +26,13 @@ export AGENT_MODEL_OUTPUT_DIR="${AGENT_MODEL_OUTPUT_DIR:-$AGENT_SCRATCH_ROOT/out
 if [[ -z "${AGENT_HF_HOME:-}" ]]; then
   export AGENT_HF_HOME="$AGENT_SCRATCH_ROOT/hf_cache"
   mkdir -p "$AGENT_HF_HOME/hub"
-  cp -a "${PDB_MODEL_CACHE_SOURCE:-/project/flame/vijayv/hf_cache}/hub/models--Qwen--Qwen3-4B" "$AGENT_HF_HOME/hub/"
+  model_src="${PDB_MODEL_CACHE_SOURCE:-/project/flame/vijayv/hf_cache}/hub/models--Qwen--Qwen3-4B"
+  cp -a "$model_src" "$AGENT_HF_HOME/hub/"
+  # A shared-blob cache links blobs/<sha> to ../../blobs/xx/<sha>, outside the
+  # model directory, which the sandbox bind refuses. Copy the blobs as files;
+  # the snapshot -> blobs links stay relative.
+  rm -rf "$AGENT_HF_HOME/hub/models--Qwen--Qwen3-4B/blobs"
+  cp -rL "$model_src/blobs" "$AGENT_HF_HOME/hub/models--Qwen--Qwen3-4B/blobs"
 fi
 : "${PDB_BENCHMARK_DIR:?Set the verified benchmark build}"
 [[ "${1:-}" == --env-file && -f "${2:-}" ]] || { echo 'Specify --env-file PATH first' >&2; exit 2; }
@@ -49,7 +55,7 @@ export AGENT_MODEL_OUTPUT_DIR AGENT_HF_HOME PDB_BENCHMARK_DIR
 export PDB_HOST_PYTHON="$PDB_REPO/post_data_bench/local_host_python.sh"
 cd "$PDB_REPO/post_data_bench"
 # Archive normal and failed exits; scheduler SIGKILL/node loss still needs recovery.
-: "${PDB_ARCHIVE_URI:?Set a unique GCS destination for this job's outputs}"
+: "${PDB_ARCHIVE_URI:?Set a unique GCS destination for the outputs of this job}"
 archive_outputs() {
   code=$?
   trap - EXIT
