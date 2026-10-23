@@ -116,6 +116,12 @@ def parse_args() -> argparse.Namespace:
         and not args.merge_shards
     ):
         p.error("only --backend tinker is available here")
+    if (
+        os.environ.get("PDB_EVAL_BACKEND") in {"vllm", "sglang"}
+        and args.backend != "openai"
+        and not args.merge_shards
+    ):
+        p.error("only the local OpenAI-compatible server is available here")
     return args
 
 

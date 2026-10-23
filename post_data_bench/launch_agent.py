@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """Generate data with OpenHands, then train and evaluate on the host.
 
-sft-rl (default) accepts shared prompt/ground-truth/rubric triples and an SFT
-checkpoint, freezes the submission, then runs fixed thinking-mode RL and
-secret-test evaluation. SFT, RL and evaluation run on Tinker (Qwen3-8B LoRA),
-charged to per-run dollar ledgers. The legacy --training-mode sft runs raw
-data -> local SFT -> test. --timeout-hours bounds only the agent phase.
-See coding/rl/UNIFIED_TRAINING.md.
+sft-rl (default) accepts shared prompt/ground-truth/rubric triples and a final RL
+checkpoint, freezes the submission, then runs secret-test evaluation only. SFT, RL
+and evaluation use --backend tinker (Qwen3-8B LoRA) or --backend local (Qwen3-4B on
+the allocated GPUs). The legacy --training-mode sft runs raw data -> local SFT -> test.
+--timeout-hours bounds only the agent phase. See coding/rl/UNIFIED_TRAINING.md.
 """
 import argparse
 import importlib.util
@@ -20,13 +19,21 @@ from typing import TextIO, cast
 
 from agent_boundary import model_cache_bind
 from agent_nudges import low_rows_message
+from backend_prompts import prompt_sections
+from coding.rl.backends import MODELS, saved_backend
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument(
     "--prompt", required=False, help="Path to a file with data-generation instructions."
 )
 parser.add_argument("--task", required=True, choices=["coding", "culture"])
-parser.add_argument("--model", default="Qwen/Qwen3-8B", help="Base model to train.")
+parser.add_argument(
+    "--backend",
+    choices=["tinker", "local"],
+    default=None,
+    help="Training/evaluation backend (default: tinker; recovery uses saved backend).",
+)
+parser.add_argument("--model", help="Base model (8B for Tinker, 4B for local).")
 parser.add_argument(
     "--litellm-api-key", required=False, help="API Key to use for Data Generation"
 )
@@ -57,7 +64,7 @@ parser.add_argument(
 parser.add_argument(
     "--timeout-hours",
     type=float,
-    default=6.0,
+    default=15.0,
     help=(
         "Kill the agentic data-generation step if it runs longer "
         "than this many hours."
@@ -104,18 +111,20 @@ parser.add_argument(
     type=int,
     default=1000,
     help="If the agent finishes with fewer dataset rows than this, tell it once "
-    "and let it continue (finishing again ends the session); 0 disables",
+    "and at least 7 hours remain, let it continue once; 0 disables",
 )
 parser.add_argument(
     "--host-python",
     default=os.environ.get("PDB_HOST_PYTHON", sys.executable),
-    help="Interpreter with tinker, transformers, RestrictedPython and LiteLLM "
-    "for host finalization (Tinker RL and secret-test evaluation)",
+    help=(
+        "Host finalization interpreter; for local image execution use "
+        "local_host_python.sh"
+    ),
 )
 parser.add_argument(
     "--prepare-final-only",
     action="store_true",
-    help="Freeze the submission for a later host RL job",
+    help="Freeze the final RL checkpoint for later secret-test evaluation",
 )
 parser.add_argument(
     "--finalize-submission",
@@ -124,21 +133,25 @@ parser.add_argument(
 )
 parser.add_argument(
     "--final-output-dir",
-    help="New host directory for the frozen submission and final RL",
+    help="New host directory for the frozen checkpoint and secret evaluation",
 )
 parser.add_argument(
     "--benchmark-dir",
     help="Directory containing one verified benchmark build for the chosen task",
 )
 args = parser.parse_args()
+args.backend = (
+    saved_backend(args.finalize_submission, args.backend)
+    if args.finalize_submission
+    else args.backend or "tinker"
+)
+args.model = args.model or MODELS[args.backend]
 if args.training_mode == "sft-rl" and (
-    args.task != "coding" or args.model != "Qwen/Qwen3-8B"
+    args.task != "coding" or args.model != MODELS[args.backend]
 ):
     parser.error(
-        (
-            "the supplied unified Tinker recipe currently supports coding "
-            "with Qwen/Qwen3-8B only"
-        )
+        f"the {args.backend} unified recipe supports coding with "
+        f"{MODELS[args.backend]} only"
     )
 if (
     args.finalize_submission or args.prepare_final_only
@@ -180,6 +193,8 @@ def finalization_command(directory, output, termination_reason="manual_recovery"
         "-m",
         "rl.agent_training",
         "finalize",
+        "--backend",
+        args.backend,
         "--data",
         os.path.join(directory, "generated_raw.jsonl"),
         "--submission",
@@ -216,11 +231,14 @@ def configure_run_token_budgets(directory, task):
     directory = os.path.abspath(directory)
     config_path = os.path.join(directory, "token_budget_config.json")
     policy = {
-        "version": 1,
+        "version": 2,
+        "submission_kind": "final_rl",
         "task": task,
         "generation_token_unit_limit": DEFAULT_GENERATION_LIMIT,
         "judge_token_unit_limit": judge_limit,
-        "tinker_usd_limits": DEFAULT_LIMITS_USD,
+        "tinker_usd_limits": DEFAULT_LIMITS_USD if args.backend == "tinker" else {},
+        "backend": args.backend,
+        "base_model": args.model,
     }
     try:
         descriptor = os.open(config_path, os.O_RDONLY | os.O_NOFOLLOW)
@@ -236,6 +254,14 @@ def configure_run_token_budgets(directory, task):
     else:
         with os.fdopen(descriptor) as stream:
             config = json.load(stream)
+        if isinstance(config, dict):
+            config.setdefault("backend", "tinker")
+            config.setdefault("base_model", MODELS["tinker"])
+            if config.get("submission_kind") != "final_rl":
+                raise ValueError(
+                    "This run uses the old SFT-submission contract; recover it "
+                    "with its original launcher"
+                )
         if (
             not isinstance(config, dict)
             or set(config) != set(policy) | {"judge_model", "judge_reasoning_effort"}
@@ -246,7 +272,7 @@ def configure_run_token_budgets(directory, task):
     judge_model = validate_judge_model(config["judge_model"])
     reasoning_effort = validate_reasoning_effort(config["judge_reasoning_effort"])
     os.makedirs(directory, exist_ok=True)
-    budget_env = {"PDB_TASK": task}
+    budget_env = {"PDB_TASK": task, "PDB_TRAIN_BACKEND": args.backend}
     for prefix, filename, limit in (
         ("FORGER", "generation_token_usage.json", DEFAULT_GENERATION_LIMIT),
         ("JUDGE", "judge_token_usage.json", judge_limit),
@@ -255,19 +281,20 @@ def configure_run_token_budgets(directory, task):
         budget_env[f"{prefix}_TOKEN_USAGE_FILE"] = path
         budget_env[f"{prefix}_TOKEN_UNIT_LIMIT"] = str(limit)
         TokenUnitBudget(path, limit).snapshot()
-    # Tinker dollars: agent SFT trials and validation evals; agent RL probes
-    # plus final RL; host secret-test evaluation (recorded, not limited).
-    for name in ("sft", "rl", "eval"):
-        path = os.path.join(directory, f"tinker_{name}_usage.json")
-        limit = DEFAULT_LIMITS_USD.get(name)
-        budget_env[f"TINKER_{name.upper()}_USAGE_FILE"] = path
-        if limit is not None:
-            budget_env[f"TINKER_{name.upper()}_USD_LIMIT"] = str(limit)
-        TinkerBudget(path, limit, name=name).snapshot()
-    # Forger's TinkerModel (e.g. sampling the student for STaR traces) charges the
-    # same SFT ledger as SFT trials and validation evaluations.
-    budget_env["FORGER_TINKER_USAGE_FILE"] = budget_env["TINKER_SFT_USAGE_FILE"]
-    budget_env["FORGER_TINKER_USD_LIMIT"] = budget_env["TINKER_SFT_USD_LIMIT"]
+    if args.backend == "tinker":
+        # Tinker dollars: agent SFT trials and validation evals; agent RL probes
+        # plus final RL; host secret-test evaluation (recorded, not limited).
+        for name in ("sft", "rl", "eval"):
+            path = os.path.join(directory, f"tinker_{name}_usage.json")
+            limit = DEFAULT_LIMITS_USD.get(name)
+            budget_env[f"TINKER_{name.upper()}_USAGE_FILE"] = path
+            if limit is not None:
+                budget_env[f"TINKER_{name.upper()}_USD_LIMIT"] = str(limit)
+            TinkerBudget(path, limit, name=name).snapshot()
+        # Forger's TinkerModel (e.g. sampling the student for STaR traces) charges the
+        # same SFT ledger as SFT trials and validation evaluations.
+        budget_env["FORGER_TINKER_USAGE_FILE"] = budget_env["TINKER_SFT_USAGE_FILE"]
+        budget_env["FORGER_TINKER_USD_LIMIT"] = budget_env["TINKER_SFT_USD_LIMIT"]
     if new_config:
         atomic_text(config_path, json.dumps(config, sort_keys=True) + "\n")
     os.environ.update(budget_env)
@@ -275,7 +302,7 @@ def configure_run_token_budgets(directory, task):
     os.environ["JUDGE_REASONING_EFFORT"] = reasoning_effort
 
 
-# Finalization always uses Slime's Python, even when OpenHands lives in trl.
+# Finalization uses the selected host interpreter or image wrapper.
 if args.benchmark_dir:
     os.environ["PDB_BENCHMARK_DIR"] = os.path.abspath(args.benchmark_dir)
 if args.finalize_submission:
@@ -344,12 +371,14 @@ CURATOR_REPO = "/home/vijayv/curator"
 HOST_FORGER_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Whether the sandbox image carries the slime stack and the agent is allowed to
 # run short RL probes in it. Off by default so babel behaviour is unchanged.
-AGENT_ENABLE_SLIME = os.environ.get("AGENT_ENABLE_SLIME", "0") == "1"
+AGENT_ENABLE_SLIME = args.backend == "local"
 # The sandbox gets one GPU for embeddings/clustering; training and student
 # sampling run on Tinker, data generation on LiteLLM APIs.
 AGENT_GPU_DESC = os.environ.get(
     "AGENT_GPU_DESC",
-    "one local GPU, for embeddings and clustering only",
+    "8 H100 80GB GPUs"
+    if args.backend == "local"
+    else "one local GPU, for embeddings and clustering only",
 )
 # Allow flame to override the data root. Its escaped path also affects
 # output names; a stable symlink keeps those names comparable.
@@ -428,7 +457,8 @@ sys.stdout = cast(TextIO, Tee(sys.stdout, log_fh))
 sys.stderr = cast(TextIO, Tee(sys.stderr, log_fh))
 
 
-prompt_content = raw_prompt_content.format(
+prompt_values = dict(
+    BASELINE_MODEL=MODEL_TAG + ("_tinker" if args.backend == "tinker" else ""),
     OUTPUT_DIR=OUTPUT_DIR,
     AGENT_DATA_DIR=AGENT_DATA_DIR,
     TASK_DIR=TASK_DIR,
@@ -452,11 +482,14 @@ prompt_content = raw_prompt_content.format(
     MAX_SFT_LENGTH="18800" if args.task == "coding" else "8192",
     JUDGE_TOKEN_UNIT_LIMIT=f"{float(os.environ['JUDGE_TOKEN_UNIT_LIMIT']):,.0f}",
     JUDGE_USAGE_PATH=JUDGE_USAGE_PATH,
-    TINKER_SFT_USD_LIMIT=f"{float(os.environ['TINKER_SFT_USD_LIMIT']):g}",
-    TINKER_SFT_USAGE_PATH=os.environ["TINKER_SFT_USAGE_FILE"],
-    TINKER_RL_USD_LIMIT=f"{float(os.environ['TINKER_RL_USD_LIMIT']):g}",
-    TINKER_RL_USAGE_PATH=os.environ["TINKER_RL_USAGE_FILE"],
+    TINKER_SFT_USD_LIMIT=f"{float(os.environ.get('TINKER_SFT_USD_LIMIT', 0)):g}",
+    TINKER_SFT_USAGE_PATH=os.environ.get("TINKER_SFT_USAGE_FILE", ""),
+    TINKER_RL_USD_LIMIT=f"{float(os.environ.get('TINKER_RL_USD_LIMIT', 0)):g}",
+    TINKER_RL_USAGE_PATH=os.environ.get("TINKER_RL_USAGE_FILE", ""),
 )
+
+prompt_values.update(prompt_sections(args.backend, args.hide_forger, prompt_values))
+prompt_content = raw_prompt_content.format(**prompt_values)
 
 # Task converters share evaluation prompt builders to keep train/eval aligned.
 RAW_SCHEMA = {
@@ -568,12 +601,15 @@ TASK_PUBLIC_FILES = {
 }[args.task]
 
 if args.training_mode == "sft-rl":
-    # SFT runs on Tinker via rl.agent_training, not the local train_model.sh.
-    TASK_PUBLIC_FILES.remove("train_model.sh")
+    # Only local runs need the GPU SFT entry point.
+    if args.backend == "tinker":
+        TASK_PUBLIC_FILES.remove("train_model.sh")
     TASK_PUBLIC_FILES += [
         f"rl/{name}"
         for name in (
             "agent_training.py",
+            "backends.py",
+            "local_training.py",
             "rubric_data.py",
             "rubric_rm.py",
             "rubric_worker.py",
@@ -584,6 +620,17 @@ if args.training_mode == "sft-rl":
             "tinker_training.py",
         )
     ]
+
+    if args.backend == "local":
+        TASK_PUBLIC_FILES += [
+            f"rl/{name}"
+            for name in (
+                "run_rl_training_and_evaluation.sh",
+                "rubric_runtime_env.py",
+                "rl_result.py",
+                "ray_job_status.py",
+            )
+        ]
 
 
 def _touch_placeholder(root: str, rel_path: str, is_dir: bool) -> None:
@@ -630,6 +677,11 @@ def _task_public_copies(task_dir: str, dest_task_dir: str) -> None:
         host_path = os.path.join(task_dir, entry)
         if os.path.exists(host_path):
             _copy_into(dest_task_dir, entry, host_path)
+            if args.backend == "local" and entry.startswith("rl/"):
+                from coding.rl.agent_validation import scrub
+
+                target = Path(dest_task_dir) / entry
+                target.write_text(scrub(target.read_text()))
 
     if args.training_mode == "sft-rl":
         from coding.rl.agent_validation import copy_validation_evaluator
@@ -663,7 +715,10 @@ def _task_public_copies(task_dir: str, dest_task_dir: str) -> None:
         )
     model_outputs_dir = os.path.join(task_dir, "model_outputs")
     if os.path.isdir(model_outputs_dir):
-        for model_name in ["Qwen__Qwen3-8B_tinker"]:
+        for model_name in [
+            args.model.replace("/", "__")
+            + ("_tinker" if args.backend == "tinker" else "")
+        ]:
             val_dir = os.path.join(model_outputs_dir, model_name, "val")
             if not os.path.isdir(val_dir):
                 continue
@@ -735,6 +790,13 @@ def build_agent_mounts(
     dest_task_dir = os.path.join(forger_copy, task_rel)
     os.makedirs(dest_task_dir, exist_ok=True)
     _task_public_copies(task_dir, dest_task_dir)
+    if args.backend == "local":
+        for name in ("train_sft.py", "fsdp.yaml"):
+            _copy_into(
+                forger_copy,
+                f"examples/training/{name}",
+                os.path.join(host_forger_repo, "examples/training", name),
+            )
     # Accounting helpers remain available in every task and hide-forger run.
     _copy_into(
         dest_task_dir,
@@ -857,11 +919,10 @@ else:
     # bound, so downloads would fill the sandbox's RAM-backed layer. /tmp is
     # this run's local disk. The host value is restored after the session.
     os.environ["HF_HOME"] = "/tmp/hf_cache"
-# The agent's validation evaluations draw on its SFT dollar budget and run on
-# Tinker only: eval_launcher.sh defaults to PDB_EVAL_BACKEND and refuses others.
+# Pin validation to the selected backend. Tinker draws on its SFT dollar budget.
 # Without --model-path they evaluate the base student, PDB_STUDENT_MODEL.
 os.environ["TINKER_EVAL_BUDGET"] = "sft"
-os.environ["PDB_EVAL_BACKEND"] = "tinker"
+os.environ["PDB_EVAL_BACKEND"] = "tinker" if args.backend == "tinker" else "vllm"
 os.environ["PDB_STUDENT_MODEL"] = args.model
 
 
@@ -957,13 +1018,13 @@ if AGENT_ENABLE_SLIME:
         "slime. Source trees are at /opt/slime and "
         "/opt/Megatron-LM.\n`import slime` under the plain `python` "
         "WILL fail; that does not mean slime is missing.\n\nYou may "
-        "use slime for short experiments only -- sanity-checking "
-        "rollouts or comparing reward shapes. Do not attempt a "
-        "full RL run: you have "
+        "use slime for experiments and full RL training -- "
+        "inspect rollouts and compare reward shapes. You have "
+        "a total of "
         f"{TIMEOUT:g}"
-        " hours total and training many steps plus an evaluation "
-        "will not fit. Write any checkpoints or rollout dumps "
-        "under /tmp/rl_out, and leave /tmp/rl_cache alone (it "
+        " hours for data generation, SFT, RL and validation. "
+        "Write checkpoints and rollout dumps "
+        "under your persistent agent data directory, and leave /tmp/rl_cache alone (it "
         "holds the flashinfer JIT cache). Ray works; its temp dir "
         "must stay under /tmp.\n"
     )
@@ -1017,46 +1078,52 @@ try:
         mount_dir=AGENT_SCRATCH_DIR,
         extra_bind_mounts=AGENT_BIND_MOUNTS,
         forward_env=[
-            "DEBUG",
-            "BRAVE_API_KEY",
-            "S2_API_KEY",
-            "HF_HUB_DISABLE_IMPLICIT_TOKEN",
-            "LITELLM_API_KEY",
-            "LITELLM_BASE_URL",
-            "LITELLM_JUDGE_API_KEY",
-            "LITELLM_JUDGE_BASE_URL",
-            "JUDGE_MAX_CONSECUTIVE_FAILURES",
-            "JUDGE_MODEL",
-            "JUDGE_REASONING_EFFORT",
-            "JUDGE_TOKEN_USAGE_FILE",
-            "JUDGE_TOKEN_UNIT_LIMIT",
-            "FORGER_TOKEN_USAGE_FILE",
-            "FORGER_TOKEN_UNIT_LIMIT",
-            "PDB_TASK",
-            "FORGER_CACHE",
-            "FORGER_REPORT_MODEL",
-            # Tinker: SFT/RL/eval run remotely; ledgers enforce dollar limits.
-            "TINKER_API_KEY",
-            "TINKER_SFT_USAGE_FILE",
-            "TINKER_SFT_USD_LIMIT",
-            "TINKER_RL_USAGE_FILE",
-            "TINKER_RL_USD_LIMIT",
-            "TINKER_EVAL_BUDGET",
-            "TINKER_MAX_CONCURRENT_SAMPLES",
-            # Forger's TinkerModel charges this ledger (the SFT one).
-            "FORGER_TINKER_USAGE_FILE",
-            "FORGER_TINKER_USD_LIMIT",
-            "PDB_EVAL_BACKEND",
-            "PDB_STUDENT_MODEL",
-            "PDB_RUN_TAG",
-            "TZ",
-            "CUDA_VISIBLE_DEVICES",
-            # slime/sglang runtime: without these the agent's RL probes rebuild
-            # the flashinfer JIT cache into the small RAM-backed --compat layer.
-            "HF_HOME",
-            "HF_HUB_OFFLINE",
-            "TVM_FFI_CACHE_DIR",
-            "FLASHINFER_WORKSPACE_BASE",
+            name
+            for name in [
+                "DEBUG",
+                "BRAVE_API_KEY",
+                "S2_API_KEY",
+                "HF_HUB_DISABLE_IMPLICIT_TOKEN",
+                "LITELLM_API_KEY",
+                "LITELLM_BASE_URL",
+                "LITELLM_JUDGE_API_KEY",
+                "LITELLM_JUDGE_BASE_URL",
+                "JUDGE_MAX_CONSECUTIVE_FAILURES",
+                "JUDGE_MODEL",
+                "JUDGE_REASONING_EFFORT",
+                "JUDGE_TOKEN_USAGE_FILE",
+                "JUDGE_TOKEN_UNIT_LIMIT",
+                "FORGER_TOKEN_USAGE_FILE",
+                "FORGER_TOKEN_UNIT_LIMIT",
+                "PDB_TASK",
+                "FORGER_CACHE",
+                "FORGER_REPORT_MODEL",
+                # Tinker: SFT/RL/eval run remotely; ledgers enforce dollar limits.
+                "TINKER_API_KEY",
+                "TINKER_SFT_USAGE_FILE",
+                "TINKER_SFT_USD_LIMIT",
+                "TINKER_RL_USAGE_FILE",
+                "TINKER_RL_USD_LIMIT",
+                "TINKER_EVAL_BUDGET",
+                "TINKER_MAX_CONCURRENT_SAMPLES",
+                # Forger's TinkerModel charges this ledger (the SFT one).
+                "FORGER_TINKER_USAGE_FILE",
+                "FORGER_TINKER_USD_LIMIT",
+                "PDB_TRAIN_BACKEND",
+                "PDB_EVAL_BACKEND",
+                "PDB_STUDENT_MODEL",
+                "PDB_RUN_TAG",
+                "TZ",
+                "CUDA_VISIBLE_DEVICES",
+                # slime/sglang runtime: without these the agent's RL probes rebuild
+                # the flashinfer JIT cache into the small RAM-backed --compat layer.
+                "HF_HOME",
+                "HF_HUB_OFFLINE",
+                "TVM_FFI_CACHE_DIR",
+                "FLASHINFER_WORKSPACE_BASE",
+            ]
+            if args.backend == "tinker"
+            or not name.startswith(("TINKER_", "FORGER_TINKER_"))
         ],
         # One GPU for embeddings/clustering; CUDA_VISIBLE_DEVICES selects it.
         enable_gpu=True,

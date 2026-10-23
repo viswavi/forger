@@ -33,7 +33,7 @@ paths and Slurm resource directives; adapt those before using another machine.
    `BRAVE_API_KEY` and `S2_API_KEY`. The runner key and unrelated provider keys
    are not forwarded into the sandbox.
 
-For agent RL probes, set `AGENT_ENABLE_SLIME=1`. `AGENT_HF_HOME` names the host
+For local GPU training, pass `--backend local`. `AGENT_HF_HOME` names the host
 cache containing the selected model; only that model's cache directory is bound
 read-only. Tokens, other model caches and dataset caches are not mounted.
 `AGENT_SCRATCH_ROOT` controls scratch storage, `AGENT_GPU_DESC` describes the
@@ -44,7 +44,7 @@ than the repository on `/home`.
 ## Tinker dollar budgets
 
 Each launched run gets a $150 Tinker budget for the agent's SFT trials and
-validation evaluations, and a $400 budget shared by its RL probes and final RL.
+validation evaluations, and a $400 budget shared by all agent RL runs and probes.
 The host's secret-test evaluation is recorded but not limited. Charges use
 Tinker's own per-call token counts (including prompt cache hits) at its Qwen3-8B
 rates; see [the unified contract](coding/rl/UNIFIED_TRAINING.md#tinker-dollar-budgets).
@@ -159,7 +159,7 @@ call** has no available dollar price; it still consumes its calculated token uni
 Missing dollar pricing is independent of whether token-unit weights are known.
 Existing ledgers keep their token usage and mark earlier calls as unpriced.
 
-Judge probes and final RL share a ledger across recovery runs.
+All agent judge calls and RL runs share a judge ledger.
 `token_budget_config.json` preserves the task, limits, judge alias, and reasoning
 effort without credentials. Ledger storage must support POSIX file locks and
 atomic rename: use persistent local storage or NFS, including for
@@ -233,15 +233,22 @@ python launch_agent.py --task coding --training-mode sft-rl \
   --benchmark-dir /path/to/new/coding --prompt coding/FORGER_PROMPT.txt
 ```
 
-The agent submits prompt/ground-truth/rubric triples and a selected completed SFT
-checkpoint. It may repeat SFT and run short RL probes. After the workspace closes,
-the host freezes the submission and runs final RL and secret evaluation outside
-the agent time limit. An error or iteration limit still permits validation of an
-already saved submission. See [the unified contract](coding/rl/UNIFIED_TRAINING.md).
+The agent has **15 hours** for data generation, SFT, RL and validation, and submits
+its chosen **final RL checkpoint** plus its dataset. It may repeat training,
+continue RL from earlier checkpoints, and revise data between experiments.
+The default recipe is **80 steps × 32 prompts × 8 completions per optimizer
+step**: 2,560 prompt draws and 20,480 completions, 20% fewer than 25 × 128 × 8.
+Planning guidelines are roughly one hour for SFT, 40 minutes for evaluation on
+1,500 examples, and six hours for RL; actual times depend on the backend and data.
+After the workspace closes, the host freezes the selected RL checkpoint and
+runs only secret-test evaluation. It does not train further. An error or timeout
+still permits evaluation of an already saved valid submission. The agent should
+select a completed RL checkpoint before spending time on further experiments.
+See [the unified contract](coding/rl/UNIFIED_TRAINING.md).
 
 For direct evaluation, set `PDB_BENCHMARK_DIR` to the selected task's benchmark
 build and run `{coding,culture}/evaluate_model.sh`. Coding samples on Tinker by
-default (a Tinker/Local split is planned); `--server-backend vllm|sglang` serves a
+default; `--server-backend vllm|sglang` serves a
 local checkpoint instead. Culture has no Tinker backend yet and defaults to vLLM.
 Coding grades only the answer
 after the final `</think>` in thinking mode; an unclosed trace is not an answer.
@@ -281,3 +288,29 @@ resource limits, but no filesystem/network namespace. Benchmark problems origina
 in public datasets; this setup does not prevent an agent from independently
 retrieving public sources. SFT receipts establish workflow provenance, not proof
 against a malicious agent fabricating training artifacts.
+
+## Orchard source release (2026-10-23)
+
+The combined image `openhands-forger-flame-v3-632f768.sif` remains compatible
+with `vijay_tinker_v4` at `fba67ef`: packaging dependencies and image definitions
+have not changed. Library code, prompts and runner scripts are provided by the
+launcher's allowlisted per-run source mounts. Deploy the source release alongside
+the image; rebuilding an identical SIF does not update those source mounts.
+
+`orchard_prepare.sbatch` installs a launcher environment on compute-node scratch
+and archives it and the source bundle to
+`gs://cmu-gpucloud-vijayv/flame_port/releases/$PDB_RELEASE/`.
+It does not start an agent, train, or evaluate a model. Set `PDB_REPO` to the
+versioned source deployment and `PDB_RELEASE` to its identifier before submission.
+
+`orchard_agent_run.sbatch` restores that launcher environment, stages the image,
+uses node-local scratch for outputs and a copy of the Qwen3-4B cache, and runs
+`--backend local`. Supply `--env-file PATH` and set `PDB_REPO`, `PDB_RELEASE`,
+`PDB_BENCHMARK_DIR` (a verified benchmark build), and `PDB_ARCHIVE_URI` (a unique
+GCS output directory). Credentials stay in the environment. The script archives
+outputs on normal or failed exit; abrupt node loss or SIGKILL cannot run that
+archive handler. The default job allocation is 24 hours, including host evaluation;
+the agent's default allowance is 15 hours.
+
+The October 23 backend integration is a development deployment. End-to-end local
+SFT, Slime probes, finalization, and evaluation still need runtime validation.

@@ -1,3 +1,5 @@
 [flake8]
 max-line-length = 88
 extend-ignore = E203,FI10,FI11,FI12,FI13,FI14,FI15,FI16,FI17,FI18,BLK100,W503
+# Agent prompt text, inserted as written; wrapping would change the prompt.
+per-file-ignores = post_data_bench/backend_prompts.py:E501

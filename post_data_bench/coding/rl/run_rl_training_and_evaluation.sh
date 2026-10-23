@@ -58,7 +58,7 @@ OUTPUT_DIR=""
 SPLIT="test"
 NO_THINKING=0
 FILTER_ZERO_STD=0
-NUM_ROLLOUT=100
+NUM_ROLLOUT=80
 ROLLOUT_BATCH_SIZE=32
 N_SAMPLES_PER_PROMPT=8
 GLOBAL_BATCH_SIZE=256
@@ -151,7 +151,7 @@ done
 if [ -n "$SIF" ]; then
   [ -f "$SIF" ] || { echo "!!! slime image not found: $SIF (run rl/setup_slime_container.sh)" >&2; exit 1; }
 else
-  [ -x "$SLIME_ENV/bin/python" ] || { echo "!!! no slime conda env at $SLIME_ENV (run rl/setup_slime_conda.sh)" >&2; exit 1; }
+  [ -x "$SLIME_ENV/bin/python3" ] || { echo "!!! no slime conda env at $SLIME_ENV (run rl/setup_slime_conda.sh)" >&2; exit 1; }
   [ -d "$SLIME_DEPS/Megatron-LM" ] || { echo "!!! no Megatron-LM under $SLIME_DEPS (run rl/setup_slime_conda.sh)" >&2; exit 1; }
 fi
 [ -d "$INIT_CHECKPOINT" ] || { echo "!!! --init-checkpoint must be a local HF directory: $INIT_CHECKPOINT" >&2; exit 1; }
@@ -188,7 +188,7 @@ CONVERT_PRECISION_ARG=""
 # Disable gradient accumulation fusion when Apex’s CUDA extension is absent.
 # The converter also needs this because it builds the same GPTModel.
 GRAD_FUSION_ARG="--no-gradient-accumulation-fusion"
-if [ -z "$SIF" ] && "$SLIME_ENV/bin/python" -c "import fused_weight_gradient_mlp_cuda" 2>/dev/null; then
+if [ -z "$SIF" ] && "$SLIME_ENV/bin/python3" -c "import fused_weight_gradient_mlp_cuda" 2>/dev/null; then
   GRAD_FUSION_ARG=""
   echo ">>> apex fused weight-gradient kernel found; leaving gradient accumulation fusion on"
 else
@@ -248,6 +248,7 @@ if [ -n "$SIF" ]; then
   echo ">>> slime runtime: apptainer image $SIF"
 else
   SLIME_DIR="${SLIME_SRC:-/home/vijayv/slime}"
+  [[ "$SLIME_ENV" != /usr ]] || SLIME_DIR="${SLIME_SRC:-/opt/slime}"
   MEGATRON_DIR="$SLIME_DEPS/Megatron-LM"
   export HF_HOME="${HF_HOME:-/data/user_data/vijayv/tir5/extra_storage/hf_cache}"
   export HF_HUB_OFFLINE=1
@@ -255,21 +256,24 @@ else
   export IMPOSSIBLE_LCB_DIR="$CODING_DIR"
   # Activate in a subshell to stream output without changing the caller’s env.
   # Use the env’s CUDA toolkit rather than the host nvcc.
-  CONDA_BASE="$(conda info --base)"
+  CONDA_BASE=""
+  [[ "$SLIME_ENV" == /usr ]] || CONDA_BASE="$(conda info --base)"
   # Prefer the env’s libstdc++ for JIT kernels requiring newer GLIBCXX symbols.
   # Keep JIT caches off $HOME.
   run_in_slime() {
-    bash -c "
-      source '$CONDA_BASE/etc/profile.d/conda.sh'
-      conda activate '$SLIME_ENV'
-      export CUDA_HOME=\"\$CONDA_PREFIX\"
-      export LD_LIBRARY_PATH=\"\$CONDA_PREFIX/lib\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}\"
-      hash -r
-      [ \"\$(command -v python3)\" = '$SLIME_ENV/bin/python3' ] || {
-        echo \"!!! python3 is \$(command -v python3), expected $SLIME_ENV/bin/python3\" >&2
-        exit 1
-      }
-      $1"
+    if [[ "$SLIME_ENV" == /usr ]]; then
+      # The combined image's system stack; TRL must not shadow its entry points.
+      PATH=/usr/local/bin:/usr/bin:/bin bash -c "set -euo pipefail; $1"
+    else
+      bash -c "
+        set -euo pipefail
+        source '$CONDA_BASE/etc/profile.d/conda.sh'
+        conda activate '$SLIME_ENV'
+        export CUDA_HOME=\"\$CONDA_PREFIX\"
+        export LD_LIBRARY_PATH=\"\$CONDA_PREFIX/lib\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}\"
+        hash -r
+        $1"
+    fi
   }
   echo ">>> slime runtime: conda env $SLIME_ENV"
 fi

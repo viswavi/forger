@@ -7,10 +7,7 @@ cd "$TASK_DIR"
 # Without --model-path, evaluate the base student (agent sandboxes set PDB_STUDENT_MODEL).
 MODEL_PATH="${PDB_STUDENT_MODEL:-Qwen/Qwen3-8B}"
 SPLIT=
-# Tinker by default, on the host too. Agent sandboxes also set PDB_EVAL_BACKEND=tinker,
-# which refuses local servers there. Elsewhere, --server-backend vllm|sglang (or
-# SERVER_BACKEND) serves a local checkpoint; culture's evaluate_model.sh exports a local
-# default. A Tinker/Local split of the benchmark is coming; revisit this default then.
+# The launcher pins the run backend; standalone evaluation defaults to Tinker.
 SERVER_BACKEND="${SERVER_BACKEND:-${PDB_EVAL_BACKEND:-tinker}}"
 OUT_DIR=
 NUM_SHARDS=

@@ -69,8 +69,12 @@ SFT_DIR="$OUTPUT_DIR"
 mkdir -p "$(dirname "$SFT_DIR")"
 
 # ---- conda env --------------------------------------------------------------
-source "$(conda info --base)/etc/profile.d/conda.sh"
-conda activate "$CONDA_ENV"
+if [[ -x "$CONDA_ENV/bin/python" ]]; then
+  export PATH="$CONDA_ENV/bin:$PATH"
+else
+  source "$(conda info --base)/etc/profile.d/conda.sh"
+  conda activate "$CONDA_ENV"
+fi
 
 # Expandable segments reduce fragmentation from variable-length loss logits.
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
@@ -84,9 +88,7 @@ if echo "$GPU_NAME" | grep -qiE 'L40|6000 Ada'; then
 fi
 
 # ---- GPU count (SLURM-aware, falls back to nvidia-smi) ----------------------
-if [[ -n "${SLURM_GPUS_ON_NODE:-}" ]]; then
-  NUM_GPUS="$SLURM_GPUS_ON_NODE"
-elif [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
   NUM_GPUS=$(awk -F, '{print NF}' <<< "$CUDA_VISIBLE_DEVICES")
 else
   NUM_GPUS=$(nvidia-smi -L | wc -l)

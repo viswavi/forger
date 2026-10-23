@@ -320,8 +320,8 @@ def run_rl(
     output_dir,
     budget,
     *,
-    num_rollout=25,
-    rollout_batch_size=128,
+    num_rollout=80,
+    rollout_batch_size=32,
     n_samples_per_prompt=8,
     max_response_len=16384,
     temperature=1.0,
@@ -339,8 +339,7 @@ def run_rl(
     completions with group-normalized advantages and one importance-sampling
     optimizer step. Tinker samples a whole batch in parallel, so wall-clock is
     roughly steps x the slowest sample (~9 min at 16K tokens and ~30 tokens/s).
-    Hence fewer, larger steps than Slime's 100 x 32 prompts: the default
-    25 x 128 prompts keeps the same 25,600 rollouts. With max_steps_off_policy=1
+    The default 80 x 32 prompts produces 20,480 completions. With max_steps_off_policy=1
     the next batch is sampled from the pre-update weights while a step trains;
     the loss uses the sampler's logprobs, which corrects for the one-step lag.
     Held-out reward is scored in the background. `lr` is the full-finetune
@@ -501,6 +500,33 @@ async def _run_rl(data_dir, init_checkpoint, output_dir, budget, **config):
 
     def save(name, step):
         record = {"step": step, **save_checkpoint(trainer, name)}
+        directory = output / name
+        directory.mkdir(exist_ok=True)
+        (directory / "tinker_checkpoint.json").write_text(
+            json.dumps(
+                {
+                    **init_checkpoint,
+                    **record,
+                    "base_model": BASE_MODEL,
+                },
+                indent=2,
+            )
+            + "\n"
+        )
+        (directory / "rl_submission.json").write_text(
+            json.dumps(
+                {
+                    "stage": "rl",
+                    "backend": "tinker",
+                    "base_model": BASE_MODEL,
+                    "completed_steps": step,
+                    "sampler_path": record["sampler_path"],
+                    "data_directory": str(Path(data_dir).resolve()),
+                },
+                indent=2,
+            )
+            + "\n"
+        )
         with checkpoints.open("a") as stream:
             stream.write(json.dumps(record) + "\n")
         return record
