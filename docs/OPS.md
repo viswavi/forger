@@ -91,6 +91,7 @@ Keywords left out of the signatures below:
   - [`inspect_step`](#inspect-inspect_step): Print the full report of the latest run of step `name` and return it.
   - [`phrase_frequency`](#inspect-phrase_frequency): Print and return the phrases and names that the most rows share,
     per field.
+  - [`runs`](#inspect-runs): Print the latest saved pipeline runs, oldest first, and return them.
   - [`spend`](#inspect-spend): Print and return the spend ledger's totals by run, pipeline, and step.
   - [`topic_based_clustering`](#inspect-topic_based_clustering): Cluster rows into `num_clusters` LLM-named topics by
     one field.
@@ -1157,6 +1158,18 @@ phrase_frequency(
 ```
 
 Print and return the phrases and names that the most rows share, per field.
+
+<a name="inspect-runs"></a>
+
+### `inspect.runs`
+
+Not cached: a plain function.
+
+```python
+runs(name: str | None = None, last: int = 10) -> list[PipelineRecord]
+```
+
+Print the latest saved pipeline runs, oldest first, and return them.
 
 <a name="inspect-spend"></a>
 
