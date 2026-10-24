@@ -553,7 +553,7 @@ def collect_trial_files(
     sources: dict[str, str],
     output: Path,
     *,
-    max_bytes: int = 2 * 1024 * 1024,
+    max_bytes: int | None = None,
 ) -> None:
     """Collect declared files from a verified native Harbor manifest."""
     from pyforger.artifacts import read_text
