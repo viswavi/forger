@@ -43,9 +43,6 @@ PROTOCOL_TIMELINE_FRAMES = 128
 # The worker redirects SDK stdout/stderr here, away from protocol frames.
 WORKER_LOG_PATH = "/tmp/forger-worker.log"
 WORKER_LOG_TAIL_CHARS = 8000
-# A guest that stalls twice in one session is not flaky, it is stuck on this
-# task. Retrying again just burns the remaining budget on the same deadlock.
-MAX_SDK_WORKER_ATTEMPTS = 2
 
 
 def worker_request(spec: Any, timeout: float) -> dict[str, Any]:
@@ -326,6 +323,96 @@ def _incoming_frames(chunks: Any, writer: _FrameWriter, budget: Any) -> Any:
         stopped.set()
 
 
+class _DetachedConnection:
+    """Adapt short-lived Sail socket clients to the existing duplex frame reader."""
+
+    def __init__(self, worker: Any, budget: Any) -> None:
+        self.worker = worker
+        self.budget = budget
+        self.pending: queue.Queue[str] = queue.Queue(maxsize=OUTBOUND_QUEUE_FRAMES)
+        self.stopped = threading.Event()
+        self.stdin = self
+        self.stdout = self.read()
+        self.requests = 0
+        self.reconnects = 0
+
+    def write(self, encoded: str) -> None:
+        self.pending.put_nowait(encoded)
+
+    @staticmethod
+    def argv(mode: str, *args: str) -> list[str]:
+        return [
+            "/usr/bin/env",
+            "-i",
+            "PATH=/usr/local/bin:/usr/bin:/bin",
+            "HOME=/tmp",
+            "HF_HUB_OFFLINE=1",
+            "python3",
+            "-u",
+            "/tmp/_sail_sdk_transport.py",
+            mode,
+            "/tmp/forger-sdk/socket",
+            *args,
+        ]
+
+    def read(self) -> Any:
+        number = 0
+        ack = 0
+        awaiting = False
+        while not self.stopped.is_set():
+            envelope: dict[str, Any] = {"ack": ack}
+            try:
+                encoded = self.pending.get(timeout=0.1 if not awaiting else 0.05)
+            except queue.Empty:
+                if not awaiting:
+                    continue
+            else:
+                awaiting = True
+                number += 1
+                envelope.update(id=number, frame=json.loads(encoded))
+            payload = json.dumps(envelope) + "\n"
+            # Retry the SAME ID/cursor against the same daemon, never the SDK turn.
+            for attempt in range(3):
+                self.budget.remaining_s()
+                try:
+                    process = self.worker.exec(
+                        self.argv("client"),
+                        user="65534",
+                        open_stdin=True,
+                        timeout=max(1, min(40, math.ceil(self.budget.remaining_s()))),
+                        output_buffer_bytes=MAX_FRAME_BYTES,
+                    )
+                    process.stdin.write(payload)
+                    process.stdin.close()
+                    raw = "".join(process.stdout)
+                    result = process.wait()
+                    if result.exit_code != 0:
+                        raise ConnectionError("SDK socket client failed")
+                    response = json.loads(raw)
+                    if envelope.get("id", 0) > response["accepted"]:
+                        raise ValueError("SDK request not acknowledged")
+                    self.requests += 1
+                    break
+                except (OSError, EOFError):
+                    if attempt == 2 or self.stopped.is_set():
+                        raise
+                    self.reconnects += 1
+                    time.sleep(0.1)
+            for sequence, encoded in response["outputs"]:
+                if sequence != ack + 1:
+                    raise ValueError("Invalid SDK output sequence")
+                ack = sequence
+                kind = json.loads(encoded).get("kind")
+                if kind in {"ready", "configured", "result", "error", "command"}:
+                    awaiting = False
+                yield encoded
+            if response["done"] and not response["outputs"]:
+                return
+
+    def close(self) -> None:
+        self.stopped.set()
+
+
 def _retain_worker_log(
     worker: Any, diagnostics: dict[str, Any], attempt_record: dict[str, Any]
 ) -> None:
@@ -431,9 +518,11 @@ def remote_sdk_session(
     writer: _FrameWriter | None = None
     attempt_record: dict[str, Any] = {}
     incoming: Any = None
+    connection: _DetachedConnection | None = None
     try:
         for filename in (
             "_sail_sdk_worker.py",
+            "_sail_sdk_transport.py",
             "_sdk_runtime.py",
             "agent_diagnostics.py",
         ):
@@ -443,22 +532,15 @@ def remote_sdk_session(
                 mode=0o644,
                 user="root",
             )
-        process = worker.exec(
-            [
-                "/usr/bin/env",
-                "-i",
-                "PATH=/usr/local/bin:/usr/bin:/bin",
-                "HOME=/tmp",
-                "HF_HUB_OFFLINE=1",
-                "python3",
-                "-u",
-                "/tmp/_sail_sdk_worker.py",
-            ],
+        lifetime = max(1, math.ceil(budget.remaining_s()))
+        started = worker.run(
+            _DetachedConnection.argv("start", str(lifetime)),
             user="65534",
-            open_stdin=True,
-            timeout=max(1, math.ceil(budget.remaining_s())),
-            output_buffer_bytes=MAX_FRAME_BYTES,
+            timeout=min(20, lifetime),
         )
+        if started.exit_code != 0:
+            raise RuntimeError("Remote SDK daemon failed to start")
+        connection = _DetachedConnection(worker, budget)
         # Attempt-scoped trajectory: the retry path must not erase the evidence
         # of the attempt that stalled, so each attempt keeps its own record.
         attempt_index = diagnostics.get("sdk_worker_attempts", 1) - 1
@@ -476,8 +558,8 @@ def remote_sdk_session(
         # keep it pointing at the live attempt while the per-attempt record
         # preserves what a later retry would otherwise erase.
         diagnostics["trajectory"] = attempt_record["trajectory"]
-        writer = _FrameWriter(process.stdin)
-        incoming = _incoming_frames(process.stdout, writer, budget)
+        writer = _FrameWriter(connection.stdin)
+        incoming = _incoming_frames(connection.stdout, writer, budget)
         event_parts: list[str] = []
 
         def send(value: dict[str, Any]) -> None:
@@ -661,6 +743,13 @@ def remote_sdk_session(
                     }
                 )
 
+        if connection is not None:
+            diagnostics["sdk_transport"] = {
+                "mode": "detached-socket",
+                "requests": connection.requests,
+                "reconnects": connection.reconnects,
+            }
+            cleanup("connection.close", connection.close)
         if writer is not None:
             snapshot = (
                 getattr(active_error, "protocol_snapshot", None) or writer.snapshot()
@@ -721,40 +810,7 @@ def run_remote_sdk(
     max_repairs: int,
     diagnostics: dict[str, Any],
 ) -> tuple[Any, Any]:
-    """Run the remote SDK, retrying a stalled guest worker once.
-
-    A Sail ``stdin write`` timeout means the guest stopped draining the
-    protocol pipe (stalled or dead worker mid-run). The workspace lives on
-    the separate transport box, so a fresh worker can redo the session from
-    the original instruction under the remaining shared budget. Any other
-    failure, a repeated stall, or an exhausted budget propagates unchanged.
-    """
-    stall_started = time.monotonic()
-    try:
-        result = _run_remote_sdk_once(
-            backend, transport, task, spec, validate, max_repairs, diagnostics
-        )
-        diagnostics.setdefault("sdk_worker_attempts", 1)
-        return result
-    except TimeoutError as exc:
-        if "stdin write" not in str(exc):
-            raise
-        # A stall is infrastructure, not agent work: credit the lost wall time
-        # back so one stall cannot consume the budget the retry needs.
-        stalled_s = transport.budget.exempt_elapsed_s(
-            max(stall_started, time.monotonic() - STDIN_WRITE_TIMEOUT_S)
-        )
-        diagnostics["sdk_stdin_retries"] = diagnostics.get("sdk_stdin_retries", 0) + 1
-        diagnostics["sdk_last_stall_s"] = round(stalled_s, 3)
-        if diagnostics.get("sdk_worker_attempts", 0) >= MAX_SDK_WORKER_ATTEMPTS:
-            diagnostics["sdk_stall_circuit_broken"] = True
-            raise
-        transport.budget.remaining_s()
-        try:
-            return _run_remote_sdk_once(
-                backend, transport, task, spec, validate, max_repairs, diagnostics
-            )
-        except TimeoutError as retry_exc:
-            if "stdin write" in str(retry_exc):
-                diagnostics["sdk_stall_circuit_broken"] = True
-            raise
+    """Run one conversation; transport retries reconnect only to its daemon."""
+    return _run_remote_sdk_once(
+        backend, transport, task, spec, validate, max_repairs, diagnostics
+    )

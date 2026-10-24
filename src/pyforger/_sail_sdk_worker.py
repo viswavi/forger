@@ -1,11 +1,13 @@
-"""Private persistent SDK worker. Only the Sail exec stdin carries credentials."""
+"""Private persistent SDK worker. Credentials arrive only through the in-memory wire."""
 
 from __future__ import annotations
 
 import faulthandler
 import json
 import os
+import re
 import sys
+import threading
 import time
 import traceback
 from contextlib import contextmanager
@@ -14,12 +16,10 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 
-def main() -> None:
+def main(wire: Any) -> None:
     """Run the persistent SDK worker loop until the controller closes it."""
-    wire = os.fdopen(os.dup(sys.stdout.fileno()), "w", buffering=1)
     # SDK/provider logs must not become protocol frames or leak credentials.
-    # Keep them out of the protocol stream, but retain a private log in a file
-    # so a guest-side crash is diagnosable after the fact instead of silent.
+    # Redact before writing to disk, including provider and native fd output.
     log_path = os.environ.get("FORGER_WORKER_LOG", "/tmp/forger-worker.log")
     try:
         sink = os.fdopen(
@@ -31,10 +31,50 @@ def main() -> None:
         )
     except OSError:
         sink = open(os.devnull, "w")
-    os.dup2(sink.fileno(), 1)
-    os.dup2(sink.fileno(), 2)
-    sys.stderr = sink
-    sys.stdout = sink
+
+    class RedactedLog:
+        def __init__(self) -> None:
+            self.lock = threading.Lock()
+            self.pending = ""
+
+        def write(self, text: str) -> int:
+            with self.lock:
+                self.pending += text
+                while "\n" in self.pending:
+                    line, self.pending = self.pending.split("\n", 1)
+                    for secret in wire.secrets:
+                        line = line.replace(secret, "[REDACTED]")
+                    line = re.sub(
+                        r"(?i)(Bearer|Basic)\s+[^\s\"']+", r"\1 [REDACTED]", line
+                    )
+                    sink.write(line + "\n")
+                # Avoid unbounded memory on a provider's unterminated log line;
+                # never spill a potentially partial credential to disk.
+                if len(self.pending) > 1024 * 1024:
+                    self.pending = "[oversize log line omitted]"
+            return len(text)
+
+        def flush(self) -> None:
+            sink.flush()
+
+        def isatty(self) -> bool:
+            return False
+
+    safe_log = RedactedLog()
+    reader, output = os.pipe()
+    os.dup2(output, 1)
+    os.dup2(output, 2)
+    os.close(output)
+
+    def capture() -> None:
+        with os.fdopen(reader, "r", errors="replace") as stream:
+            for line in stream:
+                safe_log.write(line)
+                safe_log.flush()
+
+    threading.Thread(target=capture, name="sdk-logs", daemon=True).start()
+    sys.stderr = safe_log
+    sys.stdout = safe_log
 
     # One process-wide dump, before the host's 60s write timeout; never recurring.
     faulthandler.enable(file=sink)
@@ -44,7 +84,9 @@ def main() -> None:
     def phase(name: str) -> Any:
         started = time.monotonic()
         print(
-            json.dumps({"phase": name, "state": "started", "at": started}), flush=True
+            json.dumps({"phase": name, "state": "started", "at": started}),
+            file=sink,
+            flush=True,
         )
         try:
             yield
@@ -59,19 +101,16 @@ def main() -> None:
                         "duration_s": ended - started,
                     }
                 ),
+                file=sink,
                 flush=True,
             )
 
     def send(value: dict[str, Any]) -> None:
-        wire.write(json.dumps(value) + "\n")
-        wire.flush()
+        wire.send(value)
 
     def receive() -> dict[str, Any]:
         with phase("receive"):
-            line = sys.stdin.readline()
-            if not line:
-                raise EOFError("Controller disconnected")
-            value = cast(dict[str, Any], json.loads(line))
+            value = cast(dict[str, Any], wire.receive())
             kind = value.get("kind", "request")
             kind = (
                 kind
@@ -82,10 +121,11 @@ def main() -> None:
                 json.dumps(
                     {
                         "received_kind": kind,
-                        "encoded_bytes": len(line.encode()),
+                        "encoded_bytes": len(json.dumps(value).encode()),
                         "at": time.monotonic(),
                     }
                 ),
+                file=sink,
                 flush=True,
             )
             return value
@@ -117,7 +157,10 @@ def main() -> None:
 
     class CommandExecutor(ToolExecutor[CommandAction, CommandObservation]):
         def __call__(self, action: Any, conversation: Any = None) -> Any:
-            send({"kind": "command", "command": action.command})
+            command = {"kind": "command", "command": action.command}
+            if len(json.dumps(command).encode()) + 1 > 256 * 1024:
+                raise ValueError("SDK command exceeds 256 KiB protocol frame limit")
+            send(command)
             reply = receive()
             if reply.get("kind") != "observation":
                 raise RuntimeError("Invalid controller response")
@@ -238,7 +281,8 @@ def main() -> None:
         try:
             emit_events()
         except Exception:
-            print(traceback.format_exc(), file=sink, flush=True)
+            safe_log.write(traceback.format_exc())
+            safe_log.flush()
         send(error)
 
     def emit_events() -> None:
@@ -249,8 +293,8 @@ def main() -> None:
                 retained = trajectory(retained["steps"], prior_spec)
             encoded = json.dumps(retained["steps"][0])
             # Chunk individual events too: scientific observations can be large.
-            for offset in range(0, len(encoded), 32000):
-                send({"kind": "event_chunk", "text": encoded[offset : offset + 32000]})
+            for offset in range(0, len(encoded), 8000):
+                send({"kind": "event_chunk", "text": encoded[offset : offset + 8000]})
             send({"kind": "event_end"})
             emitted += 1
 
@@ -323,17 +367,5 @@ def main() -> None:
         try:
             session.close()
         except Exception:
-            print(traceback.format_exc(), file=sink, flush=True)
-
-
-if __name__ == "__main__":
-    # The outer loop already reports handled errors over the wire. An unhandled
-    # crash here is what makes a stalled worker silent, so log the traceback to
-    # the worker log before the process dies.
-    try:
-        main()
-    except BaseException:
-        traceback.print_exc()
-        raise
-    finally:
-        faulthandler.cancel_dump_traceback_later()
+            safe_log.write(traceback.format_exc())
+            safe_log.flush()

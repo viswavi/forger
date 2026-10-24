@@ -2,6 +2,8 @@
 
 import json
 import os
+import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -29,6 +31,7 @@ from pyforger.structured import GenerationInconclusive, ValidationExhausted
     "mode",
     [
         "plain",
+        "switch",
         "repair",
         "iterations",
         "deadline",
@@ -44,6 +47,9 @@ from pyforger.structured import GenerationInconclusive, ValidationExhausted
 def test_concurrent_native_sessions(tmp_path, caplog, capsys, monkeypatch, mode):
     """Keep concurrent native sessions, repair and failure budgets isolated."""
     barrier = threading.Barrier(4)
+    http_counts = {}
+    count_lock = threading.Lock()
+    worker_state = threading.local()
 
     class Box(LocalSailbox):
         def __init__(self, root):
@@ -84,6 +90,8 @@ def test_concurrent_native_sessions(tmp_path, caplog, capsys, monkeypatch, mode)
             marker = next(
                 word for word in text.split() if word.startswith("candidate-")
             )
+            with count_lock:
+                http_counts[marker] = http_counts.get(marker, 0) + 1
             if mode == "http_timeout":
                 time.sleep(2)
             last_user = max(
@@ -176,62 +184,107 @@ def test_concurrent_native_sessions(tmp_path, caplog, capsys, monkeypatch, mode)
             self.fs = self
             self.process = None
             self.stall = False
+            self.clients = 0
 
         def write(self, path, source, **kwargs):
             Path(self.directory.name, Path(path).name).write_bytes(source.read())
 
+        def read(self, path):
+            return Path(self.directory.name, Path(path).name).read_bytes()
+
+        def local_argv(self, argv):
+            index = argv.index("python3")
+            args = argv[index + 1 :]
+            return [sys.executable] + [
+                (
+                    self.directory.name + "/private/socket"
+                    if arg.endswith("/socket")
+                    else str(Path(self.directory.name, Path(arg).name))
+                )
+                if arg.startswith("/tmp/")
+                else arg
+                for arg in args
+            ]
+
+        def environment(self):
+            return {
+                "PATH": os.environ["PATH"],
+                "HOME": self.directory.name,
+                "FORGER_WORKER_LOG": self.directory.name + "/forger-worker.log",
+                "LITELLM_LOCAL_MODEL_COST_MAP": "True",
+            }
+
+        def run(self, argv, **kwargs):
+            result = subprocess.run(
+                self.local_argv(argv),
+                env=self.environment(),
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=15,
+            )
+            assert result.returncode == 0, result.stderr
+            with socket.socket(socket.AF_UNIX) as connection:
+                connection.connect(self.directory.name + "/private/socket")
+                self.daemon_pid = struct.unpack(
+                    "3i",
+                    connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12),
+                )[0]
+            return SimpleNamespace(exit_code=0)
+
         def exec(self, argv, **kwargs):
-            self.process = subprocess.Popen(
-                [sys.executable, "-u", self.directory.name + "/_sail_sdk_worker.py"],
+            self.clients += 1
+            process = subprocess.Popen(
+                self.local_argv(argv),
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
                 text=True,
-                bufsize=1,
-                env={
-                    "PATH": os.environ["PATH"],
-                    "HOME": self.directory.name,
-                    "LITELLM_LOCAL_MODEL_COST_MAP": "True",
-                },
+                env=self.environment(),
             )
-            pipe = self.process.stdin
-            stall = self.stall
-            output_read = threading.Event()
-
-            def stdout():
-                for line in self.process.stdout:
-                    output_read.set()
-                    yield line
+            worker = self
 
             class Input:
-                def write(self, value):
-                    if stall and '"kind": "turn"' in value:
-                        raise TimeoutError("timeout error: stdin write timed out")
-                    # Sail acknowledges accepted stdin independently of guest reads;
-                    # hold that acknowledgment until the controller drains output.
-                    delayed_ack = (
-                        mode == "stdin_ack_after_output"
-                        and '"kind": "observation"' in value
-                    )
-                    if delayed_ack:
-                        output_read.clear()
-                    pipe.write(value)
-                    pipe.flush()
-                    if delayed_ack and not output_read.wait(3):
-                        raise TimeoutError(
-                            "stdin write timed out awaiting stream progress"
-                        )
+                def close(self):
+                    process.stdin.close()
 
-            return SimpleNamespace(stdin=Input(), stdout=stdout())
+                def write(self, value):
+                    assert "offline-test" not in str(argv) + str(kwargs)
+                    process.stdin.write(value)
+                    process.stdin.flush()
+                    # Lose an accepted turn's response; the reconnect must use
+                    # the same ID, not create another SDK/model turn.
+                    if worker.stall and '"kind": "turn"' in value:
+                        worker.stall = False
+                        time.sleep(0.3)
+                        process.kill()
+                        process.communicate(timeout=5)
+                        raise TimeoutError("lost short-lived client")
+
+            def stdout():
+                yield from process.stdout
+                process.wait(timeout=5)
+                process.stdin.close()
+                process.stdout.close()
+                process.stderr.close()
+
+            return SimpleNamespace(
+                stdin=Input(),
+                stdout=stdout(),
+                wait=lambda: SimpleNamespace(exit_code=process.wait(timeout=5)),
+            )
 
         def terminate(self):
-            if self.process:
-                self.process.kill()
-                self.process.wait(timeout=10)
+            if hasattr(self, "daemon_pid"):
+                os.kill(self.daemon_pid, 15)
+            for path in Path(self.directory.name).rglob("*"):
+                if path.is_file() and not path.is_socket():
+                    assert b"offline-test" not in path.read_bytes(), str(path)
             self.directory.cleanup()
 
     def make_worker(**kwargs):
         worker = Worker()
+        worker_state.current = worker
         if stall_first:
             # Each concurrent run stalls only its own first worker, tracked per
             # thread so parallel runs cannot race on shared state.
@@ -297,6 +350,27 @@ def test_concurrent_native_sessions(tmp_path, caplog, capsys, monkeypatch, mode)
         def execute():
             if stall_first:
                 stall_state.created = False
+            if mode == "switch":
+                from pyforger.sail_sdk import remote_sdk_session
+
+                task = WorkspaceTask(instruction=marker, outputs=("answer",))
+                spec = AgentSpec(model=model, max_iterations=budget.max_iterations)
+                transport = SailTransport(transport_box, budget)
+                with remote_sdk_session(
+                    SailBackend(), transport, task, spec, None, 0, diagnostics
+                ) as run:
+                    first, _ = run(task, None, 0)
+                    time.sleep(0.1)
+                    clients = worker_state.current.clients
+                    time.sleep(0.3)
+                    assert worker_state.current.clients == clients
+                    second, attempts = run(task, None, 0, spec)
+                    assert first == second
+                    assert (
+                        len({s["conversation_id"] for s in diagnostics["snapshots"]})
+                        == 1
+                    )
+                return second, attempts
             return SailBackend()._sdk(
                 SailTransport(transport_box, budget),
                 WorkspaceTask(
@@ -348,14 +422,17 @@ def test_concurrent_native_sessions(tmp_path, caplog, capsys, monkeypatch, mode)
                 2 if mode in {"repair", "stdin_stall", "stdin_ack_after_output"} else 0
             )
             assert budget.iterations == (
-                4 if mode in {"repair", "stdin_stall", "stdin_ack_after_output"} else 2
+                4
+                if mode in {"repair", "stdin_stall", "stdin_ack_after_output", "switch"}
+                else 2
             )
             if mode == "stdin_ack_after_output":
                 assert diagnostics["sdk_worker_attempts"] == 1
                 assert "sdk_stdin_retries" not in diagnostics
             if mode == "stdin_stall":
-                assert diagnostics["sdk_stdin_retries"] == 1
-                assert diagnostics["sdk_worker_attempts"] == 2
+                assert "sdk_stdin_retries" not in diagnostics
+                assert diagnostics["sdk_worker_attempts"] == 1
+                assert diagnostics["sdk_transport"]["reconnects"] == 1
             if attempts:
                 assert attempts[0].output == {"answer": marker.encode()}
                 assert (
@@ -367,6 +444,8 @@ def test_concurrent_native_sessions(tmp_path, caplog, capsys, monkeypatch, mode)
                 )
             assert diagnostics["execution_status"] == "finished"
         assert diagnostics["sdk_cleanup"] == "terminated"
+        if mode == "stdin_stall":
+            assert http_counts[marker] == 4
         return diagnostics.get("conversation_id", str(root))
 
     try:
