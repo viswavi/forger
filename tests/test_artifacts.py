@@ -338,3 +338,47 @@ def test_bounded_text_read_strict_utf8_and_byte_limit(tmp_path):
     path.mkdir()
     with pytest.raises(ValueError):
         read_text(path)
+
+
+def test_artifact_depth_above_previous_cap(tmp_path):
+    """Artifacts deeper than the previous cap are captured."""
+    root = tmp_path / "root"
+    leaf = root.joinpath(*(["d"] * 105))
+    leaf.mkdir(parents=True)
+    (leaf / "data").write_bytes(b"data")
+    ref = ArtifactRef.capture(root)
+    ref.verify()
+    assert len(ref.files) == 1
+
+
+def test_artifact_rejects_hardlinks(tmp_path):
+    """Artifacts containing hardlinks are rejected."""
+    source = tmp_path / "source"
+    source.write_bytes(b"secret")
+    root = tmp_path / "root"
+    root.mkdir()
+    os.link(source, root / "alias")
+    with pytest.raises(ValueError, match="single-link"):
+        ArtifactRef.capture(root)
+
+
+def test_read_text_no_default_byte_cap(tmp_path):
+    """read_text applies no default byte cap."""
+    from pyforger.artifacts import read_text
+
+    data = "x" * (2 * 1024 * 1024 + 1)
+    path = tmp_path / "large"
+    path.write_text(data)
+    assert read_text(path) == data
+
+
+def test_manifest_above_previous_entry_cap(tmp_path):
+    """Manifests above the previous entry cap are captured."""
+    from pyforger.artifacts import ArtifactFile, _digest
+
+    files = tuple(
+        ArtifactFile(path=f"{index:06d}", size=0, sha256="0" * 64)
+        for index in range(100001)
+    )
+    ref = ArtifactRef(root=tmp_path, files=files, digest=_digest(files))
+    assert len(ref.files) == 100001

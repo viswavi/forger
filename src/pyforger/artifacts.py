@@ -14,8 +14,6 @@ from typing import BinaryIO
 
 from pydantic import BaseModel, ConfigDict, StrictInt, model_validator
 
-_MAX_ENTRIES = 100_000
-_MAX_DEPTH = 100
 _CHUNK_SIZE = 1024 * 1024
 
 
@@ -88,9 +86,10 @@ def _digest(files: tuple[ArtifactFile, ...]) -> str:
 def _open_file(path: Path) -> BinaryIO:
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     stream = os.fdopen(os.open(path, flags), "rb")
-    if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+    info = os.fstat(stream.fileno())
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
         stream.close()
-        raise ValueError(f"Artifact special file is not allowed: {path}")
+        raise ValueError(f"Artifact must be a single-link regular file: {path}")
     return stream
 
 
@@ -98,23 +97,17 @@ def _manifest(root: Path) -> tuple[ArtifactFile, ...]:
     try:
         root = _directory(root)
         files = []
-        pending = [(root, 0)]
-        count = 0
+        pending = [root]
         while pending:
-            directory, depth = pending.pop()
-            if depth > _MAX_DEPTH:
-                raise ValueError("Artifact exceeds maximum directory depth")
+            directory = pending.pop()
             with os.scandir(directory) as entries:
                 for entry in entries:
-                    count += 1
-                    if count > _MAX_ENTRIES:
-                        raise ValueError("Artifact exceeds maximum entry count")
                     mode = entry.stat(follow_symlinks=False).st_mode
                     path = Path(entry.path)
                     if stat.S_ISLNK(mode):
                         raise ValueError(f"Artifact symlink is not allowed: {path}")
                     if stat.S_ISDIR(mode):
-                        pending.append((path, depth + 1))
+                        pending.append(path)
                     elif stat.S_ISREG(mode):
                         with _open_file(path) as stream:
                             before = os.fstat(stream.fileno())
@@ -172,9 +165,7 @@ class ArtifactRef(BaseModel):
         object.__setattr__(self, "root", _normalize_root(self.root))
         object.__setattr__(self, "files", tuple(self.files))
         _sha256(self.digest)
-        if len(self.files) > _MAX_ENTRIES or any(
-            not isinstance(f, ArtifactFile) for f in self.files
-        ):
+        if any(not isinstance(f, ArtifactFile) for f in self.files):
             raise ValueError("Invalid artifact manifest entries")
         paths = [f.path for f in self.files]
         if paths != sorted(set(paths)):
@@ -283,23 +274,23 @@ class ArtifactStore:
             return ArtifactRef(root=destination, digest=ref.digest, files=ref.files)
 
 
-def read_text(path: Path, max_bytes: int = 2 * 1024 * 1024) -> str:
-    """Read bounded regular UTF-8 content, rejecting a final-component symlink.
+def read_text(path: Path, max_bytes: int | None = None) -> str:
+    """Read single-link regular UTF-8 content, with an optional byte limit.
 
     Ancestor aliases are trusted and normalized at entry, as for ArtifactRef.
 
     Callers must prevent concurrent path or content mutation during the read.
     """
-    if type(max_bytes) is not int or max_bytes < 1:
+    if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 1):
         raise ValueError("max_bytes must be positive")
     path = Path(path)
     try:
         path = _normalize_root(path)
         path = _directory(path.parent) / path.name
         with _open_file(path) as stream:
-            data = stream.read(max_bytes + 1)
+            data = stream.read() if max_bytes is None else stream.read(max_bytes + 1)
     except OSError as exc:
         raise ValueError(f"Expected readable regular artifact: {path}") from exc
-    if len(data) > max_bytes:
+    if max_bytes is not None and len(data) > max_bytes:
         raise ValueError("Artifact exceeds read limit")
     return data.decode("utf-8")
