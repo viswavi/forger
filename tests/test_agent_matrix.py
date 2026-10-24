@@ -7,12 +7,14 @@ local backend and on the Harbor backend (Docker).
 
 from __future__ import annotations
 
+import json
 import os
 
 import pytest
 
 from pyforger import agents
 from pyforger.agent_backend import AgentSpec, WorkspaceTask
+from pyforger.agent_tasks import TaskSpec, run_command, run_task
 from pyforger.alter import dynamic_step
 from pyforger.local_backend import LocalBackend
 
@@ -63,6 +65,67 @@ def test_generate_files_with_oracle_agent(backend):
         backend=backend,
     )
     assert produced["answer.txt"] == b"hello"
+
+
+def test_run_task_with_verifier(backend):
+    """Verify run task with verifier."""
+    task = TaskSpec(
+        instruction="write answer.json",
+        files={"seed.txt": "1"},
+        outputs=("answer.json",),
+        verifier="test -f answer.json && echo 1 > reward.txt || echo 0 > reward.txt",
+    )
+    outcome = run_task(
+        task,
+        agent=AgentSpec(kind="oracle", solution="cp seed.txt answer.json"),
+        backend=backend,
+    )
+    assert outcome["status"] == "completed"
+    assert outcome["passed"] is True
+    assert outcome["files"]["answer.json"] == b"1"
+
+
+def test_review_as_ordinary_task(backend):
+    """Review uses caller-defined task instructions and report formats."""
+    outcome = run_task(
+        TaskSpec(
+            instruction="Inspect answer.json against rubric.md and write review.json",
+            files={"answer.json": "1", "rubric.md": "check: answer_present"},
+            outputs=("review.json",),
+        ),
+        agent=AgentSpec(
+            kind="oracle",
+            solution=(
+                "cat > review.json <<'EOF'\n"
+                '{"checks": {"answer_present": {"outcome": "pass"}}}\n'
+                "EOF\n"
+            ),
+        ),
+        backend=backend,
+    )
+    report = json.loads(outcome["files"]["review.json"])
+    assert report["checks"]["answer_present"]["outcome"] == "pass"
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["printf ok > answer.txt", "sh solve.sh", "python3 solve.py"],
+)
+def test_run_command_with_verifier(backend, command):
+    """Commands of different kinds use the task verifier and declared outputs."""
+    task = TaskSpec(
+        instruction="produce an answer",
+        files={
+            "solve.sh": "printf ok > answer.txt\n",
+            "solve.py": "open('answer.txt', 'w').write('ok')\n",
+        },
+        outputs=("answer.txt",),
+        verifier='test "$(cat answer.txt)" = ok && printf 1 > reward.txt',
+    )
+    outcome = run_command(task, command, backend=backend)
+    assert outcome["status"] == "completed"
+    assert outcome["passed"] is True
+    assert outcome["files"]["answer.txt"] == b"ok"
 
 
 def test_dynamic_step_with_oracle_agent(backend):
