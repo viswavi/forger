@@ -2,9 +2,13 @@
 
 import json
 import os
+import socket
+import struct
 import subprocess
 import sys
 import threading
+import time
+from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -86,26 +90,64 @@ def test_real_worker_persists_repair_and_relays_commands(tmp_path, limit, turns)
     )
     thread.start()
     worker = Path(__file__).parents[1] / "src/pyforger/_sail_sdk_worker.py"
-    for name in ("_sail_sdk_worker.py", "_sdk_runtime.py", "agent_diagnostics.py"):
+    for name in (
+        "_sail_sdk_worker.py",
+        "_sail_sdk_transport.py",
+        "_sdk_runtime.py",
+        "agent_diagnostics.py",
+    ):
         (tmp_path / name).write_bytes(worker.with_name(name).read_bytes())
-    worker = tmp_path / worker.name
-    process = subprocess.Popen(
-        [sys.executable, "-u", str(worker)],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        cwd=tmp_path,
-        env={
-            "PATH": os.environ["PATH"],
-            "HOME": str(tmp_path),
-            "LITELLM_LOCAL_MODEL_COST_MAP": "True",
-        },
-    )
+    transport = tmp_path / "_sail_sdk_transport.py"
+    path = str(tmp_path / "private/socket")
+    env = {
+        "PATH": os.environ["PATH"],
+        "HOME": str(tmp_path),
+        "FORGER_WORKER_LOG": str(tmp_path / "worker.log"),
+        "LITELLM_LOCAL_MODEL_COST_MAP": "True",
+    }
+    argv = [sys.executable, "-u", str(transport)]
+    subprocess.run(argv + ["start", path, "120"], env=env, check=True, timeout=15)
+    with socket.socket(socket.AF_UNIX) as connection:
+        connection.connect(path)
+        pid = struct.unpack(
+            "3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+        )[0]
+    number = ack = 0
+    pending = deque()
+
+    def exchange(value=None):
+        nonlocal number, ack
+        request = {"ack": ack}
+        if value is not None:
+            number += 1
+            request.update(id=number, frame=value)
+        response = subprocess.run(
+            argv + ["client", path],
+            env=env,
+            input=json.dumps(request) + "\n",
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=15,
+        )
+        reply = json.loads(response.stdout)
+        assert reply["accepted"] == number
+        for sequence, encoded in reply["outputs"]:
+            assert sequence == ack + 1
+            ack = sequence
+            pending.append(json.loads(encoded))
+        return reply
 
     def send(value):
-        process.stdin.write(json.dumps(value) + "\n")
-        process.stdin.flush()
+        exchange(value)
+
+    def receive():
+        deadline = time.monotonic() + 30
+        while not pending:
+            assert time.monotonic() < deadline
+            reply = exchange()
+            assert pending or not reply["done"], reply
+        return pending.popleft()
 
     try:
         spec = AgentSpec(
@@ -119,22 +161,18 @@ def test_real_worker_persists_repair_and_relays_commands(tmp_path, limit, turns)
             max_iterations=limit,
         )
         send(worker_request(spec, 30))
-        ready_line = process.stdout.readline()
-        assert ready_line, process.stderr.read()
-        assert json.loads(ready_line) == {"kind": "ready"}
+        assert receive() == {"kind": "ready"}
         ids = []
         for turn in ["create output"] + ["repair output"] * (turns - 1):
             send({"kind": "turn", "instruction": turn})
-            line = process.stdout.readline()
-            assert line, process.stderr.read()
-            command = json.loads(line)
+            command = receive()
             assert command["kind"] == "command", command
             assert command["command"] == "printf result"
             send({"kind": "observation", "text": "exit_code=0\nresult"})
-            result = json.loads(process.stdout.readline())
+            result = receive()
             while result["kind"] in {"event_chunk", "event_end"}:
                 assert "test-only" not in json.dumps(result)
-                result = json.loads(process.stdout.readline())
+                result = receive()
             assert result["kind"] == "result", result
             assert result["status"] == "finished"
             ids.append(result["conversation_id"])
@@ -142,11 +180,12 @@ def test_real_worker_persists_repair_and_relays_commands(tmp_path, limit, turns)
         assert result["iterations"] == 2 * turns
         assert len(requests) == 2 * turns
         send({"kind": "close"})
-        assert process.wait(timeout=20) == 0
+        deadline = time.monotonic() + 20
+        while not exchange()["done"]:
+            assert time.monotonic() < deadline
+        assert "test-only" not in (tmp_path / "worker.log").read_text()
     finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait()
+        os.kill(pid, 15)
         server.shutdown()
         thread.join()
         server.server_close()
