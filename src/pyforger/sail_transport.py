@@ -2,29 +2,21 @@
 
 from __future__ import annotations
 
-import base64
 import io
 import json
 import math
+import tempfile
+from collections.abc import Iterator
 from typing import Any
-
-from openhands.sdk.tool import (
-    Action,
-    Observation,
-    ToolDefinition,
-    ToolExecutor,
-    register_tool,
-)
-from pydantic import Field
 
 from pyforger.agent_backend import Network
 
 WORKSPACE = "/work"
-MAX_INPUT_FILE_BYTES = 32 * 1024 * 1024
-MAX_INPUT_BYTES = 128 * 1024 * 1024
-MAX_OUTPUT_FILE_BYTES = 8 * 1024 * 1024
-MAX_OUTPUT_BYTES = 32 * 1024 * 1024
-TRANSPORTS: dict[str, Any] = {}
+# Optional compatibility policies, disabled on the default execution path.
+MAX_INPUT_FILE_BYTES: int | None = None
+MAX_INPUT_BYTES: int | None = None
+MAX_OUTPUT_FILE_BYTES: int | None = None
+MAX_OUTPUT_BYTES: int | None = None
 
 
 def workspace_path(name: str) -> str:
@@ -48,7 +40,7 @@ def egress_policy(network: Network) -> dict[str, Any]:
 # Walk using directory descriptors: an agent can rename paths while collection
 # runs, so resolve()/lstat() followed by fs.read() would be a TOCTOU escape.
 _FILE_IO = r"""
-import os, stat, json, base64, sys
+import os, stat, json, sys
 if sys.argv[1] == '--request-file':
     with open(sys.argv[2]) as source: request = json.load(source)
 else:
@@ -69,6 +61,9 @@ for name, value in request['files'].items():
                 os.fchown(child, 65534, 65534)
             os.close(fd)
             fd = child
+        if request.get('replace') and request['write']:
+            try: os.unlink(parts[-1], dir_fd=fd)
+            except FileNotFoundError: pass
         flags = os.O_NOFOLLOW | os.O_NONBLOCK
         flags |= ((os.O_WRONLY | os.O_CREAT | os.O_EXCL)
                   if request['write'] else os.O_RDONLY)
@@ -78,13 +73,39 @@ for name, value in request['files'].items():
             if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                 raise ValueError('Not a single-link regular workspace file: ' + name)
             if request['write']:
-                stream.write(base64.b64decode(value))
+                with open(request['source'], 'rb') as source:
+                    info = os.fstat(source.fileno())
+                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                        raise ValueError('Unsafe transfer source')
+                    if info.st_size != request['size']:
+                        raise ValueError('Transfer source size mismatch')
+                    remaining = request['size']
+                    while remaining:
+                        chunk = source.read(min(1024 * 1024, remaining))
+                        if not chunk:
+                            raise ValueError('Incomplete transfer source')
+                        stream.write(chunk)
+                        remaining -= len(chunk)
+                    if source.read(1):
+                        raise ValueError('Transfer source grew')
                 os.fchown(stream.fileno(), 65534, 65534)
             else:
-                data = stream.read(request['limit'] + 1)
-                if len(data) > request['limit']:
-                    raise ValueError('Output exceeds size limit: ' + name)
-                result[name] = base64.b64encode(data).decode()
+                size = 0
+                with open(request['source'], 'xb') as target:
+                    while True:
+                        chunk = stream.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        size += len(chunk)
+                        if request.get('limit') is not None and size > request['limit']:
+                            raise ValueError('Output exceeds size limit: ' + name)
+                        target.write(chunk)
+                after = os.fstat(stream.fileno())
+                if (info.st_size, info.st_mtime_ns, info.st_ctime_ns) != (
+                    after.st_size, after.st_mtime_ns, after.st_ctime_ns
+                ) or size != after.st_size or after.st_nlink != 1:
+                    raise ValueError('Output changed during transfer: ' + name)
+                result[name] = size
     except FileNotFoundError:
         if request['write']: raise
     finally:
@@ -94,8 +115,19 @@ print(json.dumps(result))
 """
 
 
+def _input_chunks(value: str | bytes) -> Iterator[bytes | memoryview]:
+    # Bound UTF-8 expansion as well as binary writes without copying the payload.
+    if isinstance(value, str):
+        for offset in range(0, len(value), 256 * 1024):
+            yield value[offset : offset + 256 * 1024].encode()
+    else:
+        view = memoryview(value)
+        for offset in range(0, len(view), 1024 * 1024):
+            yield view[offset : offset + 1024 * 1024]
+
+
 class SailTransport:
-    """A single microVM handle; no host filesystem or shell operations."""
+    """A single microVM handle with private host upload spooling."""
 
     def __init__(self, box: Any, budget: Any):
         """Bind a remote handle to the shared session budget."""
@@ -132,19 +164,35 @@ class SailTransport:
             user="65534",
         )
 
-    def files(self, files: dict[str, str | bytes], *, write: bool) -> dict[str, bytes]:
-        """Stage new files or collect bounded bytes without following symlinks."""
+    def files(
+        self, files: dict[str, str | bytes], *, write: bool, replace: bool = False
+    ) -> dict[str, bytes]:
+        """Stage or snapshot files without following symlinks, using bounded chunks."""
         total = 0
         for name, value in files.items():
             workspace_path(name)
-            size = (
-                len(value.encode() if isinstance(value, str) else value) if write else 0
-            )
-            if size > MAX_INPUT_FILE_BYTES:
-                raise ValueError("Input exceeds size limit: " + name)
+            size = 0
+            if write:
+                size = (
+                    sum(len(chunk) for chunk in _input_chunks(value))
+                    if isinstance(value, str)
+                    else len(value)
+                )
+            if MAX_INPUT_FILE_BYTES is not None and size > MAX_INPUT_FILE_BYTES:
+                raise ValueError(
+                    f"Input exceeds size limit: {name}: {size} bytes; "
+                    f"limit {MAX_INPUT_FILE_BYTES} bytes"
+                )
             total += size
-        if write and self.input_bytes + total > MAX_INPUT_BYTES:
-            raise ValueError("Input exceeds total size limit")
+        if (
+            write
+            and MAX_INPUT_BYTES is not None
+            and self.input_bytes + total > MAX_INPUT_BYTES
+        ):
+            raise ValueError(
+                f"Input exceeds total size limit: {self.input_bytes + total} bytes; "
+                f"limit {MAX_INPUT_BYTES} bytes"
+            )
         # Reserve before remote writes: a failed batch may already have staged bytes.
         self.input_bytes += total
         # The root-only spool is outside the agent-writable workspace. Payloads
@@ -164,15 +212,38 @@ class SailTransport:
         try:
             output_bytes = 0
             for name, value in files.items():
-                data = value.encode() if isinstance(value, str) else value
+                size = 0
+                if write:
+                    # TemporaryFile is private and unlinked, even if upload fails.
+                    with tempfile.TemporaryFile(mode="w+b") as source:
+                        for chunk in _input_chunks(value):
+                            self.budget.remaining_s()
+                            source.write(chunk)
+                            size += len(chunk)
+                        source.seek(0)
+                        self.budget.remaining_s()
+                        self.box.fs.write(
+                            directory + "/payload", source, mode=0o600, user="root"
+                        )
                 payload = json.dumps(
                     {
-                        "files": {
-                            name: base64.b64encode(data).decode() if write else ""
-                        },
+                        "files": {name: ""},
+                        "source": directory + "/payload",
+                        "size": size,
                         "write": write,
+                        "replace": replace,
                         "limit": min(
-                            MAX_OUTPUT_FILE_BYTES, MAX_OUTPUT_BYTES - output_bytes
+                            (
+                                limit
+                                for limit in (
+                                    MAX_OUTPUT_FILE_BYTES,
+                                    None
+                                    if MAX_OUTPUT_BYTES is None
+                                    else MAX_OUTPUT_BYTES - output_bytes,
+                                )
+                                if limit is not None
+                            ),
+                            default=None,
                         ),
                     }
                 ).encode()
@@ -197,10 +268,28 @@ class SailTransport:
                     raise RuntimeError(
                         "Unsafe or failed Sail file transfer: " + result.stderr[-2000:]
                     )
-                received = {
-                    key: base64.b64decode(data)
-                    for key, data in json.loads(result.stdout).items()
-                }
+                received = {}
+                for key, expected_size in json.loads(result.stdout).items():
+                    with tempfile.TemporaryFile(mode="w+b") as target:
+                        for chunk in self.box.fs.read_stream(directory + "/payload"):
+                            self.budget.remaining_s()
+                            target.write(chunk)
+                        if target.tell() != expected_size:
+                            raise RuntimeError("Incomplete Sail output transfer")
+                        target.seek(0)
+                        received[key] = target.read()
+                    self.budget.remaining_s()
+                # Each request has one file; remove the snapshot before reuse.
+                if received:
+                    self.run(
+                        [
+                            "python3",
+                            "-I",
+                            "-c",
+                            "import os,sys; os.unlink(sys.argv[1])",
+                            directory + "/payload",
+                        ]
+                    )
                 output_bytes += sum(len(data) for data in received.values())
                 collected.update(received)
             return collected
@@ -218,55 +307,3 @@ class SailTransport:
                 timeout=10,
                 check=True,
             )
-
-
-class SailCommandAction(Action):
-    """Execute a shell command inside the remote workspace."""
-
-    command: str = Field(description="Bash command in /work of the Sail microVM")
-
-
-class SailCommandObservation(Observation):
-    """Output from a remote Sail command."""
-
-
-class SailCommandExecutor(ToolExecutor[SailCommandAction, SailCommandObservation]):
-    """Dispatch SDK actions exclusively through the remote transport."""
-
-    def __init__(self, transport: SailTransport):
-        """Bind the command transport."""
-        self.transport = transport
-
-    def __call__(
-        self, action: SailCommandAction, conversation: Any = None
-    ) -> SailCommandObservation:
-        """Execute remotely and render a bounded observation."""
-        result = self.transport.command(action.command)
-        return SailCommandObservation.from_text(
-            f"exit_code={result.exit_code}\nstdout:\n{result.stdout[-16000:]}"
-            f"\nstderr:\n{result.stderr[-16000:]}"
-        )
-
-
-class SailCommandTool(ToolDefinition[SailCommandAction, SailCommandObservation]):
-    """Remote command tool; never resolves a local terminal or file editor."""
-
-    @classmethod
-    def create(cls, conv_state: Any = None, **params: Any) -> list[Any]:
-        """Resolve the per-conversation transport without serializing credentials."""
-        return [
-            cls(
-                description=(
-                    "Execute bash in the isolated Sail microVM at /work. "
-                    "Use shell commands to read and edit files. "
-                    "No commands execute on the host."
-                ),
-                action_type=SailCommandAction,
-                observation_type=SailCommandObservation,
-                executor=SailCommandExecutor(TRANSPORTS[params["token"]]),
-            )
-        ]
-
-
-# Python imports serialize registration; sessions only resolve their own transport.
-register_tool(SailCommandTool.name, SailCommandTool)

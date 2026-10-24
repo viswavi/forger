@@ -1,4 +1,4 @@
-"""Direct Sail backend: host SDK conversation, remote unprivileged commands.
+"""Sail backend: remote SDK conversation and isolated unprivileged commands.
 
 Requires sail 0.14. PUBLIC uses Sail's public internet routing, which rejects
 private destinations and has no IPv6 internet support. MODEL/OFFLINE use
@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
-import tempfile
 import uuid
 from collections.abc import Callable
 from typing import Any
@@ -23,15 +21,22 @@ from pyforger.agent_backend import (
     WorkspaceTask,
     reward_passed,
 )
+from pyforger.agent_backends import require_learner_runtime
 from pyforger.agent_diagnostics import trajectory
 from pyforger.measurements import Measurement
+from pyforger.sail_sdk import SDK_VERSION
+
+
+class _OracleExecutionFailed(Exception):
+    """An executed oracle command returned a nonzero exit status."""
 
 
 class SailBackend:
-    """Execute in disposable Sail microVMs, without Harbor or remote agent servers."""
+    """Run SDK supervisors and command workspaces in separate disposable VMs."""
 
     name = "sail"
     supports_inner_loop_validation = True
+    supports_sdk_condensation = True
 
     def __init__(
         self, *, app: str = "forger", image: str = "docker.io/library/python:3.12-slim"
@@ -42,7 +47,11 @@ class SailBackend:
 
     def cache_key(self) -> object:
         """Identify functional execution configuration, excluding credentials."""
-        return ("sail-backend-v1", self.app, self.image)
+        return (
+            "sail-backend-v3-oracle-outcome-remote-sdk-" + SDK_VERSION,
+            self.app,
+            self.image,
+        )
 
     def run_agent(self, task: WorkspaceTask, agent: AgentSpec) -> AgentRunResult:
         """Run one agent turn; verifier material is withheld until it completes."""
@@ -64,10 +73,11 @@ class SailBackend:
     def _run(
         self, task: WorkspaceTask, agent: AgentSpec, validate: Any, max_repairs: int
     ) -> AgentRunResult:
+        require_learner_runtime(self, agent)
         import sail
 
-        from pyforger.agent_session import SessionBudget
         from pyforger.sail_transport import SailTransport, egress_policy, workspace_path
+        from pyforger.session_budget import SessionBudget
         from pyforger.structured import generate_validated
 
         if any(
@@ -141,7 +151,7 @@ class SailBackend:
                     errors = [
                         e for e in steps if e.get("kind") == "ConversationErrorEvent"
                     ]
-                    limited = bool(
+                    limited = diagnostics.get("budget_exhausted", False) or bool(
                         errors and errors[-1].get("code") == "MaxIterationsReached"
                     )
                     return AgentRunResult(
@@ -151,6 +161,8 @@ class SailBackend:
                         failure_kind=(
                             "budget"
                             if limited or isinstance(exc, TimeoutError)
+                            else "execution"
+                            if diagnostics.get("execution_status") == "stuck"
                             else "infrastructure"
                         ),
                         diagnostics=diagnostics,
@@ -168,11 +180,10 @@ class SailBackend:
                             ),
                         )
                         diagnostics["stdout"] = result.stdout[-4000:]
+                        diagnostics["stderr"] = result.stderr[-4000:]
+                        diagnostics["exit_code"] = result.exit_code
                         if result.exit_code:
-                            raise RuntimeError(
-                                f"Sail agent command failed ({result.exit_code}): "
-                                f"{result.stderr[-2000:]}"
-                            )
+                            raise _OracleExecutionFailed
                     return collect()
 
                 if validate is None:
@@ -280,6 +291,14 @@ class SailBackend:
                 failure_kind=failure_kind,
                 trajectory=diagnostics.get("trajectory"),
             )
+        except _OracleExecutionFailed:
+            diagnostics["iterations"] = budget.iterations
+            return AgentRunResult(
+                status="failed",
+                files=collect(),
+                failure_kind="execution",
+                diagnostics=diagnostics,
+            )
         finally:
             try:
                 box.terminate()
@@ -299,134 +318,11 @@ class SailBackend:
         max_repairs: int,
         diagnostics: dict[str, Any],
     ) -> tuple[Any, Any]:
-        from openhands.sdk import AgentContext
-        from openhands.sdk.conversation.impl.local_conversation import LocalConversation
-        from openhands.sdk.tool import FinishTool, Tool, resolve_tool
+        from pyforger.sail_sdk import run_remote_sdk
 
-        from pyforger.agent_session import (
-            BudgetedAgent,
-            deadline_llm,
-            run_validated_session_sync,
+        return run_remote_sdk(
+            self, transport, task, spec, validate, max_repairs, diagnostics
         )
-        from pyforger.local_agent import agent_llm
-        from pyforger.sail_transport import TRANSPORTS, SailCommandTool
-
-        class SailAgent(BudgetedAgent):
-            def _initialize(self, state: Any) -> None:
-                if self._initialized:
-                    return
-                # Avoid SDK auto-discovery of host vision profiles and tools.
-                tools = list(resolve_tool(self.tools[0], state))
-                tools.extend(FinishTool.create(state))
-                self._tools = {tool.name: tool for tool in tools}
-                self._initialized = True
-
-        class SealedConversation(LocalConversation):
-            def _ensure_plugins_loaded(self) -> None:
-                # SDK 1.55 discovers ambient user plugins unconditionally. These
-                # can add host tools/hooks, so remote-only sessions opt out.
-                self._plugins_loaded = True
-
-        assert spec.model is not None
-        token = uuid.uuid4().hex
-        TRANSPORTS[token] = transport
-        try:
-            with tempfile.TemporaryDirectory(prefix="forger-sail-host-") as directory:
-                llm = agent_llm(spec.model)
-                if spec.api_key_env:
-                    from pydantic import SecretStr
-
-                    llm = llm.model_copy(
-                        update={"api_key": SecretStr(os.environ[spec.api_key_env])}
-                    )
-                llm = deadline_llm(llm, transport.budget)
-                agent = SailAgent(
-                    llm=llm,
-                    tools=[Tool(name=SailCommandTool.name, params={"token": token})],
-                    include_default_tools=["FinishTool"],
-                    agent_context=AgentContext(
-                        load_user_skills=False,
-                        load_public_skills=False,
-                        load_project_skills=False,
-                    ),
-                )
-                agent.attach_budget(transport.budget)
-                session: Any = SealedConversation(
-                    agent=agent,
-                    workspace=directory,
-                    visualizer=None,
-                    max_iteration_per_run=spec.max_iterations,
-                )
-                failed = False
-                try:
-                    diagnostics["conversation_id"] = str(session.id)
-
-                    def collect() -> dict[str, bytes]:
-                        diagnostics.setdefault("snapshots", []).append(
-                            {
-                                "conversation_id": str(session.id),
-                                "sailbox_id": transport.box.sailbox_id,
-                                "events": len(session.state.events),
-                            }
-                        )
-                        return dict(
-                            transport.files(
-                                {name: b"" for name in task.outputs}, write=False
-                            )
-                        )
-
-                    diagnostics["execution_mode"] = "sync"
-                    diagnostics["timeout_semantics"] = (
-                        "cooperative deadline; per-request model HTTP timeout capped "
-                        "by remaining budget, one SDK attempt; Sail command timeout "
-                        "rounded up to seconds; host callbacks and cleanup "
-                        "not preempted"
-                    )
-                    if validate is not None:
-                        result = run_validated_session_sync(
-                            session,
-                            instruction=task.instruction,
-                            collect=collect,
-                            outputs=task.outputs,
-                            validate=validate,
-                            max_repairs=max_repairs,
-                            budget=transport.budget,
-                        )
-                        return result.output, result.attempts
-                    transport.budget.remaining_s()
-                    session.send_message(task.instruction)
-                    session.run()
-                    transport.budget.remaining_s()
-                    status = session.state.execution_status
-                    if getattr(status, "value", status) != "finished":
-                        raise RuntimeError(f"Agent execution did not finish: {status}")
-                    files = collect()
-                    transport.budget.remaining_s()
-                    return files, ()
-                except BaseException:
-                    failed = True
-                    raise
-                finally:
-                    diagnostics["iterations"] = transport.budget.iterations
-                    status = session.state.execution_status
-                    diagnostics["execution_status"] = getattr(status, "value", status)
-                    try:
-                        diagnostics["trajectory"] = trajectory(
-                            session.state.events, spec
-                        )
-                    finally:
-                        try:
-                            session.close()
-                            diagnostics["session_cleanup"] = "closed"
-                        except Exception as exc:
-                            diagnostics["session_cleanup"] = "failed"
-                            diagnostics["session_cleanup_error_type"] = type(
-                                exc
-                            ).__name__
-                            if not failed:
-                                raise
-        finally:
-            TRANSPORTS.pop(token, None)
 
     def execute_program(
         self, code: str, item: dict[str, Any], timeout_s: float

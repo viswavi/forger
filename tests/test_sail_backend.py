@@ -54,7 +54,19 @@ def transfer(tmp_path, files, write=False, limit=100, request_file=False):
     script = _FILE_IO.replace("'/work'", repr(str(tmp_path)))
     script = script.replace("os.fchown(stream.fileno(), 65534, 65534)", "pass")
     script = script.replace("os.fchown(child, 65534, 65534)", "pass")
-    request = json.dumps({"files": files, "write": write, "limit": limit})
+    metadata = {
+        "files": files,
+        "write": write,
+        "limit": limit,
+        "source": str(tmp_path.parent / (tmp_path.name + "-snapshot")),
+    }
+    if write:
+        assert len(files) == 1
+        data = base64.b64decode(next(iter(files.values())))
+        source = tmp_path.parent / (tmp_path.name + "-payload")
+        source.write_bytes(data)
+        metadata.update(source=str(source), size=len(data))
+    request = json.dumps(metadata)
     if request_file:
         spool = tmp_path.parent / (tmp_path.name + "-request.json")
         spool.write_text(request)
@@ -80,7 +92,10 @@ def test_file_roundtrip(tmp_path):
     assert transfer(tmp_path, {"nested/a": value}, True).returncode == 0
     result = transfer(tmp_path, {"nested/a": "", "missing": ""})
     assert result.returncode == 0
-    assert json.loads(result.stdout) == {"nested/a": value}
+    assert json.loads(result.stdout) == {"nested/a": 7}
+    assert (
+        tmp_path.parent / (tmp_path.name + "-snapshot")
+    ).read_bytes() == base64.b64decode(value)
 
 
 @pytest.mark.parametrize("kind", ["leaf", "directory", "hardlink", "fifo"])
@@ -187,18 +202,6 @@ def test_live_packages_built_before_offline_run():
     assert result.diagnostics["cleanup"] == "terminated"
 
 
-def test_command_observation_roundtrips_sdk_schema():
-    """Command observation roundtrips sdk schema."""
-    from openhands.sdk.tool import Observation
-
-    from pyforger.sail_transport import SailCommandObservation
-
-    value = SailCommandObservation.from_text("exit_code=0")
-    assert isinstance(
-        Observation.model_validate(value.model_dump()), SailCommandObservation
-    )
-
-
 def test_large_file_request_roundtrip(tmp_path):
     """Transfer binary payloads beyond Linux's per-argument size limit."""
     data = bytes(range(256)) * 2048
@@ -209,7 +212,8 @@ def test_large_file_request_roundtrip(tmp_path):
     assert result.returncode == 0, result.stderr
     result = transfer(tmp_path, {"large.bin": ""}, limit=len(data), request_file=True)
     assert result.returncode == 0, result.stderr
-    assert base64.b64decode(json.loads(result.stdout)["large.bin"]) == data
+    assert json.loads(result.stdout)["large.bin"] == len(data)
+    assert (tmp_path.parent / (tmp_path.name + "-snapshot")).read_bytes() == data
 
 
 @live
@@ -259,7 +263,15 @@ class LocalSailbox:
 
     def write(self, path, source, **kwargs):
         """Consume the streaming request as Sail's filesystem API does."""
-        Path(path).write_bytes(source.read())
+        with open(path, "wb") as target:
+            while chunk := source.read(1024 * 1024):
+                target.write(chunk)
+
+    def read_stream(self, path):
+        """Yield file contents in chunks."""
+        with open(path, "rb") as source:
+            while chunk := source.read(1024 * 1024):
+                yield chunk
 
     def run(self, argv, **kwargs):
         """Run the actual helper with local ownership and workspace substitution."""
@@ -333,9 +345,10 @@ def test_transport_output_bounds_and_repeated_collection(tmp_path, monkeypatch):
     assert transport.files({"missing": b"", "a": b""}, write=False) == {"a": b"x" * 10}
 
 
-@pytest.mark.parametrize("size", [32 * 1024 * 1024, 32 * 1024 * 1024 + 1])
-def test_transport_production_upload_boundary(tmp_path, size):
+@pytest.mark.parametrize("size", [64 * 1024 * 1024, 64 * 1024 * 1024 + 1])
+def test_transport_upload_boundary(tmp_path, monkeypatch, size):
     """Accept the public-download ceiling exactly and reject its first extra byte."""
+    monkeypatch.setattr(sail_transport, "MAX_INPUT_FILE_BYTES", 64 * 1024 * 1024)
     transport = local_transport(tmp_path)
     data = b"x" * size
     if size > sail_transport.MAX_INPUT_FILE_BYTES:
@@ -347,11 +360,13 @@ def test_transport_production_upload_boundary(tmp_path, size):
         assert (tmp_path / "input").read_bytes() == data
 
 
-def test_transport_production_output_limit_unchanged(tmp_path):
-    """Do not allow the larger staging budget to expand collected artifacts."""
-    (tmp_path / "output").write_bytes(b"x" * (8 * 1024 * 1024 + 1))
-    with pytest.raises(RuntimeError, match="Output exceeds size limit"):
-        local_transport(tmp_path).files({"output": b""}, write=False)
+def test_transport_large_output_has_no_default_ceiling(tmp_path):
+    """Stream above both the old per-file and stdout-buffer ceilings."""
+    data = bytes(range(256)) * (140 * 1024)
+    (tmp_path / "output").write_bytes(data)
+    assert local_transport(tmp_path).files({"output": b""}, write=False) == {
+        "output": data
+    }
 
 
 def test_transport_failed_batch_keeps_staging_reservation(tmp_path, monkeypatch):
@@ -372,13 +387,11 @@ def test_transport_failed_batch_keeps_staging_reservation(tmp_path, monkeypatch)
 @pytest.mark.parametrize("validated", [False, True])
 @pytest.mark.parametrize("cleanup_fails", [False, True])
 @pytest.mark.parametrize(
-    "outcome", ["limit", "provider", "raised", "timeout", "finished", "rejected"]
+    "outcome",
+    ["limit", "provider", "raised", "timeout", "stuck", "finished", "rejected"],
 )
 def test_sdk_failure_evidence(tmp_path, monkeypatch, validated, outcome, cleanup_fails):
     """Exercise backend orchestration, faking only external Sail/SDK boundaries."""
-    from openhands.sdk.conversation.impl.local_conversation import LocalConversation
-    from openhands.sdk.event.conversation_error import ConversationErrorEvent
-
     from pyforger.acquire.model import Model
     from pyforger.measurements import Measurement
 
@@ -406,48 +419,48 @@ def test_sdk_failure_evidence(tmp_path, monkeypatch, validated, outcome, cleanup
             Sailbox=SimpleNamespace(create=lambda **k: box),
         ),
     )
-    sessions = []
 
-    def initialize(self, **kwargs):
-        self.agent = SimpleNamespace(close=lambda: None)
-        self.id = "offline-session"
-        self.state = SimpleNamespace(events=[], execution_status="running")
-        self.closed = False
-        assert kwargs["max_iteration_per_run"] == 30
-        sessions.append(self)
-
-    def run(self):
+    def remote_run(self, transport, task, spec, validate, max_repairs, diagnostics):
+        diagnostics["session_cleanup"] = (
+            "failed"
+            if cleanup_fails and outcome not in {"finished", "rejected"}
+            else "closed"
+        )
+        diagnostics["execution_status"] = "running"
+        diagnostics["trajectory"] = {"steps": []}
+        if outcome == "stuck":
+            diagnostics["execution_status"] = "stuck"
+            raise RuntimeError("Remote SDK did not finish")
         if outcome == "timeout":
             raise TimeoutError("deadline exhausted")
         if outcome == "raised":
             raise ConnectionError("provider disconnected")
-        if outcome in {"finished", "rejected"}:
-            self.state.execution_status = "finished"
-            return
-        self.state.events.append(
-            ConversationErrorEvent(
-                source="agent",
-                code=(
-                    "MaxIterationsReached" if outcome == "limit" else "ProviderError"
-                ),
-                detail="stopped api_key=test-secret",
+        if outcome not in {"finished", "rejected"}:
+            diagnostics["execution_status"] = "error"
+            diagnostics["trajectory"]["steps"].append(
+                {
+                    "kind": "ConversationErrorEvent",
+                    "code": "MaxIterationsReached"
+                    if outcome == "limit"
+                    else "ProviderError",
+                }
             )
-        )
-        self.state.execution_status = "error"
+            raise RuntimeError("remote failed")
+        diagnostics["execution_status"] = "finished"
+        files = transport.files({name: b"" for name in task.outputs}, write=False)
+        if validate:
+            from pyforger.structured import generate_validated
 
-    monkeypatch.setattr(LocalConversation, "id", None)
-    monkeypatch.setattr(LocalConversation, "state", None)
-    monkeypatch.setattr(LocalConversation, "__del__", lambda self: None)
-    monkeypatch.setattr(LocalConversation, "__init__", initialize)
-    monkeypatch.setattr(LocalConversation, "send_message", lambda *a: None)
-    monkeypatch.setattr(LocalConversation, "run", run)
+            result = generate_validated(
+                task.instruction,
+                generate=lambda _: files,
+                validate=validate,
+                max_attempts=max_repairs + 1,
+            )
+            return result.output, result.attempts
+        return files, ()
 
-    def close(self):
-        self.closed = True
-        if cleanup_fails and outcome not in {"finished", "rejected"}:
-            raise RuntimeError("close failed")
-
-    monkeypatch.setattr(LocalConversation, "close", close)
+    monkeypatch.setattr(SailBackend, "_sdk", remote_run)
     checks = []
 
     def validate(files):
@@ -470,14 +483,14 @@ def test_sdk_failure_evidence(tmp_path, monkeypatch, validated, outcome, cleanup
 
         with pytest.raises(ValidationExhausted):
             backend.run_agent_validated(task, spec, validate=validate, max_repairs=0)
-        assert sessions[0].closed and box.terminated
+        assert box.terminated
         return
     result = (
         backend.run_agent_validated(task, spec, validate=validate)
         if validated
         else backend.run_agent(task, spec)
     )
-    assert sessions[0].closed and box.terminated
+    assert box.terminated
     assert result.diagnostics["cleanup"] == (
         "failed"
         if cleanup_fails and outcome not in {"finished", "rejected"}
@@ -497,14 +510,220 @@ def test_sdk_failure_evidence(tmp_path, monkeypatch, validated, outcome, cleanup
     else:
         assert result.status == ("timed_out" if outcome == "timeout" else "failed")
         assert result.failure_kind == (
-            "budget" if outcome in {"limit", "timeout"} else "infrastructure"
+            "budget"
+            if outcome in {"limit", "timeout"}
+            else "execution"
+            if outcome == "stuck"
+            else "infrastructure"
         )
         assert result.passed is None and result.files == {}
         assert not checks and not result.validation_attempts
         assert "snapshots" not in result.diagnostics
-        assert result.diagnostics["execution_status"] in {"error", "running"}
+        assert result.diagnostics["execution_status"] in {"error", "running", "stuck"}
         assert not (tmp_path / "verifier").exists()
-        if outcome not in {"raised", "timeout"}:
+        if outcome not in {"raised", "timeout", "stuck"}:
             assert result.trajectory["steps"][0]["code"] == (
                 "MaxIterationsReached" if outcome == "limit" else "ProviderError"
             )
+
+
+def test_transport_raw_upload_uses_bounded_file_source(tmp_path, monkeypatch):
+    """Do not build a base64/JSON copy of binary inputs on the host."""
+
+    def reject_base64(data):
+        raise AssertionError("Input payload must not be base64 encoded")
+
+    monkeypatch.setattr(base64, "b64encode", reject_base64)
+
+    class StreamingBox(LocalSailbox):
+        payloads = 0
+
+        def write(self, path, source, **kwargs):
+            assert kwargs == {"mode": 0o600, "user": "root"}
+            assert source.seekable()
+            if path.endswith("/payload"):
+                self.payloads += 1
+                assert os.fstat(source.fileno()).st_mode & 0o777 == 0o600
+            with open(path, "wb") as target:
+                while chunk := source.read(1024 * 1024):
+                    target.write(chunk)
+
+    transport = SailTransport(StreamingBox(tmp_path), SessionBudget(10, 120))
+    data = bytes(range(256)) * 16385
+    transport.files(
+        {"nested/binary": data, "unicode": "é😀" * 300000, "empty": b""}, write=True
+    )
+    assert (tmp_path / "nested/binary").read_bytes() == data
+    assert (tmp_path / "unicode").read_bytes() == ("é😀" * 300000).encode()
+    assert (tmp_path / "empty").read_bytes() == b""
+    assert transport.box.payloads == 3
+
+
+@pytest.mark.parametrize("kind", ["leaf", "directory", "hardlink", "fifo"])
+def test_transport_raw_staging_rejects_unsafe_targets(tmp_path, kind):
+    """Reject unsafe destinations without changing the outside file."""
+    outside = tmp_path.parent / (tmp_path.name + "-outside")
+    outside.mkdir()
+    secret = outside / "secret"
+    secret.write_bytes(b"preserve")
+    name = "target"
+    if kind == "leaf":
+        (tmp_path / name).symlink_to(secret)
+    elif kind == "directory":
+        (tmp_path / name).symlink_to(outside, target_is_directory=True)
+        name += "/secret"
+    elif kind == "hardlink":
+        os.link(secret, tmp_path / name)
+    else:
+        os.mkfifo(tmp_path / name)
+    with pytest.raises(RuntimeError, match="failed Sail file transfer"):
+        local_transport(tmp_path).files({name: b"replace"}, write=True)
+    assert secret.read_bytes() == b"preserve"
+
+
+def test_transport_spool_cleanup_after_upload_error(tmp_path):
+    """Remove private staging files when an upload fails."""
+
+    class FailingBox(LocalSailbox):
+        directory = None
+
+        def write(self, path, source, **kwargs):
+            self.directory = Path(path).parent
+            assert self.directory.stat().st_mode & 0o777 == 0o700
+            assert path.endswith("/payload")
+            raise OSError("upload interrupted")
+
+    box = FailingBox(tmp_path)
+    transport = SailTransport(box, SessionBudget(10, 120))
+    with pytest.raises(OSError, match="upload interrupted"):
+        transport.files({"data": b"abc"}, write=True)
+    assert box.directory is not None and not box.directory.exists()
+    assert transport.input_bytes == 3
+    assert not (tmp_path / "data").exists()
+
+
+def test_raw_staging_rejects_incomplete_source(tmp_path):
+    """Reject staged payloads shorter than their declared size."""
+    source = tmp_path.parent / (tmp_path.name + "-source")
+    source.write_bytes(b"a")
+    request = json.dumps(
+        {
+            "files": {"data": ""},
+            "write": True,
+            "source": str(source),
+            "size": 2,
+        }
+    )
+    script = _FILE_IO.replace("'/work'", repr(str(tmp_path)))
+    script = script.replace("os.fchown(stream.fileno(), 65534, 65534)", "pass")
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", script, request], capture_output=True, text=True
+    )
+    assert result.returncode != 0
+    assert "source size mismatch" in result.stderr
+
+
+@pytest.mark.parametrize("kind", ["leaf", "directory", "hardlink", "fifo"])
+def test_transport_stream_collection_rejects_unsafe_files(tmp_path, kind):
+    """Stream collection rejects unsafe filesystem entries."""
+    outside = tmp_path.parent / (tmp_path.name + "-outside")
+    outside.mkdir()
+    secret = outside / "secret"
+    secret.write_bytes(b"preserve")
+    name = "output"
+    if kind == "leaf":
+        (tmp_path / name).symlink_to(secret)
+    elif kind == "directory":
+        (tmp_path / name).symlink_to(outside, target_is_directory=True)
+        name += "/secret"
+    elif kind == "hardlink":
+        os.link(secret, tmp_path / name)
+    else:
+        os.mkfifo(tmp_path / name)
+    with pytest.raises(RuntimeError, match="failed Sail file transfer"):
+        local_transport(tmp_path).files({name: b""}, write=False)
+    assert secret.read_bytes() == b"preserve"
+
+
+@pytest.mark.parametrize("validated", [False, True])
+@pytest.mark.parametrize("transport_fails", [False, True])
+def test_oracle_nonzero_is_execution_failure(
+    tmp_path, monkeypatch, validated, transport_fails
+):
+    """Run a real failing script; substitute only the external Sail VM boundary."""
+
+    class Box(LocalSailbox):
+        sailbox_id = "offline-oracle"
+        terminated = False
+
+        def run(self, argv, **kwargs):
+            if argv[0] == "bash":
+                return SimpleNamespace(exit_code=0, timed_out=False)
+            if argv[0] == "/usr/bin/env":
+                if transport_fails:
+                    raise ConnectionError("Sail transport unavailable")
+                argv = list(argv)
+                argv[-1] = argv[-1].replace("cd /work &&", f"cd {self.root} &&")
+                result = subprocess.run(
+                    argv, capture_output=True, text=True, check=False
+                )
+                return SimpleNamespace(
+                    exit_code=result.returncode,
+                    stdout=result.stdout,
+                    stderr=result.stderr,
+                    timed_out=False,
+                )
+            return super().run(argv, **kwargs)
+
+        def terminate(self):
+            self.terminated = True
+
+    box = Box(tmp_path)
+    monkeypatch.setitem(
+        sys.modules,
+        "sail",
+        SimpleNamespace(
+            Image=SimpleNamespace(from_registry=lambda _: object()),
+            App=SimpleNamespace(find=lambda *a, **k: object()),
+            Sailbox=SimpleNamespace(create=lambda **k: box),
+        ),
+    )
+    script = (
+        b"from pathlib import Path\nPath('data/pbio.3002777.s012.csv').read_text()\n"
+    )
+    task = WorkspaceTask(
+        instruction="Replay analysis",
+        files={"analysis.py": script},
+        outputs=("analysis.py", "answer.json"),
+        verifier="must not execute",
+        verifier_files={"secret": b"hidden"},
+    )
+    agent = AgentSpec(kind="oracle", solution="python3 analysis.py")
+
+    def validate(files):
+        pytest.fail("Crashed execution must not validate even stale output")
+
+    (tmp_path / "answer.json").write_text("stale")
+    backend = SailBackend()
+
+    def run():
+        return (
+            backend.run_agent_validated(task, agent, validate=validate)
+            if validated
+            else backend.run_agent(task, agent)
+        )
+
+    if transport_fails:
+        with pytest.raises(ConnectionError, match="transport unavailable"):
+            run()
+        assert box.terminated
+        return
+    result = run()
+    assert result.status == "failed"
+    assert result.failure_kind == "execution"
+    assert result.passed is None
+    assert result.diagnostics["exit_code"] == 1
+    assert "FileNotFoundError" in result.diagnostics["stderr"]
+    assert result.files["analysis.py"] == script
+    assert not (tmp_path / "verifier").exists()
+    assert box.terminated

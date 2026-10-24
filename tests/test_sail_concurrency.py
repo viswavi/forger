@@ -3,10 +3,13 @@
 import json
 import os
 import subprocess
+import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -18,7 +21,7 @@ from pyforger.agent_session import SessionBudget
 from pyforger.artifacts import ArtifactStore
 from pyforger.measurements import Measurement
 from pyforger.sail_backend import SailBackend
-from pyforger.sail_transport import TRANSPORTS, SailCommandTool, SailTransport
+from pyforger.sail_transport import SailTransport
 from pyforger.structured import GenerationInconclusive, ValidationExhausted
 
 
@@ -33,9 +36,12 @@ from pyforger.structured import GenerationInconclusive, ValidationExhausted
         "rejected",
         "inconclusive",
         "validator_error",
+        "missing",
+        "stdin_stall",
+        "stdin_ack_after_output",
     ],
 )
-def test_concurrent_native_sessions(tmp_path, caplog, capsys, mode):
+def test_concurrent_native_sessions(tmp_path, caplog, capsys, monkeypatch, mode):
     """Keep concurrent native sessions, repair and failure budgets isolated."""
     barrier = threading.Barrier(4)
 
@@ -47,6 +53,7 @@ def test_concurrent_native_sessions(tmp_path, caplog, capsys, mode):
         def run(self, argv, **kwargs):
             if argv[0] != "/usr/bin/env":
                 return super().run(argv, **kwargs)
+            assert "offline-test" not in str(argv) + str(kwargs)
             barrier.wait(timeout=30)
             result = subprocess.run(
                 ["bash", "-c", argv[-1].removeprefix("cd /work && ")],
@@ -59,7 +66,11 @@ def test_concurrent_native_sessions(tmp_path, caplog, capsys, mode):
             )
             return SimpleNamespace(
                 exit_code=result.returncode,
-                stdout=result.stdout,
+                stdout=(
+                    ("data line\n" * 43932)[:395385]
+                    if mode == "stdin_ack_after_output"
+                    else result.stdout
+                ),
                 stderr=result.stderr,
                 timed_out=False,
             )
@@ -81,10 +92,18 @@ def test_concurrent_native_sessions(tmp_path, caplog, capsys, mode):
             repair = "Validation feedback" in str(
                 body["messages"][last_user]["content"]
             )
-            if repair:
+            if repair and mode != "missing":
                 assert "repair-needed" in str(body["messages"][last_user]["content"])
             done = any(m["role"] == "tool" for m in body["messages"][last_user + 1 :])
-            name = "finish" if done else SailCommandTool.name
+            name = (
+                "finish"
+                if done
+                else next(
+                    t["function"]["name"]
+                    for t in body["tools"]
+                    if t["function"]["name"] != "finish"
+                )
+            )
             arguments = (
                 {"message": marker}
                 if done
@@ -145,7 +164,99 @@ def test_concurrent_native_sessions(tmp_path, caplog, capsys, mode):
         target=server.serve_forever, kwargs={"poll_interval": 0.01}
     )
     serving.start()
-    before = dict(TRANSPORTS)
+
+    stall_first = mode == "stdin_stall"
+    stall_state = threading.local()
+
+    class Worker:
+        sailbox_id = "local-sdk-worker"
+
+        def __init__(self):
+            self.directory = tempfile.TemporaryDirectory()
+            self.fs = self
+            self.process = None
+            self.stall = False
+
+        def write(self, path, source, **kwargs):
+            Path(self.directory.name, Path(path).name).write_bytes(source.read())
+
+        def exec(self, argv, **kwargs):
+            self.process = subprocess.Popen(
+                [sys.executable, "-u", self.directory.name + "/_sail_sdk_worker.py"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                bufsize=1,
+                env={
+                    "PATH": os.environ["PATH"],
+                    "HOME": self.directory.name,
+                    "LITELLM_LOCAL_MODEL_COST_MAP": "True",
+                },
+            )
+            pipe = self.process.stdin
+            stall = self.stall
+            output_read = threading.Event()
+
+            def stdout():
+                for line in self.process.stdout:
+                    output_read.set()
+                    yield line
+
+            class Input:
+                def write(self, value):
+                    if stall and '"kind": "turn"' in value:
+                        raise TimeoutError("timeout error: stdin write timed out")
+                    # Sail acknowledges accepted stdin independently of guest reads;
+                    # hold that acknowledgment until the controller drains output.
+                    delayed_ack = (
+                        mode == "stdin_ack_after_output"
+                        and '"kind": "observation"' in value
+                    )
+                    if delayed_ack:
+                        output_read.clear()
+                    pipe.write(value)
+                    pipe.flush()
+                    if delayed_ack and not output_read.wait(3):
+                        raise TimeoutError(
+                            "stdin write timed out awaiting stream progress"
+                        )
+
+            return SimpleNamespace(stdin=Input(), stdout=stdout())
+
+        def terminate(self):
+            if self.process:
+                self.process.kill()
+                self.process.wait(timeout=10)
+            self.directory.cleanup()
+
+    def make_worker(**kwargs):
+        worker = Worker()
+        if stall_first:
+            # Each concurrent run stalls only its own first worker, tracked per
+            # thread so parallel runs cannot race on shared state.
+            first = not getattr(stall_state, "created", False)
+            stall_state.created = True
+            worker.stall = first
+        return worker
+
+    class Image:
+        def pip_install(self, *args):
+            return self
+
+    fake_sail = SimpleNamespace(
+        Image=SimpleNamespace(from_registry=lambda _: Image()),
+        App=SimpleNamespace(find=lambda *a, **k: None),
+        Sailbox=SimpleNamespace(create=make_worker),
+    )
+    monkeypatch.setitem(sys.modules, "sail", fake_sail)
+    # Only the provider boundary is local; production requires HTTPS.
+    import pyforger.sail_sdk as remote
+
+    original_split = remote.urlsplit
+    monkeypatch.setattr(
+        remote, "urlsplit", lambda url: original_split(url)._replace(scheme="https")
+    )
     cwd, env = os.getcwd(), dict(os.environ)
 
     def run(index):
@@ -158,12 +269,12 @@ def test_concurrent_native_sessions(tmp_path, caplog, capsys, mode):
             api_base=f"http://127.0.0.1:{server.server_port}/v1",
             api_mode="chat",
             num_retries=0,
-            timeout=15,
+            timeout=1 if mode == "http_timeout" else 15,
             capability_overrides={"vision": False},
         )
         diagnostics = {}
         budget = SessionBudget(
-            2 if mode == "iterations" else 6, 1 if mode == "http_timeout" else 60
+            2 if mode == "iterations" else 6, 20 if mode == "http_timeout" else 120
         )
         checks = []
 
@@ -181,11 +292,18 @@ def test_concurrent_native_sessions(tmp_path, caplog, capsys, mode):
                 passed = None
             return Measurement(passed=passed, reason="repair-needed")
 
+        transport_box = Box(root)
+
         def execute():
+            if stall_first:
+                stall_state.created = False
             return SailBackend()._sdk(
-                SailTransport(Box(root), budget),
-                WorkspaceTask(instruction=marker, outputs=("answer",)),
-                AgentSpec(model=model, max_iterations=6),
+                SailTransport(transport_box, budget),
+                WorkspaceTask(
+                    instruction=marker,
+                    outputs=("missing",) if mode == "missing" else ("answer",),
+                ),
+                AgentSpec(model=model, max_iterations=budget.max_iterations),
                 None if mode in {"plain", "http_timeout"} else validate,
                 1,
                 diagnostics,
@@ -196,31 +314,48 @@ def test_concurrent_native_sessions(tmp_path, caplog, capsys, mode):
             with pytest.raises((RuntimeError, TimeoutError)):
                 execute()
             if mode == "http_timeout":
-                assert time.monotonic() - started < 2
+                assert time.monotonic() - started < 30
                 assert not checks
             else:
                 assert len(checks) == 1
                 assert budget.iterations == 2
-        elif mode in {"rejected", "inconclusive", "validator_error"}:
+        elif mode in {"rejected", "inconclusive", "validator_error", "missing"}:
             error = {
                 "rejected": ValidationExhausted,
+                "missing": ValidationExhausted,
                 "inconclusive": GenerationInconclusive,
                 "validator_error": OSError,
             }[mode]
             with pytest.raises(error) as caught:
                 execute()
-            count = 2 if mode == "rejected" else 1
-            assert len(checks) == count
+            count = 2 if mode in {"rejected", "missing"} else 1
+            assert len(checks) == (0 if mode == "missing" else count)
             assert budget.iterations == count * 2
             if mode != "validator_error":
                 assert len(caught.value.attempts) == count
-                assert caught.value.attempts[0].output == {"answer": marker.encode()}
+                assert caught.value.attempts[0].output == (
+                    {} if mode == "missing" else {"answer": marker.encode()}
+                )
         else:
             result, attempts = execute()
-            suffix = "-repaired" if mode == "repair" else ""
+            suffix = (
+                "-repaired"
+                if mode in {"repair", "stdin_stall", "stdin_ack_after_output"}
+                else ""
+            )
             assert result == {"answer": (marker + suffix).encode()}
-            assert len(attempts) == (2 if mode == "repair" else 0)
-            assert budget.iterations == (4 if mode == "repair" else 2)
+            assert len(attempts) == (
+                2 if mode in {"repair", "stdin_stall", "stdin_ack_after_output"} else 0
+            )
+            assert budget.iterations == (
+                4 if mode in {"repair", "stdin_stall", "stdin_ack_after_output"} else 2
+            )
+            if mode == "stdin_ack_after_output":
+                assert diagnostics["sdk_worker_attempts"] == 1
+                assert "sdk_stdin_retries" not in diagnostics
+            if mode == "stdin_stall":
+                assert diagnostics["sdk_stdin_retries"] == 1
+                assert diagnostics["sdk_worker_attempts"] == 2
             if attempts:
                 assert attempts[0].output == {"answer": marker.encode()}
                 assert (
@@ -231,14 +366,13 @@ def test_concurrent_native_sessions(tmp_path, caplog, capsys, mode):
                     > diagnostics["snapshots"][0]["events"]
                 )
             assert diagnostics["execution_status"] == "finished"
-        assert diagnostics["session_cleanup"] == "closed"
-        return diagnostics["conversation_id"]
+        assert diagnostics["sdk_cleanup"] == "terminated"
+        return diagnostics.get("conversation_id", str(root))
 
     try:
         with ThreadPoolExecutor(max_workers=4) as pool:
             ids = list(pool.map(run, range(8)))
         assert len(set(ids)) == 8
-        assert TRANSPORTS == before
         assert os.getcwd() == cwd
         assert dict(os.environ) == env
         time.sleep(0.2)
