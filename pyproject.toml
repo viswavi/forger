@@ -52,6 +52,7 @@ exclude = [
 only-packages = true
 
 [project.optional-dependencies]
+sail = ["sail>=0.14,<0.15"]
 # Harbor is pinned to an exact commit of the neubig/harbor fork because the
 # modal/sail extras are not yet in an upstream PyPI release. Replace this
 # direct git dependency with the upstream `harbor` release (and drop the

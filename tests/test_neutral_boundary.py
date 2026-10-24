@@ -12,11 +12,13 @@ from pyforger.agent_backends import (
 from pyforger.agent_tasks import TaskSpec, run_task
 from pyforger.harbor_backend import HarborBackend, _failure_kind
 from pyforger.local_backend import LocalBackend
+from pyforger.sail_backend import SailBackend
 
 
 def test_backend_capability():
     """Backend capability."""
-    for backend, supported in ((LocalBackend(), True), (HarborBackend(), False)):
+    backends = ((LocalBackend(), True), (HarborBackend(), False), (SailBackend(), True))
+    for backend, supported in backends:
         assert supports_inner_loop_validation(backend) is supported
         if supported:
             require_inner_loop_validation(backend)
