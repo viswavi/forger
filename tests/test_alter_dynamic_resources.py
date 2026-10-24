@@ -9,6 +9,7 @@ from contextlib import contextmanager
 
 import pytest
 
+from pyforger.acquire import resources as acquisition
 from pyforger.alter import _dynamic_git_proxy as proxy_module
 from pyforger.alter import _dynamic_resources as resources
 
@@ -91,7 +92,11 @@ def test_pdf_url_is_parsed(monkeypatch):
 
 def test_git_url_is_cloned_to_bounded_text_bundle(monkeypatch):
     """Test git url is cloned to bounded text bundle."""
-    monkeypatch.setattr(resources, "_public_https", lambda url: "github.com")
+    monkeypatch.setattr(
+        acquisition,
+        "_public_https_address",
+        lambda url: ("github.com", "93.184.215.14"),
+    )
     monkeypatch.setenv("LITELLM_API_KEY", "dummy")
 
     def fake_clone(url, root):
@@ -111,14 +116,22 @@ def test_git_url_is_cloned_to_bounded_text_bundle(monkeypatch):
 
 def test_git_rejects_other_hosts(monkeypatch):
     """Test git rejects other hosts."""
-    monkeypatch.setattr(resources, "_public_https", lambda url: "example.org")
+    monkeypatch.setattr(
+        acquisition,
+        "_public_https_address",
+        lambda url: ("example.org", "93.184.215.14"),
+    )
     with pytest.raises(ValueError, match="GitHub or GitLab"):
         resources.prepare_input({"url": "https://example.org/repo.git"})
 
 
 def test_uppercase_git_suffix_is_accepted(monkeypatch):
     """Treat uppercase .GIT suffix as a repository URL."""
-    monkeypatch.setattr(resources, "_public_https", lambda url: "github.com")
+    monkeypatch.setattr(
+        acquisition,
+        "_public_https_address",
+        lambda url: ("github.com", "93.184.215.14"),
+    )
 
     def fake_clone(url, root):
         """Create a tiny snapshot instead of cloning."""
@@ -149,18 +162,18 @@ def test_plain_text_url_preserves_code(monkeypatch):
 def test_https_rejects_private_addresses(monkeypatch):
     """Test https rejects private addresses."""
     monkeypatch.setattr(
-        resources.socket,
+        acquisition.socket,
         "getaddrinfo",
         lambda *args, **kwargs: [(None, None, None, None, ("127.0.0.1", 443))],
     )
     with pytest.raises(ValueError, match="non-public"):
-        resources._public_https("https://localhost/document.pdf")
+        acquisition._public_https_address("https://localhost/document.pdf")
 
 
 def test_download_validates_redirect_target(monkeypatch):
     """Test download validates redirect target."""
     monkeypatch.setattr(
-        resources,
+        acquisition,
         "_public_https_address",
         lambda url: (
             (_ for _ in ()).throw(ValueError("blocked"))
@@ -231,7 +244,7 @@ def test_download_uses_validated_ip_without_reresolving(monkeypatch):
         def close(self):
             """Close the mocked pool."""
 
-    monkeypatch.setattr(resources.socket, "getaddrinfo", getaddrinfo)
+    monkeypatch.setattr(acquisition.socket, "getaddrinfo", getaddrinfo)
     monkeypatch.setattr("urllib3.HTTPSConnectionPool", Pool)
     assert resources._download("https://example.org/page?q=1") == (
         b"hello",
@@ -359,7 +372,7 @@ def test_public_fetch_rejects_invalid_limits_before_network():
     """Reject malformed limits without opening a connection."""
     for limit in (0, -1, True, 33 * 1024 * 1024):
         with pytest.raises(ValueError, match="byte limit"):
-            resources.fetch_public("https://example.org/data", limit)
+            acquisition.fetch_public("https://example.org/data", limit)
 
 
 @pytest.mark.parametrize(
@@ -368,14 +381,15 @@ def test_public_fetch_rejects_invalid_limits_before_network():
 )
 def test_public_address_rejects_special_networks(address):
     """Transition and private addresses cannot be public resources."""
-    assert not resources.public_address(address)
+    assert not acquisition._public_address(address)
 
 
-def test_public_fetch_is_shared_with_dynamic_download():
-    """Acquisition and dynamic inspection share the same fetch implementation."""
-    from pyforger.acquire.resources import fetch_public
-
-    assert fetch_public is resources.fetch_public
+def test_public_fetch_is_owned_by_acquisition():
+    """Dynamic preparation consumes acquisition rather than owning its transport."""
+    assert acquisition.fetch_public.__module__ == "pyforger.acquire.resources"
+    assert resources.resources is acquisition
+    assert proxy_module.resources is acquisition
+    assert acquisition.__all__ == ["fetch_public"]
 
 
 @contextmanager
@@ -405,14 +419,18 @@ def local_git_tunnel(monkeypatch):
             return real_connect(address, *args, **kwargs)
 
         # Substitute only destination discovery/routing, not sockets or relay I/O.
-        monkeypatch.setattr(resources, "_public_https_address", destination)
+        monkeypatch.setattr(acquisition, "_public_https_address", destination)
         monkeypatch.setattr(proxy_module.socket, "create_connection", connect)
         try:
             with proxy_module.git_proxy() as proxy:
                 yield (
-                    "127.0.0.1",
-                    int(proxy.rsplit(":", 1)[1]),
-                ), received, destinations
+                    (
+                        "127.0.0.1",
+                        int(proxy.rsplit(":", 1)[1]),
+                    ),
+                    received,
+                    destinations,
+                )
         finally:
             server.shutdown()
             thread.join(timeout=2)

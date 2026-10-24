@@ -6,11 +6,17 @@ inputs (e.g. two ``sample_from_LLM`` calls in test_acquire_sample.py)
 collide on the persistent cache: the second hits cache, the model is
 never called, and assertions like ``model._call_count == 1`` fail.
 """
+
 from __future__ import annotations
+
+import os
 
 import pytest
 
-from pyforger.op import clear_trace
+# Use the versioned bundled metadata, not a network fetch on every SDK import.
+os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+
+from pyforger.op import clear_trace  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
