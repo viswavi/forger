@@ -9,7 +9,6 @@ import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import cast
 
 from pyforger.acquire import resources
 
@@ -54,14 +53,22 @@ def git_proxy() -> Iterator[str]:
                         while time.monotonic() < deadline:
                             ready = selector.select(timeout=1)
                             for key, _ in ready:
-                                data = cast(socket.socket, key.fileobj).recv(64 * 1024)
+                                source = key.fileobj
+                                if not isinstance(source, socket.socket):
+                                    raise TypeError("Proxy selector requires sockets")
+                                destination = (
+                                    remote
+                                    if source is self.connection
+                                    else self.connection
+                                )
+                                data = source.recv(64 * 1024)
                                 if not data:
                                     return
                                 with lock:
                                     total += len(data)
                                     if total > _MAX_TRANSFER:
                                         return
-                                key.data.sendall(data)
+                                destination.sendall(data)
             except (OSError, UnicodeError, ValueError):
                 return
 

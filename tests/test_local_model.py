@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
-from pyforger.acquire.model import GenerateResult, LocalModel, split_reasoning
+from pyforger.acquire.model import GenerateResult, LocalModel, Usage, split_reasoning
 from pyforger.alter.generate import self_taught_reasoner
 
 
@@ -273,12 +273,12 @@ class TestGenerateResults:
                 f"<think>t{i}.0</think>a{i}.0",
                 f"<think>t{i}.1</think>a{i}.1",
             ]
-            assert result.usage == {
-                "prompt_tokens": i + 3,
-                "completion_tokens": 2 * i + 3,  # (i + 1) + (i + 2) token ids
-                "reasoning_tokens": 0,
-                "cost_usd": 0.0,
-            }
+            assert result.usage == Usage(
+                prompt_tokens=i + 3,
+                completion_tokens=2 * i + 3,  # (i + 1) + (i + 2) token ids
+                reasoning_tokens=0,
+                cost_usd=0.0,
+            )
             assert result.reasoning == [None, None]
             assert result.model_id == "Qwen/Qwen3-4B"
             assert result.raw is None
@@ -300,11 +300,11 @@ class TestGenerateResults:
         model.generate_batch(["p0", "p1"], n=2)
         model.generate("p0")
         assert len(model.history) == 3
-        assert model.total_usage == {
-            "prompt_tokens": 3 + 4 + 3,
-            "completion_tokens": 3 + 5 + 1,
-            "reasoning_tokens": 0,
-        }
+        assert model.total_usage == Usage(
+            prompt_tokens=3 + 4 + 3,
+            completion_tokens=3 + 5 + 1,
+            reasoning_tokens=0,
+        )
         assert model.total_cost == 0.0
         model.reset_history()
         assert model.history == []

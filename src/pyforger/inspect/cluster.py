@@ -95,7 +95,7 @@ def _clip(doc: str, truncation: int) -> str:
 
 @op(name="inspect.topic_based_clustering")
 def topic_based_clustering(
-    items: list[dict],
+    items: list[dict[str, Any]],
     *,
     field: str,
     model: Model,
@@ -394,12 +394,14 @@ def _has_phrase(text: str, phrase: str) -> bool:
     return re.search(rf"(?<!\w){re.escape(phrase)}(?!\w)", text) is not None
 
 
-def _parse_json(text: str) -> dict:
+def _parse_json(text: str) -> dict[str, Any]:
     """Extract the first JSON object from a model response."""
     decoder = json.JSONDecoder()
     for match in re.finditer(r"\{", text):
         try:
-            return decoder.raw_decode(text, match.start())[0]
+            value: object = decoder.raw_decode(text, match.start())[0]
+            if isinstance(value, dict):
+                return {str(key): item for key, item in value.items()}
         except json.JSONDecodeError:
             continue
     raise ValueError(f"no JSON object in response: {text[:200]!r}")

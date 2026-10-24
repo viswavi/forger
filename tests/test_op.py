@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import os
+import subprocess
+import sys
 import threading
+from pathlib import Path
 
 import pytest
 from pydantic import BaseModel, ValidationError
@@ -211,3 +215,146 @@ def test_call_record_validates_fields(field, value):
     data[field] = value
     with pytest.raises(ValidationError):
         CallRecord(**data)
+
+
+@pytest.mark.parametrize("decorator", ["@op", '@op(name="typed")'])
+def test_op_preserves_static_signature(tmp_path, monkeypatch, decorator) -> None:
+    """Check real mypy diagnostics without executing intentionally invalid calls."""
+    pytest.importorskip("mypy", reason="static signature checks need the test extra")
+    valid = f"""from typing import TypeVar, assert_type
+from pyforger.op import op
+
+{decorator}
+def sample(value: int, /, *, label: str, scale: int = 2) -> str:
+    return label * (value * scale)
+
+assert_type(sample(3, label="x"), str)
+assert_type(sample(3, label="x", scale=4), str)
+assert_type(sample.no_cache(3, label="x"), str)
+assert_type(sample.cache_only(3, label="x"), str)
+
+T = TypeVar("T")
+
+{decorator}
+def identity(value: T) -> T:
+    return value
+
+assert_type(identity(3), int)
+assert_type(identity("x"), str)
+assert_type(identity.no_cache(3), int)
+assert_type(identity.cache_only("x"), str)
+"""
+    fixture = tmp_path / "op_typing.py"
+    fixture.write_text(valid)
+    monkeypatch.setenv("MYPYPATH", str(Path(__file__).resolve().parents[1] / "src"))
+    mypy_args = [
+        "--strict",
+        "--follow-imports=silent",
+        "--show-error-codes",
+        "--cache-dir",
+        str(tmp_path / "mypy-cache"),
+        str(Path(__file__).resolve().parents[1] / "src/pyforger/op.py"),
+        str(fixture),
+    ]
+    result = subprocess.run(
+        [sys.executable, "-m", "mypy", *mypy_args],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    invalid = [
+        'sample("wrong", label="x")',
+        "sample(3, label=1)",
+        "sample(3)",
+        'sample(3, label="x", unknown=True)',
+        'sample(3, label="x", _no_cache=True)',
+        'sample(3, label="x", _cache_only=True)',
+        'sample.no_cache("wrong", label="x")',
+        "sample.no_cache(3)",
+        'sample.no_cache(3, label="x", unknown=True)',
+        'sample.cache_only("wrong", label="x")',
+        "sample.cache_only(3)",
+        'sample.cache_only(3, label="x", unknown=True)',
+    ]
+    fixture.write_text(valid + "\n".join(invalid) + "\n")
+    result = subprocess.run(
+        [sys.executable, "-m", "mypy", *mypy_args],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 1, output
+    first_invalid_line = len(valid.splitlines()) + 1
+    for line in range(first_invalid_line, first_invalid_line + len(invalid)):
+        assert f"{fixture}:{line}: error:" in output, output
+    assert output.count(": error:") == len(invalid), output
+
+
+@pytest.mark.parametrize("configured", [False, True])
+def test_typed_cache_controls(configured) -> None:
+    """Typed methods and legacy kwargs share cache entries without extra executions."""
+    calls = []
+
+    def sample(value: int, /, *, label: str, scale: int = 2) -> str:
+        calls.append(value)
+        return label * (value * scale)
+
+    wrapped = op(name="controls")(sample) if configured else op(sample)
+    with pytest.raises(FileNotFoundError, match="No cached result"):
+        wrapped.cache_only(3, label="x")
+    assert calls == []
+    assert wrapped(3, label="x") == "xxxxxx"
+    assert wrapped.cache_only(3, label="x", scale=2) == "xxxxxx"
+    assert wrapped(3, label="x", _cache_only=True) == "xxxxxx"
+    assert calls == [3]
+    assert wrapped.no_cache(3, label="x") == "xxxxxx"
+    assert wrapped(3, label="x", _no_cache=True) == "xxxxxx"
+    assert calls == [3, 3, 3]
+    assert wrapped.no_cache(4, label="x") == "xxxxxxxx"
+    with pytest.raises(FileNotFoundError):
+        wrapped.cache_only(4, label="x")
+    assert calls == [3, 3, 3, 4]
+
+
+def test_typed_cache_only_with_disabled_cache() -> None:
+    """Typed cache controls respect disabled caching."""
+
+    @op(cache=False)
+    def sample(value: int) -> int:
+        return value
+
+    assert sample.no_cache(1) == 1
+    with pytest.raises(ValueError, match="enabled cache"):
+        sample.cache_only(1)
+
+
+def test_op_preserves_runtime_signature_and_metadata() -> None:
+    """Wrapping retains introspection metadata."""
+
+    def sample(value: int, /, *, label: str = "x") -> str:
+        """Sample operation."""
+        return label * value
+
+    wrapped = op(sample)
+    assert inspect.signature(wrapped) == inspect.signature(sample)
+    assert inspect.unwrap(wrapped) is sample
+    assert wrapped.__name__ == sample.__name__
+    assert wrapped.__doc__ == sample.__doc__
+
+
+def test_op_preserves_method_binding() -> None:
+    """Operations bind instances like ordinary methods."""
+
+    class Sample:
+        def cache_key(self) -> str:
+            return "sample"
+
+        @op
+        def repeat(self, value: int) -> int:
+            return value * 2
+
+    assert Sample().repeat(3) == 6
+    assert Sample.repeat(Sample(), 3) == 6
