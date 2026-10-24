@@ -19,6 +19,7 @@ dependencies = [
     "tiktoken",
     "RestrictedPython>=8.4",
     "openhands-sdk>=1.51.0,<2",
+    "openhands-tools>=1.51.0,<1.54",
     "pypdf>=5,<7",
     "urllib3>=2,<3",
     "pydantic>=2,<3",
