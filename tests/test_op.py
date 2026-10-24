@@ -220,7 +220,6 @@ def test_call_record_validates_fields(field, value):
 @pytest.mark.parametrize("decorator", ["@op", '@op(name="typed")'])
 def test_op_preserves_static_signature(tmp_path, monkeypatch, decorator) -> None:
     """Check real mypy diagnostics without executing intentionally invalid calls."""
-    pytest.importorskip("mypy", reason="static signature checks need the test extra")
     valid = f"""from typing import TypeVar, assert_type
 from pyforger.op import op
 
