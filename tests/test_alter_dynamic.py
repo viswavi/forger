@@ -315,13 +315,13 @@ def test_agent_llm_real_settings_translation(options, monkeypatch, tmp_path):
     assert llm.timeout == (
         model.config.timeout if model.config.timeout is not None else 300
     )
-    assert llm.reasoning_effort == (model.config.reasoning_effort or "high")
+    assert llm.reasoning_effort == model.config.reasoning_effort
     assert llm.litellm_extra_body == model.config.extra_body
     assert llm.api_mode == model.config.api_mode
     assert llm.capability_overrides == model.config.capability_overrides
     if not options:
         assert llm.timeout == LLM.model_fields["timeout"].default
-        assert llm.reasoning_effort == LLM.model_fields["reasoning_effort"].default
+        assert llm.reasoning_effort is None
 
 
 def test_agent_llm_env_fallback(monkeypatch, tmp_path):

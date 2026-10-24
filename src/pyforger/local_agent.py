@@ -8,7 +8,6 @@ Python runs without terminal, filesystem, network, or unrestricted Python access
 from __future__ import annotations
 
 import json
-import os
 import signal
 import subprocess
 import sys
@@ -101,37 +100,10 @@ def _execute(
 
 def agent_llm(model: Model) -> LLM:
     """Construct the SDK model shared by dynamic and artifact-aware agents."""
-    # Read the caller's .env without mutating process-wide environment in threads.
-    from dotenv import dotenv_values
     from openhands.sdk import LLM
-    from pydantic import SecretStr
 
     from pyforger._sdk_llm import ConfiguredLLM
-
-    dotenv = dotenv_values(Path.cwd() / ".env")
-    config = model.config
-    key = (
-        config.api_key
-        or os.environ.get("LITELLM_API_KEY")
-        or dotenv.get("LITELLM_API_KEY")
-    )
+    from pyforger.sdk_config import llm_options
 
     llm_type = ConfiguredLLM if model._kwargs.get("disable_prompt_cache_key") else LLM
-    return llm_type(
-        model=config.model_id,
-        temperature=config.temperature,
-        base_url=config.api_base
-        or os.environ.get("LITELLM_BASE_URL")
-        or os.environ.get("LLM_BASE_URL")
-        or dotenv.get("LITELLM_BASE_URL")
-        or dotenv.get("LLM_BASE_URL"),
-        api_key=SecretStr(key) if key else None,
-        max_output_tokens=config.max_tokens,
-        # Model counts additional retries; the SDK counts total attempts.
-        num_retries=max(1, config.num_retries + 1),
-        timeout=config.timeout if config.timeout is not None else 300,
-        reasoning_effort=config.reasoning_effort or "high",
-        litellm_extra_body=config.extra_body,
-        api_mode=config.api_mode,
-        capability_overrides=config.capability_overrides,
-    )
+    return llm_type(**llm_options(model))

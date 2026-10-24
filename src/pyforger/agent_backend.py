@@ -18,6 +18,7 @@ full function-by-backend matrix be tested without LLM calls.
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
@@ -46,43 +47,81 @@ class Network(Enum):
 
 
 @dataclass(frozen=True)
+class LearnerRuntime:
+    """Opt-in SDK tools/history, separate from iteration and wall-clock budgets.
+
+    ``condenser_max_tokens`` uses SDK token estimates and the agent model for
+    summaries. Local/Sail preserve system/task and target half this threshold
+    before inserting a summary; this is not a gateway-counted hard context cap.
+    """
+
+    tools: str = "backend-default"
+    reasoning_replay: bool = False
+    condenser_max_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        """Reject unknown profiles and ambiguous threshold values."""
+        if self.tools not in {"backend-default", "science-rl"}:
+            raise ValueError("Unknown learner tool profile")
+        if type(self.reasoning_replay) is not bool:
+            raise ValueError("reasoning_replay must be a boolean")
+        if self.condenser_max_tokens is not None and (
+            type(self.condenser_max_tokens) is not int or self.condenser_max_tokens < 1
+        ):
+            raise ValueError("condenser_max_tokens must be a positive integer")
+
+    def cache_key(self) -> object:
+        """Identify requested behavior without endpoint credentials."""
+        return (self.tools, self.reasoning_replay, self.condenser_max_tokens)
+
+
+@dataclass(frozen=True)
 class AgentSpec:
     """What an agent is, independent of where it runs.
 
     ``model`` is required for ``openhands-sdk`` and ignored by deterministic
     kinds. ``solution`` is the workspace script an ``oracle`` agent executes.
+    ``max_iterations=None`` disables the step cap, not the task wall deadline.
     Credentials are never stored here; ``api_key_env`` names the host
     environment variable a backend may forward.
     """
 
     model: Model | None = None
     kind: str = "openhands-sdk"
-    max_iterations: int = 20
+    max_iterations: int | None = 20
     api_key_env: str | None = None
     solution: str | None = None
     kwargs: Mapping[str, Any] = field(default_factory=dict)
+    runtime: LearnerRuntime | None = None
 
     def __post_init__(self) -> None:
         """Validate the agent kind/model combination."""
+        if self.runtime is not None and not isinstance(self.runtime, LearnerRuntime):
+            raise TypeError("runtime must be a LearnerRuntime")
+        if self.runtime is not None and self.kind != "openhands-sdk":
+            raise ValueError("Only SDK agents accept learner runtime settings")
         if self.kind not in AGENT_KINDS:
             raise ValueError(f"agent kind must be one of {AGENT_KINDS}")
         if self.kind == "openhands-sdk" and self.model is None:
             raise ValueError("openhands-sdk agents require a Model")
         if self.kind == "oracle" and not self.solution:
             raise ValueError("oracle agents require a solution script")
-        if type(self.max_iterations) is not int or self.max_iterations < 1:
-            raise ValueError("max_iterations must be positive")
+        if self.max_iterations is not None and (
+            type(self.max_iterations) is not int or self.max_iterations < 1
+        ):
+            raise ValueError("max_iterations must be positive or None")
 
     def cache_key(self) -> object:
         """Identify functional agent settings, never credentials."""
         return (
-            "agent-spec-v1",
+            "agent-spec-v2",
             self.kind,
             self.model.cache_key() if self.model is not None else None,
             self.model.config.api_base if self.model is not None else None,
             self.max_iterations,
             self.solution,
             json.dumps(dict(self.kwargs), sort_keys=True, default=str),
+            self.runtime.cache_key() if self.runtime is not None else None,
         )
 
 
@@ -120,8 +159,8 @@ class WorkspaceTask:
             *self.outputs,
         ]:
             validate_workspace_path(path)
-        if not (0 < self.timeout_s):
-            raise ValueError("timeout_s must be positive")
+        if not math.isfinite(self.timeout_s) or self.timeout_s <= 0:
+            raise ValueError("timeout_s must be finite and positive")
 
 
 def validate_workspace_path(path: str) -> None:

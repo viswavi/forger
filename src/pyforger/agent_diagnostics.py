@@ -5,15 +5,16 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Iterable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from pyforger.agent_backend import AgentSpec
+if TYPE_CHECKING:
+    from pyforger.agent_backend import AgentSpec
 
 _SENSITIVE = re.compile(
     r"api.?key|token|secret|password|authorization|credential", re.IGNORECASE
 )
 _ASSIGNMENT = re.compile(
-    r"(?i)((?:[\w-]*(?:api[_-]?key|token|secret|password|authorization|credential)"
+    r"(?i)(?<![\w-])((?:[\w-]*(?:api[_-]?key|token|secret|password|authorization|credential)"
     r"[\w-]*)"
     r"[\"']?\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;}]+)"
 )

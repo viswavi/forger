@@ -27,6 +27,7 @@ from pyforger.agent_backend import (
     WorkspaceTask,
     reward_passed,
 )
+from pyforger.agent_backends import require_learner_runtime
 from pyforger.local_agent import _execute, agent_llm
 from pyforger.measurements import Measurement
 
@@ -97,7 +98,9 @@ class LocalBackend:
     """Execute agents in a host workspace and programs in the restricted worker."""
 
     name = "local"
+    supports_science_rl_tools = True
     supports_inner_loop_validation = True
+    supports_sdk_condensation = True
 
     def cache_key(self) -> object:
         """Return the local executor identity for cache keys."""
@@ -113,6 +116,7 @@ class LocalBackend:
         """Materialize the workspace and run the agent in-process."""
         from pyforger.agent_session import SessionBudget
 
+        require_learner_runtime(self, agent)
         budget = SessionBudget(agent.max_iterations, task.timeout_s)
         with tempfile.TemporaryDirectory(prefix="forger-local-agent-") as directory:
             root = Path(directory)
@@ -177,6 +181,7 @@ class LocalBackend:
             raise ValueError("max_repairs must be a nonnegative integer")
         if task.verifier is not None:
             raise ValueError("Validated generation uses validate, not a task verifier")
+        require_learner_runtime(self, agent)
         budget = SessionBudget(agent.max_iterations, task.timeout_s)
         with tempfile.TemporaryDirectory(prefix="forger-local-agent-") as directory:
             root = Path(directory)
@@ -260,9 +265,10 @@ class LocalBackend:
     def _sdk_session(
         self, root: Path, task: WorkspaceTask, agent: AgentSpec, *, budget: Any = None
     ) -> Any:
-        from openhands.sdk import Agent, Conversation
+        from openhands.sdk import Agent, AgentContext, Conversation
         from openhands.sdk.tool import Tool
         from openhands.tools.file_editor import FileEditorTool
+        from openhands.tools.task_tracker import TaskTrackerTool
         from openhands.tools.terminal import TerminalTool
 
         assert agent.model is not None
@@ -271,11 +277,29 @@ class LocalBackend:
             from pyforger.agent_session import BudgetedAgent
 
             agent_type = BudgetedAgent
+        require_learner_runtime(self, agent)
+        tools = [Tool(name=TerminalTool.name), Tool(name=FileEditorTool.name)]
+        defaults = ["FinishTool"]
+        kwargs = dict(agent.kwargs)
+        if agent.runtime is not None and agent.runtime.tools == "science-rl":
+            if kwargs.keys() & {"tools", "include_default_tools", "agent_context"}:
+                raise ValueError("Agent kwargs conflict with the explicit tool profile")
+            tools.append(Tool(name=TaskTrackerTool.name))
+            defaults.append("ThinkTool")
+            kwargs["agent_context"] = AgentContext(
+                load_user_skills=False,
+                load_public_skills=False,
+                load_project_skills=False,
+            )
+        llm = agent_llm(agent.model)
+        from pyforger._sdk_runtime import sdk_history_kwargs, sdk_iteration_limit
+
+        kwargs.update(sdk_history_kwargs(agent, llm))
         sdk_agent: Any = agent_type(
-            llm=agent_llm(agent.model),
-            tools=[Tool(name=TerminalTool.name), Tool(name=FileEditorTool.name)],
-            include_default_tools=["FinishTool"],
-            **dict(agent.kwargs),
+            llm=llm,
+            tools=tools,
+            include_default_tools=defaults,
+            **kwargs,
         )
         if budget is not None:
             sdk_agent.attach_budget(budget)
@@ -283,7 +307,7 @@ class LocalBackend:
             agent=sdk_agent,
             workspace=root,
             visualizer=None,
-            max_iteration_per_run=agent.max_iterations,
+            max_iteration_per_run=sdk_iteration_limit(agent.max_iterations),
         )
 
     def _run_sdk(

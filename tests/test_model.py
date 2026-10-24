@@ -1461,3 +1461,24 @@ class TestTypedMetadataAndSettings:
             Model("gpt-4o", api_key="first").cache_key()
             == Model("gpt-4o", api_key="second").cache_key()
         )
+
+
+def test_custom_tokenizer_is_sdk_setting_not_provider_kwarg():
+    """Keep the SDK tokenizer setting out of provider completion kwargs."""
+    model = Model("openai/test", custom_tokenizer="native/tokenizer")
+    assert model.config.custom_tokenizer == "native/tokenizer"
+    assert "custom_tokenizer" not in model._kwargs
+
+
+def test_sdk_agent_receives_custom_tokenizer(tmp_path):
+    """Forward the tokenizer identifier without requiring optional transformers."""
+    from pyforger.local_agent import agent_llm
+
+    llm = agent_llm(
+        Model(
+            "openai/test",
+            api_base="https://example.org/v1",
+            custom_tokenizer=str(tmp_path),
+        )
+    )
+    assert llm.custom_tokenizer == str(tmp_path)

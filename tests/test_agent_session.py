@@ -200,3 +200,49 @@ def test_zero_repairs_validates_once():
             validate=lambda _: Measurement(passed=False),
         )
     assert len(caught.value.attempts) == 1
+
+
+def test_unlimited_steps_still_share_deadline():
+    """Unlimited steps still enforce the shared wall-time deadline."""
+    from pyforger.session_budget import SessionBudget
+
+    budget = SessionBudget(None, 10)
+    for _ in range(1001):
+        budget.consume_step()
+    assert budget.iterations == 1001
+    budget._started -= 11
+    with pytest.raises(TimeoutError, match="wall-time"):
+        budget.consume_step()
+    assert budget.iterations == 1001
+
+
+@pytest.mark.parametrize("limit", [0, -1, True, 1.5])
+def test_optional_iteration_validation(limit):
+    """Invalid optional iteration limits are rejected."""
+    from pyforger.session_budget import SessionBudget
+
+    with pytest.raises(ValueError):
+        SessionBudget(limit, 10)
+    with pytest.raises(ValueError):
+        AgentSpec(kind="nop", max_iterations=limit)
+
+
+def test_unlimited_spec_preserves_none():
+    """An unlimited spec preserves None through adaptation."""
+    assert AgentSpec(kind="nop", max_iterations=None).max_iterations is None
+    assert (
+        AgentSpec(kind="nop", max_iterations=None).cache_key()
+        != AgentSpec(kind="nop").cache_key()
+    )
+
+
+@pytest.mark.parametrize("timeout", [float("inf"), float("nan"), 0, -1])
+def test_unlimited_steps_require_finite_wall_deadline(timeout):
+    """Unlimited steps still require a finite wall-time deadline."""
+    from pyforger.agent_backend import WorkspaceTask
+    from pyforger.session_budget import SessionBudget
+
+    with pytest.raises(ValueError, match="finite"):
+        SessionBudget(None, timeout)
+    with pytest.raises(ValueError, match="finite"):
+        WorkspaceTask(instruction="test", timeout_s=timeout)
