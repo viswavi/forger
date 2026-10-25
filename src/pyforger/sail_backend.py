@@ -155,8 +155,13 @@ class SailBackend:
                     errors = [
                         e for e in steps if e.get("kind") == "ConversationErrorEvent"
                     ]
-                    limited = diagnostics.get("budget_exhausted", False) or bool(
-                        errors and errors[-1].get("code") == "MaxIterationsReached"
+                    limited = (
+                        diagnostics.get("budget_exhausted", False)
+                        or diagnostics.get("trajectory", {}).get("last_error_code")
+                        == "MaxIterationsReached"
+                        or bool(
+                            errors and errors[-1].get("code") == "MaxIterationsReached"
+                        )
                     )
                     return AgentRunResult(
                         status=(

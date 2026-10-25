@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 
 import pytest
+
 from pyforger._sail_sdk_transport import MAX_OUTPUT_BYTES, Mailbox
 
 
@@ -447,3 +448,21 @@ def test_resource_probe_tolerates_missing_process():
     from pyforger._sail_sdk_transport import process_resources
 
     assert process_resources(2**30) == {}
+
+
+def test_mailbox_registers_forwarded_credentials_before_request_processing():
+    mailbox = Mailbox()
+    mailbox.done = True
+    for number, secret in enumerate(("initial-service", "replacement-service"), 1):
+        frame = {
+            "kind": "configure",
+            "llm": {"api_key": "model-key"},
+            "redaction_secrets": [secret, "short"],
+        }
+        mailbox.exchange({"ack": 0, "id": number, "frame": frame})
+        delivered = mailbox.receive()
+        assert secret in mailbox.secrets
+        assert "short" in mailbox.secrets
+        assert delivered == frame
+    assert "initial-service" in mailbox.secrets
+    assert "replacement-service" in mailbox.secrets

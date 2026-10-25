@@ -7,6 +7,7 @@ import json
 import math
 import os
 import queue
+import re
 import shlex
 import sys
 import threading
@@ -24,6 +25,11 @@ from pyforger._sail_sdk_transport import (
     PROCESS_LOG_PATH,
     TRANSPORT_LOG_PATH,
     diagnostic_text,
+)
+from pyforger.evidence_journal import (
+    EvidenceJournal,
+    evidence_file_chunks,
+    iter_trajectory_events,
 )
 from pyforger.measurements import Measurement
 from pyforger.sdk_config import llm_options
@@ -62,6 +68,14 @@ def worker_request(spec: Any, timeout: float) -> dict[str, Any]:
     options["num_retries"] = 5
     return {
         "timeout_s": timeout,
+        "redaction_secrets": [
+            value
+            for key, value in os.environ.items()
+            if value
+            and re.search(
+                r"api.?key|token|secret|password|authorization|credential", key, re.I
+            )
+        ],
         "llm": options,
         "max_iterations": spec.max_iterations,
         "disable_prompt_cache_key": bool(
@@ -383,6 +397,11 @@ class _DetachedConnection:
                 key = frame.get("llm", {}).get("api_key")
                 if isinstance(key, str) and key:
                     self.secrets.append(key)
+                self.secrets.extend(
+                    value
+                    for value in frame.get("redaction_secrets", ())
+                    if isinstance(value, str) and value
+                )
                 envelope.update(id=number, frame=frame)
             payload = json.dumps(envelope) + "\n"
             # Retry the SAME ID/cursor against the same daemon, never the SDK turn.
@@ -477,35 +496,42 @@ def _retain_worker_log(
 ) -> None:
     """Retain the full worker log before terminating its box, plus a UI tail."""
     try:
-        raw = worker.fs.read(WORKER_LOG_PATH)
+
+        def chunks():
+            # Worker RedactedLog sanitizes before persistence, including forwarded
+            # service/environment credentials registered by the private mailbox.
+            if hasattr(worker.fs, "read_stream"):
+                yield from worker.fs.read_stream(WORKER_LOG_PATH)
+            else:
+                yield worker.fs.read(WORKER_LOG_PATH)
+            if "protocol" in attempt_record:
+                yield (
+                    "\nHost protocol metadata: "
+                    + json.dumps(attempt_record["protocol"])
+                    + "\n"
+                ).encode()
+
+        log_ref, tail = evidence_file_chunks(chunks())
+        attempt_record["worker_log"] = log_ref
+        diagnostics["sdk_worker_log"] = log_ref
+        attempt_record["worker_log_tail"] = tail
+        diagnostics["sdk_worker_log_tail"] = tail
     except Exception as exc:
         diagnostics.setdefault("sdk_worker_log_errors", []).append(
-            {
-                "error_type": type(exc).__name__,
-                "error_message": str(exc),
-                "traceback": traceback.format_exc(),
-            }
+            {"error_type": type(exc).__name__, "error_message": str(exc)}
         )
-        return
-    text = redact(raw.decode("utf-8", errors="replace"))
-    if "protocol" in attempt_record:
-        text += (
-            "\nHost protocol metadata: " + json.dumps(attempt_record["protocol"]) + "\n"
-        )
-    attempt_record["worker_log"] = text
-    diagnostics["sdk_worker_log"] = text
-    attempt_record["worker_log_tail"] = text[-WORKER_LOG_TAIL_CHARS:]
-    diagnostics["sdk_worker_log_tail"] = text[-WORKER_LOG_TAIL_CHARS:]
 
 
-def _recover_current_events(worker: Any, current: dict[str, Any]) -> None:
-    """Read the credential-redacted event journal with a fixed cleanup deadline."""
+def _recover_current_events(
+    worker: Any, current: dict[str, Any], journal: EvidenceJournal | None = None
+) -> None:
+    """Recover a bounded private worker suffix using sequence identity, not content."""
     result: queue.Queue[Any] = queue.Queue(maxsize=1)
 
     def read() -> None:
         try:
             result.put(worker.fs.read(WORKER_LOG_PATH + ".events"))
-        except Exception as exc:  # noqa: BLE001 — evidence recovery must not mask failure
+        except Exception as exc:
             result.put(type(exc).__name__)
 
     threading.Thread(target=read, name="sdk-event-recovery", daemon=True).start()
@@ -515,10 +541,14 @@ def _recover_current_events(worker: Any, current: dict[str, Any]) -> None:
         current["recovery"] = "read_deadline_exceeded"
         return
     if not isinstance(raw, bytes):
-        current["recovery"] = "unavailable:" + raw
+        current["recovery"] = "unavailable:" + str(raw)
         return
-    events = []
     matched = False
+    existing = (
+        iter(iter_trajectory_events(current)) if journal is not None else iter(())
+    )
+    existing_sequence = -1
+    existing_event = None
     for line in raw[: 16 * 1024 * 1024 + 256].splitlines():
         try:
             record = json.loads(line)
@@ -527,29 +557,55 @@ def _recover_current_events(worker: Any, current: dict[str, Any]) -> None:
             continue
         if record.get("kind") == "omitted":
             current["recovery_truncated"] = True
-        if record.get("turn_id") != current.get("turn_id") or not current.get(
-            "turn_id"
+        if (
+            not current.get("turn_id")
+            or record.get("turn_id") != current["turn_id"]
+            or record.get("call_id") != current.get("call_id")
         ):
-            continue
-        if record.get("call_id") != current.get("call_id"):
             continue
         matched = True
         current["conversation_id"] = record.get("conversation_id")
         current["last_event_at"] = record.get("at")
         if record.get("kind") == "event":
-            events.append(record["event"])
-    if matched:
-        # Keep streamed events too if the bounded journal omitted a later event.
-        known = {json.dumps(event, sort_keys=True) for event in events}
-        events.extend(
-            event
-            for event in current["steps"]
-            if json.dumps(event, sort_keys=True) not in known
-        )
-        current["steps"] = events
-        current["recovery"] = "current_turn_journal"
-    else:
-        current["recovery"] = "no_matching_current_turn_journal"
+            sequence = record.get("sequence")
+            if (
+                journal is not None
+                and type(sequence) is int
+                and sequence <= current.get("last_sequence", -1)
+            ):
+                while existing_sequence < sequence:
+                    existing_event = next(existing, None)
+                    existing_sequence += 1
+                if existing_event != record["event"]:
+                    current["recovery"] = "conflicting_sequence"
+                    current["sequence_error"] = {"conflict": sequence}
+                    return
+            if (
+                journal is not None
+                and isinstance(sequence, int)
+                and sequence > current.get("last_sequence", -1)
+            ):
+                if (
+                    "last_sequence" in current
+                    and sequence != current["last_sequence"] + 1
+                ):
+                    current["sequence_error"] = {
+                        "expected": current["last_sequence"] + 1,
+                        "received": sequence,
+                    }
+                    current["recovery"] = "sequence_gap"
+                    return
+                if record["event"].get("kind") == "ConversationErrorEvent":
+                    current["last_error_code"] = record["event"].get("code")
+                journal.append_sanitized(record["event"])
+                current.update(journal.trajectory())
+                current["last_sequence"] = sequence
+            elif journal is None:
+                # Legacy workers cannot prove duplicate identity; preserve every record.
+                current.setdefault("steps", []).append(record["event"])
+    current["recovery"] = (
+        "current_turn_journal" if matched else "no_matching_current_turn_journal"
+    )
 
 
 @contextmanager
@@ -567,6 +623,7 @@ def remote_sdk_session(
 
     budget = transport.budget
     redaction_specs = [spec]
+    active_journal: EvidenceJournal | None = None
     current: dict[str, Any] = {
         "call_id": uuid.uuid4().hex,
         "turn_id": None,
@@ -710,11 +767,11 @@ def remote_sdk_session(
         attempt_record = {
             "attempt": attempt_index + 1,
             "sailbox_id": worker.sailbox_id,
-            "trajectory": {"steps": []},
+            "trajectory": {"turns": []},
             "stdin_write_stalls": 0,
         }
         attempts.append(attempt_record)
-        attempt_record["turns"] = []
+        attempt_record["turns"] = attempt_record["trajectory"]["turns"]
         lifetime = max(1, math.ceil(budget.remaining_s()))
         started = worker.run(
             _DetachedConnection.argv("start", str(lifetime)),
@@ -776,7 +833,7 @@ def remote_sdk_session(
         current["conversation_id"] = ready_frame.get("conversation_id")
 
         def generate(instruction: str) -> dict[str, bytes]:
-            nonlocal current
+            nonlocal current, active_journal
             current = {
                 "call_id": call_id,
                 "turn_id": uuid.uuid4().hex,
@@ -786,6 +843,11 @@ def remote_sdk_session(
                 "phase": "agent_turn",
                 "started_at": time.time(),
             }
+            journal = EvidenceJournal(redaction_specs)
+            active_journal = journal
+            current.pop("steps")
+            current["last_sequence"] = -1
+            current.update(journal.trajectory())
             diagnostics["current_trajectory"] = current
             diagnostics["trajectory"] = current
             attempt_record["turns"].append(current)
@@ -805,9 +867,26 @@ def remote_sdk_session(
                 if kind == "event_chunk":
                     event_parts.append(frame["text"])
                 elif kind == "event_end":
+                    sequence = frame.get("sequence")
+                    expected = current.get("last_sequence", -1) + 1
+                    if (
+                        isinstance(sequence, int)
+                        and "last_sequence" in current
+                        and sequence != expected
+                    ):
+                        current["sequence_error"] = {
+                            "expected": expected,
+                            "received": sequence,
+                        }
+                        raise RuntimeError("Out-of-order SDK event sequence")
                     event = json.loads("".join(event_parts))
-                    attempt_record["trajectory"]["steps"].append(event)
-                    current["steps"].append(event)
+                    journal.append_sanitized(event)
+                    if event.get("kind") == "ConversationErrorEvent":
+                        current["last_error_code"] = event.get("code")
+                    current.update(journal.trajectory())
+                    current["last_sequence"] = frame.get(
+                        "sequence", current.get("last_sequence", -1) + 1
+                    )
                     current["last_event_at"] = time.time()
                     event_parts.clear()
                 elif kind == "terminal":
@@ -925,6 +1004,7 @@ def remote_sdk_session(
                     {
                         "kind": "configure",
                         "llm": updated["llm"],
+                        "redaction_secrets": updated["redaction_secrets"],
                         "disable_prompt_cache_key": updated["disable_prompt_cache_key"],
                     }
                 )
@@ -939,9 +1019,9 @@ def remote_sdk_session(
         call_id = current["call_id"]
         yield run
     finally:
-        from pyforger.agent_diagnostics import trajectory
-
         active_error = sys.exc_info()[1]
+        if locals().get("event_parts"):
+            current["partial_event_frame"] = True
         cleanup_errors: list[BaseException] = []
 
         def cleanup(label: str, action: Any) -> None:
@@ -961,11 +1041,14 @@ def remote_sdk_session(
         active_current = diagnostics.get("current_trajectory", current)
         if active_current.get("phase") == "call_setup":
             current = active_current
-        cleanup("current_events", lambda: _recover_current_events(worker, current))
+        cleanup(
+            "current_events",
+            lambda: _recover_current_events(worker, current, active_journal),
+        )
         if active_error is not None:
             current["incomplete"] = True
         current["captured_at"] = time.time()
-        if not current["steps"]:
+        if not current.get("journal", {}).get("count", len(current.get("steps", []))):
             current.setdefault(
                 "no_current_history_reason", "no_current_events_recoverable"
             )
@@ -1053,10 +1136,11 @@ def remote_sdk_session(
                 raise
 
         cleanup("worker.terminate", terminate)
-        for redaction_spec in redaction_specs:
-            safe = trajectory([diagnostics], redaction_spec)["steps"][0]
-            diagnostics.clear()
-            diagnostics.update(safe)
+        from pyforger.agent_diagnostics import sanitizer
+
+        safe = sanitizer(redaction_specs)(diagnostics)
+        diagnostics.clear()
+        diagnostics.update(safe)
         if active_error is not None:
             existing = getattr(active_error, "diagnostics", {})
             if existing.get("current_trajectory", {}).get("call_id") not in (

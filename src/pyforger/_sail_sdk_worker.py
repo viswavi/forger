@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -90,7 +91,7 @@ def main(wire: Any) -> None:
                 self.pending += text
                 while "\n" in self.pending:
                     line, self.pending = self.pending.split("\n", 1)
-                    for secret in wire.secrets:
+                    for secret in sorted(set(wire.secrets), key=len, reverse=True):
                         line = line.replace(secret, "[REDACTED]")
                     line = re.sub(
                         r"(?i)(Bearer|Basic)\s+[^\s\"']+", r"\1 [REDACTED]", line
@@ -184,7 +185,7 @@ def main(wire: Any) -> None:
     request = receive()
     deadline = time.monotonic() + request["timeout_s"]
     from _sdk_runtime import sdk_history_kwargs, sdk_iteration_limit
-    from agent_diagnostics import trajectory
+    from agent_diagnostics import sanitizer
     from openhands.sdk import LLM, Agent, AgentContext
     from openhands.sdk.conversation.impl.local_conversation import LocalConversation
     from openhands.sdk.llm import LLMCallContext
@@ -210,6 +211,7 @@ def main(wire: Any) -> None:
             config=SimpleNamespace(api_key=request["llm"]["api_key"])
         ),
         api_key_env=None,
+        secrets=request.get("redaction_secrets", ()),
     )
     redaction_specs = [redaction_spec]
     iterations = 0
@@ -291,12 +293,12 @@ def main(wire: Any) -> None:
     event_omitted = False
     current_turn: dict[str, Any] = {}
 
-    def journal(record: dict[str, Any]) -> None:
+    def journal(record: dict[str, Any], *, clean: bool = True) -> None:
         nonlocal event_bytes, event_omitted
         if event_sink is None:
             return
-        for prior_spec in redaction_specs:
-            record = trajectory([record], prior_spec)["steps"][0]
+        if clean:
+            record = sanitizer(redaction_specs)(record)
         encoded = (json.dumps(record) + "\n").encode()
         try:
             if event_bytes + len(encoded) > 16 * 1024 * 1024:
@@ -313,16 +315,44 @@ def main(wire: Any) -> None:
         except OSError:
             pass
 
-    def retain_event(event: Any) -> None:
+    event_sequence = [0]
+    stream_events = [False]
+
+    pending_events = tempfile.TemporaryFile(mode="w+b")
+
+    def persist_event(clean: Any) -> None:
+        sequence = event_sequence[0]
+        event_sequence[0] += 1
         journal(
             {
                 "kind": "event",
                 "conversation_id": str(conversation_id),
                 **current_turn,
                 "at": time.time(),
-                "event": event.model_dump(mode="json"),
-            }
+                "sequence": sequence,
+                "event": clean,
+            },
+            clean=False,
         )
+        encoded = json.dumps(clean)
+        for offset in range(0, len(encoded), 8000):
+            send({"kind": "event_chunk", "text": encoded[offset : offset + 8000]})
+        send({"kind": "event_end", "sequence": sequence})
+
+    def retain_event(event: Any) -> None:
+        clean = sanitizer(redaction_specs)(event.model_dump(mode="json"))
+        if not stream_events[0]:
+            pending_events.write((json.dumps(clean) + "\n").encode())
+            pending_events.flush()
+            return
+        persist_event(clean)
+
+    def drain_pending_events() -> None:
+        pending_events.seek(0)
+        for line in pending_events:
+            persist_event(json.loads(line))
+        pending_events.seek(0)
+        pending_events.truncate()
 
     session: Any = SealedConversation(
         agent=agent,
@@ -332,7 +362,6 @@ def main(wire: Any) -> None:
         callbacks=[retain_event],
         max_iteration_per_run=sdk_iteration_limit(request["max_iterations"]),
     )
-    emitted = 0
 
     def report_error(exc: Exception, **details: Any) -> None:
         error = {
@@ -343,8 +372,7 @@ def main(wire: Any) -> None:
             "iterations": iterations,
             **details,
         }
-        for prior_spec in redaction_specs:
-            error = trajectory([error], prior_spec)["steps"][0]
+        error = sanitizer(redaction_specs)(error)
         print(error["traceback"], file=sink, flush=True)
         try:
             emit_events()
@@ -354,17 +382,8 @@ def main(wire: Any) -> None:
         send(error)
 
     def emit_events() -> None:
-        nonlocal emitted
-        for event in list(session.state.events)[emitted:]:
-            retained = trajectory([event], redaction_spec)
-            for prior_spec in redaction_specs:
-                retained = trajectory(retained["steps"], prior_spec)
-            encoded = json.dumps(retained["steps"][0])
-            # Chunk individual events too: scientific observations can be large.
-            for offset in range(0, len(encoded), 8000):
-                send({"kind": "event_chunk", "text": encoded[offset : offset + 8000]})
-            send({"kind": "event_end"})
-            emitted += 1
+        # The callback persists and streams the same sanitized event exactly once.
+        pass
 
     try:
         send({"kind": "ready", "conversation_id": str(session.id)})
@@ -373,6 +392,14 @@ def main(wire: Any) -> None:
             if turn["kind"] == "close":
                 return
             if turn["kind"] == "configure":
+                redaction_spec = SimpleNamespace(
+                    model=SimpleNamespace(
+                        config=SimpleNamespace(api_key=turn["llm"]["api_key"])
+                    ),
+                    api_key_env=None,
+                    secrets=turn.get("redaction_secrets", ()),
+                )
+                redaction_specs.append(redaction_spec)
                 try:
                     with phase("configure.model.initialize"):
                         replacement = WorkerLLM(**turn["llm"], stream=False)
@@ -386,13 +413,6 @@ def main(wire: Any) -> None:
                     request["disable_prompt_cache_key"] = turn[
                         "disable_prompt_cache_key"
                     ]
-                    redaction_spec = SimpleNamespace(
-                        model=SimpleNamespace(
-                            config=SimpleNamespace(api_key=turn["llm"]["api_key"])
-                        ),
-                        api_key_env=None,
-                    )
-                    redaction_specs.append(redaction_spec)
                     send({"kind": "configured"})
                 except Exception as exc:
                     report_error(exc)
@@ -407,6 +427,7 @@ def main(wire: Any) -> None:
                     "call_id": turn.get("call_id"),
                     "turn_id": turn.get("turn_id"),
                 }
+                event_sequence[0] = 0
                 event_bytes = 0
                 event_omitted = False
                 if event_sink is not None:
@@ -430,6 +451,8 @@ def main(wire: Any) -> None:
                         "at": time.time(),
                     }
                 )
+                stream_events[0] = True
+                drain_pending_events()
                 with phase("turn.send_message"):
                     session.send_message(
                         turn["instruction"] + "\n\n" + COMMAND_GUIDANCE
@@ -439,6 +462,7 @@ def main(wire: Any) -> None:
                 status = session.state.execution_status
                 status = getattr(status, "value", status)
                 emit_events()
+                stream_events[0] = False
                 send(
                     {
                         "kind": "result",

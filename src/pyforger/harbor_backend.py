@@ -26,7 +26,7 @@ from pyforger.agent_backend import (
     WorkspaceTask,
 )
 from pyforger.agent_backends import require_learner_runtime
-from pyforger.artifacts import ArtifactRef, read_text
+from pyforger.artifacts import ArtifactRef, read_text, write_input
 from pyforger.local_agent import _record_key
 
 _NETWORK = {
@@ -46,7 +46,7 @@ def _package(
     for name, content in task.files.items():
         path = files_dir / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(content.encode() if isinstance(content, str) else content)
+        write_input(path, content)
     installs = (
         "RUN pip install --no-cache-dir "
         + " ".join(shlex.quote(package) for package in task.packages)
@@ -82,7 +82,7 @@ def _package(
         for name, content in task.solution_files.items():
             path = files_root / name
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(content.encode() if isinstance(content, str) else content)
+            write_input(path, content)
         (solution / "solve.sh").write_text(
             "#!/bin/sh\nset -eu\ncp -r /solution/files/. /work/ 2>/dev/null || true\n"
             "cd /work\n" + (agent.solution or "") + "\n"
@@ -95,7 +95,7 @@ def _package(
         for name, content in task.verifier_files.items():
             path = verifier_dir / name
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(content.encode() if isinstance(content, str) else content)
+            write_input(path, content)
         (tests / "test.sh").write_text(
             "#!/bin/sh\nmkdir -p /logs/verifier\n"
             "WORKSPACE=/work VERIFIER_DIR=/tests/verifier sh -c "

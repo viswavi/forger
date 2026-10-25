@@ -10,6 +10,7 @@ from collections.abc import Iterator
 from typing import Any
 
 from pyforger.agent_backend import Network
+from pyforger.artifacts import FileInput
 
 WORKSPACE = "/work"
 # Optional compatibility policies, disabled on the default execution path.
@@ -115,9 +116,11 @@ print(json.dumps(result))
 """
 
 
-def _input_chunks(value: str | bytes) -> Iterator[bytes | memoryview]:
+def _input_chunks(value: str | bytes | FileInput) -> Iterator[bytes | memoryview]:
     # Bound UTF-8 expansion as well as binary writes without copying the payload.
-    if isinstance(value, str):
+    if isinstance(value, FileInput):
+        yield from value.chunks()
+    elif isinstance(value, str):
         for offset in range(0, len(value), 256 * 1024):
             yield value[offset : offset + 256 * 1024].encode()
     else:
@@ -165,7 +168,11 @@ class SailTransport:
         )
 
     def files(
-        self, files: dict[str, str | bytes], *, write: bool, replace: bool = False
+        self,
+        files: dict[str, str | bytes | FileInput],
+        *,
+        write: bool,
+        replace: bool = False,
     ) -> dict[str, bytes]:
         """Stage or snapshot files without following symlinks, using bounded chunks."""
         total = 0
@@ -176,6 +183,8 @@ class SailTransport:
                 size = (
                     sum(len(chunk) for chunk in _input_chunks(value))
                     if isinstance(value, str)
+                    else value.size
+                    if isinstance(value, FileInput)
                     else len(value)
                 )
             if MAX_INPUT_FILE_BYTES is not None and size > MAX_INPUT_FILE_BYTES:

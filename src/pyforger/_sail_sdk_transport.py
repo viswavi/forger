@@ -138,6 +138,11 @@ class Mailbox:
                     key = frame.get("llm", {}).get("api_key")
                     if isinstance(key, str) and key:
                         self.secrets.append(key)
+                    self.secrets.extend(
+                        secret
+                        for secret in frame.get("redaction_secrets", ())
+                        if isinstance(secret, str) and secret
+                    )
                     self.inputs.put_nowait(frame)
                     self.accepted = number
                 elif number > self.accepted:

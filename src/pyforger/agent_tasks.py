@@ -17,6 +17,7 @@ from typing import Any
 
 from pyforger.agent_backend import AgentBackend, AgentSpec, Network, WorkspaceTask
 from pyforger.agents import _default
+from pyforger.artifacts import FileInput, write_input
 
 
 @dataclass(frozen=True)
@@ -24,11 +25,11 @@ class TaskSpec:
     """Packaged work for an agent: instruction, files, verifier, outputs."""
 
     instruction: str
-    files: Mapping[str, str | bytes] = field(default_factory=dict)
+    files: Mapping[str, str | bytes | FileInput] = field(default_factory=dict)
     outputs: tuple[str, ...] = ()
     verifier: str | None = None
-    verifier_files: Mapping[str, str | bytes] = field(default_factory=dict)
-    solution_files: Mapping[str, str | bytes] = field(default_factory=dict)
+    verifier_files: Mapping[str, str | bytes | FileInput] = field(default_factory=dict)
+    solution_files: Mapping[str, str | bytes | FileInput] = field(default_factory=dict)
     packages: tuple[str, ...] = ()
     network: Network = Network.OFFLINE
 
@@ -62,9 +63,7 @@ class TaskSpec:
             for name, content in payload.items():
                 entry = root / directory / name
                 entry.parent.mkdir(parents=True, exist_ok=True)
-                entry.write_bytes(
-                    content.encode() if isinstance(content, str) else content
-                )
+                write_input(entry, content)
         (root / "task.json").write_text(
             json.dumps(manifest, indent=2), encoding="utf-8"
         )

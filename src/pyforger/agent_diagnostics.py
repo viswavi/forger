@@ -20,18 +20,32 @@ _ASSIGNMENT = re.compile(
 )
 
 
-def trajectory(events: Iterable[Any], spec: AgentSpec) -> dict[str, Any]:
-    """Retain native event dictionaries, never SDK configuration or credentials."""
+def credential_values(specs: Iterable[AgentSpec]) -> set[str]:
     secrets = {
         value for key, value in os.environ.items() if _SENSITIVE.search(key) and value
     }
-    if spec.model is not None and spec.model.config.api_key:
-        secrets.add(spec.model.config.api_key)
-    if spec.api_key_env and os.environ.get(spec.api_key_env):
-        secrets.add(os.environ[spec.api_key_env])
+    for spec in specs:
+        if spec.model is not None and spec.model.config.api_key:
+            secrets.add(spec.model.config.api_key)
+        if spec.api_key_env and os.environ.get(spec.api_key_env):
+            secrets.add(os.environ[spec.api_key_env])
+        secrets.update(getattr(spec, "secrets", ()))
+    return secrets
+
+
+def sanitizer(specs: Iterable[AgentSpec], *, secrets: Iterable[str] = ()):
+    """Snapshot every currently known concrete credential at persistence ingress."""
+    secrets = credential_values(specs) | set(secrets)
 
     def redact(value: Any) -> Any:
         if isinstance(value, dict):
+            # Preserve private capabilities across metadata-only sanitation.
+            try:
+                from pyforger.evidence_journal import is_private_reference
+            except ImportError:
+                is_private_reference = lambda _: False
+            if is_private_reference(value):
+                return value
             return {
                 key: "[REDACTED]" if _SENSITIVE.search(key) else redact(item)
                 for key, item in value.items()
@@ -45,9 +59,15 @@ def trajectory(events: Iterable[Any], spec: AgentSpec) -> dict[str, Any]:
             return _ASSIGNMENT.sub(lambda m: m[1] + "[REDACTED]", value)
         return value
 
+    return redact
+
+
+def trajectory(events: Iterable[Any], spec: AgentSpec) -> dict[str, Any]:
+    """Legacy in-memory reader; use the evidence journal for execution histories."""
+    clean = sanitizer([spec])
     return {
         "steps": [
-            redact(event if isinstance(event, dict) else event.model_dump(mode="json"))
+            clean(event if isinstance(event, dict) else event.model_dump(mode="json"))
             for event in events
         ]
     }

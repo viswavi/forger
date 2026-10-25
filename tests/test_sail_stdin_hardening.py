@@ -8,9 +8,11 @@ import sys
 import threading
 import time
 import uuid
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
 from pyforger.sail_sdk import (
     PROTOCOL_TIMELINE_FRAMES,
     _FrameWriter,
@@ -256,5 +258,8 @@ def test_protocol_metadata_is_appended_to_full_worker_log(tmp_path):
     diagnostics = {}
     attempt = {"protocol": {"pending_count": 1, "timeline": []}}
     _retain_worker_log(worker, diagnostics, attempt)
-    assert 'Host protocol metadata: {"pending_count": 1' in attempt["worker_log"]
+    assert (
+        'Host protocol metadata: {"pending_count": 1'
+        in Path(attempt["worker_log"]["evidence_file"]["path"]).read_text()
+    )
     assert diagnostics["sdk_worker_log"] == attempt["worker_log"]
