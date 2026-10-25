@@ -175,7 +175,10 @@ def daemon(path: str, lifetime: float) -> None:
 
     def run() -> None:
         try:
-            from _sail_sdk_worker import main
+            if os.environ.get("FORGER_TASK_TERMINAL") == "1":
+                from _sail_terminal import main
+            else:
+                from _sail_sdk_worker import main
 
             log.record("worker_started")
             main(mailbox)

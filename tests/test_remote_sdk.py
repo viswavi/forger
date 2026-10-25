@@ -13,7 +13,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
-
 from pyforger.acquire.model import Model
 from pyforger.agent_backend import AgentSpec
 from pyforger.sail_sdk import frames, worker_request
@@ -44,6 +43,14 @@ def test_real_worker_persists_repair_and_relays_commands(tmp_path, limit, turns)
                     if t["function"]["name"] != "finish"
                 )
             )
+            if not done:
+                assert name == "terminal"
+                schema = next(
+                    t["function"]["parameters"]
+                    for t in body["tools"]
+                    if t["function"]["name"] == "terminal"
+                )
+                assert {"is_input", "reset", "timeout"} <= schema["properties"].keys()
             args = {"message": "done"} if done else {"command": "printf result"}
             data = json.dumps(
                 {
@@ -162,7 +169,7 @@ def test_real_worker_persists_repair_and_relays_commands(tmp_path, limit, turns)
         )
         send(worker_request(spec, 30))
         ready = receive()
-        assert ready["kind"] == "ready"
+        assert ready["kind"] == "ready", ready
         assert ready["conversation_id"]
         ids = []
         for turn in ["create output"] + ["repair output"] * (turns - 1):
@@ -171,10 +178,18 @@ def test_real_worker_persists_repair_and_relays_commands(tmp_path, limit, turns)
             while command["kind"] in {"event_chunk", "event_end"}:
                 assert "test-only" not in json.dumps(command)
                 command = receive()
-            assert command["kind"] == "command", command
-            assert command["command"] == "printf result"
-            assert command["timeout"] == 300
-            send({"kind": "observation", "text": "exit_code=0\nresult"})
+            assert command["kind"] == "terminal", command
+            assert command["action"]["command"] == "printf result"
+            from openhands.tools.terminal.definition import TerminalObservation
+
+            send(
+                {
+                    "kind": "terminal_observation",
+                    "observation": TerminalObservation.from_text(
+                        "result", exit_code=0, command="printf result"
+                    ).model_dump(mode="json"),
+                }
+            )
             result = receive()
             while result["kind"] in {"event_chunk", "event_end"}:
                 assert "test-only" not in json.dumps(result)
@@ -186,8 +201,13 @@ def test_real_worker_persists_repair_and_relays_commands(tmp_path, limit, turns)
         assert result["iterations"] == 2 * turns
         assert len(requests) == 2 * turns
         for request in requests:
-            users = [message for message in request["messages"] if message["role"] == "user"]
-            assert "run time consuming commands in the background and monitor them" in json.dumps(users[-1])
+            users = [
+                message for message in request["messages"] if message["role"] == "user"
+            ]
+            assert (
+                "run time consuming commands in the background and monitor them"
+                in json.dumps(users[-1])
+            )
             assert "job.pid" in json.dumps(users[-1])
             assert "never broad pkill" in json.dumps(users[-1])
         send({"kind": "close"})

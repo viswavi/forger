@@ -37,6 +37,9 @@ SDK_REQUIREMENT = (
     "openhands-sdk @ git+https://github.com/neubig/software-agent-sdk.git"
     "@3e83b0734add43f40b45f89f16cdfb75356ff01e#subdirectory=openhands-sdk"
 )
+TOOLS_REQUIREMENT = SDK_REQUIREMENT.replace("openhands-sdk", "openhands-tools")
+
+
 MAX_FRAME_BYTES = 1024 * 1024
 # Keep write health independent of model latency and the overall session budget.
 # A timeout is only meaningful while stdout is also being consumed.
@@ -81,8 +84,8 @@ def _frame_kind(value: dict[str, Any]) -> str:
             "configured",
             "ready",
             "close",
-            "observation",
-            "command",
+            "terminal_observation",
+            "terminal",
             "event_chunk",
             "event_end",
             "result",
@@ -443,7 +446,15 @@ class _DetachedConnection:
                     raise ValueError("Invalid SDK output sequence")
                 ack = sequence
                 kind = json.loads(encoded).get("kind")
-                if kind in {"ready", "configured", "result", "error", "command"}:
+                if kind in {
+                    "ready",
+                    "configured",
+                    "result",
+                    "error",
+                    "terminal",
+                    "terminal_observation",
+                    "closed",
+                }:
                     awaiting = False
                 yield encoded
             if response["done"] and not response["outputs"]:
@@ -451,6 +462,14 @@ class _DetachedConnection:
 
     def close(self) -> None:
         self.stopped.set()
+
+
+class _TerminalConnection(_DetachedConnection):
+    @staticmethod
+    def argv(mode: str, *args: str) -> list[str]:
+        argv = _DetachedConnection.argv(mode, *args)
+        argv.insert(3, "FORGER_TASK_TERMINAL=1")
+        return argv
 
 
 def _retain_worker_log(
@@ -576,6 +595,7 @@ def remote_sdk_session(
         raise ValueError("Remote Sail SDK requires an explicit HTTPS model endpoint")
     image = sail.Image.from_registry(backend.image).pip_install(
         SDK_REQUIREMENT,
+        TOOLS_REQUIREMENT,
         "transformers==5.20.2",
         "mcp==1.30.0",
         "fastmcp==3.4.8",
@@ -636,7 +656,39 @@ def remote_sdk_session(
     attempt_record: dict[str, Any] = {}
     incoming: Any = None
     connection: _DetachedConnection | None = None
+    terminal_connection: _TerminalConnection | None = None
     try:
+        for filename in ("_sail_sdk_transport.py", "_sail_terminal.py"):
+            transport.box.fs.write(
+                "/tmp/" + filename,
+                io.BytesIO(Path(__file__).with_name(filename).read_bytes()),
+                mode=0o644,
+                user="root",
+            )
+        started_terminal = transport.box.run(
+            [
+                "setpriv",
+                "--reuid=65534",
+                "--regid=65534",
+                "--clear-groups",
+                "--no-new-privs",
+                "--bounding-set=-all",
+                "--inh-caps=-all",
+                "--ambient-caps=-all",
+                *_TerminalConnection.argv(
+                    "start", str(max(1, math.ceil(budget.remaining_s())))
+                ),
+            ],
+            user="root",
+            timeout=20,
+        )
+        if started_terminal.exit_code:
+            raise RuntimeError("Cannot start isolated native task terminal")
+        terminal_connection = _TerminalConnection(transport.box, budget)
+        terminal_incoming = iter(terminal_connection.stdout)
+        terminal_connection.stdin.write(json.dumps({"kind": "initialize"}) + "\n")
+        if json.loads(next(terminal_incoming)).get("kind") != "ready":
+            raise RuntimeError("Native task terminal failed isolation/setup checks")
         for filename in (
             "_sail_sdk_worker.py",
             "_sail_sdk_transport.py",
@@ -758,32 +810,15 @@ def remote_sdk_session(
                     current["steps"].append(event)
                     current["last_event_at"] = time.time()
                     event_parts.clear()
-                elif kind == "command":
-                    current["phase"] = "workspace_command"
+                elif kind == "terminal":
+                    current["phase"] = "terminal"
                     current["last_activity_at"] = time.time()
-                    command_timeout = min(float(frame.get("timeout", 300)), 300)
-                    result = transport.command(
-                        frame["command"], timeout_s=command_timeout
-                    )
+                    terminal_connection.stdin.write(json.dumps(frame) + "\n")
+                    reply = json.loads(next(terminal_incoming))
+                    if reply.get("kind") != "terminal_observation":
+                        raise RuntimeError("Task terminal failed")
                     current["phase"] = "agent_turn"
-                    command_notice = (
-                        f"Workspace command exceeded its {command_timeout:g}-second limit and its "
-                        "process group was terminated. Narrow or split the command "
-                        "and continue within the remaining session budget.\n"
-                        if result.exit_code in (124, 137, -9)
-                        and "timeout: sending signal" in result.stderr
-                        else ""
-                    )
-                    send(
-                        {
-                            "kind": "observation",
-                            "text": (
-                                command_notice
-                                + f"exit_code={result.exit_code}\nstdout:\n"
-                                f"{result.stdout}\nstderr:\n{result.stderr}"
-                            ),
-                        }
-                    )
+                    send(reply)
                 elif kind == "error":
                     handle_error(frame)
                 elif kind == "result":
@@ -938,6 +973,31 @@ def remote_sdk_session(
             current.pop("no_current_history_reason", None)
         diagnostics["current_trajectory"] = current
         diagnostics["trajectory"] = current
+        if terminal_connection is not None:
+
+            def close_terminal() -> None:
+                terminal_connection.stdin.write(json.dumps({"kind": "close"}) + "\n")
+                result: queue.Queue[Any] = queue.Queue(maxsize=1)
+
+                def drain_terminal() -> None:
+                    try:
+                        for encoded in terminal_incoming:
+                            if json.loads(encoded).get("kind") == "closed":
+                                result.put(True)
+                                return
+                    except (OSError, ValueError, StopIteration):
+                        pass
+                    result.put(False)
+
+                threading.Thread(target=drain_terminal, daemon=True).start()
+                try:
+                    diagnostics["terminal_cleanup_acknowledged"] = result.get(timeout=3)
+                except queue.Empty:
+                    diagnostics["terminal_cleanup_acknowledged"] = False
+                finally:
+                    terminal_connection.close()
+
+            cleanup("terminal.close", close_terminal)
         if connection is not None:
             diagnostics["sdk_transport"] = {
                 "mode": "detached-socket",

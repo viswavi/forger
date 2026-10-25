@@ -16,16 +16,16 @@ from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, cast
 
-
 COMMAND_GUIDANCE = (
     "Make sure to run time consuming commands in the background and monitor them "
-    "so that you can work efficiently. Foreground commands have a hard maximum "
-    "of 300 seconds, not a soft pause; timeout terminates their process group. "
-    "For long work use nohup bash -c 'your command' >job.log 2>&1 < /dev/null & "
-    "echo $! >job.pid. Return promptly, then monitor with separate commands using "
-    "the saved PID, ps, and bounded tail of the log. Check completion and outputs; "
-    "do not treat background launch as success. Stop only the verified job PID, "
-    "never broad pkill patterns. Background work must stay within the session budget."
+    "so that you can work efficiently. Redirect output to a log and record the PID, "
+    "for example: nohup bash -c 'your command' >job.log 2>&1 < /dev/null & echo $! >job.pid. "
+    "Monitor the saved PID with ps and bounded tail in separate terminal calls. "
+    "A native timeout returns control but does not prove completion or kill the job. "
+    "Use is_input to poll or send C-c to interrupt the foreground command. "
+    "Check outputs and completion; never treat a background launch as success. "
+    "Stop only the verified job PID, never broad pkill patterns. "
+    "All work must stay within the session budget."
 )
 
 
@@ -79,6 +79,8 @@ def main(wire: Any) -> None:
         sink = open(os.devnull, "w")
 
     class RedactedLog:
+        encoding = "utf-8"
+
         def __init__(self) -> None:
             self.lock = threading.Lock()
             self.pending = ""
@@ -187,61 +189,22 @@ def main(wire: Any) -> None:
     from openhands.sdk.conversation.impl.local_conversation import LocalConversation
     from openhands.sdk.llm import LLMCallContext
     from openhands.sdk.tool import (
-        Action,
         FinishTool,
-        Observation,
         Tool,
-        ToolDefinition,
         ToolExecutor,
-        register_tool,
-        resolve_tool,
     )
-    from pydantic import Field
+    from openhands.tools.terminal import TerminalTool
+    from openhands.tools.terminal.definition import TerminalAction, TerminalObservation
 
-    class CommandAction(Action):
-        command: str = Field(description="Bash command in the isolated /work workspace")
-        timeout: float = Field(
-            default=300,
-            gt=0,
-            le=300,
-            description="Hard foreground timeout in seconds (maximum 300); kills the command process group, not a soft pause.",
-        )
-
-    class CommandObservation(Observation):
-        pass
-
-    class CommandExecutor(ToolExecutor[CommandAction, CommandObservation]):
+    class TerminalRelay(ToolExecutor[TerminalAction, TerminalObservation]):
         def __call__(self, action: Any, conversation: Any = None) -> Any:
-            command = {
-                "kind": "command",
-                "command": action.command,
-                "timeout": action.timeout,
-            }
-            if len(json.dumps(command).encode()) + 1 > 256 * 1024:
-                raise ValueError("SDK command exceeds 256 KiB protocol frame limit")
             emit_events()
-            send(command)
+            send({"kind": "terminal", "action": action.model_dump(mode="json")})
             reply = receive()
-            if reply.get("kind") != "observation":
-                raise RuntimeError("Invalid controller response")
-            return CommandObservation.from_text(reply["text"])
+            if reply.get("kind") != "terminal_observation":
+                raise RuntimeError("Invalid terminal controller response")
+            return TerminalObservation.model_validate(reply["observation"])
 
-    class WorkspaceCommandTool(ToolDefinition[CommandAction, CommandObservation]):
-        @classmethod
-        def create(cls, conv_state: Any = None, **params: Any) -> list[Any]:
-            return [
-                cls(
-                    description=(
-                        "Execute bash in the isolated workspace. "
-                        "Use shell commands to read and edit files. " + COMMAND_GUIDANCE
-                    ),
-                    action_type=CommandAction,
-                    observation_type=CommandObservation,
-                    executor=CommandExecutor(),
-                )
-            ]
-
-    register_tool(WorkspaceCommandTool.name, WorkspaceCommandTool)
     redaction_spec = SimpleNamespace(
         model=SimpleNamespace(
             config=SimpleNamespace(api_key=request["llm"]["api_key"])
@@ -271,7 +234,7 @@ def main(wire: Any) -> None:
         def _initialize(self, state: Any) -> None:
             if self._initialized:
                 return
-            tools = list(resolve_tool(self.tools[0], state))
+            tools = list(TerminalTool.create(state, executor=TerminalRelay()))
             tools.extend(FinishTool.create(state))
             self._tools = {tool.name: tool for tool in tools}
             self._initialized = True
@@ -307,7 +270,7 @@ def main(wire: Any) -> None:
     )
     agent = WorkerAgent(
         llm=llm,
-        tools=[Tool(name=WorkspaceCommandTool.name)],
+        tools=[Tool(name=TerminalTool.name)],
         include_default_tools=["FinishTool"],
         agent_context=AgentContext(
             load_user_skills=False, load_public_skills=False, load_project_skills=False

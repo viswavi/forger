@@ -48,7 +48,7 @@ class SailBackend:
     def cache_key(self) -> object:
         """Identify functional execution configuration, excluding credentials."""
         return (
-            "sail-backend-v3-oracle-outcome-remote-sdk-" + SDK_VERSION,
+            "sail-backend-v4-native-terminal-sdk-" + SDK_VERSION,
             self.app,
             self.image,
         )
@@ -97,6 +97,10 @@ class SailBackend:
             workspace_path(name)
         budget = SessionBudget(agent.max_iterations, task.timeout_s)
         image = sail.Image.from_registry(self.image)
+        if agent.kind == "openhands-sdk":
+            from pyforger.sail_sdk import SDK_REQUIREMENT, TOOLS_REQUIREMENT
+
+            image = image.pip_install(SDK_REQUIREMENT, TOOLS_REQUIREMENT)
         if task.packages:
             image = image.pip_install(*task.packages)
         box = sail.Sailbox.create(
