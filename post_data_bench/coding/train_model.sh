@@ -27,7 +27,7 @@ DEFAULT_OUTPUT_BASE="/data/user_data/vijayv/tir5/agent_data_models/coding"
 DATA_FILE=""
 DATA_FILE_NAME=""
 OUTPUT_DIR=""
-LR="1e-5"
+LR="1e-6"
 EPOCHS="4"
 # Match convert_to_trl.py’s length filter to avoid truncated targets.
 MAX_LENGTH="18800"

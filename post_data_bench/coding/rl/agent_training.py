@@ -577,14 +577,10 @@ def main():
     )
     train.add_argument("--epochs", type=int, default=4)
     train.add_argument(
-        "--lr",
-        type=float,
-        help="Full-finetune LR; LoRA uses 10x (default 1e-5 local, 1e-6 tinker)",
+        "--lr", type=float, default=1e-6, help="Full-finetune LR; LoRA uses 10x"
     )
     train.add_argument("--lora-rank", type=int)
-    train.add_argument(
-        "--batch-size", type=int, help="Global batch (default 32 local, 128 tinker)"
-    )
+    train.add_argument("--batch-size", type=int, default=128)
     train.set_defaults(action=sft)
     for name in ("probe", "rl", "finalize"):
         command = commands.add_parser(name)
@@ -632,13 +628,6 @@ def main():
             args.backend = saved_backend(Path(args.data).resolve().parent, args.backend)
             if args.lora_rank is None:
                 args.lora_rank = 32 if args.backend == "tinker" else 256
-            # Local LoRA at 1e-6 x 10 and batch 128 barely moved the weights
-            # (2026-10-24 Orchard runs): https://thinkingmachines.ai/blog/lora/
-            # puts LoRA's LR at ~10x a FullFT LR and finds LoRA batch-sensitive.
-            if args.lr is None:
-                args.lr = 1e-6 if args.backend == "tinker" else 1e-5
-            if args.batch_size is None:
-                args.batch_size = 128 if args.backend == "tinker" else 32
             args.model = args.model or MODELS[args.backend]
             if args.model != MODELS[args.backend]:
                 raise ValueError("Model does not match the selected backend recipe")

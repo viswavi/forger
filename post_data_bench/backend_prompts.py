@@ -34,7 +34,7 @@ LOCAL_TRAINING = """Your sandbox has {GPU_DESCRIPTION}. SFT, validation and shor
 
 - SFT trial (use a new output directory per trial):
   python -m rl.agent_training sft --data {RAW_DATA_PATH} --output-dir {AGENT_DATA_DIR}/sft_trial_1
-  Optional: --epochs (default 4), --lr (default 1e-5; the LoRA SFT trainer multiplies it by 10), --lora-rank (default 256), --batch-size (default 32). LoRA covers every linear layer and the loss covers only the response. The trainer merges the adapter and saves a full Hugging Face checkpoint. Submit that directory, not an adapter or an intermediate epoch directory.
+  Optional: --epochs (default 4), --lr (default 1e-6; the LoRA SFT trainer multiplies it by 10), --lora-rank (default 256), --batch-size (default 128). LoRA covers every linear layer and the loss covers only the response. The trainer merges the adapter and saves a full Hugging Face checkpoint. Submit that directory, not an adapter or an intermediate epoch directory.
 - Validation evaluation:
   bash {TASK_DIR}/evaluate_model.sh --split val --server-backend vllm --model-path {AGENT_DATA_DIR}/sft_trial_1 --out-dir {AGENT_DATA_DIR}/validation/sft_trial_1
   Read metrics.json and predictions.jsonl. Use a fresh output directory when weights or settings change. --model-path {STUDENT_MODEL} evaluates the base model.
