@@ -342,7 +342,13 @@ def test_expired_remote_setup_records_no_current_history():
     }
     with pytest.raises(TimeoutError) as caught:
         with remote_sdk_session(
-            None, SimpleNamespace(budget=budget), None, None, None, 0, diagnostics
+            None,
+            SimpleNamespace(budget=budget),
+            None,
+            AgentSpec(Model("openai/test", api_key="test-credential")),
+            None,
+            0,
+            diagnostics
         ):
             pytest.fail("Expired setup must not start a worker")
     current = caught.value.diagnostics["current_trajectory"]
