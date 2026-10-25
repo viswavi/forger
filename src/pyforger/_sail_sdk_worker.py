@@ -17,6 +17,18 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 
+COMMAND_GUIDANCE = (
+    "Make sure to run time consuming commands in the background and monitor them "
+    "so that you can work efficiently. Foreground commands have a hard maximum "
+    "of 300 seconds, not a soft pause; timeout terminates their process group. "
+    "For long work use nohup bash -c 'your command' >job.log 2>&1 < /dev/null & "
+    "echo $! >job.pid. Return promptly, then monitor with separate commands using "
+    "the saved PID, ps, and bounded tail of the log. Check completion and outputs; "
+    "do not treat background launch as success. Stop only the verified job PID, "
+    "never broad pkill patterns. Background work must stay within the session budget."
+)
+
+
 def thread_snapshot(sink: Any) -> None:
     """Capture bounded Python frame metadata, without source lines or locals."""
     threads = []
@@ -188,13 +200,23 @@ def main(wire: Any) -> None:
 
     class CommandAction(Action):
         command: str = Field(description="Bash command in the isolated /work workspace")
+        timeout: float = Field(
+            default=300,
+            gt=0,
+            le=300,
+            description="Hard foreground timeout in seconds (maximum 300); kills the command process group, not a soft pause.",
+        )
 
     class CommandObservation(Observation):
         pass
 
     class CommandExecutor(ToolExecutor[CommandAction, CommandObservation]):
         def __call__(self, action: Any, conversation: Any = None) -> Any:
-            command = {"kind": "command", "command": action.command}
+            command = {
+                "kind": "command",
+                "command": action.command,
+                "timeout": action.timeout,
+            }
             if len(json.dumps(command).encode()) + 1 > 256 * 1024:
                 raise ValueError("SDK command exceeds 256 KiB protocol frame limit")
             emit_events()
@@ -211,7 +233,7 @@ def main(wire: Any) -> None:
                 cls(
                     description=(
                         "Execute bash in the isolated workspace. "
-                        "Use shell commands to read and edit files."
+                        "Use shell commands to read and edit files. " + COMMAND_GUIDANCE
                     ),
                     action_type=CommandAction,
                     observation_type=CommandObservation,
@@ -446,7 +468,9 @@ def main(wire: Any) -> None:
                     }
                 )
                 with phase("turn.send_message"):
-                    session.send_message(turn["instruction"])
+                    session.send_message(
+                        turn["instruction"] + "\n\n" + COMMAND_GUIDANCE
+                    )
                 with phase("run"):
                     session.run()
                 status = session.state.execution_status

@@ -173,6 +173,7 @@ def test_real_worker_persists_repair_and_relays_commands(tmp_path, limit, turns)
                 command = receive()
             assert command["kind"] == "command", command
             assert command["command"] == "printf result"
+            assert command["timeout"] == 300
             send({"kind": "observation", "text": "exit_code=0\nresult"})
             result = receive()
             while result["kind"] in {"event_chunk", "event_end"}:
@@ -184,6 +185,11 @@ def test_real_worker_persists_repair_and_relays_commands(tmp_path, limit, turns)
         assert ids[0] == ids[1]
         assert result["iterations"] == 2 * turns
         assert len(requests) == 2 * turns
+        for request in requests:
+            users = [message for message in request["messages"] if message["role"] == "user"]
+            assert "run time consuming commands in the background and monitor them" in json.dumps(users[-1])
+            assert "job.pid" in json.dumps(users[-1])
+            assert "never broad pkill" in json.dumps(users[-1])
         send({"kind": "close"})
         deadline = time.monotonic() + 20
         while not exchange()["done"]:

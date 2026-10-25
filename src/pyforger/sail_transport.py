@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import math
+import shlex
 import tempfile
 from collections.abc import Iterator
 from typing import Any
@@ -148,8 +149,23 @@ class SailTransport:
             raise TimeoutError("Sail command timed out")
         return result
 
-    def command(self, command: str, *, feedback: str = "") -> Any:
+    def command(
+        self, command: str, *, feedback: str = "", timeout_s: float | None = None
+    ) -> Any:
         """Run generated commands unprivileged, with no host credentials."""
+        if timeout_s is not None:
+            if not math.isfinite(timeout_s) or timeout_s <= 0:
+                raise ValueError("Command timeout must be finite and positive")
+            timeout_s = min(timeout_s, self.budget.remaining_s())
+            # GNU timeout owns the command process group; escalate even when a
+            # descendant ignores TERM. EOF prevents unattended stdin waits.
+            command = (
+                "exec timeout --verbose --kill-after=1s "
+                + shlex.quote(str(timeout_s) + "s")
+                + " bash -c "
+                + shlex.quote(command)
+                + " < /dev/null"
+            )
         return self.run(
             [
                 "/usr/bin/env",

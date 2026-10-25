@@ -727,3 +727,76 @@ def test_oracle_nonzero_is_execution_failure(
     assert result.files["analysis.py"] == script
     assert not (tmp_path / "verifier").exists()
     assert box.terminated
+
+
+@pytest.mark.parametrize("ignore_term", [False, True])
+def test_interactive_command_timeout_kills_descendants_and_can_recover(
+    tmp_path, ignore_term
+):
+    import time
+
+    class CommandBox:
+        def run(self, argv, **kwargs):
+            argv = list(argv)
+            argv[-1] = argv[-1].replace(
+                "cd /work && ", "cd " + str(tmp_path) + " && ", 1
+            )
+            result = subprocess.run(
+                argv, capture_output=True, text=True, timeout=kwargs["timeout"]
+            )
+            return SimpleNamespace(
+                exit_code=result.returncode,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                timed_out=False,
+            )
+
+    transport = SailTransport(CommandBox(), SessionBudget(None, 30))
+    started = time.monotonic()
+    result = transport.command(
+        ("trap '' TERM; " if ignore_term else "") + "(sleep 4; touch escaped) & wait",
+        timeout_s=0.2,
+    )
+    assert result.exit_code == (-9 if ignore_term else 124)
+    assert "sending signal TERM" in result.stderr
+    assert time.monotonic() - started < 3
+    assert transport.command("printf recovered", timeout_s=1).stdout == "recovered"
+    time.sleep(4)
+    assert not (tmp_path / "escaped").exists()
+    assert transport.budget.remaining_s() > 20
+
+
+def test_interactive_large_heredoc_closes_stdin(tmp_path):
+    class CommandBox:
+        def run(self, argv, **kwargs):
+            argv = list(argv)
+            argv[-1] = argv[-1].replace(
+                "cd /work && ", "cd " + str(tmp_path) + " && ", 1
+            )
+            result = subprocess.run(
+                argv, capture_output=True, text=True, timeout=kwargs["timeout"]
+            )
+            return SimpleNamespace(
+                exit_code=result.returncode,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                timed_out=False,
+            )
+
+    transport = SailTransport(CommandBox(), SessionBudget(None, 30))
+    payload = "x" * 13000
+    result = transport.command(
+        "cat > data <<'END'\n" + payload + "\nEND\ncat; wc -c < data", timeout_s=1
+    )
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "13001"
+    result = transport.command(
+        "nohup bash -c 'sleep 1; echo done > result' >job.log 2>&1 < /dev/null & echo $! >job.pid",
+        timeout_s=0.2,
+    )
+    assert result.exit_code == 0
+    assert int((tmp_path / "job.pid").read_text()) > 0
+    import time
+
+    time.sleep(1.5)
+    assert transport.command("cat result", timeout_s=1).stdout.strip() == "done"

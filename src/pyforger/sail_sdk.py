@@ -761,13 +761,25 @@ def remote_sdk_session(
                 elif kind == "command":
                     current["phase"] = "workspace_command"
                     current["last_activity_at"] = time.time()
-                    result = transport.command(frame["command"])
+                    command_timeout = min(float(frame.get("timeout", 300)), 300)
+                    result = transport.command(
+                        frame["command"], timeout_s=command_timeout
+                    )
                     current["phase"] = "agent_turn"
+                    command_notice = (
+                        f"Workspace command exceeded its {command_timeout:g}-second limit and its "
+                        "process group was terminated. Narrow or split the command "
+                        "and continue within the remaining session budget.\n"
+                        if result.exit_code in (124, 137, -9)
+                        and "timeout: sending signal" in result.stderr
+                        else ""
+                    )
                     send(
                         {
                             "kind": "observation",
                             "text": (
-                                f"exit_code={result.exit_code}\nstdout:\n"
+                                command_notice
+                                + f"exit_code={result.exit_code}\nstdout:\n"
                                 f"{result.stdout}\nstderr:\n{result.stderr}"
                             ),
                         }
