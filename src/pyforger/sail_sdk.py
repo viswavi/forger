@@ -479,6 +479,60 @@ def _retain_worker_log(
     diagnostics["sdk_worker_log_tail"] = text[-WORKER_LOG_TAIL_CHARS:]
 
 
+def _recover_current_events(worker: Any, current: dict[str, Any]) -> None:
+    """Read the credential-redacted event journal with a fixed cleanup deadline."""
+    result: queue.Queue[Any] = queue.Queue(maxsize=1)
+
+    def read() -> None:
+        try:
+            result.put(worker.fs.read(WORKER_LOG_PATH + ".events"))
+        except Exception as exc:  # noqa: BLE001 — evidence recovery must not mask failure
+            result.put(type(exc).__name__)
+
+    threading.Thread(target=read, name="sdk-event-recovery", daemon=True).start()
+    try:
+        raw = result.get(timeout=3)
+    except queue.Empty:
+        current["recovery"] = "read_deadline_exceeded"
+        return
+    if not isinstance(raw, bytes):
+        current["recovery"] = "unavailable:" + raw
+        return
+    events = []
+    matched = False
+    for line in raw[: 16 * 1024 * 1024 + 256].splitlines():
+        try:
+            record = json.loads(line)
+        except (ValueError, UnicodeError):
+            current["recovery_truncated"] = True
+            continue
+        if record.get("kind") == "omitted":
+            current["recovery_truncated"] = True
+        if record.get("turn_id") != current.get("turn_id") or not current.get(
+            "turn_id"
+        ):
+            continue
+        if record.get("call_id") != current.get("call_id"):
+            continue
+        matched = True
+        current["conversation_id"] = record.get("conversation_id")
+        current["last_event_at"] = record.get("at")
+        if record.get("kind") == "event":
+            events.append(record["event"])
+    if matched:
+        # Keep streamed events too if the bounded journal omitted a later event.
+        known = {json.dumps(event, sort_keys=True) for event in events}
+        events.extend(
+            event
+            for event in current["steps"]
+            if json.dumps(event, sort_keys=True) not in known
+        )
+        current["steps"] = events
+        current["recovery"] = "current_turn_journal"
+    else:
+        current["recovery"] = "no_matching_current_turn_journal"
+
+
 @contextmanager
 def remote_sdk_session(
     backend: Any,
@@ -494,7 +548,25 @@ def remote_sdk_session(
 
     budget = transport.budget
     redaction_specs = [spec]
-    request = worker_request(spec, budget.remaining_s())
+    current: dict[str, Any] = {
+        "call_id": uuid.uuid4().hex,
+        "turn_id": None,
+        "conversation_id": None,
+        "steps": [],
+        "incomplete": True,
+        "phase": "worker_setup",
+        "started_at": time.time(),
+        "no_current_history_reason": "session_not_started",
+    }
+    diagnostics["current_trajectory"] = current
+    diagnostics["trajectory"] = current
+    diagnostics.pop("conversation_id", None)
+    try:
+        request = worker_request(spec, budget.remaining_s())
+    except BaseException as exc:
+        current["captured_at"] = time.time()
+        exc.diagnostics = dict(diagnostics)
+        raise
     endpoint = request["llm"]["base_url"]
     if (
         not endpoint
@@ -554,7 +626,12 @@ def remote_sdk_session(
         ) + [instance.sailbox_id]
         return instance
 
-    worker = create_worker()
+    try:
+        worker = create_worker()
+    except BaseException as exc:
+        current["captured_at"] = time.time()
+        exc.diagnostics = dict(diagnostics)
+        raise
     writer: _FrameWriter | None = None
     attempt_record: dict[str, Any] = {}
     incoming: Any = None
@@ -585,10 +662,7 @@ def remote_sdk_session(
             "stdin_write_stalls": 0,
         }
         attempts.append(attempt_record)
-        # Downstream readers (sail_backend) read diagnostics["trajectory"], so
-        # keep it pointing at the live attempt while the per-attempt record
-        # preserves what a later retry would otherwise erase.
-        diagnostics["trajectory"] = attempt_record["trajectory"]
+        attempt_record["turns"] = []
         lifetime = max(1, math.ceil(budget.remaining_s()))
         started = worker.run(
             _DetachedConnection.argv("start", str(lifetime)),
@@ -646,10 +720,28 @@ def remote_sdk_session(
         if ready_frame.get("kind") != "ready":
             raise ValueError("Unknown remote SDK protocol frame")
 
+        diagnostics["conversation_id"] = ready_frame.get("conversation_id")
+        current["conversation_id"] = ready_frame.get("conversation_id")
+
         def generate(instruction: str) -> dict[str, bytes]:
+            nonlocal current
+            current = {
+                "call_id": call_id,
+                "turn_id": uuid.uuid4().hex,
+                "conversation_id": diagnostics.get("conversation_id"),
+                "steps": [],
+                "incomplete": True,
+                "phase": "agent_turn",
+                "started_at": time.time(),
+            }
+            diagnostics["current_trajectory"] = current
+            diagnostics["trajectory"] = current
+            attempt_record["turns"].append(current)
             send(
                 {
                     "kind": "turn",
+                    "call_id": call_id,
+                    "turn_id": current["turn_id"],
                     "instruction": instruction,
                     "timeout_s": budget.remaining_s(),
                 }
@@ -661,12 +753,16 @@ def remote_sdk_session(
                 if kind == "event_chunk":
                     event_parts.append(frame["text"])
                 elif kind == "event_end":
-                    attempt_record["trajectory"]["steps"].append(
-                        json.loads("".join(event_parts))
-                    )
+                    event = json.loads("".join(event_parts))
+                    attempt_record["trajectory"]["steps"].append(event)
+                    current["steps"].append(event)
+                    current["last_event_at"] = time.time()
                     event_parts.clear()
                 elif kind == "command":
+                    current["phase"] = "workspace_command"
+                    current["last_activity_at"] = time.time()
                     result = transport.command(frame["command"])
+                    current["phase"] = "agent_turn"
                     send(
                         {
                             "kind": "observation",
@@ -687,6 +783,12 @@ def remote_sdk_session(
                     )
                     diagnostics["execution_status"] = frame["status"]
                     diagnostics["conversation_id"] = frame["conversation_id"]
+                    current.update(
+                        conversation_id=frame["conversation_id"],
+                        incomplete=frame["status"] != "finished",
+                        phase="result",
+                        captured_at=time.time(),
+                    )
                     diagnostics.setdefault("snapshots", []).append(
                         {
                             "conversation_id": frame["conversation_id"],
@@ -708,6 +810,8 @@ def remote_sdk_session(
             raise RuntimeError("Remote SDK disconnected")
 
         def check(files: dict[str, bytes]) -> Measurement:
+            current["phase"] = "host_validation"
+            current["last_activity_at"] = time.time()
             missing = [name for name in task.outputs if name not in files]
             value = (
                 Measurement(passed=False, reason=f"Missing declared outputs: {missing}")
@@ -738,7 +842,20 @@ def remote_sdk_session(
             next_max_repairs: int,
             next_spec: Any = None,
         ) -> Any:
-            nonlocal task, validate, max_repairs, spec
+            nonlocal task, validate, max_repairs, spec, call_id, current
+            call_id = uuid.uuid4().hex
+            current = {
+                "call_id": call_id,
+                "turn_id": None,
+                "conversation_id": diagnostics.get("conversation_id"),
+                "steps": [],
+                "incomplete": True,
+                "phase": "configure",
+                "started_at": time.time(),
+                "no_current_history_reason": "turn_not_started",
+            }
+            diagnostics["current_trajectory"] = current
+            diagnostics["trajectory"] = current
             task, validate, max_repairs = next_task, next_validate, next_max_repairs
             if next_spec is not None:
                 redaction_specs.append(next_spec)
@@ -772,6 +889,7 @@ def remote_sdk_session(
                 spec = next_spec
             return run_session()
 
+        call_id = current["call_id"]
         yield run
     finally:
         from pyforger.agent_diagnostics import trajectory
@@ -793,6 +911,21 @@ def remote_sdk_session(
                     }
                 )
 
+        active_current = diagnostics.get("current_trajectory", current)
+        if active_current.get("phase") == "call_setup":
+            current = active_current
+        cleanup("current_events", lambda: _recover_current_events(worker, current))
+        if active_error is not None:
+            current["incomplete"] = True
+        current["captured_at"] = time.time()
+        if not current["steps"]:
+            current.setdefault(
+                "no_current_history_reason", "no_current_events_recoverable"
+            )
+        else:
+            current.pop("no_current_history_reason", None)
+        diagnostics["current_trajectory"] = current
+        diagnostics["trajectory"] = current
         if connection is not None:
             diagnostics["sdk_transport"] = {
                 "mode": "detached-socket",
@@ -853,7 +986,14 @@ def remote_sdk_session(
             diagnostics.clear()
             diagnostics.update(safe)
         if active_error is not None:
-            active_error.diagnostics = dict(diagnostics)
+            existing = getattr(active_error, "diagnostics", {})
+            if existing.get("current_trajectory", {}).get("call_id") not in (
+                None,
+                current["call_id"],
+            ):
+                existing.setdefault("enclosing_sessions", []).append(dict(diagnostics))
+            else:
+                active_error.diagnostics = {**existing, **diagnostics}
         elif cleanup_errors:
             cleanup_errors[0].diagnostics = dict(diagnostics)
             raise cleanup_errors[0]

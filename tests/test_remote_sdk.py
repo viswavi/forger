@@ -161,11 +161,16 @@ def test_real_worker_persists_repair_and_relays_commands(tmp_path, limit, turns)
             max_iterations=limit,
         )
         send(worker_request(spec, 30))
-        assert receive() == {"kind": "ready"}
+        ready = receive()
+        assert ready["kind"] == "ready"
+        assert ready["conversation_id"]
         ids = []
         for turn in ["create output"] + ["repair output"] * (turns - 1):
             send({"kind": "turn", "instruction": turn})
             command = receive()
+            while command["kind"] in {"event_chunk", "event_end"}:
+                assert "test-only" not in json.dumps(command)
+                command = receive()
             assert command["kind"] == "command", command
             assert command["command"] == "printf result"
             send({"kind": "observation", "text": "exit_code=0\nresult"})
@@ -260,3 +265,62 @@ def test_worker_allows_five_total_llm_attempts():
 
     spec = AgentSpec(model=Model("openai/test", api_key="test"))
     assert worker_request(spec, 600)["llm"]["num_retries"] == 5
+
+
+def test_current_event_recovery_is_bounded_and_rejects_stale_turn(tmp_path):
+    from types import SimpleNamespace
+
+    from pyforger.sail_sdk import _recover_current_events
+
+    prior = {
+        "kind": "event",
+        "call_id": "old",
+        "turn_id": "old",
+        "event": {"text": "stale"},
+    }
+    path = tmp_path / "events"
+    path.write_text(json.dumps(prior) + "\n")
+    current = {"call_id": "new", "turn_id": "new", "steps": []}
+    worker = SimpleNamespace(fs=SimpleNamespace(read=lambda _: path.read_bytes()))
+    _recover_current_events(worker, current)
+    assert current["steps"] == []
+    assert current["recovery"] == "no_matching_current_turn_journal"
+
+    released = threading.Event()
+
+    def blocked_read(_):
+        released.wait(10)
+        return b""
+
+    worker.fs.read = blocked_read
+    started = time.monotonic()
+    try:
+        _recover_current_events(worker, current)
+        assert time.monotonic() - started < 4
+        assert current["recovery"] == "read_deadline_exceeded"
+    finally:
+        released.set()
+
+
+def test_expired_remote_setup_records_no_current_history():
+    from types import SimpleNamespace
+
+    from pyforger.sail_sdk import remote_sdk_session
+    from pyforger.session_budget import SessionBudget
+
+    budget = SessionBudget(None, 0.001)
+    time.sleep(0.01)
+    diagnostics = {
+        "conversation_id": "stale",
+        "trajectory": {"steps": [{"text": "old"}]},
+    }
+    with pytest.raises(TimeoutError) as caught:
+        with remote_sdk_session(
+            None, SimpleNamespace(budget=budget), None, None, None, 0, diagnostics
+        ):
+            pytest.fail("Expired setup must not start a worker")
+    current = caught.value.diagnostics["current_trajectory"]
+    assert current["steps"] == []
+    assert current["conversation_id"] is None
+    assert current["no_current_history_reason"] == "session_not_started"
+    assert current["captured_at"]

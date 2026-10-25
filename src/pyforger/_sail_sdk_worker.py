@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 import traceback
+import uuid
 from contextlib import contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
@@ -160,6 +161,7 @@ def main(wire: Any) -> None:
             command = {"kind": "command", "command": action.command}
             if len(json.dumps(command).encode()) + 1 > 256 * 1024:
                 raise ValueError("SDK command exceeds 256 KiB protocol frame limit")
+            emit_events()
             send(command)
             reply = receive()
             if reply.get("kind") != "observation":
@@ -203,6 +205,7 @@ def main(wire: Any) -> None:
                     kwargs.get("call_context") or LLMCallContext(),
                     prompt_cache_key=None,
                 )
+            emit_events()
             with phase("model.generate"):
                 return super().generate(*args, **kwargs)
 
@@ -258,10 +261,54 @@ def main(wire: Any) -> None:
         def _ensure_plugins_loaded(self) -> None:
             self._plugins_loaded = True
 
+    conversation_id = uuid.uuid4()
+    event_path = (
+        os.environ.get("FORGER_WORKER_LOG", "/tmp/forger-worker.log") + ".events"
+    )
+    event_sink: Any = None
+    event_bytes = 0
+    event_omitted = False
+    current_turn: dict[str, Any] = {}
+
+    def journal(record: dict[str, Any]) -> None:
+        nonlocal event_bytes, event_omitted
+        if event_sink is None:
+            return
+        for prior_spec in redaction_specs:
+            record = trajectory([record], prior_spec)["steps"][0]
+        encoded = (json.dumps(record) + "\n").encode()
+        try:
+            if event_bytes + len(encoded) > 16 * 1024 * 1024:
+                if not event_omitted:
+                    event_sink.write(
+                        b'{"kind":"omitted","reason":"event journal byte limit"}\n'
+                    )
+                    event_sink.flush()
+                    event_omitted = True
+                return
+            event_sink.write(encoded)
+            event_sink.flush()
+            event_bytes += len(encoded)
+        except OSError:
+            pass
+
+    def retain_event(event: Any) -> None:
+        journal(
+            {
+                "kind": "event",
+                "conversation_id": str(conversation_id),
+                **current_turn,
+                "at": time.time(),
+                "event": event.model_dump(mode="json"),
+            }
+        )
+
     session: Any = SealedConversation(
         agent=agent,
         workspace="/tmp",
         visualizer=None,
+        conversation_id=conversation_id,
+        callbacks=[retain_event],
         max_iteration_per_run=sdk_iteration_limit(request["max_iterations"]),
     )
     emitted = 0
@@ -299,7 +346,7 @@ def main(wire: Any) -> None:
             emitted += 1
 
     try:
-        send({"kind": "ready"})
+        send({"kind": "ready", "conversation_id": str(session.id)})
         while True:
             turn = receive()
             if turn["kind"] == "close":
@@ -335,6 +382,33 @@ def main(wire: Any) -> None:
             try:
                 if "timeout_s" in turn:
                     deadline = time.monotonic() + turn["timeout_s"]
+                current_turn = {
+                    "call_id": turn.get("call_id"),
+                    "turn_id": turn.get("turn_id"),
+                }
+                event_bytes = 0
+                event_omitted = False
+                if event_sink is not None:
+                    event_sink.close()
+                try:
+                    event_sink = os.fdopen(
+                        os.open(
+                            event_path,
+                            os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
+                            0o600,
+                        ),
+                        "wb",
+                    )
+                except OSError:
+                    event_sink = None
+                journal(
+                    {
+                        "kind": "turn",
+                        "conversation_id": str(session.id),
+                        **current_turn,
+                        "at": time.time(),
+                    }
+                )
                 with phase("turn.send_message"):
                     session.send_message(turn["instruction"])
                 with phase("run"):
@@ -364,6 +438,8 @@ def main(wire: Any) -> None:
                 )
                 return
     finally:
+        if event_sink is not None:
+            event_sink.close()
         try:
             session.close()
         except Exception:
