@@ -26,6 +26,7 @@ from pyforger._sail_sdk_transport import (
     TRANSPORT_LOG_PATH,
     diagnostic_text,
 )
+from pyforger.agent_diagnostics import credential_values, sanitizer
 from pyforger.evidence_journal import (
     EvidenceJournal,
     evidence_file_chunks,
@@ -623,6 +624,7 @@ def remote_sdk_session(
 
     budget = transport.budget
     redaction_specs = [spec]
+    credentials = credential_values([spec])
     active_journal: EvidenceJournal | None = None
     current: dict[str, Any] = {
         "call_id": uuid.uuid4().hex,
@@ -803,10 +805,7 @@ def remote_sdk_session(
             budget.iterations = frame["iterations"]
             diagnostics["budget_exhausted"] = frame.get("budget_exhausted", False)
             diagnostics["execution_status"] = "error"
-            from pyforger.agent_diagnostics import trajectory
-
-            for redaction_spec in redaction_specs:
-                frame = trajectory([frame], redaction_spec)["steps"][0]
+            frame = sanitizer([], secrets=credentials)(frame)
             attempt_record["error"] = frame
             diagnostics["sdk_error"] = frame
             message = "Remote SDK failed: " + frame["error_type"]
@@ -869,11 +868,7 @@ def remote_sdk_session(
                 elif kind == "event_end":
                     sequence = frame.get("sequence")
                     expected = current.get("last_sequence", -1) + 1
-                    if (
-                        isinstance(sequence, int)
-                        and "last_sequence" in current
-                        and sequence != expected
-                    ):
+                    if type(sequence) is not int or sequence != expected:
                         current["sequence_error"] = {
                             "expected": expected,
                             "received": sequence,
@@ -984,6 +979,7 @@ def remote_sdk_session(
             diagnostics["trajectory"] = current
             task, validate, max_repairs = next_task, next_validate, next_max_repairs
             if next_spec is not None:
+                credentials.update(credential_values([next_spec]))
                 redaction_specs.append(next_spec)
                 updated = worker_request(next_spec, budget.remaining_s())
                 updated_endpoint = urlsplit(updated["llm"]["base_url"] or "")
@@ -1136,9 +1132,9 @@ def remote_sdk_session(
                 raise
 
         cleanup("worker.terminate", terminate)
-        from pyforger.agent_diagnostics import sanitizer
-
-        safe = sanitizer(redaction_specs)(diagnostics)
+        if connection is not None:
+            credentials.update(connection.secrets)
+        safe = sanitizer([], secrets=credentials)(diagnostics)
         diagnostics.clear()
         diagnostics.update(safe)
         if active_error is not None:
