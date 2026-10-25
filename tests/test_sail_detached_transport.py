@@ -13,7 +13,6 @@ import time
 from pathlib import Path
 
 import pytest
-
 from pyforger._sail_sdk_transport import MAX_OUTPUT_BYTES, Mailbox
 
 
@@ -352,3 +351,99 @@ def test_daemon_bind_failure_retains_exception_metadata(tmp_path):
     assert failure["errno"] is not None
     assert failure["stack"][-1]["function"] == "daemon"
     assert records[-1]["event"] == "daemon_stopped"
+
+
+@pytest.mark.parametrize("termination", ["SIGKILL", "SIGTERM", "SIGSEGV", "lifetime"])
+def test_supervisor_retains_daemon_exit_without_payloads(tmp_path, termination):
+    source = Path(__file__).parents[1] / "src/pyforger/_sail_sdk_transport.py"
+    shutil.copyfile(source, tmp_path / source.name)
+    # Only the SDK/provider boundary is replaced; subprocess supervision and socket
+    # framing exercise production code, with a worker that never calls the network.
+    (tmp_path / "_sail_sdk_worker.py").write_text(
+        "def main(wire):\n    wire.receive()\n    wire.send({'kind': 'ready'})\n"
+        "    wire.receive()\n"
+    )
+    path = str(tmp_path / "socket")
+    log = tmp_path / "transport.log.process"
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            str(tmp_path / source.name),
+            "supervise",
+            path,
+            "1" if termination == "lifetime" else "15",
+        ],
+        env=dict(os.environ, FORGER_TRANSPORT_LOG=str(tmp_path / "transport.log")),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    pid = None
+    secret = "memory-only-" + os.urandom(16).hex()
+    try:
+        deadline = time.monotonic() + 5
+        while not Path(path).exists():
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        pid = json.loads(log.read_text().splitlines()[0])["daemon_pid"]
+        if termination == "SIGKILL":
+            deadline = time.monotonic() + 7
+            while "daemon_alive" not in log.read_text():
+                assert time.monotonic() < deadline
+                time.sleep(0.02)
+        result = subprocess.run(
+            [sys.executable, str(tmp_path / source.name), "client", path],
+            input=json.dumps({"id": 1, "ack": 0, "frame": {"llm": {"api_key": secret}}})
+            + "\n",
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
+        )
+        assert json.loads(result.stdout)["accepted"] == 1
+        if termination != "lifetime":
+            os.kill(pid, getattr(signal, termination))
+        assert process.wait(timeout=5) == 0
+        records = [json.loads(line) for line in log.read_text().splitlines()]
+        final = records[-1]
+        assert final["event"] == "daemon_exit"
+        assert final["signal_name"] == (
+            None if termination == "lifetime" else termination
+        )
+        assert final["exit_code"] == (
+            0 if termination == "lifetime" else -getattr(signal, termination)
+        )
+        assert "VmRSS" in final["resources"]
+        assert log.stat().st_mode & 0o777 == 0o600
+        assert secret not in log.read_text()
+        assert "api_key" not in log.read_text()
+    finally:
+        if process.poll() is None:
+            if pid is not None:
+                os.kill(pid, signal.SIGKILL)
+            process.kill()
+        process.wait(timeout=5)
+
+
+def test_supervisor_records_uncaught_daemon_failure(tmp_path):
+    source = Path(__file__).parents[1] / "src/pyforger/_sail_sdk_transport.py"
+    log = tmp_path / "transport.log.process"
+    path = str(tmp_path / "occupied")
+    with socket.socket(socket.AF_UNIX) as listener:
+        listener.bind(path)
+        subprocess.run(
+            [sys.executable, str(source), "supervise", path, "10"],
+            env=dict(os.environ, FORGER_TRANSPORT_LOG=str(tmp_path / "transport.log")),
+            capture_output=True,
+            timeout=5,
+            check=True,
+        )
+    final = json.loads(log.read_text().splitlines()[-1])
+    assert final["event"] == "daemon_exit"
+    assert final["exit_code"] == 1
+    assert final["signal_number"] is None
+
+
+def test_resource_probe_tolerates_missing_process():
+    from pyforger._sail_sdk_transport import process_resources
+
+    assert process_resources(2**30) == {}

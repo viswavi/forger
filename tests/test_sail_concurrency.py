@@ -419,6 +419,8 @@ def test_concurrent_native_sessions(tmp_path, caplog, capsys, monkeypatch, mode)
                 else ""
             )
             assert result == {"answer": (marker + suffix).encode()}
+            assert "daemon_spawned" in diagnostics["sdk_process_log_tail"]
+            assert marker not in diagnostics["sdk_process_log_tail"]
             assert len(attempts) == (
                 2 if mode in {"repair", "stdin_stall", "stdin_ack_after_output"} else 0
             )

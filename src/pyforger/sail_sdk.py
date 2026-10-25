@@ -20,7 +20,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from pyforger._sail_sdk_transport import TRANSPORT_LOG_PATH, diagnostic_text
+from pyforger._sail_sdk_transport import (
+    PROCESS_LOG_PATH,
+    TRANSPORT_LOG_PATH,
+    diagnostic_text,
+)
 from pyforger.measurements import Measurement
 from pyforger.sdk_config import llm_options
 from pyforger.structured import generate_validated
@@ -812,20 +816,26 @@ def remote_sdk_session(
             lambda: _retain_worker_log(worker, diagnostics, attempt_record),
         )
 
-        def retain_transport_log() -> None:
+        def retain_transport_log(path: str, key: str) -> None:
             try:
-                raw = worker.fs.read(TRANSPORT_LOG_PATH)
+                raw = worker.fs.read(path)
             except Exception as exc:  # noqa: BLE001 — diagnostics must not fail cleanup
-                attempt_record["transport_log_error_type"] = type(exc).__name__
+                attempt_record[key.removesuffix("_tail") + "_error_type"] = type(
+                    exc
+                ).__name__
                 return
             text = diagnostic_text(
                 redact(raw.decode("utf-8", errors="replace")),
                 connection.secrets if connection is not None else [],
             )
-            attempt_record["transport_log_tail"] = text
-            diagnostics["sdk_transport_log_tail"] = text
+            attempt_record[key] = text
+            diagnostics["sdk_" + key] = text
 
-        cleanup("transport_log", retain_transport_log)
+        for path, key in (
+            (TRANSPORT_LOG_PATH, "transport_log_tail"),
+            (PROCESS_LOG_PATH, "process_log_tail"),
+        ):
+            cleanup(key, lambda path=path, key=key: retain_transport_log(path, key))
 
         def terminate() -> None:
             try:

@@ -8,6 +8,7 @@ import os
 import queue
 import re
 import resource
+import signal
 import socket
 import struct
 import subprocess
@@ -24,6 +25,7 @@ BATCH_BYTES = 256 * 1024
 
 DIAGNOSTIC_CHARS = 4000
 TRANSPORT_LOG_PATH = "/tmp/forger-transport.log"
+PROCESS_LOG_PATH = TRANSPORT_LOG_PATH + ".process"
 
 
 def diagnostic_text(text: str, secrets: list[str]) -> str:
@@ -42,13 +44,14 @@ def diagnostic_text(text: str, secrets: list[str]) -> str:
 
 
 class TransportLog:
-    def __init__(self) -> None:
+    def __init__(self, *, process: bool = False) -> None:
         self.lock = threading.Lock()
         self.records: collections.deque[dict[str, Any]] = collections.deque(maxlen=128)
         try:
             self.sink = os.fdopen(
                 os.open(
-                    os.environ.get("FORGER_TRANSPORT_LOG", TRANSPORT_LOG_PATH),
+                    os.environ.get("FORGER_TRANSPORT_LOG", TRANSPORT_LOG_PATH)
+                    + (".process" if process else ""),
                     os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
                     0o600,
                 ),
@@ -57,11 +60,14 @@ class TransportLog:
         except OSError:
             self.sink = open(os.devnull, "w")  # noqa: SIM115 — daemon-lifetime sink
 
-    def record(self, event: str, error: BaseException | None = None) -> None:
+    def record(
+        self, event: str, error: BaseException | None = None, **fields: Any
+    ) -> None:
         record: dict[str, Any] = {
             "event": event,
             "at": time.monotonic(),
             "pid": os.getpid(),
+            **fields,
         }
         if error is not None:
             # Exception messages and traceback source lines can contain payloads.
@@ -232,10 +238,77 @@ def daemon(path: str, lifetime: float) -> None:
         log.record("daemon_stopped")
 
 
+def process_resources(pid: int) -> dict[str, Any]:
+    """Read only fixed numeric fields, never process arguments or environment."""
+    result: dict[str, Any] = {}
+    try:
+        with open(f"/proc/{pid}/status") as stream:
+            for line in stream:
+                key, _, value = line.partition(":")
+                if key in {"VmRSS", "VmHWM", "VmSize", "Threads"}:
+                    result[key] = int(value.split()[0])
+    except (OSError, ValueError):
+        pass
+    try:
+        with open(f"/proc/{pid}/cgroup") as stream:
+            group = next(line.strip()[3:] for line in stream if line.startswith("0::"))
+        root = os.path.join("/sys/fs/cgroup", group.lstrip("/"))
+        for name in ("memory.current", "memory.peak", "memory.max", "memory.events"):
+            try:
+                with open(os.path.join(root, name)) as stream:
+                    text = stream.read(1024)
+                if name == "memory.events":
+                    result[name] = {
+                        key: int(value)
+                        for key, value in map(str.split, text.splitlines())
+                        if key
+                        in {"low", "high", "max", "oom", "oom_kill", "oom_group_kill"}
+                    }
+                else:
+                    result[name] = int(text) if text.strip() != "max" else "max"
+            except (OSError, ValueError):
+                pass
+    except (OSError, StopIteration):
+        pass
+    return result
+
+
+def supervise(path: str, lifetime: float) -> None:
+    # Separate process: Python handlers cannot observe SIGKILL or a fatal daemon crash.
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    os.umask(0o077)
+    log = TransportLog(process=True)
+    child = subprocess.Popen(
+        [sys.executable, "-u", __file__, "daemon", path, str(lifetime)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+    )
+    last = process_resources(child.pid)
+    log.record("daemon_spawned", daemon_pid=child.pid, resources=last)
+    while True:
+        try:
+            code = child.wait(timeout=5)
+            break
+        except subprocess.TimeoutExpired:
+            last = process_resources(child.pid)
+            log.record("daemon_alive", daemon_pid=child.pid, resources=last)
+    log.record(
+        "daemon_exit",
+        daemon_pid=child.pid,
+        exit_code=code,
+        signal_number=-code if code < 0 else None,
+        signal_name=signal.Signals(-code).name if code < 0 else None,
+        last_resources=last,
+        resources=process_resources(os.getpid()),
+    )
+
+
 def start(path: str, lifetime: float) -> None:
     os.mkdir(os.path.dirname(path), mode=0o700)
     child = subprocess.Popen(
-        [sys.executable, "-u", __file__, "daemon", path, str(lifetime)],
+        [sys.executable, "-u", __file__, "supervise", path, str(lifetime)],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -280,6 +353,8 @@ if __name__ == "__main__":
     mode, path = sys.argv[1:3]
     if mode == "start":
         start(path, float(sys.argv[3]))
+    elif mode == "supervise":
+        supervise(path, float(sys.argv[3]))
     elif mode == "daemon":
         daemon(path, float(sys.argv[3]))
     elif mode == "client":
