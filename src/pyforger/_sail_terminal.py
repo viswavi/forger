@@ -35,7 +35,6 @@ def main(mailbox):
         initialize = mailbox.receive()
         if initialize.get("kind") != "initialize":
             raise ValueError("Invalid terminal initialization")
-        registry.update_secrets(initialize.get("task_secrets", {}))
         mailbox.send({"kind": "ready"})
         while True:
             frame = mailbox.receive()

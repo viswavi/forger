@@ -26,9 +26,7 @@ def exercise():
 
     worker = threading.Thread(target=run)
     worker.start()
-    incoming.put(
-        {"kind": "initialize", "task_secrets": {"TASK_TOKEN": "explicit-task-sentinel"}}
-    )
+    incoming.put({"kind": "initialize"})
     assert outgoing.get(timeout=30) == {"kind": "ready"}, errors
 
     def command(text, **kwargs):
@@ -48,9 +46,6 @@ def exercise():
         assert "clean-env" in text(result)
         assert "private-denied" in text(result) and "proc-denied" in text(result)
         assert "service-only-sentinel" not in text(result)
-        result = command("printf '%s' \"$TASK_TOKEN\"", timeout=5)
-        assert "explicit-task-sentinel" not in text(result)
-        assert "<secret-hidden>" in text(result), text(result)
         command("mkdir -p sub; cd sub", timeout=5)
         assert "/work/sub" in text(command("pwd", timeout=5))
         command(
@@ -82,6 +77,24 @@ def exercise():
         assert outgoing.get(timeout=10) == {"kind": "closed"}
         worker.join(10)
     assert not worker.is_alive() and not errors, errors
+    # Exercise the SDK's supported grant API directly, not a Forger wire feature.
+    from types import SimpleNamespace
+    from openhands.sdk.conversation.secret_registry import SecretRegistry
+    from openhands.tools.terminal.definition import TerminalAction
+    from openhands.tools.terminal.impl import TerminalExecutor
+
+    registry = SecretRegistry()
+    registry.update_secrets({"TASK_TOKEN": "explicit-task-sentinel"})
+    executor = TerminalExecutor(working_dir="/work", terminal_type="subprocess")
+    try:
+        result = executor(
+            TerminalAction(command="printf '%s' \"$TASK_TOKEN\"", timeout=5),
+            SimpleNamespace(state=SimpleNamespace(secret_registry=registry)),
+        )
+        assert "explicit-task-sentinel" not in result.text
+        assert "<secret-hidden>" in result.text
+    finally:
+        executor.close()
     print("native terminal isolation and behavior checks passed")
 
 
