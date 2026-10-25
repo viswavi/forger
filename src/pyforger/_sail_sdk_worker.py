@@ -17,6 +17,39 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 
+def thread_snapshot(sink: Any) -> None:
+    """Capture bounded Python frame metadata, without source lines or locals."""
+    threads = []
+    for ident, frame in list(sys._current_frames().items())[:32]:
+        frames = []
+        for _ in range(32):
+            if frame is None:
+                break
+            frames.append(
+                {
+                    "file": frame.f_code.co_filename,
+                    "function": frame.f_code.co_name,
+                    "line": frame.f_lineno,
+                }
+            )
+            frame = frame.f_back
+        threads.append({"thread_id": ident, "frames": frames})
+    try:
+        sink.write(
+            json.dumps(
+                {
+                    "event": "worker_stack_snapshot",
+                    "at": time.monotonic(),
+                    "threads": threads,
+                }
+            )
+            + "\n"
+        )
+        sink.flush()
+    except OSError:
+        pass
+
+
 def main(wire: Any) -> None:
     """Run the persistent SDK worker loop until the controller closes it."""
     # SDK/provider logs must not become protocol frames or leak credentials.
@@ -77,9 +110,12 @@ def main(wire: Any) -> None:
     sys.stderr = safe_log
     sys.stdout = safe_log
 
-    # One process-wide dump, before the host's 60s write timeout; never recurring.
+    # CPython's asynchronous watchdog can SIGSEGV while walking changing C/Python
+    # callback frames. Python frame objects keep this scheduled snapshot safe.
     faulthandler.enable(file=sink)
-    faulthandler.dump_traceback_later(45, repeat=False, file=sink)
+    watchdog = threading.Timer(45, thread_snapshot, args=(sink,))
+    watchdog.daemon = True
+    watchdog.start()
 
     @contextmanager
     def phase(name: str) -> Any:
@@ -438,6 +474,7 @@ def main(wire: Any) -> None:
                 )
                 return
     finally:
+        watchdog.cancel()
         if event_sink is not None:
             event_sink.close()
         try:

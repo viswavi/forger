@@ -324,3 +324,54 @@ def test_expired_remote_setup_records_no_current_history():
     assert current["conversation_id"] is None
     assert current["no_current_history_reason"] == "session_not_started"
     assert current["captured_at"]
+
+
+def test_worker_stack_snapshot_survives_active_python_callbacks(tmp_path):
+    import shutil
+
+    interpreter = shutil.which("python3.12") or sys.executable
+    worker = Path(__file__).parents[1] / "src/pyforger/_sail_sdk_worker.py"
+    code = r"""
+import importlib.util, json, resource, sys, threading, time
+resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+spec = importlib.util.spec_from_file_location("worker", sys.argv[1])
+worker = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(worker)
+stop = threading.Event()
+def callback(x):
+    private_value = "credential-sentinel-not-for-logs"
+    return x % 17
+def busy():
+    while not stop.is_set():
+        sorted(range(1000), key=callback)
+thread = threading.Thread(target=busy)
+thread.start()
+try:
+    with open(sys.argv[2], "w") as sink:
+        for _ in range(100):
+            worker.thread_snapshot(sink)
+finally:
+    stop.set()
+    thread.join()
+"""
+    path = tmp_path / "stacks.jsonl"
+    result = subprocess.run(
+        [interpreter, "-c", code, str(worker), str(path)],
+        capture_output=True,
+        timeout=20,
+    )
+    assert result.returncode == 0, result.stderr.decode()
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    assert len(records) == 100
+    assert all(record["event"] == "worker_stack_snapshot" for record in records)
+    assert any(
+        frame["function"] == "callback"
+        for record in records
+        for stack in record["threads"]
+        for frame in stack["frames"]
+    )
+    assert all(len(record["threads"]) <= 32 for record in records)
+    assert all(
+        len(stack["frames"]) <= 32 for record in records for stack in record["threads"]
+    )
+    assert "credential-sentinel-not-for-logs" not in path.read_text()
