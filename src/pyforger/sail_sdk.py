@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from pyforger._sail_sdk_transport import TRANSPORT_LOG_PATH, diagnostic_text
 from pyforger.measurements import Measurement
 from pyforger.sdk_config import llm_options
 from pyforger.structured import generate_validated
@@ -335,6 +336,8 @@ class _DetachedConnection:
         self.stdout = self.read()
         self.requests = 0
         self.reconnects = 0
+        self.failures: deque[dict[str, Any]] = deque(maxlen=PROTOCOL_TIMELINE_FRAMES)
+        self.secrets: list[str] = []
 
     def write(self, encoded: str) -> None:
         self.pending.put_nowait(encoded)
@@ -369,11 +372,17 @@ class _DetachedConnection:
             else:
                 awaiting = True
                 number += 1
-                envelope.update(id=number, frame=json.loads(encoded))
+                frame = json.loads(encoded)
+                key = frame.get("llm", {}).get("api_key")
+                if isinstance(key, str) and key:
+                    self.secrets.append(key)
+                envelope.update(id=number, frame=frame)
             payload = json.dumps(envelope) + "\n"
             # Retry the SAME ID/cursor against the same daemon, never the SDK turn.
             for attempt in range(3):
                 self.budget.remaining_s()
+                exit_code = None
+                stderr = ""
                 try:
                     process = self.worker.exec(
                         self.argv("client"),
@@ -386,15 +395,42 @@ class _DetachedConnection:
                     process.stdin.close()
                     raw = "".join(process.stdout)
                     result = process.wait()
-                    if result.exit_code != 0:
-                        raise ConnectionError("SDK socket client failed")
+                    exit_code = result.exit_code
+                    if exit_code != 0:
+                        stderr = diagnostic_text(
+                            redact(getattr(result, "stderr", "")), self.secrets
+                        )
+                        raise ConnectionError(
+                            f"SDK socket client failed: exit_code={exit_code}; stderr={stderr}"
+                        )
                     response = json.loads(raw)
                     if envelope.get("id", 0) > response["accepted"]:
                         raise ValueError("SDK request not acknowledged")
                     self.requests += 1
                     break
-                except (OSError, EOFError):
-                    if attempt == 2 or self.stopped.is_set():
+                except (OSError, EOFError, ValueError, KeyError, TypeError) as exc:
+                    self.failures.append(
+                        {
+                            "request_id": number,
+                            "ack": ack,
+                            "attempt": attempt + 1,
+                            "at": time.monotonic(),
+                            "exit_code": exit_code,
+                            "stderr": stderr,
+                            "error_type": type(exc).__name__,
+                            "error_message": diagnostic_text(
+                                redact(str(exc))
+                                if isinstance(exc, (OSError, EOFError))
+                                else type(exc).__name__,
+                                self.secrets,
+                            ),
+                        }
+                    )
+                    if (
+                        not isinstance(exc, (OSError, EOFError))
+                        or attempt == 2
+                        or self.stopped.is_set()
+                    ):
                         raise
                     self.reconnects += 1
                     time.sleep(0.1)
@@ -532,15 +568,6 @@ def remote_sdk_session(
                 mode=0o644,
                 user="root",
             )
-        lifetime = max(1, math.ceil(budget.remaining_s()))
-        started = worker.run(
-            _DetachedConnection.argv("start", str(lifetime)),
-            user="65534",
-            timeout=min(20, lifetime),
-        )
-        if started.exit_code != 0:
-            raise RuntimeError("Remote SDK daemon failed to start")
-        connection = _DetachedConnection(worker, budget)
         # Attempt-scoped trajectory: the retry path must not erase the evidence
         # of the attempt that stalled, so each attempt keeps its own record.
         attempt_index = diagnostics.get("sdk_worker_attempts", 1) - 1
@@ -558,6 +585,25 @@ def remote_sdk_session(
         # keep it pointing at the live attempt while the per-attempt record
         # preserves what a later retry would otherwise erase.
         diagnostics["trajectory"] = attempt_record["trajectory"]
+        lifetime = max(1, math.ceil(budget.remaining_s()))
+        started = worker.run(
+            _DetachedConnection.argv("start", str(lifetime)),
+            user="65534",
+            timeout=min(20, lifetime),
+        )
+        if started.exit_code != 0:
+            stderr = diagnostic_text(
+                redact(started.stderr), [request["llm"].get("api_key", "")]
+            )
+            attempt_record["transport_start_failure"] = {
+                "exit_code": started.exit_code,
+                "stderr": stderr,
+            }
+            raise RuntimeError(
+                f"Remote SDK daemon failed to start: exit_code={started.exit_code}; "
+                f"stderr={stderr}"
+            )
+        connection = _DetachedConnection(worker, budget)
         writer = _FrameWriter(connection.stdin)
         incoming = _incoming_frames(connection.stdout, writer, budget)
         event_parts: list[str] = []
@@ -748,7 +794,9 @@ def remote_sdk_session(
                 "mode": "detached-socket",
                 "requests": connection.requests,
                 "reconnects": connection.reconnects,
+                "failures": list(connection.failures),
             }
+            attempt_record["transport"] = diagnostics["sdk_transport"]
             cleanup("connection.close", connection.close)
         if writer is not None:
             snapshot = (
@@ -763,6 +811,21 @@ def remote_sdk_session(
             "worker_log",
             lambda: _retain_worker_log(worker, diagnostics, attempt_record),
         )
+
+        def retain_transport_log() -> None:
+            try:
+                raw = worker.fs.read(TRANSPORT_LOG_PATH)
+            except Exception as exc:  # noqa: BLE001 — diagnostics must not fail cleanup
+                attempt_record["transport_log_error_type"] = type(exc).__name__
+                return
+            text = diagnostic_text(
+                redact(raw.decode("utf-8", errors="replace")),
+                connection.secrets if connection is not None else [],
+            )
+            attempt_record["transport_log_tail"] = text
+            diagnostics["sdk_transport_log_tail"] = text
+
+        cleanup("transport_log", retain_transport_log)
 
         def terminate() -> None:
             try:

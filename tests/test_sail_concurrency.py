@@ -211,6 +211,7 @@ def test_concurrent_native_sessions(tmp_path, caplog, capsys, monkeypatch, mode)
                 "PATH": os.environ["PATH"],
                 "HOME": self.directory.name,
                 "FORGER_WORKER_LOG": self.directory.name + "/forger-worker.log",
+                "FORGER_TRANSPORT_LOG": self.directory.name + "/forger-transport.log",
                 "LITELLM_LOCAL_MODEL_COST_MAP": "True",
             }
 

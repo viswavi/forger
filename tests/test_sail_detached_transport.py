@@ -69,6 +69,7 @@ def test_detached_subprocess_disconnect_and_secret_disk(tmp_path):
         "PATH": os.environ["PATH"],
         "HOME": str(tmp_path),
         "FORGER_WORKER_LOG": str(tmp_path / "worker.log"),
+        "FORGER_TRANSPORT_LOG": str(tmp_path / "transport.log"),
         "LITELLM_LOCAL_MODEL_COST_MAP": "True",
     }
     subprocess.run(argv + ["start", path, "30"], env=env, check=True, timeout=15)
@@ -189,6 +190,7 @@ def test_detached_daemon_lifetime_cleanup(tmp_path):
         text=True,
         timeout=10,
         check=True,
+        env=dict(os.environ, FORGER_TRANSPORT_LOG=str(tmp_path / "transport.log")),
     )
     assert result.stdout == result.stderr == ""
     with socket.socket(socket.AF_UNIX) as connection:
@@ -197,3 +199,156 @@ def test_detached_daemon_lifetime_cleanup(tmp_path):
     with socket.socket(socket.AF_UNIX) as connection:
         with pytest.raises(ConnectionRefusedError):
             connection.connect(path)
+
+
+@pytest.mark.parametrize("failure", ["socket", "stderr"])
+def test_controller_retains_each_nonzero_client_attempt(tmp_path, failure):
+    from types import SimpleNamespace
+
+    from pyforger.sail_sdk import _DetachedConnection
+    from pyforger.session_budget import SessionBudget
+
+    secret = "client-credential-" + os.urandom(16).hex()
+    source = Path(__file__).parents[1] / "src/pyforger/_sail_sdk_transport.py"
+
+    # Only the Sail exec boundary is adapted: the client and missing socket are real.
+    class LocalWorker:
+        def exec(self, argv, **kwargs):
+            argv = [sys.executable, str(source), "client", str(Path("/tmp") / secret)]
+            if failure == "stderr":
+                argv = [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import json,sys; frame=json.load(sys.stdin)['frame']; "
+                        "sys.stderr.write('x'*5000 + frame['llm']['api_key'] + '\\n'); "
+                        "sys.exit(7)"
+                    ),
+                ]
+            process = subprocess.Popen(
+                argv,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            def wait():
+                code = process.wait(timeout=5)
+                stderr = process.stderr.read()
+                process.stdout.close()
+                process.stderr.close()
+                return SimpleNamespace(exit_code=code, stderr=stderr)
+
+            return SimpleNamespace(
+                stdin=process.stdin, stdout=process.stdout, wait=wait
+            )
+
+    connection = _DetachedConnection(LocalWorker(), SessionBudget(None, 10))
+    connection.write(json.dumps({"llm": {"api_key": secret}}))
+    exit_code = 1 if failure == "socket" else 7
+    with pytest.raises(ConnectionError, match=f"exit_code={exit_code}") as error:
+        next(connection.stdout)
+    assert len(connection.failures) == 3
+    assert connection.reconnects == 2
+    assert [failure["attempt"] for failure in connection.failures] == [1, 2, 3]
+    assert all(item["exit_code"] == exit_code for item in connection.failures)
+    assert all(len(item["stderr"]) <= 4000 for item in connection.failures)
+    if failure == "socket":
+        assert all(
+            "FileNotFoundError" in item["stderr"] for item in connection.failures
+        )
+    else:
+        assert all("[REDACTED]" in item["stderr"] for item in connection.failures)
+    assert secret not in json.dumps(list(connection.failures)) + str(error.value)
+
+
+def test_daemon_diagnostics(tmp_path):
+    source = Path(__file__).parents[1] / "src/pyforger/_sail_sdk_transport.py"
+    shutil.copyfile(source, tmp_path / source.name)
+    # A minimal worker keeps this real daemon/socket test independent of SDK HTTP.
+    (tmp_path / "_sail_sdk_worker.py").write_text(
+        'def main(wire):\n    wire.receive()\n    raise RuntimeError("worker-secret")\n'
+    )
+    path = str(tmp_path / "socket")
+    log = tmp_path / "transport.log"
+    env = dict(os.environ, FORGER_TRANSPORT_LOG=str(log))
+    process = subprocess.Popen(
+        [sys.executable, str(tmp_path / source.name), "daemon", path, "2"],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    secret = "protocol-secret-" + os.urandom(16).hex()
+    try:
+        deadline = time.monotonic() + 5
+        while not Path(path).exists():
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        for _ in range(150):
+            with socket.socket(socket.AF_UNIX) as connection:
+                connection.connect(path)
+                connection.sendall(json.dumps({"ack": secret}).encode() + b"\n")
+                assert connection.recv(4) == b""
+        with socket.socket(socket.AF_UNIX) as connection:
+            connection.connect(path)
+            connection.sendall(
+                json.dumps(
+                    {"ack": 0, "id": 1, "frame": {"llm": {"api_key": secret}}}
+                ).encode()
+                + b"\n"
+            )
+            connection.recv(4096)
+        process.communicate(timeout=5)
+        records = [json.loads(line) for line in log.read_text().splitlines()]
+        assert len(records) <= 128
+        assert any(
+            r["event"] == "request_failed" and r["error_type"] == "ValueError"
+            for r in records
+        )
+        assert any(r["event"] == "worker_failed" for r in records)
+        assert any(r["event"] == "worker_done" for r in records)
+        assert records[-1]["event"] == "lifetime_expired"
+        assert log.stat().st_mode & 0o777 == 0o600
+        assert secret not in log.read_text()
+        assert "worker-secret" not in log.read_text()
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.communicate(timeout=5)
+
+
+def test_diagnostic_redaction_precedes_tail_truncation():
+    from pyforger._sail_sdk_transport import DIAGNOSTIC_CHARS, diagnostic_text
+
+    secret = "inline-key-" + os.urandom(16).hex()
+    raw = secret + "x" * (DIAGNOSTIC_CHARS - 2)
+    safe = diagnostic_text(raw, [secret])
+    assert len(safe) <= DIAGNOSTIC_CHARS
+    assert secret[-2:] not in safe
+    safe = diagnostic_text('Bearer unknown-value api_key="another-value"', [])
+    assert "unknown-value" not in safe
+    assert "another-value" not in safe
+
+
+def test_daemon_bind_failure_retains_exception_metadata(tmp_path):
+    source = Path(__file__).parents[1] / "src/pyforger/_sail_sdk_transport.py"
+    log = tmp_path / "transport.log"
+    path = str(tmp_path / "socket")
+    with socket.socket(socket.AF_UNIX) as listener:
+        listener.bind(path)
+        result = subprocess.run(
+            [sys.executable, str(source), "daemon", path, "10"],
+            env=dict(os.environ, FORGER_TRANSPORT_LOG=str(log)),
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    assert result.returncode != 0
+    records = [json.loads(line) for line in log.read_text().splitlines()]
+    failure = next(record for record in records if record["event"] == "daemon_failed")
+    assert failure["error_type"] == "OSError"
+    assert failure["errno"] is not None
+    assert failure["stack"][-1]["function"] == "daemon"
+    assert records[-1]["event"] == "daemon_stopped"
