@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import pickle
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, TypeVar
 
@@ -36,23 +36,31 @@ def get_formatted_logger(logger_name: str, level: int = logging.INFO) -> logging
     return logger
 
 
-def get_field(item: dict[str, Any], field: str, caller: str) -> Any:
-    """Retrieve a field from a dict item, raising a clear error if missing.
+def get_field(item: Any, field: str, caller: str) -> Any:
+    """Retrieve a field from a dict or data-model item, with a clear error.
 
     Args:
-        item: The dictionary to look up.
-        field: The key to retrieve.
+        item: A dict or an object with attributes (e.g. a pydantic model).
+        field: The key or attribute name to retrieve.
         caller: Name of the calling function, used in the error message.
 
     Raises:
-        KeyError: If the field is not present in the item.
+        KeyError: If the field is not present on the item.
     """
+    if isinstance(item, Mapping):
+        try:
+            return item[field]
+        except KeyError:
+            raise KeyError(
+                f"{caller}: item is missing required field '{field}'. "
+                f"Available fields: {list(item.keys())}"
+            )
     try:
-        return item[field]
-    except KeyError:
+        return getattr(item, field)
+    except AttributeError:
         raise KeyError(
             f"{caller}: item is missing required field '{field}'. "
-            f"Available fields: {list(item.keys())}"
+            f"Item type: {type(item).__name__}"
         )
 
 

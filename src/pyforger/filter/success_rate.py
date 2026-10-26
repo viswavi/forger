@@ -1,12 +1,14 @@
 """Select rows by measured success rates, independently of sample production."""
 from __future__ import annotations
 
-from typing import Any
+from typing import TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from pyforger.inspect.success_rate import _success_rates
 from pyforger.op import op
+
+Row = TypeVar("Row")
 
 
 class _Bounds(BaseModel):
@@ -26,19 +28,21 @@ class _Bounds(BaseModel):
 
 @op(name="filter.by_success_rate")
 def by_success_rate(
-    items: list[dict[str, Any]],
+    items: list[Row],
     *,
     outcomes_field: str = "evaluations",
     min_rate: float = 0.2,
     max_rate: float = 0.8,
     min_valid: int | None = None,
-) -> list[dict[str, Any]]:
+) -> list[Row]:
     """Keep rows whose existing measurements meet bounds in every group.
 
-    This function never generates samples, evaluates data, or writes files.
-    By default all grades must be present; ``min_valid`` explicitly permits
-    exclusions. Empty groups and rows without groups never pass. Inspect the
-    same inputs with ``inspect.success_rates`` for complete rejected-row reports.
+    Rows may be dicts or data models; ``outcomes_field`` is read as a key or
+    attribute. This function never generates samples, evaluates data, or writes
+    files. By default all grades must be present; ``min_valid`` explicitly
+    permits exclusions. Empty groups and rows without groups never pass.
+    Inspect the same inputs with ``inspect.success_rates`` for complete
+    rejected-row reports.
     """
     bounds = _Bounds(min_rate=min_rate, max_rate=max_rate, min_valid=min_valid)
     return [

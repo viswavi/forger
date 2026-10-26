@@ -1,11 +1,12 @@
 """Generic ordered calls and environment-credential redaction."""
 
+from collections import UserDict
 from functools import partial
 from threading import Barrier, Lock
 
 import pytest
 
-from pyforger.utils import redact, run_concurrently
+from pyforger.utils import get_field, redact, run_concurrently
 
 
 @pytest.mark.parametrize("concurrency", [None, 1, 2])
@@ -83,3 +84,10 @@ def test_run_concurrently_default_starts_all_jobs():
         return index
 
     assert run_concurrently(partial(job, i) for i in range(40)) == list(range(40))
+
+
+def test_get_field_mapping():
+    """Mapping keys take precedence over object attributes."""
+    assert get_field(UserDict({"passed": True}), "passed", "test") is True
+    with pytest.raises(KeyError, match="missing required field"):
+        get_field(UserDict({"passed": True}), "absent", "test")
