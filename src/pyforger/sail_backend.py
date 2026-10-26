@@ -64,14 +64,20 @@ class SailBackend:
         *,
         validate: Callable[[dict[str, bytes]], Measurement],
         max_repairs: int = 2,
+        require_outputs: bool = True,
     ) -> AgentRunResult:
         """Validate exact collected bytes on the host in one persistent session."""
         if type(max_repairs) is not int or max_repairs < 0:
             raise ValueError("max_repairs must be a nonnegative integer")
-        return self._run(task, agent, validate, max_repairs)
+        return self._run(task, agent, validate, max_repairs, require_outputs)
 
     def _run(
-        self, task: WorkspaceTask, agent: AgentSpec, validate: Any, max_repairs: int
+        self,
+        task: WorkspaceTask,
+        agent: AgentSpec,
+        validate: Any,
+        max_repairs: int,
+        require_outputs: bool = True,
     ) -> AgentRunResult:
         require_learner_runtime(self, agent)
         import sail
@@ -141,7 +147,13 @@ class SailBackend:
             if agent.kind == "openhands-sdk":
                 try:
                     files, attempts = self._sdk(
-                        transport, task, agent, validate, max_repairs, diagnostics
+                        transport,
+                        task,
+                        agent,
+                        validate,
+                        max_repairs,
+                        diagnostics,
+                        require_outputs=require_outputs,
                     )
                 except Exception as exc:
                     if diagnostics.get("execution_status") in (None, "finished"):
@@ -206,7 +218,7 @@ class SailBackend:
                                 passed=False,
                                 reason=f"Missing declared outputs: {missing}",
                             )
-                            if missing
+                            if missing and require_outputs
                             else validate(files)
                         )
                         budget.remaining_s()
@@ -288,7 +300,7 @@ class SailBackend:
                     failure_kind = "infrastructure"
                 else:
                     passed = reward_passed(reward.get("reward.txt", b""))
-            if validate is None and task.verifier is not None:
+            if task.verifier is not None:
                 files = collect()
             diagnostics["iterations"] = budget.iterations
             return AgentRunResult(
@@ -329,11 +341,20 @@ class SailBackend:
         validate: Any,
         max_repairs: int,
         diagnostics: dict[str, Any],
+        *,
+        require_outputs: bool = True,
     ) -> tuple[Any, Any]:
         from pyforger.sail_sdk import run_remote_sdk
 
         return run_remote_sdk(
-            self, transport, task, spec, validate, max_repairs, diagnostics
+            self,
+            transport,
+            task,
+            spec,
+            validate,
+            max_repairs,
+            diagnostics,
+            require_outputs=require_outputs,
         )
 
     def execute_program(

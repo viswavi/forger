@@ -179,7 +179,9 @@ def run_task(
             return Measurement(passed=True)
 
         try:
-            result = validated(workspace, agent, validate=check, max_repairs=2)
+            result = validated(
+                workspace, agent, validate=check, max_repairs=2, require_outputs=False
+            )
         except ValidationExhausted as error:
             if safety_rejected:
                 failure = ArtifactSafetyError(

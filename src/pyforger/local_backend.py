@@ -270,6 +270,7 @@ class LocalBackend:
         *,
         validate: Callable[[dict[str, bytes]], Measurement],
         max_repairs: int = 2,
+        require_outputs: bool = True,
     ) -> AgentRunResult:
         """Repair files in one SDK conversation and workspace with host validation."""
         from pyforger.agent_session import SessionBudget, run_validated_session
@@ -296,7 +297,7 @@ class LocalBackend:
                         session,
                         instruction=self._instruction(root, task),
                         collect=lambda: _collect(root, task.outputs),
-                        outputs=task.outputs,
+                        outputs=task.outputs if require_outputs else (),
                         validate=validate,
                         max_repairs=max_repairs,
                         budget=budget,
@@ -330,7 +331,7 @@ class LocalBackend:
                     status=status,
                     passed=passed,
                     failure_kind=failure_kind,
-                    files=result.output,
+                    files=_collect(root, task.outputs),
                     validation_attempts=result.attempts,
                     trajectory=retained_trajectory,
                     diagnostics={

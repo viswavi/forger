@@ -423,7 +423,9 @@ def test_sdk_failure_evidence(tmp_path, monkeypatch, validated, outcome, cleanup
         ),
     )
 
-    def remote_run(self, transport, task, spec, validate, max_repairs, diagnostics):
+    def remote_run(
+        self, transport, task, spec, validate, max_repairs, diagnostics, **kwargs
+    ):
         diagnostics["session_cleanup"] = (
             "failed"
             if cleanup_fails and outcome not in {"finished", "rejected"}
@@ -737,7 +739,10 @@ def test_oracle_nonzero_is_execution_failure(
 
 
 @pytest.mark.parametrize("repair", [False, True])
-def test_recorded_remote_artifact_safety_repair(tmp_path, monkeypatch, repair):
+@pytest.mark.parametrize("verifier", [None, "after", "credential"])
+def test_recorded_remote_artifact_safety_repair(
+    tmp_path, monkeypatch, repair, verifier
+):
     """Real Sail orchestration/transport/host loop; only service and SDK boundary replaced."""
     from pyforger.acquire.model import Model
     from pyforger.agent_tasks import TaskSpec
@@ -751,11 +756,21 @@ def test_recorded_remote_artifact_safety_repair(tmp_path, monkeypatch, repair):
     box.sailbox_id = "synthetic-offline"
     box.terminate = lambda: None
     original = box.run
-    box.run = lambda argv, **kw: (
-        SimpleNamespace(exit_code=0, timed_out=False)
-        if argv[0] == "bash"
-        else original(argv, **kw)
-    )
+
+    def run(argv, **kwargs):
+        if argv[0] == "bash" or "/usr/bin/env" == argv[0]:
+            if verifier is not None:
+                (box.root / "answer").write_text(
+                    secret if verifier == "credential" else "after"
+                )
+                (box.root / "reward.txt").write_text("1")
+            return SimpleNamespace(exit_code=0, timed_out=False, stdout="", stderr="")
+        if argv[0] == "python3" and "import os; p='/work/reward.txt';" in argv[-1]:
+            (box.root / "reward.txt").unlink(missing_ok=True)
+            return SimpleNamespace(exit_code=0, timed_out=False)
+        return original(argv, **kwargs)
+
+    box.run = run
     monkeypatch.setitem(
         sys.modules,
         "sail",
@@ -769,7 +784,7 @@ def test_recorded_remote_artifact_safety_repair(tmp_path, monkeypatch, repair):
     )
     messages = []
 
-    def sdk(self, transport, task, spec, validate, max_repairs, diagnostics):
+    def sdk(self, transport, task, spec, validate, max_repairs, diagnostics, **kwargs):
         diagnostics.update(execution_status="finished", trajectory={"steps": []})
 
         def generate(message):
@@ -791,14 +806,22 @@ def test_recorded_remote_artifact_safety_repair(tmp_path, monkeypatch, repair):
 
     monkeypatch.setattr(SailBackend, "_sdk", sdk)
     report = run_recorded_task(
-        TaskSpec("produce", outputs=("answer",)),
+        TaskSpec(
+            "produce",
+            outputs=("answer",),
+            verifier="modify output" if verifier else None,
+        ),
         agent=AgentSpec(Model("openai/test")),
         backend=SailBackend(),
         output=tmp_path / "run",
     )
     assert len(messages) == (2 if repair else 3)
     assert secret not in json.dumps(report)
-    assert report["status"] == ("completed" if repair else "artifact_safety_error")
-    if not repair:
+    accepted = repair and verifier != "credential"
+    assert report["status"] == ("completed" if accepted else "artifact_safety_error")
+    if accepted and verifier:
+        assert report["passed"] is True
+        assert (tmp_path / "run/answer").read_bytes() == b"after"
+    if not accepted:
         assert report["diagnostics"]["sailbox_id"] == "synthetic-offline"
         assert not (tmp_path / "run/answer").exists()
