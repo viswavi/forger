@@ -322,10 +322,23 @@ fi
 CHAT_TEMPLATE_KWARGS='{"enable_thinking": true}'
 [ "$NO_THINKING" -eq 1 ] && CHAT_TEMPLATE_KWARGS='{"enable_thinking": false}'
 
+# Throughput on 8x H100 80GB with a 4B model (Orchard 2026-10-26: the old
+# TP=2 / 8192 tokens / 0.5 settings, meant for 48GB cards, used ~45 of 80 GB).
+# Megatron and SGLang both run at TP_SIZE; Megatron disables sequence
+# parallelism by itself at TP=1. None of these change the training math.
+TP_SIZE="${RL_TP_SIZE:-1}"
+MAX_TOKENS_PER_GPU="${RL_MAX_TOKENS_PER_GPU:-24576}"
+SGLANG_MEM_FRACTION="${RL_SGLANG_MEM_FRACTION:-0.7}"
+echo ">>> throughput: TP=$TP_SIZE, max tokens/GPU $MAX_TOKENS_PER_GPU, SGLang memory fraction $SGLANG_MEM_FRACTION"
+
 DYNAMIC_FILTER_ARGS=""
 if [ "$FILTER_ZERO_STD" -eq 1 ]; then
-  DYNAMIC_FILTER_ARGS="--dynamic-sampling-filter-path slime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std"
-  echo ">>> dropping zero-variance prompt groups (this reshapes the training mix; see header)"
+  # Sample RL_OVER_SAMPLING_FACTOR x the batch per wave: most groups come back
+  # all-same and get dropped (Orchard 162166 step 4: 81+ dropped for 32 kept),
+  # so one-batch waves meant several refills per step.
+  OVER_SAMPLING=$(( ROLLOUT_BATCH_SIZE * ${RL_OVER_SAMPLING_FACTOR:-2} ))
+  DYNAMIC_FILTER_ARGS="--dynamic-sampling-filter-path slime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std --over-sampling-batch-size $OVER_SAMPLING"
+  echo ">>> dropping zero-variance prompt groups (this reshapes the training mix; see header); sampling $OVER_SAMPLING prompts per wave"
 fi
 SAMPLE_FILTER_ARGS=""
 if [ "$DROP_TRUNCATED" -eq 1 ]; then
@@ -447,7 +460,7 @@ TRAIN_ARGS=(
   --weight-decay 0.1 \
   --adam-beta1 0.9 \
   --adam-beta2 0.98 \
-  --tensor-model-parallel-size 2 \
+  --tensor-model-parallel-size $TP_SIZE \
   --sequence-parallel \
   --pipeline-model-parallel-size 1 \
   --context-parallel-size 1 \
@@ -455,9 +468,9 @@ TRAIN_ARGS=(
   --recompute-method uniform \
   --recompute-num-layers 1 \
   --use-dynamic-batch-size \
-  --max-tokens-per-gpu 8192 \
-  --rollout-num-gpus-per-engine 2 \
-  --sglang-mem-fraction-static 0.5 \
+  --max-tokens-per-gpu $MAX_TOKENS_PER_GPU \
+  --rollout-num-gpus-per-engine $TP_SIZE \
+  --sglang-mem-fraction-static $SGLANG_MEM_FRACTION \
   --attention-dropout 0.0 \
   --hidden-dropout 0.0 \
   --accumulate-allreduce-grads-in-fp32 \

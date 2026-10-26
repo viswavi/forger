@@ -347,8 +347,12 @@ eval every other model in this study gets.
 Defaults: 100 rollout steps x 32 prompts x 8 samples, `--global-batch-size 256`,
 lr 1e-6 constant, `--eps-clip-high 0.28`, KL coefficient 0. Response cap is 16384
 in thinking mode and 3072 without (no-thinking answers on this data measured
-329-3260 tokens). TP=2 for both Megatron and SGLang, `--sglang-mem-fraction-static
-0.5` and `--max-tokens-per-gpu 8192` for 48GB-class cards.
+329-3260 tokens). For 8x H100 80GB: TP=1 for both Megatron and SGLang (eight
+single-GPU rollout engines), `--sglang-mem-fraction-static 0.7` and
+`--max-tokens-per-gpu 24576`; for 48GB-class cards use `RL_TP_SIZE=2`,
+`RL_SGLANG_MEM_FRACTION=0.5` and `RL_MAX_TOKENS_PER_GPU=8192`. With the zero-std filter
+on, each sampling wave draws `RL_OVER_SAMPLING_FACTOR` (default 2) times the rollout
+batch, since most groups come back all-same and are dropped.
 
 Two Slime filters are on by default. DAPO-style dropping of all-same-reward groups
 (`check_reward_nonzero_std`) keeps sampling until each batch holds groups whose
