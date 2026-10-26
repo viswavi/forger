@@ -1431,8 +1431,8 @@ class TestTypedMetadataAndSettings:
         assert "timeout" not in kwargs
         assert "reasoning_effort" not in kwargs
         assert kwargs["extra_body"] == {"custom": 1}
-        assert kwargs["api_mode"] == "chat"
-        assert kwargs["capability_overrides"] == {"vision": False}
+        assert "api_mode" not in kwargs
+        assert "capability_overrides" not in kwargs
         assert kwargs["organization"] == "test-org"
 
     @patch("pyforger.acquire.model.litellm")

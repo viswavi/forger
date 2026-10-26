@@ -20,7 +20,10 @@ Prompt = Union[str, list[Message]]
 
 
 def _batch_completion_with_progress(
-    all_messages: list[list[dict[str, str]]], call_kwargs: dict[str, Any]
+    all_messages: list[list[dict[str, str]]],
+    call_kwargs: dict[str, Any],
+    *,
+    responses_api: bool = False,
 ) -> list[Any]:
     """Concurrent, progress-tracked replacement for litellm.batch_completion.
 
@@ -36,7 +39,11 @@ def _batch_completion_with_progress(
     max_workers = min(100, len(all_messages))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_idx = {
-            executor.submit(litellm.completion, messages=msgs, **call_kwargs): i
+            executor.submit(
+                litellm.responses if responses_api else litellm.completion,
+                **{("input" if responses_api else "messages"): msgs},
+                **call_kwargs,
+            ): i
             for i, msgs in enumerate(all_messages)
         }
         for future in tqdm(
@@ -249,11 +256,23 @@ def _extract_cost(response: Any, model_id: str) -> float:
     return float(cost)
 
 
-def _extract_usage(response: Any) -> Usage:
+def _extract_usage(response: Any, *, responses_api: bool = False) -> Usage:
     """Extract token counts, defaulting missing provider metadata to zero."""
     usage = getattr(response, "usage", None)
     if usage is None:
         return Usage()
+
+    if responses_api:
+        return Usage(
+            prompt_tokens=usage.input_tokens or 0,
+            completion_tokens=usage.output_tokens or 0,
+            reasoning_tokens=(
+                getattr(
+                    getattr(usage, "output_tokens_details", None), "reasoning_tokens", 0
+                )
+                or 0
+            ),
+        )
 
     details = getattr(usage, "completion_tokens_details", None)
     reasoning_tokens = (
@@ -331,7 +350,8 @@ class Model:
             timeout: Request timeout in seconds; SDK default is 300.
             reasoning_effort: Reasoning level; SDK default is "high".
             extra_body: Extra provider request body fields.
-            api_mode: SDK endpoint mode (auto, chat, or responses).
+            api_mode: Endpoint mode. Responses supports n=1 and no stop
+                sequences; auto and chat use chat completions.
             capability_overrides: SDK model capability overrides.
             custom_tokenizer: Optional tokenizer repo or path forwarded
                 to SDK agents.
@@ -495,6 +515,11 @@ class Model:
         }
         if n != 1:
             validate_kwargs["n"] = n
+        responses_api = self.config.api_mode == "responses"
+        if responses_api:
+            if n != 1 or stop is not None:
+                raise ValueError("Responses API supports only n=1 and stop=None")
+            validate_kwargs.pop("stop")
         self._check_params(**validate_kwargs)
 
         all_messages = [_to_messages(prompt) for prompt in prompts]
@@ -508,7 +533,40 @@ class Model:
             num_retries=self.config.num_retries,
             **self._completion_options(),
         )
-        if len(all_messages) == 1:
+        call_kwargs.pop("api_mode", None)
+        call_kwargs.pop("capability_overrides", None)
+        responses: list[Any]
+        if responses_api:
+            call_kwargs.pop("n")
+            call_kwargs.pop("stop")
+            tokens = call_kwargs.pop("max_tokens")
+            if tokens is not None:
+                call_kwargs.setdefault("max_output_tokens", tokens)
+            effort = call_kwargs.pop("reasoning_effort", None)
+            if effort is not None:
+                call_kwargs.setdefault("reasoning", {"effort": effort})
+            use_progress = (
+                self.config.show_progress if show_progress is None else show_progress
+            )
+            if len(all_messages) == 1:
+                responses = [litellm.responses(input=all_messages[0], **call_kwargs)]
+            elif use_progress:
+                responses = _batch_completion_with_progress(
+                    all_messages, call_kwargs, responses_api=True
+                )
+            else:
+                with ThreadPoolExecutor(
+                    max_workers=min(100, len(all_messages))
+                ) as pool:
+                    responses = list(
+                        pool.map(
+                            lambda messages: litellm.responses(
+                                input=messages, **call_kwargs
+                            ),
+                            all_messages,
+                        )
+                    )
+        elif len(all_messages) == 1:
             responses = [litellm.completion(messages=all_messages[0], **call_kwargs)]
         else:
             use_progress = (
@@ -527,10 +585,32 @@ class Model:
 
         results: list[GenerateResult] = []
         for response in responses:
-            completions = [choice.message.content or "" for choice in response.choices]
-            usage = _extract_usage(response)
+            if responses_api:
+                output = response.model_dump().get("output", [])
+                completions = [
+                    "".join(
+                        part.get("text", "")
+                        for item in output
+                        if item.get("type") == "message"
+                        for part in item.get("content", [])
+                        if part.get("type") == "output_text"
+                    )
+                ]
+                summaries = [
+                    part.get("text", "")
+                    for item in output
+                    if item.get("type") == "reasoning"
+                    for part in item.get("summary", [])
+                    if part.get("type") == "summary_text"
+                ]
+                reasoning = ["\n".join(summaries) or None]
+            else:
+                completions = [
+                    choice.message.content or "" for choice in response.choices
+                ]
+                reasoning = _extract_reasoning(response, self.config.model_id)
+            usage = _extract_usage(response, responses_api=responses_api)
             usage.cost_usd = _extract_cost(response, self.config.model_id)
-            reasoning = _extract_reasoning(response, self.config.model_id)
             result = GenerateResult(
                 completions,
                 usage=usage,
