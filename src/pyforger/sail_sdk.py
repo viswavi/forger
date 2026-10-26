@@ -619,6 +619,8 @@ def remote_sdk_session(
     validate: Any,
     max_repairs: int,
     diagnostics: dict[str, Any],
+    *,
+    require_outputs: bool = True,
 ) -> Any:
     """Own one real remote conversation across multiple host generation calls."""
     import sail
@@ -932,7 +934,7 @@ def remote_sdk_session(
             missing = [name for name in task.outputs if name not in files]
             value = (
                 Measurement(passed=False, reason=f"Missing declared outputs: {missing}")
-                if missing
+                if missing and require_outputs
                 else validate(files)
             )
             budget.remaining_s()
@@ -1155,9 +1157,18 @@ def _run_remote_sdk_once(
     validate: Any,
     max_repairs: int,
     diagnostics: dict[str, Any],
+    *,
+    require_outputs: bool = True,
 ) -> tuple[Any, Any]:
     with remote_sdk_session(
-        backend, transport, task, spec, validate, max_repairs, diagnostics
+        backend,
+        transport,
+        task,
+        spec,
+        validate,
+        max_repairs,
+        diagnostics,
+        require_outputs=require_outputs,
     ) as run:
         return run(task, validate, max_repairs)
 
@@ -1170,8 +1181,17 @@ def run_remote_sdk(
     validate: Any,
     max_repairs: int,
     diagnostics: dict[str, Any],
+    *,
+    require_outputs: bool = True,
 ) -> tuple[Any, Any]:
     """Run one conversation; transport retries reconnect only to its daemon."""
     return _run_remote_sdk_once(
-        backend, transport, task, spec, validate, max_repairs, diagnostics
+        backend,
+        transport,
+        task,
+        spec,
+        validate,
+        max_repairs,
+        diagnostics,
+        require_outputs=require_outputs,
     )
