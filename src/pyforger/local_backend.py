@@ -199,6 +199,16 @@ class LocalBackend:
     supports_inner_loop_validation = True
     supports_sdk_condensation = True
 
+    def open_session(self, *, deadline: float | None = None) -> Any:
+        """Retain a generation conversation until close, with cumulative budgets.
+
+        ``deadline`` is an optional absolute ``time.monotonic()`` deadline.
+        Fresh run_agent calls on this backend remain independent.
+        """
+        from pyforger.reusable_session import LocalSession
+
+        return LocalSession(self, deadline=deadline)
+
     def cache_key(self) -> object:
         """Return the local executor identity for cache keys."""
         return ("local-backend-v1", sys.version_info[:2])

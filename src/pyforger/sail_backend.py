@@ -24,6 +24,7 @@ from pyforger.agent_backend import (
 from pyforger.agent_backends import require_learner_runtime
 from pyforger.agent_diagnostics import trajectory
 from pyforger.measurements import Measurement
+from pyforger.sail_provision import create_sailbox
 from pyforger.sail_sdk import SDK_VERSION
 
 
@@ -44,6 +45,16 @@ class SailBackend:
         """Select the Sail app and public registry base image."""
         self.app = app
         self.image = image
+
+    def open_session(self, *, deadline: float | None = None) -> Any:
+        """Retain a generation conversation until close, with cumulative budgets.
+
+        ``deadline`` is an optional absolute ``time.monotonic()`` deadline.
+        Fresh run_agent calls on this backend remain independent.
+        """
+        from pyforger.reusable_session import SailSession
+
+        return SailSession(self, deadline=deadline)
 
     def cache_key(self) -> object:
         """Identify functional execution configuration, excluding credentials."""
@@ -109,13 +120,13 @@ class SailBackend:
             image = image.pip_install(SDK_REQUIREMENT, TOOLS_REQUIREMENT)
         if task.packages:
             image = image.pip_install(*task.packages)
-        box = sail.Sailbox.create(
+        box = create_sailbox(
+            sail.Sailbox.create,
+            budget=budget,
             app=sail.App.find(self.app, mint_if_missing=True),
             image=image,
-            image_build_timeout=max(1, math.ceil(budget.remaining_s())),
             name="forger-" + uuid.uuid4().hex,
             egress_policy=egress_policy(task.network),
-            timeout=budget.remaining_s(),
             max_lifetime_seconds=max(60, math.ceil(task.timeout_s) + 60),
         )
         diagnostics: dict[str, Any] = {

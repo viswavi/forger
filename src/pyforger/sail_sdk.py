@@ -33,6 +33,7 @@ from pyforger.evidence_journal import (
     iter_trajectory_events,
 )
 from pyforger.measurements import Measurement
+from pyforger.sail_provision import create_sailbox
 from pyforger.sdk_config import llm_options
 from pyforger.structured import generate_validated
 from pyforger.utils import redact
@@ -678,15 +679,15 @@ def remote_sdk_session(
     def create_worker() -> Any:
         attempt = diagnostics.get("sdk_worker_attempts", 0) + 1
         diagnostics["sdk_worker_attempts"] = attempt
-        started = time.monotonic()
-        instance = sail.Sailbox.create(
+        instance = create_sailbox(
+            sail.Sailbox.create,
+            budget=budget,
+            setup_times=diagnostics.setdefault("sdk_worker_setup_s", []),
             app=sail.App.find(backend.app, mint_if_missing=True),
             image=image,
-            image_build_timeout=max(1, math.ceil(budget.remaining_s())),
             name="forger-sdk-" + uuid.uuid4().hex,
             memory_limit_gib=8,
             egress_policy={"allowlist": [urlsplit(endpoint).hostname]},
-            timeout=budget.remaining_s(),
             max_lifetime_seconds=max(60, math.ceil(budget.remaining_s()) + 60),
         )
         diagnostics.update(
@@ -694,11 +695,6 @@ def remote_sdk_session(
             execution_mode="remote-sdk",
             sdk_version=SDK_VERSION,
             sdk_cleanup="pending",
-        )
-        # Provisioning is infrastructure, not agent work: credit it back so a
-        # slow image build cannot eat the time the agent needs to do the task.
-        diagnostics.setdefault("sdk_worker_setup_s", []).append(
-            round(budget.exempt_elapsed_s(started), 3)
         )
         diagnostics["sdk_worker_sailbox_ids"] = diagnostics.get(
             "sdk_worker_sailbox_ids", []

@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+
 from pyforger.acquire.model import Model
 from pyforger.agent_backend import AgentSpec
 from pyforger.sail_sdk import frames, worker_request
