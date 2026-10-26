@@ -4,8 +4,9 @@
 #        [--init-checkpoint <local-HF-dir>] [--no-thinking] [--dry-run]
 #
 # Use rl/measure_group_variance.py to check the starting policy: equal-reward
-# groups contribute no gradient. --filter-zero-std drops them and changes
-# the training mix. See rl/README.md for the recipe and remaining flags.
+# groups contribute no gradient. The zero-std filter (on by default) drops them
+# and changes the training mix; truncated samples are masked from the loss (also
+# on by default). See rl/README.md for the recipe and remaining flags.
 #
 # base_score matches benchmark accuracy; reward also penalizes false
 # abstention (-0.1). Optional --doubt-reward <1 grants gameable partial credit
@@ -57,10 +58,11 @@ INIT_CHECKPOINT="$QWEN3_4B_LOCAL"
 OUTPUT_DIR=""
 SPLIT="test"
 NO_THINKING=0
-# Off unless --filter-zero-std / --drop-truncated or RL_FILTER_ZERO_STD=1 /
-# RL_DROP_TRUNCATED=1 (the agent-facing rl.agent_training has no flags for them).
-FILTER_ZERO_STD="${RL_FILTER_ZERO_STD:-0}"
-DROP_TRUNCATED="${RL_DROP_TRUNCATED:-0}"
+# On by default, as in the babel run that took abstention from 7% (SFT) to 51%
+# (RL); RL_FILTER_ZERO_STD=0 / RL_DROP_TRUNCATED=0 turn them off (the
+# agent-facing rl.agent_training has no flags for them).
+FILTER_ZERO_STD="${RL_FILTER_ZERO_STD:-1}"
+DROP_TRUNCATED="${RL_DROP_TRUNCATED:-1}"
 NUM_ROLLOUT=80
 ROLLOUT_BATCH_SIZE=32
 N_SAMPLES_PER_PROMPT=8

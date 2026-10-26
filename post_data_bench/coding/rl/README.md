@@ -350,10 +350,15 @@ in thinking mode and 3072 without (no-thinking answers on this data measured
 329-3260 tokens). TP=2 for both Megatron and SGLang, `--sglang-mem-fraction-static
 0.5` and `--max-tokens-per-gpu 8192` for 48GB-class cards.
 
-`--filter-zero-std` turns on DAPO-style dropping of all-same-reward groups. It is
-off by default: it saves the training step from all-zero groups, but it also
-reshapes the training mix, and early on the groups most likely to come back
-all-zero are exactly the impossible ones.
+Two Slime filters are on by default. DAPO-style dropping of all-same-reward groups
+(`check_reward_nonzero_std`) keeps sampling until each batch holds groups whose
+rewards differ, and `rl.sample_filters.drop_truncated` masks capped completions
+from the loss. Together they are the RL settings of the babel run that took
+abstention from 7% after SFT to 51% after RL (Sep 2026); without them, two Orchard
+agent runs (Oct 2026) went from 9-12% abstention after SFT to 0% after RL. The
+group filter reshapes the training mix, and early on the groups most likely to come
+back all-zero are the impossible ones. `RL_FILTER_ZERO_STD=0` and
+`RL_DROP_TRUNCATED=0` turn the filters off.
 
 ## Process reward for thinking mode
 
