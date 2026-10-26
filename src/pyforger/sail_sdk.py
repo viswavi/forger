@@ -43,7 +43,7 @@ SDK_VERSION = "1.58.0"
 # released SDK versions containing both changes.
 SDK_REQUIREMENT = (
     "openhands-sdk @ git+https://github.com/neubig/software-agent-sdk.git"
-    "@3e83b0734add43f40b45f89f16cdfb75356ff01e#subdirectory=openhands-sdk"
+    "@a8e34dd0f4475553855a78c69369a4a37d24e125#subdirectory=openhands-sdk"
 )
 TOOLS_REQUIREMENT = SDK_REQUIREMENT.replace("openhands-sdk", "openhands-tools")
 
