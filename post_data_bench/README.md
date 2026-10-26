@@ -74,8 +74,8 @@ add `reasoning_tokens` again. Model aliases must contain `DeepSeek-V4-Flash` or
 `GLM-5.3` (case-insensitive). There are no defined weights for other models:
 Forger reports `NaN` units for them, and budgeted helpers reject them before a call.
 
-Generation/SFT has 230M units. RL has 75M for Impossible-LiveCodeBench and NormAD,
-and 230M for PRBench and HealthBench. These are separate quotas. The launcher
+Generation/SFT has 180M units. RL has 50M for Impossible-LiveCodeBench and NormAD,
+and 180M for PRBench and HealthBench. These are separate quotas. The launcher
 currently supports coding and culture; unified RL currently supports coding only.
 
 ### LiteLLM helpers without Forger
@@ -111,7 +111,7 @@ ledger path and quota:
 
 ```bash
 export FORGER_TOKEN_USAGE_FILE=/path/to/persistent/run/generation_token_usage.json
-export FORGER_TOKEN_UNIT_LIMIT=230000000
+export FORGER_TOKEN_UNIT_LIMIT=180000000
 ```
 
 The `FORGER_` prefix is retained for configuration compatibility and does not

@@ -9,7 +9,7 @@ import os
 import tempfile
 from pathlib import Path
 
-DEFAULT_GENERATION_LIMIT = 230_000_000
+DEFAULT_GENERATION_LIMIT = 180_000_000
 DEFAULT_JUDGE_MODEL = "litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731"
 DEFAULT_REASONING_EFFORT = "low"
 _WEIGHTS = {"deepseek-v4-flash": (1, 3), "glm-5.3": (4, 12.5)}
@@ -136,7 +136,7 @@ def default_rl_limit(task):
     """
     normalized = str(task).strip().lower()
     if normalized in ("coding", "culture"):
-        return 75_000_000
+        return 50_000_000
     raise ValueError("Unknown task for RL token-unit quota")
 
 

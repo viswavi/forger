@@ -52,7 +52,7 @@ def low_rows_message(path: str | Path, minimum: int, seconds_left: float) -> str
         found = (
             f"Your dataset at {path} has {rows} rows. The default RL recipe draws "
             f"{RL_PROMPT_DRAWS:,} prompts from your training rows, so each would be "
-            f"seen about {visits:.0f} times; about 1,600 rows is a good target, and "
+            f"seen about {visits:.0f} times; about 1,250 rows is a good target, and "
             f"at least {minimum:,} is what we expect realistically."
         )
     return (

@@ -129,9 +129,9 @@ def test_judge_policy():
 
 def test_task_quotas():
     """The policy covers the launcher task names."""
-    assert DEFAULT_GENERATION_LIMIT == 230_000_000
+    assert DEFAULT_GENERATION_LIMIT == 180_000_000
     for task in ("coding", "culture", " Coding "):
-        assert default_rl_limit(task) == 75_000_000
+        assert default_rl_limit(task) == 50_000_000
     with pytest.raises(ValueError):
         default_rl_limit("unknown")
 

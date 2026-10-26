@@ -4,7 +4,7 @@ For agent-generated shared SFT/RL triples, submitted SFT checkpoints, and mixed
 code/LM rubrics, see [Unified training](UNIFIED_TRAINING.md). The original
 benchmark-specific reward recipe below remains available.
 
-Unified coding runs use 230M generation token units and a separate 75M judge
+Unified coding runs use 180M generation token units and a separate 50M judge
 quota shared by probes and final RL. The judge must be DeepSeek-V4-Flash; its
 default reasoning effort is `low`, with `none` and `high` also accepted. See
 [token-unit quotas](../../README.md#token-unit-quotas) for weights and accounting.

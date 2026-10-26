@@ -82,7 +82,7 @@ Set `FORGER_TOKEN_USAGE_FILE` to a persistent JSON ledger and
 Ledgers retain `cost_usd` and count missing prices in `unpriced_calls`.
 New calls stop once the recorded total reaches the quota; in-flight calls can overshoot it.
 Unknown model weights or missing token counts stop budgeted calls instead of counting as free.
-The benchmark launcher sets a 230M-unit generation quota and a separate judge quota,
+The benchmark launcher sets a 180M-unit generation quota and a separate judge quota,
 given in the task instructions.
 Direct API calls must use the launcher's `rl.token_budget` helpers to participate in accounting.
 

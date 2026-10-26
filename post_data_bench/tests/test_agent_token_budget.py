@@ -49,9 +49,9 @@ class AgentTokenBudgetTests(unittest.TestCase):
             os.environ["JUDGE_REASONING_EFFORT"] = "high"
             configure(directory, "coding")
             generation = TokenUnitBudget(
-                os.environ["FORGER_TOKEN_USAGE_FILE"], 230_000_000
+                os.environ["FORGER_TOKEN_USAGE_FILE"], 180_000_000
             )
-            judge = TokenUnitBudget(os.environ["JUDGE_TOKEN_USAGE_FILE"], 75_000_000)
+            judge = TokenUnitBudget(os.environ["JUDGE_TOKEN_USAGE_FILE"], 50_000_000)
             generation.record(DEFAULT_JUDGE_MODEL, 10, 20)
             judge.record(DEFAULT_JUDGE_MODEL, 5, 3)
             os.environ.clear()  # Recovery starts in a fresh terminal session.
@@ -101,8 +101,8 @@ class AgentTokenBudgetTests(unittest.TestCase):
                 {
                     "version": 1,
                     "task": "coding",
-                    "generation_token_unit_limit": 230_000_000,
-                    "judge_token_unit_limit": 75_000_000,
+                    "generation_token_unit_limit": 180_000_000,
+                    "judge_token_unit_limit": 50_000_000,
                     "judge_model": DEFAULT_JUDGE_MODEL,
                     "judge_reasoning_effort": "low",
                     "tinker_usd_limits": {"sft": 150.0, "rl": 400.0},
@@ -149,19 +149,19 @@ class AgentTokenBudgetTests(unittest.TestCase):
             first, second = Path(directory) / "first", Path(directory) / "second"
             configure(first, "culture")
             previous = TokenUnitBudget(
-                os.environ["FORGER_TOKEN_USAGE_FILE"], 230_000_000
+                os.environ["FORGER_TOKEN_USAGE_FILE"], 180_000_000
             )
             previous.record(DEFAULT_JUDGE_MODEL, 1, 1)
             configure(second, "culture")
             self.assertEqual(Path(os.environ["FORGER_TOKEN_USAGE_FILE"]).parent, second)
             self.assertEqual(
                 TokenUnitBudget(
-                    os.environ["FORGER_TOKEN_USAGE_FILE"], 230_000_000
+                    os.environ["FORGER_TOKEN_USAGE_FILE"], 180_000_000
                 ).snapshot()["token_units"],
                 0,
             )
             self.assertEqual(previous.snapshot()["token_units"], 4)
-            self.assertEqual(os.environ["JUDGE_TOKEN_UNIT_LIMIT"], "75000000")
+            self.assertEqual(os.environ["JUDGE_TOKEN_UNIT_LIMIT"], "50000000")
 
     def test_invalid_judge_configuration_fails_before_creating_run(self):
         """Validate judge settings before creating any run files."""
@@ -281,7 +281,7 @@ completion(model='litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731')
             TASK_DIR="/task",
             STUDENT_MODEL="Qwen/Qwen3-8B",
             MAX_SFT_LENGTH="18800",
-            GENERATION_TOKEN_UNIT_LIMIT="230000000",
+            GENERATION_TOKEN_UNIT_LIMIT="180000000",
             GENERATION_USAGE_PATH="/run/generation_token_usage.json",
             TIMEOUT_HOURS="6",
             GPU_DESCRIPTION="one local GPU, for embeddings and clustering only",
@@ -306,7 +306,7 @@ completion(model='litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731')
                 prompt = prompts[relative] = (
                     (ROOT / relative).read_text().format(**values)
                 )
-                self.assertIn("230000000 token units", prompt)
+                self.assertIn("180000000 token units", prompt)
                 self.assertNotIn("llm_spend", prompt)
                 # Agents must never learn benchmark names.
                 self.assertIsNone(BENCHMARK_NAMES.search(prompt))

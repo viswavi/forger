@@ -126,10 +126,10 @@ values, include them in prompts, or pass them on command lines:
   experiments and agent RL. There is no fallback to the generation key.
 - `LITELLM_JUDGE_BASE_URL`: optional; defaults to `LITELLM_BASE_URL`.
 - `FORGER_TOKEN_USAGE_FILE` / `FORGER_TOKEN_UNIT_LIMIT`: persistent generation
-  ledger and quota; the launcher allocates 230M units.
+  ledger and quota; the launcher allocates 180M units.
 - `JUDGE_TOKEN_USAGE_FILE` / `JUDGE_TOKEN_UNIT_LIMIT`: persistent judge ledger and
-  quota; coding/Impossible-LiveCodeBench and culture/NormAD receive 75M units.
-  The quota policy assigns 230M to PRBench and HealthBench; this launcher does
+  quota; coding/Impossible-LiveCodeBench and culture/NormAD receive 50M units.
+  The quota policy assigns 180M to PRBench and HealthBench; this launcher does
   not yet implement those tasks.
 - `JUDGE_MAX_CONSECUTIVE_FAILURES`: defaults to 5. Each logical judge call gets three local attempts with backoff, each
   with up to two LiteLLM retries. After five consecutive exhausted calls in any reward
