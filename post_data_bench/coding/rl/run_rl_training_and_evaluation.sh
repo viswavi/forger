@@ -402,10 +402,7 @@ RUNTIME_ENV_FILE=\$(mktemp /dev/shm/rubric-ray-env.\$\$.XXXXXX.json)
 trap 'rm -f \"\$RUNTIME_ENV_FILE\"; ray stop --force >/dev/null 2>&1 || true' EXIT
 python3 '$CODING_DIR/rl/rubric_runtime_env.py' \"\$RUNTIME_ENV_JSON\" \"\$RUNTIME_ENV_FILE\"
 RAY_JOB_ID=\$(python3 -c 'import uuid; print(uuid.uuid4().hex)')
-submit_job() {
-ray job submit --no-wait --address=http://127.0.0.1:8265 --submission-id=\"\$RAY_JOB_ID\" \
-  --runtime-env=\"\$RUNTIME_ENV_FILE\" \
-  -- python3 train.py \
+TRAIN_ARGS=(
   --actor-num-nodes 1 \
   --actor-num-gpus-per-node $NUM_GPUS \
   --colocate \
@@ -469,21 +466,33 @@ ray job submit --no-wait --address=http://127.0.0.1:8265 --submission-id=\"\$RAY
   $PRECISION_ARGS \
   $GRAD_FUSION_ARG \
   ${EXTRA_SLIME_ARGS[*]:-}
-}
+)
 
-# ray start returns before the dashboard's job agent is up; submitting then can
-# fail with HTTP 504 (Orchard jobs 162111, 162165). Retry the local submission
-# unless the job did get through.
-submitted=0
-for attempt in 1 2 3 4 5 6; do
-  if submit_job; then submitted=1; break; fi
-  if ray job status --address=http://127.0.0.1:8265 \"\$RAY_JOB_ID\" >/dev/null 2>&1; then submitted=1; break; fi
-  echo \">>> ray job submit failed (attempt \$attempt); retrying in 20s\"
-  sleep 20
-done
-[ \"\$submitted\" = 1 ] || { echo '!!! could not submit the RL job to ray' >&2; exit 1; }
-ray job logs --address=http://127.0.0.1:8265 --follow \"\$RAY_JOB_ID\" || true
-python3 '$CODING_DIR/rl/ray_job_status.py' \"\$RAY_JOB_ID\"
+if [ \"\${RL_RAY_JOB_SUBMIT:-0}\" = 1 ]; then
+  # Ray's job API. ray start returns before the dashboard's job agent is up, and
+  # submitting then can fail with HTTP 504 (Orchard 162111, 162165): retry
+  # unless the job did get through.
+  submitted=0
+  for attempt in 1 2 3 4 5 6; do
+    if ray job submit --no-wait --address=http://127.0.0.1:8265 --submission-id=\"\$RAY_JOB_ID\" \
+        --runtime-env=\"\$RUNTIME_ENV_FILE\" -- python3 train.py \"\${TRAIN_ARGS[@]}\"; then
+      submitted=1; break
+    fi
+    if ray job status --address=http://127.0.0.1:8265 \"\$RAY_JOB_ID\" >/dev/null 2>&1; then submitted=1; break; fi
+    echo \">>> ray job submit failed (attempt \$attempt); retrying in 20s\"
+    sleep 20
+  done
+  [ \"\$submitted\" = 1 ] || { echo '!!! could not submit the RL job to ray' >&2; exit 1; }
+  ray job logs --address=http://127.0.0.1:8265 --follow \"\$RAY_JOB_ID\" || true
+  python3 '$CODING_DIR/rl/ray_job_status.py' \"\$RAY_JOB_ID\"
+else
+  # Default: run train.py as the driver on the cluster ray start launched. The
+  # dashboard's job agent can stay unresponsive (Orchard 162173: every
+  # submission waited 300 s, then HTTP 504). Workers inherit this shell's
+  # exports (PYTHONPATH, reward and judge settings) through ray start.
+  echo \">>> running train.py as the ray driver (RL_RAY_JOB_SUBMIT=1 uses ray job submit)\"
+  RAY_ADDRESS=\"\$MASTER_ADDR:6379\" python3 train.py \"\${TRAIN_ARGS[@]}\"
+fi
 ray stop --force 2>/dev/null || true
 "
 
