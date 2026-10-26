@@ -27,7 +27,7 @@ DEFAULT_OUTPUT_BASE="/data/user_data/vijayv/tir5/agent_data_models/coding"
 DATA_FILE=""
 DATA_FILE_NAME=""
 OUTPUT_DIR=""
-LR="1e-6"
+LR="1e-5"
 EPOCHS="4"
 # Match convert_to_trl.py’s length filter to avoid truncated targets.
 MAX_LENGTH="18800"
@@ -122,12 +122,17 @@ export HF_HUB_OFFLINE=1
 # chat template to match evaluation. Derive a per-job rendezvous port to
 # avoid collisions between jobs sharing a node.
 MAIN_PROCESS_PORT=$(( 20000 + (${SLURM_JOB_ID:-$RANDOM} % 40000) ))
-# LoRA on every linear layer: attention-only LoRA underperforms MLP LoRA
-# (https://thinkingmachines.ai/blog/lora/). alpha=32 with the 1/r scaling keeps
-# the best LR roughly rank-independent.
+# MLP-only LoRA (r=256, alpha=32) with the loss over the whole sequence: the
+# recipe that seeded abstention for RL on babel (Sep 2026) and again on Orchard
+# (161710: 12/136 abstaining samples on impossible val tasks). Attention-q/v-only
+# LoRA barely trained; all-linear LoRA with response-only loss loops at LoRA 1e-4.
+# SFT_LORA_TARGETS / SFT_ASSISTANT_ONLY_LOSS=1 override both.
+LORA_TARGETS="${SFT_LORA_TARGETS:-gate_proj,up_proj,down_proj}"
 LORA_ARGS=()
 [[ "$FULL_FINETUNE" -eq 0 ]] && LORA_ARGS=(--use-lora --lora-r 256 --lora-alpha 32
-  --lora-target-modules q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj)
+  --lora-target-modules "$LORA_TARGETS")
+LOSS_ARGS=()
+[[ "${SFT_ASSISTANT_ONLY_LOSS:-0}" == 1 ]] && LOSS_ARGS=(--assistant-only-loss)
 accelerate launch \
   --config_file "${EXAMPLES_DIR}/training/fsdp.yaml" \
   --num_processes "$NUM_GPUS" \
@@ -138,7 +143,7 @@ accelerate launch \
     --output-dir "$SFT_DIR" \
     --learning-rate "$LR" \
     --epochs "$EPOCHS" --save-every-epoch --max-length "$MAX_LENGTH" \
-    "${LORA_ARGS[@]}" --use-default-chat-template --assistant-only-loss \
+    "${LORA_ARGS[@]}" --use-default-chat-template "${LOSS_ARGS[@]}" \
     --per-device-batch-size 1 --grad-accum "$GRAD_ACCUM" \
     "${EXTRA_TRAIN_ARGS[@]}"
 

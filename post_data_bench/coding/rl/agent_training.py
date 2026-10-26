@@ -577,7 +577,9 @@ def main():
     )
     train.add_argument("--epochs", type=int, default=4)
     train.add_argument(
-        "--lr", type=float, default=1e-6, help="Full-finetune LR; LoRA uses 10x"
+        "--lr",
+        type=float,
+        help="Full-finetune LR; LoRA uses 10x (default 1e-5 local, 1e-6 tinker)",
     )
     train.add_argument("--lora-rank", type=int)
     train.add_argument("--batch-size", type=int, default=128)
@@ -628,6 +630,10 @@ def main():
             args.backend = saved_backend(Path(args.data).resolve().parent, args.backend)
             if args.lora_rank is None:
                 args.lora_rank = 32 if args.backend == "tinker" else 256
+            # Local MLP-only LoRA on Qwen3-4B needs LoRA 1e-4 to seed abstention
+            # (Orchard 161710, babel Sep 2026); 1e-5 left it at 0/136 samples.
+            if args.lr is None:
+                args.lr = 1e-6 if args.backend == "tinker" else 1e-5
             args.model = args.model or MODELS[args.backend]
             if args.model != MODELS[args.backend]:
                 raise ValueError("Model does not match the selected backend recipe")
