@@ -276,8 +276,6 @@ class LocalBackend:
 
         if type(max_repairs) is not int or max_repairs < 0:
             raise ValueError("max_repairs must be a nonnegative integer")
-        if task.verifier is not None:
-            raise ValueError("Validated generation uses validate, not a task verifier")
         require_learner_runtime(self, agent)
         budget = SessionBudget(agent.max_iterations, task.timeout_s)
         with tempfile.TemporaryDirectory(prefix="forger-local-agent-") as directory:
@@ -309,12 +307,34 @@ class LocalBackend:
                     if agent.kind == "openhands-sdk"
                     else None
                 )
+                passed = None
+                status = "completed"
+                diagnostics = {}
+                failure_kind = None
+                if task.verifier is not None:
+                    _materialize(
+                        root / "verifier", dict(task.verifier_files), workspace=root
+                    )
+                    reward = root / "reward.txt"
+                    reward.unlink(missing_ok=True)
+                    verified = _run_script(root, task.verifier, budget.remaining_s())
+                    diagnostics = {
+                        "verifier_exit_code": verified.returncode,
+                        "verifier_stderr": verified.stderr[-4000:],
+                    }
+                    if verified.returncode:
+                        status, failure_kind = "failed", "infrastructure"
+                    else:
+                        passed = reward.is_file() and reward_passed(reward.read_bytes())
                 return AgentRunResult(
-                    status="completed",
+                    status=status,
+                    passed=passed,
+                    failure_kind=failure_kind,
                     files=result.output,
                     validation_attempts=result.attempts,
                     trajectory=retained_trajectory,
                     diagnostics={
+                        **diagnostics,
                         "iterations": budget.iterations,
                         "session_id": str(getattr(session, "id", "script")),
                         **(
@@ -326,7 +346,10 @@ class LocalBackend:
                 )
             except BaseException as exc:
                 if agent.kind == "openhands-sdk":
-                    retained = self._trajectory(session, agent)
+                    try:
+                        retained = self._trajectory(session, agent)
+                    except (AttributeError, ValueError, TypeError, OSError):
+                        retained = None
                     exc.diagnostics = {
                         "trajectory": retained,
                         "iterations": budget.iterations,

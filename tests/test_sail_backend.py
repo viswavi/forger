@@ -734,3 +734,71 @@ def test_oracle_nonzero_is_execution_failure(
     assert result.files["analysis.py"] == script
     assert not (tmp_path / "verifier").exists()
     assert box.terminated
+
+
+@pytest.mark.parametrize("repair", [False, True])
+def test_recorded_remote_artifact_safety_repair(tmp_path, monkeypatch, repair):
+    """Real Sail orchestration/transport/host loop; only service and SDK boundary replaced."""
+    from pyforger.acquire.model import Model
+    from pyforger.agent_tasks import TaskSpec
+    from pyforger.structured import generate_validated
+    from pyforger.task_runs import run_recorded_task
+
+    secret = "synthetic-remote-credential-646464"
+    monkeypatch.setenv("REMOTE_TEST_SECRET", secret)
+    box = LocalSailbox(tmp_path / "box")
+    box.root.mkdir()
+    box.sailbox_id = "synthetic-offline"
+    box.terminate = lambda: None
+    original = box.run
+    box.run = lambda argv, **kw: (
+        SimpleNamespace(exit_code=0, timed_out=False)
+        if argv[0] == "bash"
+        else original(argv, **kw)
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "sail",
+        SimpleNamespace(
+            Image=SimpleNamespace(
+                from_registry=lambda _: SimpleNamespace(pip_install=lambda *a: object())
+            ),
+            App=SimpleNamespace(find=lambda *a, **k: None),
+            Sailbox=SimpleNamespace(create=lambda **k: box),
+        ),
+    )
+    messages = []
+
+    def sdk(self, transport, task, spec, validate, max_repairs, diagnostics):
+        diagnostics.update(execution_status="finished", trajectory={"steps": []})
+
+        def generate(message):
+            messages.append(message)
+            assert secret not in message
+            (box.root / "answer").write_bytes(
+                b"safe" if repair and len(messages) > 1 else b"\xff" + secret.encode()
+            )
+            return transport.files({"answer": b""}, write=False)
+
+        result = generate_validated(
+            task.instruction,
+            generate=generate,
+            validate=validate,
+            revise=lambda request, attempt: attempt.measurement.model_dump_json(),
+            max_attempts=max_repairs + 1,
+        )
+        return result.output, result.attempts
+
+    monkeypatch.setattr(SailBackend, "_sdk", sdk)
+    report = run_recorded_task(
+        TaskSpec("produce", outputs=("answer",)),
+        agent=AgentSpec(Model("openai/test")),
+        backend=SailBackend(),
+        output=tmp_path / "run",
+    )
+    assert len(messages) == (2 if repair else 3)
+    assert secret not in json.dumps(report)
+    assert report["status"] == ("completed" if repair else "artifact_safety_error")
+    if not repair:
+        assert report["diagnostics"]["sailbox_id"] == "synthetic-offline"
+        assert not (tmp_path / "run/answer").exists()

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -31,6 +31,27 @@ def credential_values(specs: Iterable[AgentSpec]) -> set[str]:
             secrets.add(os.environ[spec.api_key_env])
         secrets.update(getattr(spec, "secrets", ()))
     return secrets
+
+
+class ArtifactSafetyError(ValueError):
+    """Declared output contains a concrete credential and cannot be published."""
+
+
+def validate_artifact_bytes(
+    files: Mapping[str, str | bytes], specs: Iterable[AgentSpec]
+) -> None:
+    """Check exact bytes only; assignment-like scientific source is not a leak."""
+    secrets = {value.encode("utf-8") for value in credential_values(specs) if value}
+    for content in files.values():
+        if isinstance(content, str):
+            content = content.encode("utf-8")
+        if not isinstance(content, bytes):
+            raise TypeError("Malformed output artifact")
+        if any(secret in content for secret in secrets):
+            raise ArtifactSafetyError(
+                "Credential detected in output artifact. Remove credential literals "
+                "from all declared outputs; do not echo credentials in feedback."
+            )
 
 
 def sanitizer(specs: Iterable[AgentSpec], *, secrets: Iterable[str] = ()):

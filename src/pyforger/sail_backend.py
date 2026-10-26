@@ -308,6 +308,9 @@ class SailBackend:
                 failure_kind="execution",
                 diagnostics=diagnostics,
             )
+        except Exception as exc:
+            exc.diagnostics = diagnostics
+            raise
         finally:
             try:
                 box.terminate()
