@@ -397,3 +397,89 @@ def test_configured_non_environment_credential_is_blocked(tmp_path):
     assert report["failure_kind"] == "artifact_safety"
     assert secret not in json.dumps(report)
     assert not (tmp_path / "run/answer").exists()
+
+
+@pytest.mark.parametrize("leak", [False, True])
+def test_recorded_validated_task_collects_post_verifier_bytes(
+    tmp_path, monkeypatch, leak
+):
+    secret = "synthetic-verifier-credential-838383"
+    monkeypatch.setenv("VERIFIER_TEST_SECRET", secret)
+
+    class Session:
+        state = SimpleNamespace(execution_status="finished", events=[])
+
+        def __init__(self, root):
+            self.root = root
+
+        def send_message(self, message):
+            pass
+
+        async def arun(self):
+            (self.root / "answer").write_text("before")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        LocalBackend, "_sdk_session", lambda self, root, *a, **kw: Session(root)
+    )
+    final = secret if leak else "after"
+    report = run_recorded_task(
+        TaskSpec(
+            "produce",
+            outputs=("answer",),
+            verifier=f"printf '%s' '{final}' > answer; echo 1 > reward.txt",
+        ),
+        agent=AgentSpec(Model("openai/test")),
+        backend=LocalBackend(),
+        output=tmp_path / "run",
+    )
+    if leak:
+        assert report["failure_kind"] == "artifact_safety"
+        assert report["passed"] is None
+        assert not (tmp_path / "run/answer").exists()
+    else:
+        assert report["passed"] is True
+        assert (tmp_path / "run/answer").read_text() == "after"
+    assert secret not in json.dumps(report)
+
+
+@pytest.mark.parametrize("created", [False, True])
+def test_sdk_missing_submission_reaches_verifier_without_repair(
+    tmp_path, monkeypatch, created
+):
+    turns = []
+
+    class Session:
+        state = SimpleNamespace(execution_status="finished", events=[])
+
+        def send_message(self, message):
+            turns.append(message)
+
+        async def arun(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(LocalBackend, "_sdk_session", lambda *a, **kw: Session())
+    report = run_recorded_task(
+        TaskSpec(
+            "produce",
+            outputs=("answer",),
+            verifier="echo verified > answer; echo 1 > reward.txt"
+            if created
+            else "echo 0 > reward.txt",
+        ),
+        agent=AgentSpec(Model("openai/test")),
+        backend=LocalBackend(),
+        output=tmp_path / "run",
+    )
+    assert len(turns) == 1
+    assert report["status"] == "completed"
+    assert report["passed"] is created
+    if created:
+        assert (tmp_path / "run/answer").read_text() == "verified\n"
+    else:
+        assert not (tmp_path / "run/answer").exists()
