@@ -5,7 +5,9 @@ from __future__ import annotations
 import logging
 import os
 import pickle
-from typing import Any
+from collections.abc import Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, TypeVar
 
 
 def get_formatted_logger(logger_name: str, level: int = logging.INFO) -> logging.Logger:
@@ -124,3 +126,26 @@ def redact(text: str) -> str:
         ):
             text = text.replace(value, "[REDACTED]")
     return text
+
+
+_Result = TypeVar("_Result")
+
+
+def run_concurrently(
+    functions: Iterable[Callable[[], _Result]], *, concurrency: int | None = None
+) -> list[_Result]:
+    """Call independent functions, preserving input order and propagating errors.
+
+    A positive ``concurrency`` bounds worker threads; ``None`` allocates one
+    worker per callable and ``1`` runs serially in the calling thread. Calls are
+    not cached. Running jobs finish before a worker error reaches the caller.
+    """
+    if concurrency is not None and (type(concurrency) is not int or concurrency < 1):
+        raise ValueError("concurrency must be a positive integer or None")
+    if concurrency == 1:
+        return [function() for function in functions]
+    jobs = list(functions)
+    if not jobs:
+        return []
+    with ThreadPoolExecutor(max_workers=concurrency or len(jobs)) as executor:
+        return list(executor.map(lambda function: function(), jobs))
