@@ -384,7 +384,11 @@ source scripts/models/qwen3-4B.sh
 # ray worker need it importable for --custom-rm-path to resolve.
 export PYTHONPATH='$CODING_DIR:$MEGATRON_DIR'
 export CUDA_DEVICE_MAX_CONNECTIONS=1
-export MASTER_ADDR=\${MASTER_ADDR:-127.0.0.1}
+# Single-node Ray on loopback. On Orchard MASTER_ADDR arrives set to the node's
+# own IP, and on some nodes traffic to that IP stalls inside the container: the
+# dashboard's job agent never answered (162173) and a driver hung right after
+# connecting (162182). RL_RAY_NODE_IP overrides it.
+export MASTER_ADDR=\${RL_RAY_NODE_IP:-127.0.0.1}
 
 # Use a short per-user/job Ray directory to avoid shared /tmp ownership
 # and cleanup races while staying within Unix socket path limits.
