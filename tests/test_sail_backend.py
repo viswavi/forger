@@ -758,6 +758,8 @@ def test_recorded_remote_artifact_safety_repair(
     original = box.run
 
     def run(argv, **kwargs):
+        if argv[0] == "python3" and "signal.SIGSTOP" in argv[-1]:
+            return SimpleNamespace(exit_code=0, timed_out=False)
         if argv[0] == "bash" or "/usr/bin/env" == argv[0]:
             if verifier is not None:
                 (box.root / "answer").write_text(
