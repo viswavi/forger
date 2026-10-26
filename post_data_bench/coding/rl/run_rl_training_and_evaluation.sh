@@ -57,7 +57,10 @@ INIT_CHECKPOINT="$QWEN3_4B_LOCAL"
 OUTPUT_DIR=""
 SPLIT="test"
 NO_THINKING=0
-FILTER_ZERO_STD=0
+# Off unless --filter-zero-std / --drop-truncated or RL_FILTER_ZERO_STD=1 /
+# RL_DROP_TRUNCATED=1 (the agent-facing rl.agent_training has no flags for them).
+FILTER_ZERO_STD="${RL_FILTER_ZERO_STD:-0}"
+DROP_TRUNCATED="${RL_DROP_TRUNCATED:-0}"
 NUM_ROLLOUT=80
 ROLLOUT_BATCH_SIZE=32
 N_SAMPLES_PER_PROMPT=8
@@ -113,6 +116,7 @@ while [[ $# -gt 0 ]]; do
     --eval-interval) EVAL_INTERVAL="$2"; shift 2 ;;
     --no-thinking) NO_THINKING=1; shift ;;
     --filter-zero-std) FILTER_ZERO_STD=1; shift ;;
+    --drop-truncated) DROP_TRUNCATED=1; shift ;;
     --skip-final-eval) SKIP_FINAL_EVAL=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     *) EXTRA_SLIME_ARGS+=("$1"); shift ;;
@@ -311,6 +315,11 @@ if [ "$FILTER_ZERO_STD" -eq 1 ]; then
   DYNAMIC_FILTER_ARGS="--dynamic-sampling-filter-path slime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std"
   echo ">>> dropping zero-variance prompt groups (this reshapes the training mix; see header)"
 fi
+SAMPLE_FILTER_ARGS=""
+if [ "$DROP_TRUNCATED" -eq 1 ]; then
+  SAMPLE_FILTER_ARGS="--rollout-sample-filter-path rl.sample_filters.drop_truncated"
+  echo ">>> masking truncated samples from the loss (rl.sample_filters.drop_truncated)"
+fi
 
 # The verifier grades in a spawn-context process pool sized here. It executes
 # untrusted model code, so it wants real cores, not GPU time.
@@ -410,6 +419,7 @@ ray job submit --address=http://127.0.0.1:8265 --submission-id=\"\$RAY_JOB_ID\" 
   --global-batch-size $GLOBAL_BATCH_SIZE \
   --balance-data \
   $DYNAMIC_FILTER_ARGS \
+  $SAMPLE_FILTER_ARGS \
   --eval-interval $EVAL_INTERVAL \
   --eval-prompt-data generated_val '$RL_DATA_DIR/val.jsonl' \
   --n-samples-per-eval-prompt 4 \
