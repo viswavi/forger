@@ -350,6 +350,17 @@ and returns a typed `PanelReport`. `pyforger.structured.generate_result` is the 
 `generate_validated`: it returns a `GenerationResult` whose `status` is `accepted`, `exhausted`, or
 `inconclusive`, for pipelines that branch on the outcome instead of catching exceptions.
 
+`pyforger.structured.generate_batch(requests, ...)` runs that same bounded
+validated generation independently for a sequence of requests and returns one
+`GenerationResult` per request, in input order: no request is filtered out
+when it is rejected, exhausted, or inconclusive.  `concurrency` bounds
+simultaneous per-request generations.  `pyforger.evaluation.evaluate_panels(
+panels, evaluate_panel, concurrency=...)` fans out over a mapping of panel
+names to model lists and returns one typed `PanelReport` per panel; the
+callback composes the existing single-panel `evaluate_panel` for one name.
+Both operations are the set-level forms of their single-item counterparts and
+are the primitives a sequence-in/sequence-out pipeline step should call.
+
 ### Data Generation Patterns
 
 We often see some common patterns in data generation pipelines. Here is an incomplete list of examples:
