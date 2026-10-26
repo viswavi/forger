@@ -282,6 +282,16 @@ else
     fi
   }
   echo ">>> slime runtime: conda env $SLIME_ENV"
+  if [[ "$SLIME_ENV" == /usr && "$DRY_RUN" -eq 0 ]] && ! /usr/bin/python3 -c "import RestrictedPython" 2>/dev/null; then
+    # The combined image has RestrictedPython only in the TRL env, but rubric
+    # rewards import it in Slime's Python (every agent run had to pip-install it
+    # itself). It is pure Python and both are 3.12; the container overlay is
+    # writable.
+    TRL_SITE=/home/vijayv/miniconda3/envs/trl/lib/python3.12/site-packages
+    cp -r "$TRL_SITE/RestrictedPython" /usr/local/lib/python3.12/dist-packages/
+    /usr/bin/python3 -c "import RestrictedPython"
+    echo ">>> copied RestrictedPython from the TRL env into Slime's Python"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
