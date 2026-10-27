@@ -248,3 +248,93 @@ class TestDefaultExtractAnswer:
             [{"prompt": "q", "final_answer": "12"}], "{prompt}", model, n=1
         )
         assert items == []
+
+
+class _HintAware:
+    """Answers 42 only when the prompt has a hint or is solvable; records prompts."""
+
+    def __init__(self, solves: frozenset[str] = frozenset()):
+        self.solves = solves
+        self.prompts: list[str] = []
+
+    def cache_key(self) -> tuple:
+        """Stable identity for @op caching."""
+        return ("hint-aware", tuple(sorted(self.solves)))
+
+    def generate_batch(self, prompts, *, n=1, temperature=None, max_tokens=None):
+        """``n`` copies of ANSWER: 42 for hinted or solvable prompts, else ANSWER: 0."""
+        self.prompts.extend(prompts)
+        return [
+            ["ANSWER: 42" if "hint" in p or p in self.solves else "ANSWER: 0"] * n
+            for p in prompts
+        ]
+
+
+class TestRationalization:
+    """hint_fn: a hinted second pass for items with no accepted response."""
+
+    ITEMS = [
+        {"prompt": "easy", "final_answer": "42"},
+        {"prompt": "hard", "final_answer": "42"},
+    ]
+
+    def test_only_unsolved_items_get_the_hint(self):
+        """The solved item keeps its own rows; the unsolved one is rationalized."""
+        model = _HintAware(solves=frozenset({"easy"}))
+        rows = self_taught_reasoner(
+            self.ITEMS,
+            "{prompt}",
+            model,
+            n=2,
+            hint_fn="{prompt} (hint: {final_answer})",
+            _no_cache=True,
+        )
+        assert model.prompts == ["easy", "hard", "hard (hint: 42)"]
+        assert [(r["prompt"], r["rationalized"]) for r in rows] == [
+            ("easy", False),
+            ("easy", False),
+            ("hard", True),
+            ("hard", True),
+        ]
+
+    def test_still_unsolved_items_contribute_no_rows(self):
+        """A hint that does not help leaves the item without rows."""
+        model = _HintAware()
+        rows = self_taught_reasoner(
+            self.ITEMS, "{prompt}", model, n=1, hint_fn="{prompt} again", _no_cache=True
+        )
+        assert rows == []
+        assert model.prompts == ["easy", "hard", "easy again", "hard again"]
+
+    def test_verifier_judges_the_hinted_pass(self):
+        """The hinted pass uses the same acceptance rule as the first."""
+        rows = self_taught_reasoner(
+            self.ITEMS[:1],
+            "{prompt}",
+            _HintAware(),
+            n=1,
+            verifier=lambda answer, row: answer.endswith("42"),
+            hint_fn="{prompt} hint",
+            _no_cache=True,
+        )
+        assert [r["rationalized"] for r in rows] == [True]
+
+    def test_without_hint_fn_rows_have_no_flag(self):
+        """Without hint_fn there is no second pass and no rationalized field."""
+        model = _HintAware(solves=frozenset({"easy"}))
+        rows = self_taught_reasoner(self.ITEMS, "{prompt}", model, n=1, _no_cache=True)
+        assert model.prompts == ["easy", "hard"]
+        assert [r["prompt"] for r in rows] == ["easy"]
+        assert "rationalized" not in rows[0]
+
+    def test_filter_fn_with_hint_fn_raises(self):
+        """filter_fn sees all candidates at once, so unsolved items are unknown."""
+        with pytest.raises(ValueError, match="hint_fn"):
+            self_taught_reasoner(
+                self.ITEMS,
+                "{prompt}",
+                _HintAware(),
+                filter_fn=lambda rows: rows,
+                hint_fn="{prompt} hint",
+                _no_cache=True,
+            )
