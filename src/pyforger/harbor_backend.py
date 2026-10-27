@@ -322,9 +322,9 @@ class HarborBackend:
                 ) or any(native.glob("trial-*/agent/exit-code.txt"))
                 diagnostics: dict[str, Any] = {
                     "wall_timeout_s": task.timeout_s,
-                    "phase": "agent_or_verifier"
-                    if agent_started
-                    else "startup_unresolved",
+                    "phase": (
+                        "agent_or_verifier" if agent_started else "startup_unresolved"
+                    ),
                 }
                 if self._retain_trials is not None and (root / "native").exists():
                     retained = self._retain_trials / ("timeout-" + root.name)

@@ -217,6 +217,7 @@ def test_runtime_uses_shared_token_condenser_and_unlimited_iteration_adapter():
 
 def test_custom_tokenizer_is_preserved_in_harbor_request(monkeypatch):
     import inspect
+
     from pyforger import harbor
     from pyforger.sdk_config import llm_options
 

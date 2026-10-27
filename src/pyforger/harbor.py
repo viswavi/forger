@@ -197,9 +197,9 @@ def harbor_agent_config(
             "LLM_API_KEY": "${" + api_key_env + "}",
             "FORGER_LLM_CONFIG": json.dumps(settings),
             **({"LLM_BASE_URL": llm.base_url} if llm.base_url else {}),
-            "FORGER_DISABLE_PROMPT_CACHE": "1"
-            if model._kwargs.get("disable_prompt_cache_key")
-            else "0",
+            "FORGER_DISABLE_PROMPT_CACHE": (
+                "1" if model._kwargs.get("disable_prompt_cache_key") else "0"
+            ),
         },
     )
 
