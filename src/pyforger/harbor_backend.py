@@ -28,7 +28,8 @@ from pyforger.agent_backend import (
     WorkspaceTask,
 )
 from pyforger.agent_backends import require_learner_runtime
-from pyforger.artifacts import ArtifactRef, read_text, write_input
+from pyforger.agent_diagnostics import ArtifactSafetyError, credential_values
+from pyforger.artifacts import ArtifactRef, FileInput, read_text, write_input
 from pyforger.local_agent import _record_key
 
 _NETWORK = {
@@ -36,6 +37,31 @@ _NETWORK = {
     Network.MODEL: "no-network",
     Network.PUBLIC: "public",
 }
+
+
+def _validate_packaged_inputs(task: WorkspaceTask, agent: AgentSpec) -> None:
+    secrets = {value.encode("utf-8") for value in credential_values([agent]) if value}
+    if not secrets:
+        return
+    overlap = max(map(len, secrets)) - 1
+    inputs = [task.files, task.verifier_files]
+    if agent.kind == "oracle":
+        inputs.append(task.solution_files)
+    for files in inputs:
+        for content in files.values():
+            chunks = (
+                content.chunks()
+                if isinstance(content, FileInput)
+                else [content.encode("utf-8") if isinstance(content, str) else content]
+            )
+            tail = b""
+            for chunk in chunks:
+                block = tail + chunk
+                if any(secret in block for secret in secrets):
+                    raise ArtifactSafetyError(
+                        "Credential detected in native task inputs; remove credential literals before execution"
+                    )
+                tail = block[-overlap:] if overlap else b""
 
 
 def _package(
@@ -53,6 +79,7 @@ def _package(
         raise ValueError(
             "Harbor outputs must be explicit workspace artifacts, not reward or workspace root"
         )
+    _validate_packaged_inputs(task, agent)
     root.mkdir()
     environment = root / "environment"
     files_dir = environment / "files"

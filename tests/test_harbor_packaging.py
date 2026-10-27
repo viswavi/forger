@@ -116,3 +116,36 @@ def test_empty_public_inputs_have_no_docker_copy_from_missing_directory(tmp_path
         not in artifact.path("environment/Dockerfile").read_text()
     )
     assert "COPY public /work" not in artifact.path("tests/Dockerfile").read_text()
+
+
+def test_native_packaging_rejects_reference_credentials_before_creating_artifacts(
+    tmp_path, monkeypatch
+):
+    import pytest
+
+    from pyforger.agent_diagnostics import ArtifactSafetyError
+    from pyforger.artifacts import FileInput
+
+    secret = "synthetic-reference-credential-575757"
+    monkeypatch.setenv("REFERENCE_TEST_SECRET", secret)
+    source = tmp_path / "reference.py"
+    source.write_text("print(1)\n# " + secret)
+    for files in (
+        {"reference.py": source.read_text()},
+        {"reference.py": FileInput.capture(source)},
+    ):
+        task = WorkspaceTask(
+            instruction="submit",
+            files={},
+            outputs=("result.json",),
+            solution_files=files,
+        )
+        target = tmp_path / "task"
+        with pytest.raises(ArtifactSafetyError):
+            _package(
+                task,
+                AgentSpec(kind="oracle", solution="python3 reference.py"),
+                target,
+                ["/work/result.json"],
+            )
+        assert not target.exists()
