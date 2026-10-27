@@ -127,6 +127,10 @@ class EngineProcess:
         self.devices = devices
         self._conn, child = multiprocessing.Pipe()
         env = dict(os.environ, CUDA_VISIBLE_DEVICES=",".join(devices))
+        # The worker is already a process of its own, so its engine core runs in
+        # it rather than in a forked child: under apptainer --fakeroot a forked
+        # child's CUDA init fails ("CUDA driver initialization failed").
+        env.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
         self._process = subprocess.Popen(
             [
                 sys.executable,
