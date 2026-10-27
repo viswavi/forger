@@ -28,6 +28,23 @@ JUDGE_MODEL = DEFAULT_JUDGE_MODEL
 JUDGE_MAX_TOKENS = 4096
 _ANSWER_CHARS = 300  # of each response's final answer kept in the rollout log
 _log_file = None
+_STOP_TOKENS = ("<|im_end|>", "<|endoftext|>")
+
+
+def without_stop_tokens(text):
+    """Drop trailing chat stop tokens, as Tinker's response_text and the vLLM eval do.
+
+    The Orchard image's Slime keeps them in sample.response, e.g. "This task is
+    impossible to complete given the provided tests.<|im_end|>", which fails every
+    exact-match rubric: abstaining scored 0 in every Orchard RL run.
+    """
+    text = text or ""
+    while True:
+        stripped = text.rstrip()
+        stop = next((s for s in _STOP_TOKENS if stripped.endswith(s)), None)
+        if stop is None:
+            return text
+        text = stripped[: -len(stop)]
 
 
 def _abstention_check():
@@ -73,7 +90,7 @@ def _log_rollout(sample, reward):
         except Exception:
             step = None
         status = getattr(sample, "status", None)
-        response = sample.response or ""
+        response = without_stop_tokens(sample.response)
         record = {
             "ts": round(time.time(), 3),
             "step": step,
@@ -421,7 +438,7 @@ async def custom_rm(args, sample, **kwargs):
     metadata = sample.metadata
     rubric = validate_rubric(metadata["rubric"])
     prompt = metadata["original_prompt"]  # Pre-template prompt, exactly as in SFT.
-    response = sample.response or ""
+    response = without_stop_tokens(sample.response)  # as the evaluator sees it
     total = 0.0
     for criterion, weight in rubric:
         if weight == 0:
