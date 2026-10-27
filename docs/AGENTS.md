@@ -147,6 +147,10 @@ samples contributes nothing (so 8 samples with 4 correct yield 4 rows). Acceptan
 with `default_extract_answer` (reads `ANSWER:`/`\boxed{}`/`####` markers) and comparing by normalized string equality;
 pass a custom `extract_answer`, `match_fn`, or a `filter_fn` (any `list[dict] -> list[dict]`, e.g. a `pyforger.filter`
 op bound with `functools.partial`) to override. Pair it with `LocalModel` to generate student traces on-GPU for SFT.
+By default `LocalModel` starts one engine per visible GPU, each in its own process with a full copy of the model, and
+splits the prompts among them (`data_parallel_size="auto"`; set `CUDA_VISIBLE_DEVICES` to use fewer GPUs, and
+`tensor_parallel_size` only for a model too large for one GPU). The engines hold their GPUs until `model.close()` or
+the process exits, so free them before training on the same GPUs.
 
 ```python
 # LocalModel needs vLLM: pip install "pyforger[vllm]"

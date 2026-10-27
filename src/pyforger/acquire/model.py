@@ -12,6 +12,9 @@ from typing import Any, Union
 
 import litellm
 
+from pyforger.acquire import _local_dp
+from pyforger.utils import get_formatted_logger
+
 # Type aliases
 Message = dict[str, str]
 Prompt = Union[str, list[Message]]
@@ -462,6 +465,8 @@ class Model:
 # provider decide" is replaced here by an explicit, generous ceiling.
 _DEFAULT_LOCAL_MAX_TOKENS = 32768
 
+_logger = get_formatted_logger(__name__)
+
 
 def _import_vllm() -> Any:
     """Import vllm, with an install hint when it is not installed."""
@@ -511,6 +516,7 @@ class LocalModel(Model):
         max_model_len: int | None = None,
         gpu_memory_utilization: float = 0.9,
         tensor_parallel_size: int = 1,
+        data_parallel_size: int | str = "auto",
         dtype: str = "auto",
         enable_thinking: bool = True,
         chat_template_kwargs: dict[str, Any] | None = None,
@@ -528,7 +534,16 @@ class LocalModel(Model):
             max_model_len: Maximum context length (prompt + generation) for the
                 engine. None lets vLLM use the model's configured maximum.
             gpu_memory_utilization: Fraction of GPU memory vLLM may use.
-            tensor_parallel_size: Number of GPUs to shard the model across.
+            tensor_parallel_size: Number of GPUs to shard each engine across.
+                Raise it only for a model too large for one GPU.
+            data_parallel_size: Number of engines, each a full copy of the
+                model on its own `tensor_parallel_size` GPUs in its own process,
+                sampling an equal share of the prompts. "auto" (the default)
+                uses every visible GPU (`CUDA_VISIBLE_DEVICES`, else
+                `nvidia-smi`): 8 GPUs give 8 one-GPU engines. With fewer than
+                two engines the model runs in this process, as `vllm.LLM`.
+                The engines hold their GPUs until `close()` or exit, so set
+                `CUDA_VISIBLE_DEVICES` to leave GPUs free for other jobs.
             dtype: Engine dtype ("auto", "bfloat16", "float16", ...).
             enable_thinking: For reasoning models, whether the chat template
                 should enable the thinking block. Forwarded via
@@ -553,6 +568,7 @@ class LocalModel(Model):
         self._max_model_len = max_model_len
         self._gpu_memory_utilization = gpu_memory_utilization
         self._tensor_parallel_size = tensor_parallel_size
+        self._data_parallel_size = data_parallel_size
         self._dtype = dtype
         self._enable_thinking = enable_thinking
         self._chat_template_kwargs = chat_template_kwargs
@@ -570,7 +586,8 @@ class LocalModel(Model):
         `gpu_memory_utilization` and `tensor_parallel_size` only affect speed
         and memory, so they are left out -- except with `max_model_len=-1`,
         where vLLM (0.14+) sizes the context to fit memory and they cap
-        generation length. `show_progress` is always left out.
+        generation length. `data_parallel_size` and `show_progress` are always
+        left out.
         """
         engine_kwargs = tuple(sorted(self._kwargs.items(), key=lambda kv: str(kv[0])))
         memory = (
@@ -595,9 +612,14 @@ class LocalModel(Model):
         """No-op: vLLM model ids are not in LiteLLM's parameter registry."""
 
     def _engine(self) -> Any:
-        """Lazily construct and cache the vLLM engine."""
+        """Lazily construct and cache the vLLM engine (one per GPU group).
+
+        With two or more GPU groups, e.g. 8 visible GPUs and the defaults, this
+        is a `DataParallelEngine` of worker processes with `vllm.LLM`'s `chat`.
+        """
         if self._llm is None:
-            self._llm = _import_vllm().LLM(
+            vllm = _import_vllm()  # fails here, with the install hint, without vllm
+            engine_kwargs = dict(
                 model=self._model_id,
                 gpu_memory_utilization=self._gpu_memory_utilization,
                 tensor_parallel_size=self._tensor_parallel_size,
@@ -606,7 +628,28 @@ class LocalModel(Model):
                 max_model_len=self._max_model_len,
                 **self._kwargs,
             )
+            groups = _local_dp.device_groups(
+                _local_dp.visible_gpus(),
+                self._tensor_parallel_size,
+                self._data_parallel_size,
+            )
+            if groups:
+                _logger.info(
+                    "LocalModel %s: %d engines, one per GPU group %s",
+                    self._model_id,
+                    len(groups),
+                    "; ".join(",".join(g) for g in groups),
+                )
+                self._llm = _local_dp.DataParallelEngine.start(groups, engine_kwargs)
+            else:
+                self._llm = vllm.LLM(**engine_kwargs)
         return self._llm
+
+    def close(self) -> None:
+        """Free the GPUs held by data-parallel engines; the next call restarts them."""
+        if isinstance(self._llm, _local_dp.DataParallelEngine):
+            self._llm.close()
+            self._llm = None
 
     def _template_kwargs(self) -> dict[str, Any]:
         """Resolve chat-template kwargs from explicit override or enable_thinking."""
