@@ -203,3 +203,12 @@ def test_bridge_control_environment_does_not_match_native_credentials(monkeypatc
     for name, value in config.env.items():
         if value in {"0", "1"}:
             assert not is_sensitive_env_key(name), name
+
+
+def test_runtime_uses_shared_token_condenser_and_unlimited_iteration_adapter():
+    from pyforger._harbor_model import runner_source
+
+    source = runner_source()
+    assert "TaskPreservingCondenser(llm=llm, max_tokens=int(limit)" in source
+    assert "keep_first=2" in source
+    assert 'os.environ.get("MAX_ITERATIONS") or str(sys.maxsize)' in source

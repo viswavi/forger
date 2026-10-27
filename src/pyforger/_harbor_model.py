@@ -37,6 +37,10 @@ def runner_source() -> str:
     agent = Agent(**agent_kwargs)"""
     if source.count(condenser_anchor) != 1:
         raise RuntimeError("Unsupported Harbor SDK runner: agent construction changed")
+    source = source.replace(
+        '    max_iter_raw = os.environ.get("MAX_ITERATIONS")',
+        '    max_iter_raw = os.environ.get("MAX_ITERATIONS") or str(sys.maxsize)',
+    )
     return source.replace(condenser_anchor, condenser)
 
 
