@@ -14,27 +14,37 @@ def runner_source() -> str:
     source = (
         Path(openhands_sdk.__file__).with_name("openhands_sdk_runner.py").read_text()
     )
-    anchor = "    llm = LLM(**llm_kwargs)"
+    anchor = "    llm = build_llm()"
     if source.count(anchor) != 1:
         raise RuntimeError("Unsupported Harbor SDK runner: LLM construction changed")
     compatibility = Path(__file__).with_name("_sdk_llm.py").read_text()
     compatibility = compatibility.replace("from __future__ import annotations", "")
     replacement = """    settings = json.loads(os.environ["FORGER_LLM_CONFIG"])
-    settings["api_key"] = api_key
+    settings["api_key"] = os.environ.get("LLM_API_KEY")
     disable_cache_key = os.environ.get("FORGER_DISABLE_PROMPT_CACHE") == "1"
     llm_type = ConfiguredLLM if disable_cache_key else LLM
     llm = llm_type(**settings)"""
-    return source.replace("def main():", compatibility + "\n\ndef main():").replace(
-        anchor, replacement
-    )
+    runtime = Path(__file__).with_name("_sdk_runtime.py").read_text()
+    runtime = runtime.replace("from __future__ import annotations", "")
+    source = source.replace("import argparse", "import argparse\nimport sys")
+    source = source.replace(
+        "def main():", compatibility + "\n" + runtime + "\n\ndef main():"
+    ).replace(anchor, replacement)
+    condenser_anchor = "    agent = Agent(**agent_kwargs)"
+    condenser = """    limit = os.environ.get("FORGER_CONDENSER_MAX_TOKENS")
+    if limit:
+        agent_kwargs["condenser"] = TaskPreservingCondenser(llm=llm, max_tokens=int(limit), max_size=sys.maxsize, keep_first=2)
+    agent = Agent(**agent_kwargs)"""
+    if source.count(condenser_anchor) != 1:
+        raise RuntimeError("Unsupported Harbor SDK runner: agent construction changed")
+    return source.replace(condenser_anchor, condenser)
 
 
 class ForgerOpenHandsSDK(OpenHandsSDK):  # type: ignore[misc]
     """Keep Harbor behavior while supplying the complete common Model settings.
 
-    Remove this bridge after https://github.com/harbor-framework/harbor/pull/3689
-    is merged and the Harbor dependency is updated to use native ``llm_config``.
-    Preserve the separate SDK prompt-cache-key workaround when migrating.
+    Harbor owns authentication and agent lifecycle. This bridge preserves Forger
+    model settings, prompt-cache behavior, and the shared condenser contract.
     """
 
     async def install(self, environment: Any) -> None:
@@ -57,7 +67,11 @@ class ForgerOpenHandsSDK(OpenHandsSDK):  # type: ignore[misc]
     ) -> Any:
         """Forward bridge settings explicitly without mutating the host env."""
         combined = dict(env or {})
-        for name in ("FORGER_LLM_CONFIG", "FORGER_DISABLE_PROMPT_CACHE"):
+        for name in (
+            "FORGER_LLM_CONFIG",
+            "FORGER_DISABLE_PROMPT_CACHE",
+            "FORGER_CONDENSER_MAX_TOKENS",
+        ):
             value = self._get_env(name)
             if value is not None:
                 combined[name] = value

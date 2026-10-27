@@ -10,7 +10,9 @@ through Oracle without any model.
 
 from __future__ import annotations
 
+import asyncio
 import copy
+import hashlib
 import json
 import shlex
 import shutil
@@ -37,8 +39,20 @@ _NETWORK = {
 
 
 def _package(
-    task: WorkspaceTask, agent: AgentSpec, root: Path, outputs: list[str]
+    task: WorkspaceTask,
+    agent: AgentSpec,
+    root: Path,
+    outputs: list[str],
+    *,
+    trusted_verifier_files: dict[str, bytes] | None = None,
 ) -> ArtifactRef:
+    if any(
+        not name.startswith("/work/") or name in {"/work/reward.txt", "/work/"}
+        for name in outputs
+    ):
+        raise ValueError(
+            "Harbor outputs must be explicit workspace artifacts, not reward or workspace root"
+        )
     root.mkdir()
     environment = root / "environment"
     files_dir = environment / "files"
@@ -64,14 +78,17 @@ def _package(
         "&& /opt/openhands-sdk-venv/bin/pip install --no-cache-dir "
         "openhands-sdk==1.58.0 openhands-tools==1.58.0 fastapi==0.135.2\n"
         "RUN mkdir /work && chown 65534:65534 /work\n"
-        "ENV HOME=/tmp\nWORKDIR /work\nCOPY files /work\nUSER 65534:65534\n"
+        "ENV HOME=/tmp\nWORKDIR /work\nCOPY --chown=65534:65534 files /work\nUSER root\n"
     )
     (root / "instruction.md").write_text(task.instruction)
     (root / "task.toml").write_text(
-        'schema_version = "1.3"\n'
+        'schema_version = "1.4"\n'
         f"artifacts = {json.dumps(outputs)}\n"
         f"[agent]\ntimeout_sec = {max(1, int(task.timeout_s))}\n"
         'user = "65534"\n'
+        '[verifier]\nenvironment_mode = "separate"\nuser = "root"\n'
+        f"timeout_sec = {max(1, int(task.timeout_s))}\n"
+        'network_mode = "no-network"\n'
         f'[environment]\nnetwork_mode = "{_NETWORK[task.network]}"\n'
         "cpus = 2\nmemory_mb = 4096\n"
     )
@@ -89,6 +106,29 @@ def _package(
         )
     tests = root / "tests"
     tests.mkdir()
+    trusted = tests / "trusted"
+    trusted.mkdir()
+    for name, body in (trusted_verifier_files or {}).items():
+        path = Path(name)
+        if path.is_absolute() or len(path.parts) != 1 or name in {".", ".."}:
+            raise ValueError("Trusted verifier filenames must be simple basenames")
+        (trusted / name).write_bytes(body)
+    public = tests / "public"
+    public.mkdir()
+    for name, content in task.files.items():
+        path = public / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_input(path, content)
+    (tests / "Dockerfile").write_text(
+        "FROM python:3.12-slim\n"
+        + installs
+        + "RUN mkdir -p /work /tests /logs/verifier && chmod 700 /tests /logs/verifier\n"
+        "COPY . /tests\nCOPY public /work\n"
+        "RUN mkdir -p /opt/trusted && cp -r /tests/trusted/. /opt/trusted/ "
+        "&& chmod 755 /opt/trusted && chmod -R go-w /opt/trusted "
+        "&& chmod 700 /tests /logs/verifier\n"
+        "WORKDIR /tests\nUSER root\n"
+    )
     if task.verifier is not None:
         verifier_dir = tests / "verifier"
         verifier_dir.mkdir()
@@ -97,11 +137,14 @@ def _package(
             path.parent.mkdir(parents=True, exist_ok=True)
             write_input(path, content)
         (tests / "test.sh").write_text(
-            "#!/bin/sh\nmkdir -p /logs/verifier\n"
-            "WORKSPACE=/work VERIFIER_DIR=/tests/verifier sh -c "
+            "#!/bin/sh\nset -eu\numask 077\nchmod 700 /tests /logs/verifier\n"
+            "rm -f /work/reward.txt /logs/verifier/reward.txt /logs/verifier/reward.json\n"
+            "touch /work/reward.txt && chmod 600 /work/reward.txt\n"
+            "WORKSPACE=/work VERIFIER_DIR=/tests/verifier PYTHONSAFEPATH=1 sh -c "
             + shlex.quote("cd /work\n" + task.verifier)
-            + "\ncp /work/reward.txt /logs/verifier/reward.txt 2>/dev/null "
-            "|| echo 0 > /logs/verifier/reward.txt\n"
+            + "\nif [ ! -s /logs/verifier/reward.txt ]; then "
+            "cp /work/reward.txt /logs/verifier/reward.txt 2>/dev/null "
+            "|| echo 0 > /logs/verifier/reward.txt; fi\n"
         )
     else:
         checks = " && ".join(f"test -f {shlex.quote(o)}" for o in outputs) or "true"
@@ -110,6 +153,17 @@ def _package(
             f"if {checks}; then echo 1; else echo 0; fi "
             "> /logs/verifier/reward.txt\n"
         )
+    original = tests / "verifier-command.sh"
+    (tests / "test.sh").rename(original)
+    (tests / "test.sh").write_text("#!/bin/sh\nexec python3 -I /tests/launch.py\n")
+    (tests / "launch.py").write_text(
+        "import os, pathlib, subprocess\n"
+        "os.umask(0o077)\n"
+        "for name in ('/tests', '/logs/verifier'):\n"
+        "    pathlib.Path(name).chmod(0o700)\n"
+        "subprocess.run(['sh', '/tests/verifier-command.sh'], check=True, cwd='/tests', "
+        "env={'PATH':'/usr/local/bin:/usr/bin:/bin','HOME':'/root','PYTHONSAFEPATH':'1'})\n"
+    )
     return ArtifactRef.capture(root)
 
 
@@ -139,9 +193,14 @@ class HarborBackend:
 
     name = "harbor"
     supports_inner_loop_validation = False
+    supports_sdk_condensation = True
 
     def __init__(
-        self, environment: Any = None, *, retain_trials: str | Path | None = None
+        self,
+        environment: Any = None,
+        *,
+        retain_trials: str | Path | None = None,
+        trusted_verifier_files: dict[str, bytes] | None = None,
     ) -> None:
         """Snapshot backend configuration without importing the optional SDK.
 
@@ -154,6 +213,7 @@ class HarborBackend:
             environment if environment is not None else {"type": "docker"}
         )
         self._retain_trials = Path(retain_trials) if retain_trials else None
+        self._trusted_verifier_files = dict(trusted_verifier_files or {})
         backend_env = (
             self._environment.get("env")
             if isinstance(self._environment, dict)
@@ -175,7 +235,11 @@ class HarborBackend:
         if _secrets(backend):
             raise ValueError("Harbor backend environments must not contain credentials")
         return (
-            "harbor-backend-v1",
+            tuple(
+                (name, hashlib.sha256(body).hexdigest())
+                for name, body in sorted(self._trusted_verifier_files.items())
+            ),
+            "harbor-backend-v2-separate-root-verifier",
             json.dumps(backend, sort_keys=True, allow_nan=False),
         )
 
@@ -188,12 +252,17 @@ class HarborBackend:
         from pyforger.harbor import harbor_agent_config
 
         assert agent.model is not None
-        return harbor_agent_config(
+        config = harbor_agent_config(
             agent.model,
             max_iterations=agent.max_iterations,
             api_key_env=agent.api_key_env,
             agent_kwargs=dict(agent.kwargs),
         )
+        if agent.runtime is not None and agent.runtime.condenser_max_tokens is not None:
+            config.env["FORGER_CONDENSER_MAX_TOKENS"] = str(
+                agent.runtime.condenser_max_tokens
+            )
+        return config
 
     def run_agent(self, task: WorkspaceTask, agent: AgentSpec) -> AgentRunResult:
         """Package the task natively and run the agent in Harbor."""
@@ -209,10 +278,37 @@ class HarborBackend:
         outputs = ["/work/" + name for name in task.outputs]
         with tempfile.TemporaryDirectory(prefix="forger-harbor-agent-") as directory:
             root = Path(directory)
-            packaged = _package(task, agent, root / "task", outputs)
-            rollout = HarborTaskRunner(
+            packaged = _package(
+                task,
+                agent,
+                root / "task",
+                outputs,
+                trusted_verifier_files=self._trusted_verifier_files,
+            )
+            runner = HarborTaskRunner(
                 agent=self._agent_config(agent), environment=self._environment
-            ).run(HarborRequest(trial_id="agent", task=packaged), root / "native")
+            )
+
+            async def run() -> Any:
+                async with asyncio.timeout(task.timeout_s):
+                    return await runner.arun(
+                        HarborRequest(trial_id="agent", task=packaged), root / "native"
+                    )
+
+            try:
+                rollout = asyncio.run(run())
+            except TimeoutError:
+                diagnostics: dict[str, Any] = {"wall_timeout_s": task.timeout_s}
+                if self._retain_trials is not None and (root / "native").exists():
+                    retained = self._retain_trials / ("timeout-" + root.name)
+                    shutil.copytree(root / "native", retained)
+                    diagnostics["trial_dir"] = str(retained)
+                return AgentRunResult(
+                    status="timed_out",
+                    passed=False,
+                    failure_kind="budget",
+                    diagnostics=diagnostics,
+                )
             outcome = trial_outcome(rollout)
             native_trajectory = trial_directory(rollout) / "agent/trajectory.json"
             normalized_trajectory = None

@@ -164,8 +164,9 @@ def test_endpoint_rejects_credentials_and_non_http(url, monkeypatch):
 
 def test_endpoint_and_network_policy(monkeypatch):
     """Allow the configured endpoint in a native restricted network plan."""
-    from harbor.models.task.config import TaskConfig
-    from harbor.trial.network_policy import resolve_agent_phase_policy
+    from harbor.models.task.config import TaskConfig, VerifierEnvironmentMode
+    from harbor.models.trial.config import EnvironmentConfig, VerifierConfig
+    from harbor.trial.network_policy import resolve_trial_network_plan
 
     monkeypatch.setenv("LITELLM_API_KEY", "fixture")
     config = harbor_agent_config(
@@ -174,8 +175,14 @@ def test_endpoint_and_network_policy(monkeypatch):
     assert config.extra_allowed_hosts == ["example.org"]
     assert config.env["LLM_BASE_URL"] == "https://example.org/v1"
     task = TaskConfig.model_validate({"environment": {"network_mode": "no-network"}})
-    baseline = task.environment.resolve_baseline()
-    policy = resolve_agent_phase_policy(task, config, baseline)
+    policy = resolve_trial_network_plan(
+        task,
+        config,
+        EnvironmentConfig(type="sail"),
+        VerifierConfig(),
+        None,
+        verifier_mode=VerifierEnvironmentMode.SHARED,
+    ).agent_phase
     assert policy.allowed_hosts == ["example.org"]
 
 
