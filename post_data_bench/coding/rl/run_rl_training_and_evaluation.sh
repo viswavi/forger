@@ -57,11 +57,7 @@ INIT_CHECKPOINT="$QWEN3_4B_LOCAL"
 OUTPUT_DIR=""
 SPLIT="test"
 NO_THINKING=0
-# The zero-std filter, 20480-token responses and save-interval 10 are the defaults
-# because the babel run passed them (--filter-zero-std --max-response-len 20480
-# --save-interval 10 --max-tokens-per-gpu 24576); rl.agent_training has no flags
-# for them. RL_FILTER_ZERO_STD=0 turns the filter off.
-FILTER_ZERO_STD="${RL_FILTER_ZERO_STD:-1}"
+FILTER_ZERO_STD=0
 NUM_ROLLOUT=80
 ROLLOUT_BATCH_SIZE=32
 N_SAMPLES_PER_PROMPT=8
@@ -70,7 +66,7 @@ MAX_RESPONSE_LEN=""
 LR="3e-6"
 KL_LOSS_COEF="1e-3"
 TEMPERATURE="1.0"
-SAVE_INTERVAL=10
+SAVE_INTERVAL=20
 EVAL_INTERVAL=10
 SKIP_FINAL_EVAL=0
 ROLLOUT_LOG_DIR=""
@@ -162,7 +158,7 @@ fi
 
 # Use a shorter cap for no-thinking answers and room for long thinking traces.
 if [ -z "$MAX_RESPONSE_LEN" ]; then
-  if [ "$NO_THINKING" -eq 1 ]; then MAX_RESPONSE_LEN=3072; else MAX_RESPONSE_LEN=20480; fi
+  if [ "$NO_THINKING" -eq 1 ]; then MAX_RESPONSE_LEN=3072; else MAX_RESPONSE_LEN=16384; fi
   echo ">>> defaulting --max-response-len -> $MAX_RESPONSE_LEN"
 fi
 
@@ -454,7 +450,7 @@ ray job submit --address=http://127.0.0.1:8265 --submission-id=\"\$RAY_JOB_ID\" 
   --recompute-method uniform \
   --recompute-num-layers 1 \
   --use-dynamic-batch-size \
-  --max-tokens-per-gpu 24576 \
+  --max-tokens-per-gpu 8192 \
   --rollout-num-gpus-per-engine 2 \
   --sglang-mem-fraction-static 0.5 \
   --attention-dropout 0.0 \

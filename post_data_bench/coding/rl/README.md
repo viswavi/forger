@@ -344,20 +344,16 @@ GPUs, saves HF checkpoints via slime's `--save-hf`, and finishes by running
 `./evaluate_model.sh --split test` on the last one from the `trl` env — the same
 eval every other model in this study gets.
 
-Defaults: 80 rollout steps x 32 prompts x 8 samples, `--global-batch-size 256`,
-lr 3e-6 constant, `--eps-clip-high 0.28`, KL coefficient 1e-3, HF checkpoints every
-10 steps. Response cap is 20480 in thinking mode and 3072 without (no-thinking
-answers on this data measured 329-3260 tokens). TP=2 for both Megatron and SGLang,
-`--sglang-mem-fraction-static 0.5`, `--max-tokens-per-gpu 24576`.
+Defaults: 100 rollout steps x 32 prompts x 8 samples, `--global-batch-size 256`,
+lr 1e-6 constant, `--eps-clip-high 0.28`, KL coefficient 0. Response cap is 16384
+in thinking mode and 3072 without (no-thinking answers on this data measured
+329-3260 tokens). TP=2 for both Megatron and SGLang, `--sglang-mem-fraction-static
+0.5` and `--max-tokens-per-gpu 8192` for 48GB-class cards.
 
-DAPO-style dropping of all-same-reward groups (`check_reward_nonzero_std`) is on
-by default: it keeps sampling until each batch holds groups whose rewards differ.
-These defaults are the babel run that took abstention from 7% after SFT to 51%
-after RL (Sep 2026): `--filter-zero-std --max-response-len 20480 --save-interval 10
---max-tokens-per-gpu 24576`, lr 3e-6, KL 1e-3. Truncated completions stay in the
-loss, as there. The filter reshapes the training mix, and early on the groups most
-likely to come back all-zero are the impossible ones; `RL_FILTER_ZERO_STD=0` turns
-it off.
+`--filter-zero-std` turns on DAPO-style dropping of all-same-reward groups. It is
+off by default: it saves the training step from all-zero groups, but it also
+reshapes the training mix, and early on the groups most likely to come back
+all-zero are exactly the impossible ones.
 
 ## Process reward for thinking mode
 
