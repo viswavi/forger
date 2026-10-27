@@ -450,7 +450,7 @@ ray job submit --address=http://127.0.0.1:8265 --submission-id=\"\$RAY_JOB_ID\" 
   --recompute-method uniform \
   --recompute-num-layers 1 \
   --use-dynamic-batch-size \
-  --max-tokens-per-gpu 8192 \
+  --max-tokens-per-gpu 24576 \
   --rollout-num-gpus-per-engine 2 \
   --sglang-mem-fraction-static 0.5 \
   --attention-dropout 0.0 \

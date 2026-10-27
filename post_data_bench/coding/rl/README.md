@@ -348,7 +348,8 @@ Defaults: 100 rollout steps x 32 prompts x 8 samples, `--global-batch-size 256`,
 lr 1e-6 constant, `--eps-clip-high 0.28`, KL coefficient 0. Response cap is 16384
 in thinking mode and 3072 without (no-thinking answers on this data measured
 329-3260 tokens). TP=2 for both Megatron and SGLang, `--sglang-mem-fraction-static
-0.5` and `--max-tokens-per-gpu 8192` for 48GB-class cards.
+0.5` and `--max-tokens-per-gpu 24576`, as in the babel run (it packs micro-batches
+and truncates nothing; 8192 split a single 16K response).
 
 `--filter-zero-std` turns on DAPO-style dropping of all-same-reward groups. It is
 off by default: it saves the training step from all-zero groups, but it also
