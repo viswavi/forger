@@ -503,6 +503,7 @@ class TestDataParallel:
 
         Workers are fresh processes, so the caller's script is not re-imported
         (multiprocessing's "spawn" would rerun it and start engines recursively).
+        Each runs its engine core in-process (VLLM_ENABLE_V1_MULTIPROCESSING=0).
         """
         fake = tmp_path / "vllm"
         fake.mkdir()
@@ -513,7 +514,9 @@ class TestDataParallel:
             "    def __init__(self, **kw): self.kw = kw\n"
             "class LLM:\n"
             "    def __init__(self, **kw):\n"
-            "        self.gpu = os.environ['CUDA_VISIBLE_DEVICES']\n"
+            "        env = os.environ\n"
+            "        self.gpu = env['CUDA_VISIBLE_DEVICES'] + '/' + env.get(\n"
+            "            'VLLM_ENABLE_V1_MULTIPROCESSING', 'unset')\n"
             "    def chat(self, messages, sp, **kw):\n"
             "        return [N(prompt_token_ids=[1], outputs=[N(\n"
             "            text=m[0]['content'] + '@' + self.gpu, token_ids=[1],\n"
@@ -530,6 +533,7 @@ class TestDataParallel:
         env = dict(
             os.environ, CUDA_VISIBLE_DEVICES="4,5", PYTHONPATH=f"{tmp_path}:{src}"
         )
+        env.pop("VLLM_ENABLE_V1_MULTIPROCESSING", None)
         done = subprocess.run(
             [sys.executable, str(script)],
             env=env,
@@ -538,7 +542,7 @@ class TestDataParallel:
             timeout=120,
         )
         assert done.returncode == 0, done.stderr[-2000:]
-        assert done.stdout.strip().splitlines()[-1] == "['a@4', 'b@5', 'c@4']"
+        assert done.stdout.strip().splitlines()[-1] == "['a@4/0', 'b@5/0', 'c@4/0']"
 
     def test_data_parallel_size_one_keeps_one_engine(self, engines, monkeypatch):
         """data_parallel_size=1 runs in this process even with several GPUs visible."""
