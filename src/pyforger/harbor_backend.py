@@ -68,6 +68,23 @@ def _package(
         if task.packages
         else ""
     )
+    tokenizer_build = ""
+    if agent.model is not None:
+        from pyforger.sdk_config import llm_options
+
+        tokenizer = llm_options(agent.model).get("custom_tokenizer")
+        if tokenizer:
+            script = (
+                "from huggingface_hub import snapshot_download; "
+                f"snapshot_download({tokenizer!r}, local_dir='/opt/tokenizer', "
+                "allow_patterns=['*token*','*vocab*','merges.txt','config.json',"
+                "'*.model','*.tiktoken','*.jinja'], token=False)"
+            )
+            tokenizer_build = (
+                "RUN /opt/openhands-sdk-venv/bin/python -c "
+                + shlex.quote(script)
+                + "\n"
+            )
     (environment / "Dockerfile").write_text(
         "FROM python:3.12-slim\n"
         + installs
@@ -77,7 +94,8 @@ def _package(
         "RUN python -m venv /opt/openhands-sdk-venv "
         "&& /opt/openhands-sdk-venv/bin/pip install --no-cache-dir "
         "openhands-sdk==1.58.0 openhands-tools==1.58.0 fastapi==0.135.2\n"
-        "RUN mkdir /work && chown 65534:65534 /work\n"
+        + tokenizer_build
+        + "RUN mkdir /work && chown 65534:65534 /work\n"
         "ENV HOME=/tmp\nWORKDIR /work\nCOPY --chown=65534:65534 files /work\nUSER root\n"
     )
     (root / "instruction.md").write_text(task.instruction)

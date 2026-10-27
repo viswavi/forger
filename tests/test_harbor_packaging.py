@@ -83,3 +83,19 @@ def test_verifier_root_bootstrap_executes_without_submitted_imports(tmp_path):
     command = artifact.path("tests/verifier-command.sh").read_text()
     assert "chmod 600 /work/reward.txt" in command
     assert "if [ ! -s /logs/verifier/reward.txt ]" in command
+
+
+def test_public_custom_tokenizer_is_built_without_credentials(tmp_path):
+    from pyforger.acquire.model import Model
+
+    model = Model("openai/gpt-4o", custom_tokenizer="meta-models/Muse-Glimmer-30B")
+    task = WorkspaceTask(instruction="submit", files={}, outputs=("result.json",))
+    artifact = _package(
+        task, AgentSpec(model=model), tmp_path / "task", ["/work/result.json"]
+    )
+    dockerfile = artifact.path("environment/Dockerfile").read_text()
+    assert "snapshot_download" in dockerfile
+    assert "token=False" in dockerfile
+    assert "/opt/tokenizer" in dockerfile
+    assert "model.safetensors" not in dockerfile
+    assert "snapshot_download" not in artifact.path("tests/Dockerfile").read_text()

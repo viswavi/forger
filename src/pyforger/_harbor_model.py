@@ -21,6 +21,8 @@ def runner_source() -> str:
     compatibility = compatibility.replace("from __future__ import annotations", "")
     replacement = """    settings = json.loads(os.environ["FORGER_LLM_CONFIG"])
     settings["api_key"] = os.environ.get("LLM_API_KEY")
+    if settings.get("custom_tokenizer"):
+        settings["custom_tokenizer"] = "/opt/tokenizer"
     disable_cache_key = os.environ.get("FORGER_DISABLE_PROMPT_CACHE") == "1"
     llm_type = ConfiguredLLM if disable_cache_key else LLM
     llm = llm_type(**settings)"""
@@ -41,7 +43,9 @@ def runner_source() -> str:
         '    max_iter_raw = os.environ.get("MAX_ITERATIONS")',
         '    max_iter_raw = os.environ.get("MAX_ITERATIONS") or str(sys.maxsize)',
     )
-    return "from __future__ import annotations\n" + source.replace(condenser_anchor, condenser)
+    return "from __future__ import annotations\n" + source.replace(
+        condenser_anchor, condenser
+    )
 
 
 class ForgerOpenHandsSDK(OpenHandsSDK):  # type: ignore[misc]
