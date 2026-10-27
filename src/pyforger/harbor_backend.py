@@ -96,7 +96,9 @@ def _package(
         "openhands-sdk==1.58.0 openhands-tools==1.58.0 fastapi==0.135.2\n"
         + tokenizer_build
         + "RUN mkdir /work && chown 65534:65534 /work\n"
-        "ENV HOME=/tmp\nWORKDIR /work\nCOPY --chown=65534:65534 files /work\nUSER root\n"
+        "ENV HOME=/tmp\nWORKDIR /work\n"
+        + ("COPY --chown=65534:65534 files /work\n" if task.files else "")
+        + "USER root\n"
     )
     (root / "instruction.md").write_text(task.instruction)
     (root / "task.toml").write_text(
@@ -141,8 +143,9 @@ def _package(
         "FROM python:3.12-slim\n"
         + installs
         + "RUN mkdir -p /work /tests /logs/verifier && chmod 700 /tests /logs/verifier\n"
-        "COPY . /tests\nCOPY public /work\n"
-        "RUN mkdir -p /opt/trusted && cp -r /tests/trusted/. /opt/trusted/ "
+        "COPY . /tests\n"
+        + ("COPY public /work\n" if task.files else "")
+        + "RUN mkdir -p /opt/trusted && cp -r /tests/trusted/. /opt/trusted/ "
         "&& chmod 755 /opt/trusted && chmod -R go-w /opt/trusted "
         "&& chmod 700 /tests /logs/verifier\n"
         "WORKDIR /tests\nUSER root\n"

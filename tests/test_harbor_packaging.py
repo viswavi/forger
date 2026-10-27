@@ -99,3 +99,20 @@ def test_public_custom_tokenizer_is_built_without_credentials(tmp_path):
     assert "/opt/tokenizer" in dockerfile
     assert "model.safetensors" not in dockerfile
     assert "snapshot_download" not in artifact.path("tests/Dockerfile").read_text()
+
+
+def test_empty_public_inputs_have_no_docker_copy_from_missing_directory(tmp_path):
+    task = WorkspaceTask(
+        instruction="submit",
+        files={},
+        outputs=("result.json",),
+        verifier="echo 0 > $WORKSPACE/reward.txt",
+    )
+    artifact = _package(
+        task, AgentSpec(kind="nop"), tmp_path / "task", ["/work/result.json"]
+    )
+    assert (
+        "COPY --chown=65534:65534 files /work"
+        not in artifact.path("environment/Dockerfile").read_text()
+    )
+    assert "COPY public /work" not in artifact.path("tests/Dockerfile").read_text()
