@@ -384,11 +384,15 @@ source scripts/models/qwen3-4B.sh
 # ray worker need it importable for --custom-rm-path to resolve.
 export PYTHONPATH='$CODING_DIR:$MEGATRON_DIR'
 export CUDA_DEVICE_MAX_CONNECTIONS=1
-# Single-node Ray on loopback. On Orchard MASTER_ADDR arrives set to the node's
-# own IP, and on some nodes traffic to that IP stalls inside the container: the
-# dashboard's job agent never answered (162173) and a driver hung right after
-# connecting (162182). RL_RAY_NODE_IP overrides it.
+# Single-node Ray; train.py reaches the GCS on loopback. Orchard presets
+# MASTER_ADDR to the node IP. Ray still registers the node under its own IP.
+# RL_RAY_NODE_IP overrides the address.
 export MASTER_ADDR=\${RL_RAY_NODE_IP:-127.0.0.1}
+# By default the raylet holds the first driver's registration until it has
+# prestarted one worker per CPU (208 on an Orchard node). Inside the fakeroot
+# container those workers sometimes never register, so train.py waited forever
+# with idle GPUs (162182, 162194, 162222). Start workers on demand instead.
+export RAY_prestart_worker_first_driver=0
 
 # Use a short per-user/job Ray directory to avoid shared /tmp ownership
 # and cleanup races while staying within Unix socket path limits.
