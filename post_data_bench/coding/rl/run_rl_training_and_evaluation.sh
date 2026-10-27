@@ -4,9 +4,8 @@
 #        [--init-checkpoint <local-HF-dir>] [--no-thinking] [--dry-run]
 #
 # Use rl/measure_group_variance.py to check the starting policy: equal-reward
-# groups contribute no gradient. The zero-std filter (on by default) drops them
-# and changes the training mix; truncated samples are masked from the loss (also
-# on by default). See rl/README.md for the recipe and remaining flags.
+# groups contribute no gradient. --filter-zero-std drops them and changes
+# the training mix. See rl/README.md for the recipe and remaining flags.
 #
 # base_score matches benchmark accuracy; reward also penalizes false
 # abstention (-0.1). Optional --doubt-reward <1 grants gameable partial credit
@@ -58,11 +57,11 @@ INIT_CHECKPOINT="$QWEN3_4B_LOCAL"
 OUTPUT_DIR=""
 SPLIT="test"
 NO_THINKING=0
-# On by default, as in the babel run that took abstention from 7% (SFT) to 51%
-# (RL); RL_FILTER_ZERO_STD=0 / RL_DROP_TRUNCATED=0 turn them off (the
-# agent-facing rl.agent_training has no flags for them).
+# The zero-std filter, 20480-token responses and save-interval 10 are the defaults
+# because the babel run passed them (--filter-zero-std --max-response-len 20480
+# --save-interval 10 --max-tokens-per-gpu 24576); rl.agent_training has no flags
+# for them. RL_FILTER_ZERO_STD=0 turns the filter off.
 FILTER_ZERO_STD="${RL_FILTER_ZERO_STD:-1}"
-DROP_TRUNCATED="${RL_DROP_TRUNCATED:-1}"
 NUM_ROLLOUT=80
 ROLLOUT_BATCH_SIZE=32
 N_SAMPLES_PER_PROMPT=8
@@ -71,7 +70,7 @@ MAX_RESPONSE_LEN=""
 LR="3e-6"
 KL_LOSS_COEF="1e-3"
 TEMPERATURE="1.0"
-SAVE_INTERVAL=20
+SAVE_INTERVAL=10
 EVAL_INTERVAL=10
 SKIP_FINAL_EVAL=0
 ROLLOUT_LOG_DIR=""
@@ -118,7 +117,6 @@ while [[ $# -gt 0 ]]; do
     --eval-interval) EVAL_INTERVAL="$2"; shift 2 ;;
     --no-thinking) NO_THINKING=1; shift ;;
     --filter-zero-std) FILTER_ZERO_STD=1; shift ;;
-    --drop-truncated) DROP_TRUNCATED=1; shift ;;
     --skip-final-eval) SKIP_FINAL_EVAL=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     *) EXTRA_SLIME_ARGS+=("$1"); shift ;;
@@ -164,7 +162,7 @@ fi
 
 # Use a shorter cap for no-thinking answers and room for long thinking traces.
 if [ -z "$MAX_RESPONSE_LEN" ]; then
-  if [ "$NO_THINKING" -eq 1 ]; then MAX_RESPONSE_LEN=3072; else MAX_RESPONSE_LEN=16384; fi
+  if [ "$NO_THINKING" -eq 1 ]; then MAX_RESPONSE_LEN=3072; else MAX_RESPONSE_LEN=20480; fi
   echo ">>> defaulting --max-response-len -> $MAX_RESPONSE_LEN"
 fi
 
@@ -322,28 +320,10 @@ fi
 CHAT_TEMPLATE_KWARGS='{"enable_thinking": true}'
 [ "$NO_THINKING" -eq 1 ] && CHAT_TEMPLATE_KWARGS='{"enable_thinking": false}'
 
-# Throughput on 8x H100 80GB with a 4B model (Orchard 2026-10-26: the old
-# TP=2 / 8192 tokens / 0.5 settings, meant for 48GB cards, used ~45 of 80 GB).
-# Megatron and SGLang both run at TP_SIZE; Megatron disables sequence
-# parallelism by itself at TP=1. None of these change the training math.
-TP_SIZE="${RL_TP_SIZE:-1}"
-MAX_TOKENS_PER_GPU="${RL_MAX_TOKENS_PER_GPU:-24576}"
-SGLANG_MEM_FRACTION="${RL_SGLANG_MEM_FRACTION:-0.7}"
-echo ">>> throughput: TP=$TP_SIZE, max tokens/GPU $MAX_TOKENS_PER_GPU, SGLang memory fraction $SGLANG_MEM_FRACTION"
-
 DYNAMIC_FILTER_ARGS=""
 if [ "$FILTER_ZERO_STD" -eq 1 ]; then
-  # Sample RL_OVER_SAMPLING_FACTOR x the batch per wave: most groups come back
-  # all-same and get dropped (Orchard 162166 step 4: 81+ dropped for 32 kept),
-  # so one-batch waves meant several refills per step.
-  OVER_SAMPLING=$(( ROLLOUT_BATCH_SIZE * ${RL_OVER_SAMPLING_FACTOR:-2} ))
-  DYNAMIC_FILTER_ARGS="--dynamic-sampling-filter-path slime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std --over-sampling-batch-size $OVER_SAMPLING"
-  echo ">>> dropping zero-variance prompt groups (this reshapes the training mix; see header); sampling $OVER_SAMPLING prompts per wave"
-fi
-SAMPLE_FILTER_ARGS=""
-if [ "$DROP_TRUNCATED" -eq 1 ]; then
-  SAMPLE_FILTER_ARGS="--rollout-sample-filter-path rl.sample_filters.drop_truncated"
-  echo ">>> masking truncated samples from the loss (rl.sample_filters.drop_truncated)"
+  DYNAMIC_FILTER_ARGS="--dynamic-sampling-filter-path slime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std"
+  echo ">>> dropping zero-variance prompt groups (this reshapes the training mix; see header)"
 fi
 
 # The verifier grades in a spawn-context process pool sized here. It executes
@@ -384,14 +364,11 @@ source scripts/models/qwen3-4B.sh
 # ray worker need it importable for --custom-rm-path to resolve.
 export PYTHONPATH='$CODING_DIR:$MEGATRON_DIR'
 export CUDA_DEVICE_MAX_CONNECTIONS=1
-# Single-node Ray; train.py reaches the GCS on loopback. Orchard presets
-# MASTER_ADDR to the node IP. Ray still registers the node under its own IP.
-# RL_RAY_NODE_IP overrides the address.
-export MASTER_ADDR=\${RL_RAY_NODE_IP:-127.0.0.1}
-# By default the raylet holds the first driver's registration until it has
-# prestarted one worker per CPU (208 on an Orchard node). Inside the fakeroot
-# container those workers sometimes never register, so train.py waited forever
-# with idle GPUs (162182, 162194, 162222). Start workers on demand instead.
+export MASTER_ADDR=\${MASTER_ADDR:-127.0.0.1}
+# The raylet otherwise holds the first driver until it has prestarted one
+# worker per CPU (208 on an Orchard node); inside the fakeroot container those
+# workers sometimes never register, and the run hangs with idle GPUs (Orchard
+# 162182, 162194, 162222). Start workers on demand instead.
 export RAY_prestart_worker_first_driver=0
 
 # Use a short per-user/job Ray directory to avoid shared /tmp ownership
@@ -423,7 +400,9 @@ RUNTIME_ENV_FILE=\$(mktemp /dev/shm/rubric-ray-env.\$\$.XXXXXX.json)
 trap 'rm -f \"\$RUNTIME_ENV_FILE\"; ray stop --force >/dev/null 2>&1 || true' EXIT
 python3 '$CODING_DIR/rl/rubric_runtime_env.py' \"\$RUNTIME_ENV_JSON\" \"\$RUNTIME_ENV_FILE\"
 RAY_JOB_ID=\$(python3 -c 'import uuid; print(uuid.uuid4().hex)')
-TRAIN_ARGS=(
+ray job submit --address=http://127.0.0.1:8265 --submission-id=\"\$RAY_JOB_ID\" \
+  --runtime-env=\"\$RUNTIME_ENV_FILE\" \
+  -- python3 train.py \
   --actor-num-nodes 1 \
   --actor-num-gpus-per-node $NUM_GPUS \
   --colocate \
@@ -450,7 +429,6 @@ TRAIN_ARGS=(
   --global-batch-size $GLOBAL_BATCH_SIZE \
   --balance-data \
   $DYNAMIC_FILTER_ARGS \
-  $SAMPLE_FILTER_ARGS \
   --eval-interval $EVAL_INTERVAL \
   --eval-prompt-data generated_val '$RL_DATA_DIR/val.jsonl' \
   --n-samples-per-eval-prompt 4 \
@@ -468,7 +446,7 @@ TRAIN_ARGS=(
   --weight-decay 0.1 \
   --adam-beta1 0.9 \
   --adam-beta2 0.98 \
-  --tensor-model-parallel-size $TP_SIZE \
+  --tensor-model-parallel-size 2 \
   --sequence-parallel \
   --pipeline-model-parallel-size 1 \
   --context-parallel-size 1 \
@@ -476,9 +454,9 @@ TRAIN_ARGS=(
   --recompute-method uniform \
   --recompute-num-layers 1 \
   --use-dynamic-batch-size \
-  --max-tokens-per-gpu $MAX_TOKENS_PER_GPU \
-  --rollout-num-gpus-per-engine $TP_SIZE \
-  --sglang-mem-fraction-static $SGLANG_MEM_FRACTION \
+  --max-tokens-per-gpu 24576 \
+  --rollout-num-gpus-per-engine 2 \
+  --sglang-mem-fraction-static 0.5 \
   --attention-dropout 0.0 \
   --hidden-dropout 0.0 \
   --accumulate-allreduce-grads-in-fp32 \
@@ -487,33 +465,8 @@ TRAIN_ARGS=(
   $PRECISION_ARGS \
   $GRAD_FUSION_ARG \
   ${EXTRA_SLIME_ARGS[*]:-}
-)
 
-if [ \"\${RL_RAY_JOB_SUBMIT:-0}\" = 1 ]; then
-  # Ray's job API. ray start returns before the dashboard's job agent is up, and
-  # submitting then can fail with HTTP 504 (Orchard 162111, 162165): retry
-  # unless the job did get through.
-  submitted=0
-  for attempt in 1 2 3 4 5 6; do
-    if ray job submit --no-wait --address=http://127.0.0.1:8265 --submission-id=\"\$RAY_JOB_ID\" \
-        --runtime-env=\"\$RUNTIME_ENV_FILE\" -- python3 train.py \"\${TRAIN_ARGS[@]}\"; then
-      submitted=1; break
-    fi
-    if ray job status --address=http://127.0.0.1:8265 \"\$RAY_JOB_ID\" >/dev/null 2>&1; then submitted=1; break; fi
-    echo \">>> ray job submit failed (attempt \$attempt); retrying in 20s\"
-    sleep 20
-  done
-  [ \"\$submitted\" = 1 ] || { echo '!!! could not submit the RL job to ray' >&2; exit 1; }
-  ray job logs --address=http://127.0.0.1:8265 --follow \"\$RAY_JOB_ID\" || true
-  python3 '$CODING_DIR/rl/ray_job_status.py' \"\$RAY_JOB_ID\"
-else
-  # Default: run train.py as the driver on the cluster ray start launched. The
-  # dashboard's job agent can stay unresponsive (Orchard 162173: every
-  # submission waited 300 s, then HTTP 504). Workers inherit this shell's
-  # exports (PYTHONPATH, reward and judge settings) through ray start.
-  echo \">>> running train.py as the ray driver (RL_RAY_JOB_SUBMIT=1 uses ray job submit)\"
-  RAY_ADDRESS=\"\$MASTER_ADDR:6379\" python3 train.py \"\${TRAIN_ARGS[@]}\"
-fi
+python3 '$CODING_DIR/rl/ray_job_status.py' \"\$RAY_JOB_ID\"
 ray stop --force 2>/dev/null || true
 "
 
