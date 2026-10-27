@@ -106,12 +106,15 @@ def test_sdk_backends_accept_condensation(backend):
     require_learner_runtime(backend, spec(condenser_max_tokens=104857))
 
 
-def test_harbor_rejects_condensation():
-    """Reject condensation when the Harbor adapter cannot honor it."""
-    with pytest.raises(NotImplementedError, match="condensation"):
-        HarborBackend().run_agent(
-            WorkspaceTask(instruction="test"), spec(condenser_max_tokens=104857)
-        )
+def test_harbor_accepts_and_serializes_condensation(monkeypatch):
+    """Validate native configuration without invoking remote model transport."""
+    monkeypatch.setenv("LITELLM_API_KEY", "fixture-local-only")
+    backend = HarborBackend()
+    agent = spec(condenser_max_tokens=104857)
+    require_learner_runtime(backend, agent)
+    config = backend._agent_config(agent)
+    assert config.env["FORGER_CONDENSER_MAX_TOKENS"] == "104857"
+    assert config.env["LLM_API_KEY"] == "${LITELLM_API_KEY}"
 
 
 def test_local_condenser_uses_agent_model(tmp_path):

@@ -107,7 +107,7 @@ def test_harbor_backend_retains_trial_directory(tmp_path, monkeypatch):
         def __init__(self, **kwargs):
             pass
 
-        def run(self, request, root):
+        async def arun(self, request, root):
             trial = Path(root) / "trial-fake"
             (trial / "agent").mkdir(parents=True)
             (trial / "result.json").write_text("{}")
