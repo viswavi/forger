@@ -10,7 +10,6 @@ through Oracle without any model.
 
 from __future__ import annotations
 
-import asyncio
 import copy
 import hashlib
 import json
@@ -334,38 +333,14 @@ class HarborBackend:
                 trusted_verifier_files=self._trusted_verifier_files,
             )
             runner = HarborTaskRunner(
-                agent=self._agent_config(agent), environment=self._environment
+                agent=self._agent_config(agent),
+                environment=self._environment,
+                timeout_s=task.timeout_s,
             )
 
-            async def run() -> Any:
-                async with asyncio.timeout(task.timeout_s):
-                    return await runner.arun(
-                        HarborRequest(trial_id="agent", task=packaged), root / "native"
-                    )
-
-            try:
-                rollout = asyncio.run(run())
-            except TimeoutError:
-                native = root / "native"
-                agent_started = any(
-                    native.glob("trial-*/agent/trajectory.json")
-                ) or any(native.glob("trial-*/agent/exit-code.txt"))
-                diagnostics: dict[str, Any] = {
-                    "wall_timeout_s": task.timeout_s,
-                    "phase": (
-                        "agent_or_verifier" if agent_started else "startup_unresolved"
-                    ),
-                }
-                if self._retain_trials is not None and (root / "native").exists():
-                    retained = self._retain_trials / ("timeout-" + root.name)
-                    shutil.copytree(root / "native", retained)
-                    diagnostics["trial_dir"] = str(retained)
-                return AgentRunResult(
-                    status="timed_out",
-                    passed=False if agent_started else None,
-                    failure_kind="budget" if agent_started else "infrastructure",
-                    diagnostics=diagnostics,
-                )
+            rollout = runner.run(
+                HarborRequest(trial_id="agent", task=packaged), root / "native"
+            )
             outcome = trial_outcome(rollout)
             native_trajectory = trial_directory(rollout) / "agent/trajectory.json"
             normalized_trajectory = None

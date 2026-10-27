@@ -149,3 +149,30 @@ def test_native_packaging_rejects_reference_credentials_before_creating_artifact
                 ["/work/result.json"],
             )
         assert not target.exists()
+
+
+def test_native_agent_budget_is_configured_independently_of_environment_setup(tmp_path):
+    from pyforger.harbor import HarborRequest, HarborTaskRunner
+
+    task = WorkspaceTask(
+        instruction="wait", files={}, outputs=("result.json",), timeout_s=1
+    )
+    artifact = _package(
+        task,
+        AgentSpec(kind="oracle", solution="sleep 3"),
+        tmp_path / "task",
+        ["/work/result.json"],
+    )
+    runner = HarborTaskRunner(
+        agent={"name": "oracle"},
+        environment={"type": "docker"},
+        timeout_s=task.timeout_s,
+    )
+    config = runner._configuration(
+        HarborRequest(trial_id="budget", task=artifact),
+        artifact.root,
+        tmp_path / "trials",
+    )
+    assert config.agent.override_timeout_sec == 1
+    native_task = TaskConfig.model_validate_toml(artifact.path("task.toml").read_text())
+    assert native_task.agent.timeout_sec == 1
