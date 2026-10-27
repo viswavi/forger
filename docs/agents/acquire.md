@@ -60,17 +60,19 @@ To sample a student model, use `LocalModel` when you have GPUs and `TinkerModel`
 Tinker. Use one whenever you need a student model's own outputs: STaR traces, pass@k difficulty checks, or sanity
 checks of a checkpoint.
 
-`LocalModel(path_or_name, ...)` loads a Hugging Face model or a local checkpoint directory into vLLM in-process, at
-no API cost; its sampling defaults are vLLM's (`top_p=1`, no `top_k`), so `temperature=1.0` matches typical RL
-sampling. It runs one engine: `tensor_parallel_size` shards it across GPUs, and one GPU writes roughly 240 Qwen3-4B
-thinking samples of up to 16K tokens in 18 minutes, so spread larger jobs over all your GPUs. It holds its GPUs until
-the process exits, so sample in a separate script before training on the same GPUs.
+`LocalModel(path_or_name, ...)` loads a Hugging Face model or a local checkpoint directory into vLLM, at no API cost;
+its sampling defaults are vLLM's (`top_p=1`, no `top_k`), so `temperature=1.0` matches typical RL sampling. By default
+it starts one engine per visible GPU, each a full copy of the model in its own process, and splits the prompts among
+them (`data_parallel_size="auto"`; one GPU writes roughly 240 Qwen3-4B thinking samples of up to 16K tokens in 18
+minutes, so 8 GPUs do it in a few). Set `CUDA_VISIBLE_DEVICES` to use fewer GPUs, and `tensor_parallel_size` only for
+a model too large for one GPU. The engines hold their GPUs until `model.close()` or the process exits, so free them
+before training on the same GPUs.
 
 ```python
 from pyforger import filter
 from pyforger.acquire import LocalModel
 
-student = LocalModel("Qwen/Qwen3-4B", temperature=1.0, max_tokens=16384, max_model_len=32768, tensor_parallel_size=8)
+student = LocalModel("Qwen/Qwen3-4B", temperature=1.0, max_tokens=16384, max_model_len=32768)  # every GPU
 measured = filter.by_pass_at_k(rows, model=student, input_field="prompt", metric=my_verifier,
                                k=8, min_rate=0.0, max_rate=1.0, outcomes_field="grades")  # keep all; read the histogram
 ```
