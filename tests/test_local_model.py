@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
 import types
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -494,6 +497,48 @@ class TestDataParallel:
         assert len(results) == 3 and model.history == results
         model.close()
         assert model._llm is None
+
+    def test_unguarded_script_runs_worker_processes(self, tmp_path):
+        """A script with no __main__ guard starts real workers, one per GPU, once.
+
+        Workers are fresh processes, so the caller's script is not re-imported
+        (multiprocessing's "spawn" would rerun it and start engines recursively).
+        """
+        fake = tmp_path / "vllm"
+        fake.mkdir()
+        (fake / "__init__.py").write_text(
+            "import os\n"
+            "from types import SimpleNamespace as N\n"
+            "class SamplingParams:\n"
+            "    def __init__(self, **kw): self.kw = kw\n"
+            "class LLM:\n"
+            "    def __init__(self, **kw):\n"
+            "        self.gpu = os.environ['CUDA_VISIBLE_DEVICES']\n"
+            "    def chat(self, messages, sp, **kw):\n"
+            "        return [N(prompt_token_ids=[1], outputs=[N(\n"
+            "            text=m[0]['content'] + '@' + self.gpu, token_ids=[1],\n"
+            "            finish_reason='stop')]) for m in messages]\n"
+        )
+        script = tmp_path / "unguarded.py"
+        script.write_text(
+            "from pyforger.acquire.model import LocalModel\n"
+            "m = LocalModel('x')\n"
+            "print([r[0] for r in m.generate_batch(['a', 'b', 'c'])])\n"
+            "m.close()\n"
+        )
+        src = str(Path(__file__).resolve().parents[1] / "src")
+        env = dict(
+            os.environ, CUDA_VISIBLE_DEVICES="4,5", PYTHONPATH=f"{tmp_path}:{src}"
+        )
+        done = subprocess.run(
+            [sys.executable, str(script)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert done.returncode == 0, done.stderr[-2000:]
+        assert done.stdout.strip().splitlines()[-1] == "['a@4', 'b@5', 'c@4']"
 
     def test_data_parallel_size_one_keeps_one_engine(self, engines, monkeypatch):
         """data_parallel_size=1 runs in this process even with several GPUs visible."""

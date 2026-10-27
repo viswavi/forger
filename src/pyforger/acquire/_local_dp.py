@@ -14,6 +14,7 @@ import atexit
 import multiprocessing
 import os
 import subprocess
+import sys
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
@@ -86,10 +87,14 @@ def _plain(output: Any) -> SimpleNamespace:
     )
 
 
-def _worker(conn: Any, devices: list[str], engine_kwargs: dict[str, Any]) -> None:
-    """Hold one `vllm.LLM` on `devices`; answer `chat` requests until told to stop."""
-    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(devices)
+def serve(conn: Any) -> None:
+    """Hold one `vllm.LLM`; answer `chat` requests until told to stop.
+
+    The first message is the engine kwargs; `CUDA_VISIBLE_DEVICES` was set by
+    the parent before this process started.
+    """
     try:
+        engine_kwargs = conn.recv()
         import vllm
 
         llm = vllm.LLM(**engine_kwargs)
@@ -110,18 +115,30 @@ def _worker(conn: Any, devices: list[str], engine_kwargs: dict[str, Any]) -> Non
 
 
 class EngineProcess:
-    """One worker process holding a vLLM engine on a group of GPUs."""
+    """One worker process holding a vLLM engine on a group of GPUs.
+
+    The worker is a fresh `python -m pyforger.acquire._local_dp_worker` process, not a
+    multiprocessing child: "spawn" re-imports the caller's main script, which
+    reruns any script without an `if __name__ == "__main__":` guard.
+    """
 
     def __init__(self, devices: list[str], engine_kwargs: dict[str, Any]) -> None:
         """Start the worker; `wait_ready` blocks until its engine has loaded."""
-        context = multiprocessing.get_context("spawn")  # CUDA cannot be forked
         self.devices = devices
-        self._conn, child = context.Pipe()
-        self._process = context.Process(
-            target=_worker, args=(child, devices, engine_kwargs), daemon=True
+        self._conn, child = multiprocessing.Pipe()
+        env = dict(os.environ, CUDA_VISIBLE_DEVICES=",".join(devices))
+        self._process = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "pyforger.acquire._local_dp_worker",
+                str(child.fileno()),
+            ],
+            pass_fds=[child.fileno()],
+            env=env,
         )
-        self._process.start()
         child.close()
+        self._conn.send(engine_kwargs)
 
     def _receive(self) -> Any:
         """The worker's next reply; a worker error or exit raises RuntimeError."""
@@ -130,7 +147,7 @@ class EngineProcess:
         except EOFError:
             raise RuntimeError(
                 f"LocalModel engine on GPU(s) {','.join(self.devices)} exited "
-                f"(exit code {self._process.exitcode})"
+                f"(exit code {self._process.poll()})"
             ) from None
         if status == "error":
             raise RuntimeError(
@@ -150,13 +167,14 @@ class EngineProcess:
 
     def close(self) -> None:
         """Stop the worker and free its GPUs."""
-        if self._process.is_alive():
+        if self._process.poll() is None:
             try:
                 self._conn.send(None)
             except (BrokenPipeError, OSError):
                 pass
-            self._process.join(timeout=30)
-            if self._process.is_alive():
+            try:
+                self._process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
                 self._process.kill()
         self._conn.close()
 
