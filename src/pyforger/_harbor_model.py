@@ -41,7 +41,7 @@ def runner_source() -> str:
         '    max_iter_raw = os.environ.get("MAX_ITERATIONS")',
         '    max_iter_raw = os.environ.get("MAX_ITERATIONS") or str(sys.maxsize)',
     )
-    return source.replace(condenser_anchor, condenser)
+    return "from __future__ import annotations\n" + source.replace(condenser_anchor, condenser)
 
 
 class ForgerOpenHandsSDK(OpenHandsSDK):  # type: ignore[misc]

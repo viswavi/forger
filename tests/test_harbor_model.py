@@ -224,3 +224,12 @@ def test_custom_tokenizer_is_preserved_in_harbor_request(monkeypatch):
     model = Model("openai/gpt-4o", custom_tokenizer="meta-models/Muse-Glimmer-30B")
     assert '"custom_tokenizer"' in inspect.getsource(harbor.harbor_agent_config)
     assert llm_options(model)["custom_tokenizer"] == "meta-models/Muse-Glimmer-30B"
+
+
+def test_complete_generated_module_executes_without_model_transport():
+    from pyforger._harbor_model import runner_source
+
+    namespace = {"__name__": "forger_generated_runner_test"}
+    exec(compile(runner_source(), "generated-runner", "exec"), namespace)
+    assert callable(namespace["main"])
+    assert namespace["TaskPreservingCondenser"]
