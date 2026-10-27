@@ -10,6 +10,9 @@ import random
 from functools import lru_cache
 from pathlib import Path
 
+# Rows per SFT or RL run (and in the final dataset); experiments are unlimited.
+MAX_ROWS = 2000
+
 
 def score(value):
     """Validate and normalize a finite numeric criterion score in [0, 1]."""
@@ -199,6 +202,8 @@ def validate_dataset(source):
     rows = read_rows(source)
     if len(rows) < 10:
         raise ValueError("submit at least 10 distinct prompts for the 90/10 split")
+    if len(rows) > MAX_ROWS:
+        raise ValueError(f"{len(rows)} rows; each dataset may have at most {MAX_ROWS}")
     if len({prompt_id(r) for r in rows}) != len(rows):
         raise ValueError(
             "duplicate prompts are not allowed (prevents train/eval leakage)"

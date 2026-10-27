@@ -16,6 +16,8 @@ import tempfile
 from pathlib import Path
 
 from .backends import MODELS, resolve_backend, saved_backend  # noqa: ABS101
+from .lineage import check as check_lineage  # noqa: ABS101
+from .lineage import record_start  # noqa: ABS101
 
 # Supports both `rl` CLI imports and `coding.rl` library imports.
 from .rubric_data import compile_data, validate_dataset, validate_rubric  # noqa: ABS101
@@ -141,6 +143,7 @@ def _freeze_into(data, submission, agent_dir, output, backend="tinker"):
         raise ValueError(
             "submitted checkpoint must be inside this agent's persistent data directory"
         )
+    check_lineage(checkpoint, data)
     checkpoint = checkpoint_files(checkpoint, backend)
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=False)
@@ -543,6 +546,15 @@ def validate(args):
             "passed; no rubric execution or judge calls."
         )
     )
+    if args.checkpoint:
+        runs = check_lineage(args.checkpoint, args.data)
+        print(
+            f"{args.checkpoint} can be submitted with this dataset: "
+            + (
+                " <- ".join(f"{r['stage']} {r['checkpoint']}" for r in runs)
+                or "base model"
+            )
+        )
 
 
 def main():
@@ -557,6 +569,10 @@ def main():
         ),
     )
     check.add_argument("--data", required=True)
+    check.add_argument(
+        "--checkpoint",
+        help="Also check that this checkpoint's SFT and RL runs used these prompts",
+    )
     check.set_defaults(action=validate)
     resume = commands.add_parser(
         "run-final", help="Verify and run a frozen host submission"
@@ -668,6 +684,7 @@ def train_rl(args, short=False):
     backend = saved_backend(Path(args.data).resolve().parent, args.backend)
     checkpoint = checkpoint_files(args.checkpoint, backend)
     data = prepare(args.data, str(args.output_dir) + ".data", MODELS[backend])
+    record_start(data, checkpoint)
     reward_preflight(data, judge_config)
     command = rl_command(
         data,

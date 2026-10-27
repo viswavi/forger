@@ -48,7 +48,7 @@ Iterate with small batches before your final generation run. Web search uses `BR
 
 {BACKEND_TRAINING}
 
-You have {TIMEOUT_HOURS} hours for the entire agent workflow: data generation, SFT, RL, and validation. You decide how to divide that time, how many experiments to run, and which trained RL checkpoint to submit. You may continue RL from an earlier RL checkpoint or start another run from an SFT trial. Use a fresh output directory for each training run.
+You have {TIMEOUT_HOURS} hours for the entire agent workflow: data generation, SFT, RL, and validation. You decide how to divide that time, how many experiments to run, and which trained RL checkpoint to submit. You may continue RL from an earlier RL checkpoint or start another run from an SFT trial; SFT always starts from the base model. A run's --data can be any file in the dataset format, not only {RAW_DATA_PATH}: for example, a small seed set for a first SFT trial, then a larger set built by sampling that trial. Each file may have at most 2,000 rows. Use a fresh output directory for each training run.
 
 {BACKEND_TIMING} These are approximate guidelines, not guarantees; model, backend, sequence lengths, and service load affect wall-clock time. Leave enough time to complete a useful RL run, evaluate candidate checkpoints, and write submission.json. Keep a completed RL checkpoint selected while trying further experiments.
 
@@ -68,7 +68,7 @@ After your session ends, the host freezes your selected final RL checkpoint and 
 After choosing a completed RL checkpoint, write {SUBMISSION_PATH} as:
 {{"checkpoint": "<absolute path to your selected RL checkpoint directory>"}}
 {BACKEND_SUBMISSION}
-Keep your final dataset at {RAW_DATA_PATH} and all training outputs under {AGENT_DATA_DIR}. The selected checkpoint must have completed at least one RL step; an SFT-only checkpoint is not a final submission. The training helpers record an rl_submission.json receipt with RL checkpoints. You can revise your dataset between experiments; the host does not require the selected checkpoint to have been SFT-trained on the latest dataset. Preserve the data versions used by each experiment for your own records.
+Keep your final dataset at {RAW_DATA_PATH} and all training outputs under {AGENT_DATA_DIR}. The selected checkpoint must have completed at least one RL step; an SFT-only checkpoint is not a final submission. The training helpers record an rl_submission.json receipt with RL checkpoints. You can revise your dataset between experiments and generate as much data as you like, but the selected checkpoint's own training (the SFT trial it descends from and every RL run on the way to it) must use only prompts from your final dataset at {RAW_DATA_PATH}; a checkpoint that fails this check cannot be submitted. Check the checkpoint you select with: python -m rl.agent_training validate --data {RAW_DATA_PATH} --checkpoint <checkpoint directory>. Preserve the data versions used by each experiment for your own records.
 
 Write a valid submission.json as soon as you have a completed RL checkpoint, and update it atomically when you choose a better one. If your time expires, the host evaluates the checkpoint already selected there. When you are satisfied, call the finish tool to start secret-test evaluation immediately.
 

@@ -73,12 +73,12 @@ parser.add_argument(
 parser.add_argument(
     "--max-iterations",
     type=int,
-    default=750,
+    default=1200,
     help=(
         "Hard cap on agent turns passed to the OpenHands SDK "
         "(max_iteration_per_run). The agent is separately told "
         "(see AGENT_TURN_BUDGET below) to target finishing within "
-        "500 turns -- this flag just adds headroom above that "
+        "800 turns -- this flag just adds headroom above that "
         "target so a run that slightly overshoots isn't killed by "
         "ConversationRunError/MaxIterationsReached instead of "
         "finishing naturally or hitting --timeout-hours."
@@ -342,7 +342,7 @@ TIMEOUT = (
 # Turn budget communicated to the agent in INSTRUCTIONS below; kept independent of
 # args.max_iterations (the hard hidden cap passed to Conversation), which just adds
 # headroom above this target -- see --max-iterations help text.
-AGENT_TURN_BUDGET = 500
+AGENT_TURN_BUDGET = 800
 
 litellm_key = args.litellm_api_key
 if litellm_key is None:
