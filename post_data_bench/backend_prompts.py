@@ -28,6 +28,19 @@ TINKER_TRAINING = """Your sandbox has {GPU_DESCRIPTION}. Do not train or serve L
 
 TINKER_BUDGET = """- Tinker usage is billed in dollars from Tinker's own token counts. SFT trials and validation evaluations share ${TINKER_SFT_USD_LIMIT} ({TINKER_SFT_USAGE_PATH}). All RL runs and probes share ${TINKER_RL_USD_LIMIT} ({TINKER_RL_USAGE_PATH}); training stops when that budget runs out. Prices per million tokens: train $0.44, sampled $0.60, prompt $0.195 ($0.039 when prefix-cached); one SFT epoch costs about (training tokens) x $0.44/1M. Read cost_usd and remaining_usd in those files. Every Tinker call checks its ledger first and is refused if it would exceed the limit. Use only these commands and the Tinker access described under LLM API Usage; do not call the Tinker API (TINKER_API_KEY) directly."""
 
+LOCAL_FORGER_STUDENT = """To query the student model itself ({STUDENT_MODEL}, or a local SFT checkpoint directory), use `pyforger.acquire.LocalModel`: vLLM on your GPUs, at no API cost. For example: sample reasoning traces in the student's own distribution for STaR targets (`alter.self_taught_reasoner` with `verifier=rubric_verifier()` keeps only samples that score full marks on the row's rubric), check how often the student already solves a candidate problem by sampling it k times (pass@k), or sanity-check a trial's outputs before a full validation run. LocalModel works with `sample_from_LLM`, `generate_from_context`, and the other operations that take a model; it renders prompts with the student's chat template, as the evaluator does, and keeps the student's thinking inline in <think>...</think> (`split_reasoning` separates it). Ask for several samples per prompt (`n`, or `k` in pass@k) rather than repeating the prompt. One engine on one GPU writes about 240 thinking samples of up to 16,384 tokens in 18 minutes; `tensor_parallel_size=8` spreads it over all GPUs. LocalModel holds its GPUs until its process exits, so sample in a separate script that finishes before SFT, validation evaluation, or an RL probe.
+
+To measure how often a checkpoint already solves your rows (see Training and Validation), sample it with RL's settings and grade each sample with `rubric_verifier`:
+```python
+from rl.solution_runner import rubric_verifier
+student = LocalModel(checkpoint_dir, temperature=1.0, max_tokens=16384, max_model_len=32768,
+                     tensor_parallel_size=8)  # as in RL (top_p=1, no top_k)
+measured = filter.by_pass_at_k(
+    subset, model=student, input_field="prompt", metric=rubric_verifier(),
+    extract_answer=lambda c: c, k=8, min_rate=0.0, max_rate=1.0, outcomes_field="grades")
+```
+`input_field="prompt"` sends each row's chat messages as they are, `extract_answer=lambda c: c` gives the verifier the whole response, and `min_rate=0.0, max_rate=1.0` keeps every row: the step report's histogram of pass rates is the measurement."""
+
 LOCAL_STUDENT = """To query the student model ({STUDENT_MODEL}, or a local SFT checkpoint), use the local GPUs. You can use vLLM for sampling; preserve the student's thinking trace and the exact chat template used by the evaluator. Stop any sampling server before SFT, validation evaluation, or an RL probe so it releases its GPUs. To measure how often a checkpoint solves your rows, sample with temperature=1.0, top_p=1.0, top_k=-1 and max_tokens=16384, then grade whole responses (thinking included) with `rl.solution_runner.rubric_verifier()`. RL probe rewards also show whether samples within each prompt group receive different rewards."""
 
 LOCAL_TRAINING = """Your sandbox has {GPU_DESCRIPTION}. SFT, validation and short RL probes use these GPUs. Run one GPU job at a time and stop sampling servers before training. Run these commands from {TASK_DIR}:
@@ -41,6 +54,14 @@ LOCAL_TRAINING = """Your sandbox has {GPU_DESCRIPTION}. SFT, validation and shor
 - Short RL probe (2 steps, 32 prompts x 8 samples each):
   python -m rl.agent_training probe --data {RAW_DATA_PATH} --checkpoint {AGENT_DATA_DIR}/sft_trial_1 --output-dir {AGENT_DATA_DIR}/rl_probe_1
   This uses the separate Slime stack and your rubric reward. Read logs/reward_dump.jsonl and logs/rollouts/ for reward variation, truncation and abstention behavior; rl_result.json records the resulting checkpoint. Probes do not evaluate secret test tasks."""
+
+
+TINKER_TIMING = "For planning, allow roughly 1 hour for SFT, 40 minutes to evaluate 1,500 examples, and 6 hours for an RL run."
+
+# Measured on Orchard 8x H100 with Qwen3-4B (2026-10-26/27): SFT trials of
+# 1,336 rows took 14-16 min (2 and 4 epochs), validation 137 tasks ~7 min, the
+# 1,232-task test ~17 min, 80 RL steps 3.0-3.5 min each.
+LOCAL_TIMING = "For planning on this hardware, allow roughly 15 minutes for an SFT trial on about 1,300 rows, 10 minutes for a validation evaluation, and 5 hours for an 80-step RL run (3-4 minutes per step). Sampling the student yourself writes about 240 thinking responses of up to 16,384 tokens in 18 minutes on one GPU, and faster across more GPUs."
 
 
 RL_COMMAND = """
@@ -62,14 +83,18 @@ def prompt_sections(backend, hide_forger, values):
             "BACKEND_BUDGET": TINKER_BUDGET,
             "RL_SCHEDULE": "80 x 32",
             "PROBE_BUDGET": "Probes spend the final RL budget, so run a few, not dozens.",
+            "BACKEND_TIMING": TINKER_TIMING,
         }
     else:
         sections = {
-            "BACKEND_STUDENT_USAGE": LOCAL_STUDENT,
+            "BACKEND_STUDENT_USAGE": LOCAL_STUDENT
+            if hide_forger
+            else LOCAL_FORGER_STUDENT,
             "BACKEND_TRAINING": LOCAL_TRAINING + RL_COMMAND,
             "BACKEND_SUBMISSION": "For local training, select the HF directory named by rl_trial_1/rl_result.json (usually an hf_rollout* directory). It contains the model weights and rl_submission.json. Use that same directory for validation evaluation.",
             "BACKEND_BUDGET": "- Local training and sampling have no Tinker dollar budget. GPU experiments must fit within your agent deadline; all SFT and RL must finish within that deadline.",
             "RL_SCHEDULE": "80 x 32",
             "PROBE_BUDGET": "Probes consume your agent time and shared judge quota; leave time for final submission.",
+            "BACKEND_TIMING": LOCAL_TIMING,
         }
     return {key: value.format(**values) for key, value in sections.items()}

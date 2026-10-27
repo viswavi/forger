@@ -67,7 +67,7 @@ Iterate with small batches before your final generation run. Web search uses `BR
 
 You have {TIMEOUT_HOURS} hours for the entire agent workflow: data generation, SFT, RL, and validation. You decide how to divide that time, how many experiments to run, and which trained RL checkpoint to submit. You may continue RL from an earlier RL checkpoint or start another run from an SFT trial. Use a fresh output directory for each training run.
 
-For planning, allow roughly 1 hour for SFT, 40 minutes to evaluate 1,500 examples, and 6 hours for an RL run. These are approximate guidelines, not guarantees; model, backend, sequence lengths, and service load affect wall-clock time. Leave enough time to complete a useful RL run, evaluate candidate checkpoints, and write submission.json. Keep a completed RL checkpoint selected while trying further experiments.
+{BACKEND_TIMING} These are approximate guidelines, not guarantees; model, backend, sequence lengths, and service load affect wall-clock time. Leave enough time to complete a useful RL run, evaluate candidate checkpoints, and write submission.json. Keep a completed RL checkpoint selected while trying further experiments.
 
 SFT can establish useful behaviors, while RL optimizes them against your rubrics. Inspect sampled responses, reward variation within groups, truncation, and performance on solvable and impossible validation tasks. Short probes are optional diagnostic tools; you can run full RL whenever you judge it useful. `rl.solution_runner.rubric_verifier()` grades a whole sampled response, including thinking, using its row's code criteria and returns True at full reward.
 

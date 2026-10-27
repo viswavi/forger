@@ -155,7 +155,9 @@ each answer against `ground_truth_field` or with a verifier. `by_comparative_dif
 both cost and reliability: one prediction per row from `weak_model` and from `strong_model`, keeping rows only the
 strong model gets right. `by_pass_at_k` is the most expensive but most reliable difficulty filter: `k` samples per
 row in one `n=k` call, keeping rows whose pass rate (passed / valid grades) is in `[min_rate, max_rate]` (default
-`[0.1, 0.9]`, inclusive).
+`[0.1, 0.9]`, inclusive). "Expensive" means model calls: with the student itself on your own GPUs (`LocalModel`, see
+[acquire.md](acquire.md)) it costs only GPU time, and it is the only one of the three that measures difficulty for
+the model you will train rather than for a stronger one.
 `by_judged_difficulty` (least expensive, least reliable) only asks a judge how hard a task looks.
 
 No answer format is imposed. The prompt is the task itself (`prompt_template` replaces it, e.g. to ask for a final

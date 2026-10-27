@@ -49,9 +49,34 @@ your prompt's own format instructions (e.g. "answer with one code block"). If yo
 don't combine `output_schema` with format instructions in the prompt, or generate without `output_schema` and parse
 the answer yourself.
 
+Before training a student on another model's `thinking_trace`, read a few traces as SFT targets. A teacher's raw
+reasoning is in the teacher's own style and length, and it discusses everything in its prompt: rules you gave it for a
+checker ("no names starting with `_`"), output formats, budgets. The student learns to reason about those too. When
+the target is the student's reasoning, prefer traces from the student itself (`alter.self_taught_reasoner`, with
+`LocalModel` or `TinkerModel` below), or have a model write a short trace for an answer you have already verified,
+from a prompt that contains only the task.
+
+To sample a student model, use `LocalModel` when you have GPUs and `TinkerModel` when the student is trained on
+Tinker. Use one whenever you need a student model's own outputs: STaR traces, pass@k difficulty checks, or sanity
+checks of a checkpoint.
+
+`LocalModel(path_or_name, ...)` loads a Hugging Face model or a local checkpoint directory into vLLM in-process, at
+no API cost; its sampling defaults are vLLM's (`top_p=1`, no `top_k`), so `temperature=1.0` matches typical RL
+sampling. It runs one engine: `tensor_parallel_size` shards it across GPUs, and one GPU writes roughly 240 Qwen3-4B
+thinking samples of up to 16K tokens in 18 minutes, so spread larger jobs over all your GPUs. It holds its GPUs until
+the process exits, so sample in a separate script before training on the same GPUs.
+
+```python
+from pyforger import filter
+from pyforger.acquire import LocalModel
+
+student = LocalModel("Qwen/Qwen3-4B", temperature=1.0, max_tokens=16384, max_model_len=32768, tensor_parallel_size=8)
+measured = filter.by_pass_at_k(rows, model=student, input_field="prompt", metric=my_verifier,
+                               k=8, min_rate=0.0, max_rate=1.0, outcomes_field="grades")  # keep all; read the histogram
+```
+
 `TinkerModel` samples a base model (e.g. `"Qwen/Qwen3-8B"`) or a trained `tinker://...` sampler checkpoint remotely on
-Tinker. Use it whenever you need a student model's own outputs: STaR traces, pass@k difficulty checks, or sanity
-checks of a checkpoint. It works with every op that takes a `Model` (`sample_from_LLM`, `generate_from_context`,
+Tinker. It works with every op that takes a `Model` (`sample_from_LLM`, `generate_from_context`,
 `self_taught_reasoner`, `filter.by_llm_score`, `filter.by_pass_at_k`, ...); see [models.md](models.md#tinkermodel) for
 its request cache, errors, and spend accounting. Prompts are rendered with the model's chat template and stop at its
 eos tokens, as a vLLM chat server would; defaults are Qwen3's thinking-mode settings (`temperature=0.6`, `top_p=0.95`,
