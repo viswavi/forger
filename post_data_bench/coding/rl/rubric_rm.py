@@ -26,6 +26,81 @@ from .token_budget import (  # noqa: ABS101
 
 JUDGE_MODEL = DEFAULT_JUDGE_MODEL
 JUDGE_MAX_TOKENS = 4096
+_ANSWER_CHARS = 300  # of each response's final answer kept in the rollout log
+_log_file = None
+
+
+def _abstention_check():
+    """Return (final_answer, is_abstention, marker), or None outside the coding dir."""
+    try:
+        from answer_text import final_answer, is_abstention
+    except Exception:
+        return None
+    try:
+        from prompt_building import ABSTENTION_MARKER
+    except Exception:  # prompt_building needs lcb_runner; the marker itself does not
+        ABSTENTION_MARKER = (
+            "This task is impossible to complete given the provided tests."
+        )
+    return final_answer, is_abstention, ABSTENTION_MARKER
+
+
+def _log_rollout(sample, reward):
+    """Append one scored sample to LCB_RM_LOG_DIR/rollouts_<host>_<pid>.jsonl.
+
+    e.g. {"step": 3, "prompt_id": "9f2c...", "reward": 0.75, "truncated": false,
+    "gold_abstains": true, "abstained": true, "answer": "This task is ..."}, the
+    per-sample fields of the test-reward log and of Tinker's rollouts.jsonl.
+    Logging never fails the reward.
+    """
+    global _log_file
+    log_dir = os.environ.get("LCB_RM_LOG_DIR")
+    if not log_dir:
+        return
+    try:
+        import hashlib
+        import socket
+        import time
+
+        if _log_file is None:
+            Path(log_dir).mkdir(parents=True, exist_ok=True)
+            name = f"rollouts_{socket.gethostname()}_{os.getpid()}.jsonl"
+            _log_file = open(Path(log_dir) / name, "a")
+        try:
+            from slime.rollout import sample_hooks
+
+            step = getattr(sample_hooks, "_current_rollout_id", None)
+        except Exception:
+            step = None
+        status = getattr(sample, "status", None)
+        response = sample.response or ""
+        record = {
+            "ts": round(time.time(), 3),
+            "step": step,
+            "group_index": getattr(sample, "group_index", None),
+            "index": getattr(sample, "index", None),
+            # rubric_data.prompt_id of the submitted row, so samples join back to it.
+            "prompt_id": hashlib.sha256(
+                json.dumps(sample.metadata["original_prompt"], sort_keys=True).encode()
+            ).hexdigest(),
+            "reward": reward,
+            "truncated": getattr(status, "value", status) == "truncated",
+            "response_tokens": getattr(sample, "response_length", None),
+            "answer": response.rsplit("</think>", 1)[-1].strip()[:_ANSWER_CHARS],
+        }
+        check = _abstention_check()
+        if check:
+            final_answer, is_abstention, marker = check
+            record["gold_abstains"] = is_abstention(
+                final_answer(sample.label or ""), marker
+            )
+            record["abstained"] = is_abstention(
+                final_answer(response, thinking=True), marker
+            )
+        _log_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+        _log_file.flush()
+    except Exception as exc:  # pragma: no cover - logging is best effort
+        print(f"rubric_rm: rollout log write failed: {exc}", file=sys.stderr)
 
 
 def judge_configuration(default_usage_file=None, task=None, overrides=None):
@@ -361,4 +436,6 @@ async def custom_rm(args, sample, **kwargs):
                     criterion["prompt"], prompt, response, sample.label
                 )
         total += weight * value
-    return total / sum(weight for _, weight in rubric)
+    reward = total / sum(weight for _, weight in rubric)
+    _log_rollout(sample, reward)
+    return reward
