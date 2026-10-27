@@ -151,6 +151,7 @@ def harbor_agent_config(
         raise ValueError("Harbor requires a credential in a host api_key_env variable")
     fields = (
         "model",
+        "custom_tokenizer",
         "base_url",
         "temperature",
         "max_output_tokens",

@@ -37,6 +37,7 @@ def test_model_settings_and_secret_reference(monkeypatch):
     settings = json.loads(config.env["FORGER_LLM_CONFIG"])
     assert settings == dict(
         model="openai/gpt-4o",
+        custom_tokenizer=None,
         base_url="https://fixture.invalid/v1",
         temperature=None,
         max_output_tokens=1234,
@@ -212,3 +213,14 @@ def test_runtime_uses_shared_token_condenser_and_unlimited_iteration_adapter():
     assert "TaskPreservingCondenser(llm=llm, max_tokens=int(limit)" in source
     assert "keep_first=2" in source
     assert 'os.environ.get("MAX_ITERATIONS") or str(sys.maxsize)' in source
+
+
+def test_custom_tokenizer_is_preserved_in_harbor_request(monkeypatch):
+    import inspect
+    from pyforger import harbor
+    from pyforger.sdk_config import llm_options
+
+    monkeypatch.setenv("LITELLM_API_KEY", "fixture")
+    model = Model("openai/gpt-4o", custom_tokenizer="meta-models/Muse-Glimmer-30B")
+    assert '"custom_tokenizer"' in inspect.getsource(harbor.harbor_agent_config)
+    assert llm_options(model)["custom_tokenizer"] == "meta-models/Muse-Glimmer-30B"

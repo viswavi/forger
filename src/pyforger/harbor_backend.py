@@ -298,15 +298,24 @@ class HarborBackend:
             try:
                 rollout = asyncio.run(run())
             except TimeoutError:
-                diagnostics: dict[str, Any] = {"wall_timeout_s": task.timeout_s}
+                native = root / "native"
+                agent_started = any(
+                    native.glob("trial-*/agent/trajectory.json")
+                ) or any(native.glob("trial-*/agent/exit-code.txt"))
+                diagnostics: dict[str, Any] = {
+                    "wall_timeout_s": task.timeout_s,
+                    "phase": "agent_or_verifier"
+                    if agent_started
+                    else "startup_unresolved",
+                }
                 if self._retain_trials is not None and (root / "native").exists():
                     retained = self._retain_trials / ("timeout-" + root.name)
                     shutil.copytree(root / "native", retained)
                     diagnostics["trial_dir"] = str(retained)
                 return AgentRunResult(
                     status="timed_out",
-                    passed=False,
-                    failure_kind="budget",
+                    passed=False if agent_started else None,
+                    failure_kind="budget" if agent_started else "infrastructure",
                     diagnostics=diagnostics,
                 )
             outcome = trial_outcome(rollout)
@@ -336,13 +345,16 @@ class HarborBackend:
             collected: dict[str, bytes] = {}
             if task.outputs:
                 (root / "collected").mkdir()
+                destinations = {
+                    name: f"artifact-{index}" for index, name in enumerate(task.outputs)
+                }
                 collect_trial_files(
                     rollout,
-                    {"/work/" + n: n.replace("/", "_") for n in task.outputs},
+                    {"/work/" + name: target for name, target in destinations.items()},
                     root / "collected",
                 )
                 for name in task.outputs:
-                    path = root / "collected" / name.replace("/", "_")
+                    path = root / "collected" / destinations[name]
                     if path.is_file():
                         collected[name] = path.read_bytes()
             return AgentRunResult(
