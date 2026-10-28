@@ -58,6 +58,18 @@ def _get_logger() -> logging.Logger:
     return _gf(__name__)
 
 
+def _with_hint(prompt: Prompt, hint: str) -> Prompt:
+    """``prompt`` with ``hint`` after its text (a chat's last user message)."""
+    if isinstance(prompt, str):
+        return f"{prompt}\n\n{hint}"
+    messages = [dict(m) for m in prompt]
+    for message in reversed(messages):
+        if message.get("role") == "user" and isinstance(message.get("content"), str):
+            message["content"] = f"{message['content']}\n\n{hint}"
+            return messages  # type: ignore[return-value]
+    return [*messages, {"role": "user", "content": hint}]  # type: ignore[list-item]
+
+
 def _resolve_prompt(template: PromptTemplate, item: dict) -> Prompt:
     """Resolve a prompt template against one input item.
 
@@ -459,6 +471,7 @@ def self_taught_reasoner(
     filter_fn: Callable[[list[dict]], list[dict]] | None = None,
     verifier: Callable[[str, dict], bool | None] | None = None,
     max_workers: int | None = None,
+    rationalize: bool = True,
     hint_fn: PromptTemplate | None = None,
     rationalized_field: str = "rationalized",
     response_field: str = "response",
@@ -502,15 +515,20 @@ def self_taught_reasoner(
     the model returns one, and otherwise the inline ``<think>`` block split out
     via `pyforger.acquire.split_reasoning`.
 
-    **Rationalization** (the paper's second pass): with ``hint_fn``, every item
-    left with no accepted response is sampled ``n`` more times from
-    ``hint_fn(item)``, a prompt that also gives a hint (e.g. the reference
-    answer, or why the task cannot be done), and the accepted responses are
-    kept as if the student had answered the unhinted prompt: rows carry the
-    item's fields, not the hinted prompt. This gives rows for items the
-    student never solves on its own, in the student's own words. As in the
-    paper, responses that mention the hint are not filtered out. Every row gets
-    ``rationalized_field`` (False for the first pass, True for the second).
+    **Rationalization** (the paper's second pass, on by default): every item
+    left with no accepted response is sampled ``n`` more times from a prompt
+    that also gives a hint, and the accepted responses are kept as if the
+    student had answered the unhinted prompt: rows carry the item's fields,
+    not the hinted prompt. This gives rows for items the student never solves
+    on its own, in the student's own words. The default hint, as in the paper,
+    is the item's reference (``prompt_fn``'s prompt plus "Hint: a correct
+    answer is: <item[reference_field]>"); items without one are not retried.
+    ``hint_fn`` gives another hint (e.g. only the final code, or why the task
+    cannot be done). As in the paper, responses that mention the hint are not
+    filtered out. Every row gets ``rationalized_field`` (False for the first
+    pass, True for the second). ``rationalize=False`` turns this off; with
+    ``filter_fn`` it is off, since the filter judges all candidates together
+    and cannot say which items went unsolved.
 
     Args:
         items: Input rows. Each must contain ``reference_field``.
@@ -532,11 +550,12 @@ def self_taught_reasoner(
             candidate row (the item's fields plus the response fields). With
             it, ``reference_field`` is not needed and is left unchanged.
         max_workers: Verifier calls at a time (default 8).
-        hint_fn: Format string or ``(dict) -> Prompt`` for the hinted prompt
-            of the rationalization pass; None (default) skips it. Needs answer
-            matching or ``verifier``, not ``filter_fn``.
-        rationalized_field: Output key marking rationalized rows (only set
-            when ``hint_fn`` is given).
+        rationalize: Re-sample unsolved items with a hint (default True).
+        hint_fn: Format string or ``(dict) -> Prompt`` for the hinted prompt;
+            None (default) appends the item's ``reference_field`` as the hint.
+            Needs answer matching or ``verifier``, not ``filter_fn``.
+        rationalized_field: Output key marking rationalized rows (set when
+            rationalization runs).
         response_field: Output key for the raw student response.
         thinking_field: Output key for the split-out reasoning trace.
         answer_field: Output key for the answer portion of the response.
@@ -582,6 +601,14 @@ def self_taught_reasoner(
             "hint_fn needs answer matching or verifier: filter_fn judges all "
             "candidates together, so the unsolved items are unknown"
         )
+    if hint_fn is not None and not rationalize:
+        raise ValueError("hint_fn is only used with rationalize=True")
+    rationalizing = rationalize and filter_fn is None
+
+    def default_hint(item: dict) -> Prompt:
+        """``prompt_fn``'s prompt, with the item's reference as a hint."""
+        hint = f"Hint: a correct answer is:\n{item[reference_field]}"
+        return _with_hint(_resolve_prompt(prompt_fn, item), hint)
 
     def sample(template: PromptTemplate, batch_items: list[dict]) -> list[list[dict]]:
         """``n`` candidate rows per item, from ``template``'s prompts."""
@@ -661,12 +688,19 @@ def self_taught_reasoner(
 
     first = sample(prompt_fn, items)
     n_candidates = sum(len(cs) for cs in first)
-    if hint_fn is None:
+    if not rationalizing:
         kept = accept([c for cs in first for c in cs])
     else:
         kept_per_item = accept_per_item(first)
-        unsolved = [i for i, cs in enumerate(kept_per_item) if not cs]
-        hinted = sample(hint_fn, [items[i] for i in unsolved]) if unsolved else []
+        # The default hint is the reference, so items without one are not retried.
+        unsolved = [
+            i
+            for i, cs in enumerate(kept_per_item)
+            if not cs
+            and (hint_fn is not None or items[i].get(reference_field) is not None)
+        ]
+        hint_template = hint_fn if hint_fn is not None else default_hint
+        hinted = sample(hint_template, [items[i] for i in unsolved]) if unsolved else []
         n_candidates += sum(len(cs) for cs in hinted)
         for cs in kept_per_item:
             for candidate in cs:

@@ -6,6 +6,7 @@ from fixtures import MockModel
 
 from pyforger.alter.generate import (
     _normalized_equal,
+    _with_hint,
     default_extract_answer,
     self_taught_reasoner,
 )
@@ -265,7 +266,8 @@ class _HintAware:
         """``n`` copies of ANSWER: 42 for hinted or solvable prompts, else ANSWER: 0."""
         self.prompts.extend(prompts)
         return [
-            ["ANSWER: 42" if "hint" in p or p in self.solves else "ANSWER: 0"] * n
+            ["ANSWER: 42" if "hint" in p.lower() or p in self.solves else "ANSWER: 0"]
+            * n
             for p in prompts
         ]
 
@@ -319,13 +321,67 @@ class TestRationalization:
         )
         assert [r["rationalized"] for r in rows] == [True]
 
-    def test_without_hint_fn_rows_have_no_flag(self):
-        """Without hint_fn there is no second pass and no rationalized field."""
+    def test_default_hint_is_the_reference(self):
+        """By default the unsolved item is retried with its reference as the hint."""
         model = _HintAware(solves=frozenset({"easy"}))
         rows = self_taught_reasoner(self.ITEMS, "{prompt}", model, n=1, _no_cache=True)
+        assert model.prompts == [
+            "easy",
+            "hard",
+            "hard\n\nHint: a correct answer is:\n42",
+        ]
+        assert [(r["prompt"], r["rationalized"]) for r in rows] == [
+            ("easy", False),
+            ("hard", True),
+        ]
+
+    def test_items_without_a_reference_are_not_retried(self):
+        """With a verifier and no reference there is no default hint to give."""
+        model = _HintAware()
+        rows = self_taught_reasoner(
+            [{"prompt": "hard"}],
+            "{prompt}",
+            model,
+            n=1,
+            verifier=lambda answer, row: answer.endswith("42"),
+            _no_cache=True,
+        )
+        assert rows == []
+        assert model.prompts == ["hard"]
+
+    def test_rationalize_false_skips_the_second_pass(self):
+        """rationalize=False: one pass and no rationalized field."""
+        model = _HintAware(solves=frozenset({"easy"}))
+        rows = self_taught_reasoner(
+            self.ITEMS, "{prompt}", model, n=1, rationalize=False, _no_cache=True
+        )
         assert model.prompts == ["easy", "hard"]
         assert [r["prompt"] for r in rows] == ["easy"]
         assert "rationalized" not in rows[0]
+
+    def test_hint_fn_without_rationalize_raises(self):
+        """A hint_fn would be ignored with rationalize=False, so it is refused."""
+        with pytest.raises(ValueError, match="rationalize=True"):
+            self_taught_reasoner(
+                self.ITEMS,
+                "{prompt}",
+                _HintAware(),
+                rationalize=False,
+                hint_fn="{prompt} hint",
+                _no_cache=True,
+            )
+
+    def test_chat_hint_goes_after_the_last_user_message(self):
+        """A chat prompt gets the hint appended to its last user message."""
+        prompt = [
+            {"role": "system", "content": "Be brief."},
+            {"role": "user", "content": "6*7?"},
+        ]
+        assert _with_hint(prompt, "Hint: 42") == [
+            {"role": "system", "content": "Be brief."},
+            {"role": "user", "content": "6*7?\n\nHint: 42"},
+        ]
+        assert prompt[1]["content"] == "6*7?"
 
     def test_filter_fn_with_hint_fn_raises(self):
         """filter_fn sees all candidates at once, so unsolved items are unknown."""

@@ -629,6 +629,7 @@ self_taught_reasoner(
     filter_fn: Callable[[list[dict]], list[dict]] | None = None,
     verifier: Callable[[str, dict], bool | None] | None = None,
     max_workers: int | None = None,
+    rationalize: bool = True,
     hint_fn: PromptTemplate | None = None,
     rationalized_field: str = "rationalized",
     response_field: str = "response",
