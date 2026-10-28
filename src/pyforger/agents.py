@@ -20,7 +20,7 @@ from pyforger.agent_diagnostics import (
     validate_artifact_bytes,
 )
 from pyforger.alter._dynamic_resources import prepare_input
-from pyforger.artifacts import FileInput
+from pyforger.artifacts import FileInput, input_bytes
 from pyforger.local_backend import LocalBackend
 from pyforger.measurements import Measurement
 from pyforger.structured import (
@@ -96,7 +96,7 @@ def generate_files(
     missing = [name for name in outputs if name not in result.files]
     if missing:
         raise RuntimeError(f"Agent did not produce declared outputs: {missing}")
-    return result.files
+    return {name: input_bytes(value) for name, value in result.files.items()}
 
 
 def generate_object(
@@ -207,8 +207,9 @@ def generate_object(
             raise RuntimeError(
                 f"Agent run failed: {result.status}; {result.diagnostics}"
             )
-        validate(result.files)
-        return result.files
+        files = {name: input_bytes(value) for name, value in result.files.items()}
+        validate(files)
+        return files
 
     def revise(request: str, attempt: GenerationAttempt[str, dict[str, bytes]]) -> str:
         nonlocal rejected
@@ -291,7 +292,7 @@ def generate_source(
             artifact_error = "Missing declared output: program.py"
             return ""
         try:
-            return result.files[_PROGRAM].decode("utf-8")
+            return input_bytes(result.files[_PROGRAM]).decode("utf-8")
         except UnicodeDecodeError as exc:
             artifact_error = str(exc)
             return ""

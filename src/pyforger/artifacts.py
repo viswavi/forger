@@ -9,10 +9,11 @@ import re
 import shutil
 import stat
 import tempfile
+import weakref
 from pathlib import Path, PureWindowsPath
 from typing import BinaryIO
 
-from pydantic import BaseModel, ConfigDict, StrictInt, model_validator
+from pydantic import BaseModel, ConfigDict, PrivateAttr, StrictInt, model_validator
 
 _CHUNK_SIZE = 1024 * 1024
 
@@ -373,3 +374,82 @@ def write_input(path: Path, content: str | bytes | FileInput) -> None:
         content.copy_to(path)
     else:
         path.write_bytes(content.encode() if isinstance(content, str) else content)
+
+
+def replace_file_secrets(path: Path, secrets: set[bytes]) -> None:
+    """Atomically redact exact byte strings with overlap across read boundaries."""
+    secrets = {value for value in secrets if value}
+    if not secrets:
+        return
+    patterns = sorted(secrets, key=lambda value: (-len(value), value))
+    overlap = max(map(len, patterns)) - 1
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".redact-")
+    changed = False
+    try:
+        with _open_file(path) as source, os.fdopen(fd, "wb") as target:
+            pending = b""
+            while True:
+                chunk = source.read(_CHUNK_SIZE)
+                pending += chunk
+                limit = max(0, len(pending) - overlap) if chunk else len(pending)
+                position = 0
+                while position < limit:
+                    matches = [
+                        (pending.find(pattern, position), pattern)
+                        for pattern in patterns
+                    ]
+                    matches = [
+                        (index, pattern) for index, pattern in matches if index >= 0
+                    ]
+                    if not matches:
+                        target.write(pending[position:limit])
+                        position = limit
+                        break
+                    index, pattern = min(
+                        matches, key=lambda pair: (pair[0], -len(pair[1]))
+                    )
+                    if index >= limit:
+                        target.write(pending[position:limit])
+                        position = limit
+                        break
+                    target.write(pending[position:index])
+                    target.write(b"[REDACTED]")
+                    changed = True
+                    position = index + len(pattern)
+                pending = pending[position:]
+                if not chunk:
+                    break
+        if changed:
+            os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+class OwnedFileInput(FileInput):
+    """File-backed result whose private snapshot lives as long as the value."""
+
+    _cleanup: object = PrivateAttr(default=None)
+
+    @classmethod
+    def snapshot(cls, path: Path) -> OwnedFileInput:
+        fd, name = tempfile.mkstemp(prefix="forger-output-")
+        os.close(fd)
+        destination = Path(name)
+        try:
+            with destination.open("wb") as target:
+                for chunk in FileInput.capture(path).chunks():
+                    target.write(chunk)
+            result = cls(**FileInput.capture(destination).model_dump())
+            result._cleanup = weakref.finalize(
+                result, destination.unlink, missing_ok=True
+            )
+            return result
+        except BaseException:
+            destination.unlink(missing_ok=True)
+            raise
+
+
+def input_bytes(content: bytes | FileInput) -> bytes:
+    """Materialize only at APIs explicitly requiring an in-memory value."""
+    return b"".join(content.chunks()) if isinstance(content, FileInput) else content

@@ -7,6 +7,13 @@ from typing import Any
 
 from harbor.agents.installed import openhands_sdk
 from harbor.agents.installed.openhands_sdk import OpenHandsSDK
+from harbor.models.agent.context import ModelUsage
+from harbor.models.trajectories.agent import Agent
+from harbor.models.trajectories.step import Step
+from harbor.models.trajectories.trajectory import Trajectory
+from harbor.utils.trajectory_utils import compute_model_usage
+
+from pyforger._streaming_json import object_items
 
 
 def runner_source() -> str:
@@ -54,6 +61,54 @@ class ForgerOpenHandsSDK(OpenHandsSDK):  # type: ignore[misc]
     Harbor owns authentication and agent lifecycle. This bridge preserves Forger
     model settings, prompt-cache behavior, and the shared condenser contract.
     """
+
+    def populate_context_post_run(self, context: Any) -> None:
+        """Read final metrics and per-model usage without loading the ATIF history."""
+        path = self.logs_dir / self._TRAJECTORY_FILENAME
+        if not path.exists():
+            return
+        try:
+            agent = {}
+            metrics = {}
+            for key, value in object_items(path):
+                if key == "agent":
+                    agent = value
+                elif key == "final_metrics":
+                    metrics = value or {}
+            usage = {}
+            unpriced = set()
+            for key, value in object_items(path, ("steps", "subagent_trajectories")):
+                if key == "steps":
+                    fragment = Trajectory.model_construct(
+                        agent=Agent.model_validate(agent),
+                        steps=[Step.model_validate(value)],
+                        subagent_trajectories=None,
+                    )
+                elif key == "subagent_trajectories":
+                    fragment = Trajectory.model_validate(value)
+                else:
+                    continue
+                partial = compute_model_usage(fragment)
+                for model, amount in partial.items():
+                    total = usage.setdefault(model, ModelUsage())
+                    total.n_input_tokens += amount.n_input_tokens
+                    total.n_cache_tokens += amount.n_cache_tokens
+                    total.n_output_tokens += amount.n_output_tokens
+                    if amount.cost_usd is None:
+                        unpriced.add(model)
+                    else:
+                        total.cost_usd = (total.cost_usd or 0.0) + amount.cost_usd
+            for model in unpriced:
+                usage[model].cost_usd = None
+            context.cost_usd = metrics.get("total_cost_usd")
+            context.n_input_tokens = metrics.get("total_prompt_tokens", 0)
+            context.n_output_tokens = metrics.get("total_completion_tokens", 0)
+            context.n_cache_tokens = metrics.get("total_cached_tokens", 0)
+            # An explicit empty mapping prevents Harbor's whole-file fallback.
+            context.model_usage = usage
+        except (ValueError, OSError, TypeError) as error:
+            context.model_usage = {}
+            self.logger.error("Failed to parse trajectory metrics: %s", error)
 
     async def install(self, environment: Any) -> None:
         """Install the native SDK then upload the minimally extended runner."""

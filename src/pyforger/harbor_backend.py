@@ -28,7 +28,13 @@ from pyforger.agent_backend import (
 )
 from pyforger.agent_backends import require_learner_runtime
 from pyforger.agent_diagnostics import ArtifactSafetyError, credential_values
-from pyforger.artifacts import ArtifactRef, FileInput, read_text, write_input
+from pyforger.artifacts import (
+    ArtifactRef,
+    FileInput,
+    OwnedFileInput,
+    read_text,
+    write_input,
+)
 from pyforger.local_agent import _record_key
 
 _NETWORK = {
@@ -345,17 +351,12 @@ class HarborBackend:
             native_trajectory = trial_directory(rollout) / "agent/trajectory.json"
             normalized_trajectory = None
             if native_trajectory.is_file():
-                from pyforger.agent_diagnostics import trajectory
+                from pyforger._streaming_json import trajectory_events
+                from pyforger.evidence_journal import journal_events
 
-                native = json.loads(native_trajectory.read_text())
-                events = (
-                    native.get("steps", native.get("events", []))
-                    if isinstance(native, dict)
-                    else native
+                normalized_trajectory = journal_events(
+                    trajectory_events(native_trajectory), [agent]
                 )
-                if not isinstance(events, list):
-                    raise ValueError("Harbor trajectory must contain a list of steps")
-                normalized_trajectory = trajectory(events, agent)
             if self._retain_trials is not None:
                 source = trial_directory(rollout)
                 retained = self._retain_trials / source.name
@@ -365,7 +366,7 @@ class HarborBackend:
                     "harbor_result": str(retained / "result.json"),
                     "trial_dir": str(retained),
                 }
-            collected: dict[str, bytes] = {}
+            collected: dict[str, bytes | FileInput] = {}
             if task.outputs:
                 (root / "collected").mkdir()
                 destinations = {
@@ -379,7 +380,7 @@ class HarborBackend:
                 for name in task.outputs:
                     path = root / "collected" / destinations[name]
                     if path.is_file():
-                        collected[name] = path.read_bytes()
+                        collected[name] = OwnedFileInput.snapshot(path)
             return AgentRunResult(
                 status=str(outcome["status"]),
                 trajectory=normalized_trajectory,

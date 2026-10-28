@@ -9,6 +9,7 @@ import math
 import os
 import re
 import shlex
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Any, Literal
@@ -16,8 +17,9 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, SecretStr
 
+from pyforger._streaming_json import JSONReader
 from pyforger.acquire.model import Model
-from pyforger.artifacts import ArtifactRef, ArtifactStore
+from pyforger.artifacts import ArtifactRef, ArtifactStore, replace_file_secrets
 
 
 class HarborRequest(BaseModel):
@@ -262,20 +264,32 @@ def _scrub(output: Path, secrets: set[str]) -> None:
         replacements.add(json.dumps(secret)[1:-1].encode())
     for entry in ref.files:
         path = output / entry.path
-        original = path.read_bytes()
-        content = original
-        for encoded_secret in sorted(replacements, key=len, reverse=True):
-            content = content.replace(encoded_secret, b"[REDACTED]")
-        if path.suffix == ".json":
-            try:
-                parsed = json.loads(content)
-                redacted = _redact(parsed, secrets)
-                if redacted != parsed:
-                    content = json.dumps(redacted, indent=2, allow_nan=False).encode()
-            except (ValueError, UnicodeDecodeError):
-                pass
-        if content != original:
-            path.write_bytes(content)
+        replace_file_secrets(path, replacements)
+        if path.suffix != ".json":
+            continue
+        fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".scrub-")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as target:
+                with path.open(encoding="utf-8") as source:
+                    reader = JSONReader(source)
+                    reader.rewrite(
+                        target,
+                        lambda value: _redact(value, secrets),
+                        lambda key: (
+                            bool(_SENSITIVE.search(key)) and not key.endswith("_env")
+                        ),
+                    )
+                    trailing, token = reader.token(target)
+                    if token:
+                        raise ValueError("Trailing JSON content")
+                    target.write(trailing)
+            os.replace(temporary, path)
+        except (ValueError, UnicodeDecodeError):
+            # Non-JSON native logs still receive exact-byte secret redaction.
+            pass
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
 
 
 def _output_path(output: Path, task: ArtifactRef) -> Path:
@@ -557,7 +571,7 @@ def collect_trial_files(
     max_bytes: int | None = None,
 ) -> None:
     """Collect declared files from a verified native Harbor manifest."""
-    from pyforger.artifacts import read_text
+    from pyforger.artifacts import FileInput
 
     trial = trial_directory(rollout)
     manifest = json.loads((trial / "artifacts/manifest.json").read_text())
@@ -573,7 +587,10 @@ def collect_trial_files(
             relative = (
                 trial.relative_to(rollout.artifacts.root) / entries[0]["destination"]
             )
-            target.write_text(
-                read_text(rollout.artifacts.path(relative.as_posix()), max_bytes)
-            )
+            source_file = FileInput.capture(rollout.artifacts.path(relative.as_posix()))
+            if max_bytes is not None and source_file.size > max_bytes:
+                raise ValueError("Artifact exceeds read limit")
+            if target.exists():
+                target.unlink()
+            source_file.copy_to(target)
     rollout.artifacts.verify()

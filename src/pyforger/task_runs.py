@@ -16,6 +16,7 @@ from pyforger.agent_diagnostics import (
     validate_artifact_bytes,
 )
 from pyforger.agent_tasks import TaskSpec, run_task
+from pyforger.artifacts import FileInput
 from pyforger.evidence_journal import materialize_journals
 from pyforger.utils import redact, run_concurrently
 
@@ -114,12 +115,15 @@ def run_recorded_task(
             content = result["files"][name]
             if isinstance(content, str):
                 content = content.encode("utf-8")
-            if not isinstance(content, bytes):
+            if not isinstance(content, (bytes, FileInput)):
                 raise TypeError(f"Malformed output artifact: {name}")
             path = output / name
             path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("xb") as stream:
-                stream.write(content)
+            if isinstance(content, FileInput):
+                content.copy_to(path)
+            else:
+                with path.open("xb") as stream:
+                    stream.write(content)
         missing = [name for name in task.outputs if name not in result["files"]]
         if missing and result["passed"] is True:
             raise ValueError(f"Missing declared outputs: {missing}")
