@@ -36,4 +36,9 @@ def llm_options(model: Any) -> dict[str, Any]:
         litellm_extra_body=config.extra_body,
         api_mode=config.api_mode,
         capability_overrides=config.capability_overrides,
+        **(
+            {"max_context_tokens": config.max_context_tokens}
+            if config.max_context_tokens is not None
+            else {}
+        ),
     )

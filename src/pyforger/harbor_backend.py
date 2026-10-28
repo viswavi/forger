@@ -19,6 +19,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from pyforger._sdk_install import SDK_COMMIT, SDK_REQUIREMENT, TOOLS_REQUIREMENT
 from pyforger.agent_backend import (
     AgentRunResult,
     AgentSpec,
@@ -122,11 +123,12 @@ def _package(
         "FROM python:3.12-slim\n"
         + installs
         + "RUN apt-get update && apt-get install -y --no-install-recommends "
-        "curl coreutils "
+        "curl coreutils git "
         "&& rm -rf /var/lib/apt/lists/*\n"
         "RUN python -m venv /opt/openhands-sdk-venv "
         "&& /opt/openhands-sdk-venv/bin/pip install --no-cache-dir "
-        "openhands-sdk==1.58.0 openhands-tools==1.58.0 fastapi==0.135.2\n"
+        + shlex.join((SDK_REQUIREMENT, TOOLS_REQUIREMENT, "fastapi==0.135.2"))
+        + "\n"
         + tokenizer_build
         + "RUN mkdir /work && chown 65534:65534 /work\n"
         "ENV HOME=/tmp\nWORKDIR /work\n"
@@ -294,6 +296,7 @@ class HarborBackend:
                 for name, body in sorted(self._trusted_verifier_files.items())
             ),
             "harbor-backend-v2-separate-root-verifier",
+            SDK_COMMIT,
             json.dumps(backend, sort_keys=True, allow_nan=False),
         )
 

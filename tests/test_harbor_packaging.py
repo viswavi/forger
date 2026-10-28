@@ -176,3 +176,20 @@ def test_native_agent_budget_is_configured_independently_of_environment_setup(tm
     assert config.agent.override_timeout_sec == 1
     native_task = TaskConfig.model_validate_toml(artifact.path("task.toml").read_text())
     assert native_task.agent.timeout_sec == 1
+
+
+def test_agent_image_uses_shared_exact_sdk_sources_with_git(tmp_path):
+    from pyforger.sail_sdk import SDK_REQUIREMENT, TOOLS_REQUIREMENT
+
+    artifact = _package(
+        WorkspaceTask(instruction="submit", files={}, outputs=("result.json",)),
+        AgentSpec(kind="nop"),
+        tmp_path / "task",
+        ["/work/result.json"],
+    )
+    dockerfile = artifact.path("environment/Dockerfile").read_text()
+    assert SDK_REQUIREMENT in dockerfile
+    assert TOOLS_REQUIREMENT in dockerfile
+    assert "curl coreutils git " in dockerfile
+    assert dockerfile.index("apt-get install") < dockerfile.index("pip install")
+    assert "openhands-sdk==1.58.0" not in dockerfile

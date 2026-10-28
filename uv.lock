@@ -2233,9 +2233,10 @@ wheels = [
 
 [[package]]
 name = "harbor"
-version = "0.24.0"
-source = { git = "https://github.com/neubig/harbor.git?rev=1ccd8b04f513fb09149fb128678279bbba1c4f05#1ccd8b04f513fb09149fb128678279bbba1c4f05" }
+version = "0.25.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
+    { name = "certifi" },
     { name = "dirhash" },
     { name = "fastapi" },
     { name = "filelock", version = "3.32.7", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.15' and platform_machine != 's390x') or (python_full_version >= '3.15' and sys_platform != 'darwin')" },
@@ -2260,6 +2261,10 @@ dependencies = [
     { name = "toml" },
     { name = "typer" },
     { name = "uvicorn" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b5/8f/624ed4b2763565d50c78e9278d2800037c9147d56ee977d3b8ed6c5b81b1/harbor-0.25.0.tar.gz", hash = "sha256:a66543a223539cd853889ee0eea77d15a3e5222963418a87c0f079b63dadb4b2", size = 2309418, upload-time = "2026-10-25T20:27:27.643Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/90/72/2ead84b6d43e4737682dd489b107be9d828bf5ae4869d0d4f2aa72243149/harbor-0.25.0-py3-none-any.whl", hash = "sha256:51923ac567fc57b03279e93468b105f689628bcac2cd3d541d4e44aa5c0ec309", size = 2535481, upload-time = "2026-10-25T20:27:25.575Z" },
 ]
 
 [package.optional-dependencies]
@@ -4670,7 +4675,7 @@ wheels = [
 [[package]]
 name = "openhands-sdk"
 version = "1.58.0"
-source = { registry = "https://pypi.org/simple" }
+source = { git = "https://github.com/neubig/software-agent-sdk.git?subdirectory=openhands-sdk&rev=e80bfb378cd16dda3d2a267afb6054af05b4cbc4#e80bfb378cd16dda3d2a267afb6054af05b4cbc4" }
 dependencies = [
     { name = "agent-client-protocol" },
     { name = "deprecation" },
@@ -4692,15 +4697,11 @@ dependencies = [
     { name = "tree-sitter-bash" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c9/1a/bad12edfd089afc80af4ad400c1b0f0acbc1e7079864f5c446f7bf65ea46/openhands_sdk-1.58.0.tar.gz", hash = "sha256:05444fde118e74e19e1bc879d4126a9d68257aefd4275135a3b7fbd0e012eca3", size = 808884, upload-time = "2026-10-22T16:00:51.43Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/a2/29/cd575b385a88c31d2284808ca180091c6420d866df117b37ed2d6654a313/openhands_sdk-1.58.0-py3-none-any.whl", hash = "sha256:051b8cee229a3bb3335680407fd8c81d621455b190833c8de91bdc5d3c2acb1f", size = 959096, upload-time = "2026-10-22T16:00:45.8Z" },
-]
 
 [[package]]
 name = "openhands-tools"
 version = "1.58.0"
-source = { registry = "https://pypi.org/simple" }
+source = { git = "https://github.com/neubig/software-agent-sdk.git?subdirectory=openhands-tools&rev=e80bfb378cd16dda3d2a267afb6054af05b4cbc4#e80bfb378cd16dda3d2a267afb6054af05b4cbc4" }
 dependencies = [
     { name = "binaryornot" },
     { name = "browser-use" },
@@ -4714,10 +4715,6 @@ dependencies = [
     { name = "tom-swe" },
     { name = "tree-sitter" },
     { name = "tree-sitter-bash" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/cd/0c/d3ea3685c8d5b47030b50cbdba57d0f05a09e6a85a27a706b61806900cc3/openhands_tools-1.58.0.tar.gz", hash = "sha256:fd723206a83c497eb867179014f7fcdeca4ae71357b7eb7f227c79420222632c", size = 163042, upload-time = "2026-10-22T16:00:52.751Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/de/58/4b78efcb76df3b42acf5ac868d13626609219197212ae06aba0658cfc6e5/openhands_tools-1.58.0-py3-none-any.whl", hash = "sha256:f181b0853a816b2e14e0c3d3e24b7b81b17dd66820b320ef7e78fd80b944dc74", size = 211928, upload-time = "2026-10-22T16:00:47.635Z" },
 ]
 
 [[package]]
@@ -5935,7 +5932,7 @@ vllm = [
 requires-dist = [
     { name = "arxiv", specifier = ">=2.0" },
     { name = "datasets" },
-    { name = "harbor", extras = ["modal", "sail"], marker = "python_full_version >= '3.12' and extra == 'harbor'", git = "https://github.com/neubig/harbor.git?rev=1ccd8b04f513fb09149fb128678279bbba1c4f05" },
+    { name = "harbor", extras = ["modal", "sail"], marker = "python_full_version >= '3.12' and extra == 'harbor'", specifier = ">=0.25.0,<0.26" },
     { name = "huggingface-hub" },
     { name = "jsonschema", marker = "extra == 'dev'" },
     { name = "jsonschema", marker = "extra == 'test'" },
@@ -5944,8 +5941,8 @@ requires-dist = [
     { name = "mypy", marker = "extra == 'test'", specifier = "==2.4.0" },
     { name = "numpy", marker = "extra == 'clustering'" },
     { name = "numpy", marker = "extra == 'test'" },
-    { name = "openhands-sdk", specifier = ">=1.58.0,<2" },
-    { name = "openhands-tools", specifier = ">=1.58.0,<2" },
+    { name = "openhands-sdk", git = "https://github.com/neubig/software-agent-sdk.git?subdirectory=openhands-sdk&rev=e80bfb378cd16dda3d2a267afb6054af05b4cbc4" },
+    { name = "openhands-tools", git = "https://github.com/neubig/software-agent-sdk.git?subdirectory=openhands-tools&rev=e80bfb378cd16dda3d2a267afb6054af05b4cbc4" },
     { name = "pre-commit", marker = "extra == 'dev'" },
     { name = "pydantic", specifier = ">=2,<3" },
     { name = "pypdf", specifier = ">=5,<7" },

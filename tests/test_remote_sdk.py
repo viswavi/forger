@@ -13,7 +13,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
-
 from pyforger.acquire.model import Model
 from pyforger.agent_backend import AgentSpec
 from pyforger.sail_sdk import frames, worker_request
@@ -413,3 +412,43 @@ finally:
         len(stack["frames"]) <= 32 for record in records for stack in record["threads"]
     )
     assert "credential-sentinel-not-for-logs" not in path.read_text()
+
+
+def test_sail_sdk_image_installs_git_before_exact_sources():
+    import ast
+
+    import sail
+    from google.protobuf.json_format import MessageToDict
+    from pyforger import sail_sdk
+    from pyforger.sail_sdk import SDK_REQUIREMENT, TOOLS_REQUIREMENT
+
+    tree = ast.parse(Path(sail_sdk.__file__).read_text())
+    assignment = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "image"
+            for target in node.targets
+        )
+    )
+    # Evaluate the production build expression, never provisioning the image.
+    from types import SimpleNamespace
+
+    expression = ast.Expression(assignment.value)
+    image = eval(
+        compile(expression, sail_sdk.__file__, "eval"),
+        {
+            "sail": sail,
+            "backend": SimpleNamespace(image="python:3.12-slim"),
+            "SDK_REQUIREMENT": SDK_REQUIREMENT,
+            "TOOLS_REQUIREMENT": TOOLS_REQUIREMENT,
+            "sdk_provenance_command": sail_sdk.sdk_provenance_command,
+        },
+    )
+    steps = MessageToDict(image._spec)["buildSteps"]
+    assert steps[0] == {"aptInstall": {"packages": ["git"]}}
+    assert steps[1]["pipInstall"]["packages"][:2] == [
+        SDK_REQUIREMENT,
+        TOOLS_REQUIREMENT,
+    ]

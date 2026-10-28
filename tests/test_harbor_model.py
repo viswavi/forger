@@ -6,7 +6,6 @@ import json
 import os
 
 import pytest
-
 from pyforger.acquire.model import Model
 from pyforger.harbor import harbor_agent_config
 
@@ -65,7 +64,6 @@ def test_native_factory_and_generated_runtime(tmp_path, monkeypatch):
     import ast
 
     from harbor.agents.factory import AgentFactory
-
     from pyforger._harbor_model import ForgerOpenHandsSDK, runner_source
     from pyforger._sdk_llm import ConfiguredLLM
 
@@ -190,7 +188,6 @@ def test_endpoint_and_network_policy(monkeypatch):
 def test_bridge_control_environment_does_not_match_native_credentials(monkeypatch):
     """Native scrubbing must not treat a numeric configuration flag as a secret."""
     from harbor.utils.env import is_sensitive_env_key
-
     from pyforger.harbor import harbor_agent_config
 
     monkeypatch.setenv("LLM_API_KEY", "fixture-model-credential")
@@ -329,3 +326,82 @@ def test_generated_budget_llm_preserves_cache_compatibility():
     )
     assert llm.prompt_token_limit == 80000
     assert llm.max_output_tokens == 49152
+
+
+def test_native_install_refuses_wrong_sdk_sources_without_pip(tmp_path, monkeypatch):
+    import asyncio
+    import subprocess
+    import sys
+    from types import SimpleNamespace
+
+    from harbor.agents.factory import AgentFactory
+
+    monkeypatch.setenv("LLM_API_KEY", "offline-test")
+    config = harbor_agent_config(Model("openai/gpt-4o"), api_key_env="LLM_API_KEY")
+    agent = AgentFactory.create_agent_from_config(config, logs_dir=tmp_path)
+
+    class LocalEnvironment:
+        async def exec(self, *, command, user=None):
+            assert "pip install" not in command
+            assert "uv " not in command
+            command = command.replace(
+                "/opt/openhands-sdk-venv/bin/python", sys.executable
+            )
+            command = command.replace("/installed-agent", str(tmp_path / "installed-agent"))
+            result = subprocess.run(command, shell=True, capture_output=True, text=True)
+            return SimpleNamespace(return_code=result.returncode)
+
+    from pyforger._sdk_install import sdk_provenance_command
+
+    command = sdk_provenance_command(sys.executable)
+    check = subprocess.run(command, shell=True, capture_output=True, text=True)
+    if check.returncode == 0:
+        pytest.skip(
+            "Installed environment already has the exact SDK; success tested separately"
+        )
+    with pytest.raises(RuntimeError, match="exact Forger SDK/tools"):
+        asyncio.run(agent.install(LocalEnvironment()))
+
+
+def test_native_install_uses_exact_imported_sdk_and_creates_runner_directory(
+    tmp_path, monkeypatch
+):
+    import asyncio
+    import shutil
+    import subprocess
+    import sys
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from harbor.agents.factory import AgentFactory
+    from pyforger._sdk_install import sdk_provenance_command
+
+    subprocess.run(sdk_provenance_command(sys.executable), shell=True, check=True)
+    monkeypatch.setenv("LLM_API_KEY", "offline-test")
+    config = harbor_agent_config(Model("openai/gpt-4o"), api_key_env="LLM_API_KEY")
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    agent = AgentFactory.create_agent_from_config(config, logs_dir=logs)
+    installed = tmp_path / "installed-agent"
+
+    class LocalEnvironment:
+        async def exec(self, *, command, user=None):
+            assert user == "root"
+            assert "pip install" not in command and "uv " not in command
+            command = command.replace(
+                "/opt/openhands-sdk-venv/bin/python", sys.executable
+            )
+            command = command.replace("/installed-agent", str(installed))
+            result = subprocess.run(command, shell=True, capture_output=True, text=True)
+            assert result.returncode == 0, result.stderr
+            return SimpleNamespace(return_code=result.returncode)
+
+        async def upload_file(self, *, source_path, target_path):
+            assert installed.is_dir()
+            shutil.copyfile(source_path, installed / Path(target_path).name)
+
+    asyncio.run(agent.install(LocalEnvironment()))
+    target = installed / "run_agent.py"
+    assert target.read_text() == (logs / "run_agent.py").read_text()
+    assert target.stat().st_mode & 0o111
+    compile(target.read_text(), str(target), "exec")

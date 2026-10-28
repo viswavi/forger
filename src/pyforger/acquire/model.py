@@ -91,6 +91,7 @@ class ModelSettings(BaseModel):
     api_mode: Literal["auto", "chat", "responses"] = "auto"
     capability_overrides: dict[str, bool | str] = Field(default_factory=dict)
     custom_tokenizer: str | None = None
+    max_context_tokens: int | None = Field(default=None, gt=0)
 
 
 class GenerateResult(list[str]):
@@ -346,6 +347,7 @@ class Model:
         api_mode: Literal["auto", "chat", "responses"] | None = None,
         capability_overrides: dict[str, bool | str] | None = None,
         custom_tokenizer: str | None = None,
+        max_context_tokens: int | None = None,
         **kwargs: Any,
     ) -> None:
         """Create a Model instance.
@@ -372,10 +374,12 @@ class Model:
             capability_overrides: SDK model capability overrides.
             custom_tokenizer: Optional tokenizer repo or path forwarded
                 to SDK agents.
+            max_context_tokens: Optional joint prompt/output context limit for SDK agents.
         """
         self.config = ModelSettings(
             model_id=model_id,
             custom_tokenizer=custom_tokenizer,
+            max_context_tokens=max_context_tokens,
             api_key=api_key,
             temperature=temperature,
             max_tokens=max_tokens,
@@ -417,6 +421,7 @@ class Model:
             self.config.temperature,
             self.config.max_tokens,
             self.config.num_retries,
+            self.config.max_context_tokens,
             kwargs_items,
         )
 

@@ -13,6 +13,7 @@ from harbor.models.trajectories.step import Step
 from harbor.models.trajectories.trajectory import Trajectory
 from harbor.utils.trajectory_utils import compute_model_usage
 
+from pyforger._sdk_install import sdk_provenance_command
 from pyforger._streaming_json import object_items
 
 
@@ -118,13 +119,23 @@ class ForgerOpenHandsSDK(OpenHandsSDK):  # type: ignore[misc]
             self.logger.error("Failed to parse trajectory metrics: %s", error)
 
     async def install(self, environment: Any) -> None:
-        """Install the native SDK then upload the minimally extended runner."""
+        """Use the image's exact SDK without Harbor's package-index installer."""
         source = runner_source()
-        await super().install(environment)
+        await environment.exec(command="mkdir -p /installed-agent", user="root")
+        result = await environment.exec(command=sdk_provenance_command(), user="root")
+        if result.return_code != 0:
+            raise RuntimeError(
+                "Harbor requires the exact Forger SDK/tools sources preinstalled "
+                "in /opt/openhands-sdk-venv; rebuild the agent image"
+            )
+        await self.ensure_system_dependencies(environment, ("curl", "coreutils"))
         local = self.logs_dir / "run_agent.py"
         local.write_text(source)
         await environment.upload_file(
             source_path=local, target_path="/installed-agent/run_agent.py"
+        )
+        await environment.exec(
+            command="chmod +x /installed-agent/run_agent.py", user="root"
         )
 
     async def exec_as_agent(
