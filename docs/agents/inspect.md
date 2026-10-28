@@ -22,22 +22,30 @@ when no longer phrase containing it is in nearly as many rows, and returns a `Ph
 field, with `skipped` set for categorical, identifier, and code fields). Topic clustering can look balanced while
 every row says "I need"; run both. Rows are not modified.
 
-`student_log_likelihood(rows, model, *, prompt_field="prompt", target_field="response", own_samples=200,
+`student_log_likelihood(rows, model, *, prompt_field="prompt", target_field="response", own_samples=64,
 max_tokens=None, top_k=5)` scores each row's target (e.g. an SFT target `"<think>...</think>answer"`) under the student,
 a `LocalModel`, as SFT trains on it. Bits are `-log2` of each token's probability given the prompt and the earlier
 tokens. A log-likelihood alone has no natural scale, so the student also answers `own_samples` of the prompts (evenly
 spaced, at temperature 1) and its own responses are scored the same way:
 
 ```text
-                   rows   median tokens   bits/token   bits/row   total bits
-  targets         1,336           1,713         3.71       6.4k     16.8M
-    reasoning     1,336           1,600         3.90
-    answer        1,336             110         0.62
-  student's own     200           9,284         0.85      7,851   -
+  134 rows · "ground_truth" scored by Qwen/Qwen3-4B
+                  rows   median tokens   bits/token   bits/row   total bits
+  targets          134             736         3.77      2,641   450.2k
+    reasoning      134             600         4.18
+    answer         134             126         0.45
+  student's own    134           8,064         0.44      4,011   -
+    reasoning      124           7,243         0.45
+    answer         124             272         0.02
 
-  excess over the student's own rate (0.85 bits/token): 12.1M bits in total
-    per row: p10 1,200 · median 4,900 · p90 14.0k · max 40.0k
+  excess over the student's own rate (0.44 bits/token): 397.8k bits in total
+    per row: p10 290 · median 2,358 · p90 5,999 · max 12.8k
+  most excess bits:
+    row 68  12.8k (2,479 tokens × 5.58 bits)  ### Question: There is a row of N coins. In each turn, a player selects a…
 ```
+
+Here (a coding SFT set for Qwen3-4B) the targets' reasoning costs 4.18 bits per token against the student's own 0.45:
+a teacher's reasoning, far from what the student writes, though at a tenth of its length.
 
 - *bits/token*, targets against the student's own: how foreign the text is, token by token.
 - *tokens*: how long the targets are against what the student writes.
@@ -48,8 +56,9 @@ spaced, at temperature 1) and its own responses are scored the same way:
   reading one number alone.
 
 The report lists the rows with the most excess bits; `report.rows[i]` belongs to `rows[i]`. Scores and the sampled
-responses are cached, so changing `top_k` costs nothing. On 8 GPUs, scoring a few thousand rows takes minutes;
-sampling is the slow part (see `own_samples`).
+responses are cached, so changing `top_k` costs nothing. Scoring is fast; sampling the student's own responses is
+the slow part: 134 long reasoning responses took 37 minutes on one L40S and 19 on two. Its median rate is stable with
+the default 64 samples.
 
 Topic-based clustering uses the ClusterFusion clustering algorithm ([arXiv:2512.04350](https://arxiv.org/abs/2512.04350)),
 a hybrid method in which embeddings guide how rows are partitioned and an LLM summarizes the partitions into

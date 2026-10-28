@@ -1199,7 +1199,7 @@ student_log_likelihood(
     *,
     prompt_field: str = "prompt",
     target_field: str = "response",
-    own_samples: int = 200,
+    own_samples: int = 64,
     max_tokens: int | None = None,
     top_k: int = 5,
 ) -> LikelihoodReport
