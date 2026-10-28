@@ -10,6 +10,7 @@ import os
 import re
 import shlex
 import tempfile
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Literal
@@ -17,6 +18,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
+from pyforger._harbor_deadline import remaining, run_owned
 from pyforger._streaming_json import JSONReader
 from pyforger.acquire.model import Model
 from pyforger.agent_backend import validate_workspace_path
@@ -349,12 +351,14 @@ class HarborTaskRunner:
         environment: Any,
         max_iterations: int | None = None,
         timeout_s: float | None = None,
+        deadline: float | None = None,
     ) -> None:
         """Snapshot trusted AgentConfig/EnvironmentConfig objects or dictionaries."""
         self._agent = copy.deepcopy(agent)
         self._environment = copy.deepcopy(environment)
         self._max_iterations = _positive(max_iterations, "max_iterations", integer=True)
         self._timeout_s = _positive(timeout_s, "timeout_s")
+        self._deadline = _positive(deadline, "deadline")
 
     def _configuration(self, request: HarborRequest, task: Path, output: Path) -> Any:
         AgentConfig, EnvironmentConfig, TaskConfig, TrialConfig, _ = _sdk()
@@ -420,6 +424,13 @@ class HarborTaskRunner:
         """Retain the entire native trial tree before returning verified evidence."""
         if environment is not None:
             raise ValueError("HarborTaskRunner owns its native execution environment")
+        timeout = _positive(
+            request.configuration.get("timeout_s", self._timeout_s), "timeout_s"
+        )
+        deadline = self._deadline
+        if timeout is not None:
+            deadline = min(deadline or float("inf"), time.monotonic() + timeout)
+        remaining(deadline)
         identity = request.cache_key()
         output = _output_path(output, request.task)
         output.mkdir(mode=0o700)
@@ -438,20 +449,65 @@ class HarborTaskRunner:
         )
         _, _, _, _, Trial = _sdk()
         try:
-            result = None
             attempt_usage = []
-            for attempt in range(_STARTUP_MAX_ATTEMPTS):
-                trial = await Trial.create(config)
-                expected = output / config.trial_name
-                if trial.paths.trial_dir != expected:
-                    raise ValueError("Harbor returned an unexpected trial output path")
-                result = await trial.run()
-                attempt_usage.append(_trial_usage(result))
-                if not _transient_startup_failure(result):
-                    break
-                if attempt + 1 < _STARTUP_MAX_ATTEMPTS:
-                    await asyncio.sleep(_STARTUP_BACKOFF_S[attempt])
-            assert result is not None
+
+            async def execute() -> Any:
+                result = None
+                for attempt in range(_STARTUP_MAX_ATTEMPTS):
+                    left = remaining(deadline)
+                    if left is not None:
+                        config.agent.override_timeout_sec = min(
+                            config.agent.override_timeout_sec or left, left
+                        )
+                        config.verifier.override_timeout_sec = min(
+                            config.verifier.override_timeout_sec or left, left
+                        )
+                    trial = await Trial.create(config)
+                    expected = output / config.trial_name
+                    if trial.paths.trial_dir != expected:
+                        raise ValueError(
+                            "Harbor returned an unexpected trial output path"
+                        )
+                    if deadline is not None:
+                        from harbor.trial.hooks import TrialEvent
+
+                        async def cap(event: Any) -> None:
+                            left = remaining(deadline)
+                            assert left is not None
+                            for field in (
+                                "_agent_timeout_sec",
+                                "_verifier_timeout_sec",
+                                "_agent_setup_timeout_sec",
+                                "_environment_build_timeout_sec",
+                            ):
+                                value = getattr(trial, field, None)
+                                setattr(trial, field, min(value or left, left))
+
+                        if hasattr(trial, "add_hook"):
+                            for event in (
+                                TrialEvent.START,
+                                TrialEvent.ENVIRONMENT_START,
+                                TrialEvent.AGENT_START,
+                                TrialEvent.VERIFICATION_START,
+                            ):
+                                trial.add_hook(event, cap)
+                    remaining(deadline)
+                    result = await trial.run()
+                    remaining(deadline)
+                    attempt_usage.append(_trial_usage(result))
+                    if not _transient_startup_failure(result):
+                        break
+                    if attempt + 1 < _STARTUP_MAX_ATTEMPTS:
+                        await asyncio.sleep(
+                            min(
+                                _STARTUP_BACKOFF_S[attempt],
+                                remaining(deadline) or float("inf"),
+                            )
+                        )
+                assert result is not None
+                return result
+
+            result = await run_owned(execute, deadline)
             payload = _redact(result.model_dump(mode="json"), secrets)
             usage = combine_usage(attempt_usage)
             status = _status(result)
@@ -482,8 +538,12 @@ def execute_script(
     destination: str = "/work/analysis.py",
     model: str = "oracle",
     timeout_s: float | None = None,
+    deadline: float | None = None,
 ) -> HarborResult:
     """Execute a retained program through Oracle on a fresh task copy."""
+    if timeout_s is not None:
+        deadline = min(deadline or float("inf"), time.monotonic() + timeout_s)
+    remaining(deadline)
     task.verify()
     script.verify()
     source = script.path(script_path)
@@ -510,7 +570,10 @@ def execute_script(
     )
     solve.chmod(0o755)
     return HarborTaskRunner(
-        agent={"name": "oracle"}, environment=environment, timeout_s=timeout_s
+        agent={"name": "oracle"},
+        environment=environment,
+        timeout_s=timeout_s,
+        deadline=deadline,
     ).run(
         HarborRequest(
             trial_id="script-" + uuid.uuid4().hex,

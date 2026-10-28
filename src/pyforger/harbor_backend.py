@@ -16,9 +16,11 @@ import json
 import shlex
 import shutil
 import tempfile
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from pyforger._harbor_deadline import remaining
 from pyforger._sdk_install import SDK_COMMIT, SDK_REQUIREMENT, TOOLS_REQUIREMENT
 from pyforger.agent_backend import (
     AgentRunResult,
@@ -243,10 +245,10 @@ def _failure_kind(outcome: dict[str, Any]) -> str | None:
 
 def _collect_outputs(
     rollout: HarborResult, outputs: tuple[str, ...], output: Path
-) -> dict[str, FileInput]:
+) -> dict[str, bytes | FileInput]:
     from pyforger.harbor import collect_trial_files
 
-    collected: dict[str, FileInput] = {}
+    collected: dict[str, bytes | FileInput] = {}
     if not outputs:
         return collected
     output.mkdir()
@@ -347,6 +349,8 @@ class HarborBackend:
 
     def run_agent(self, task: WorkspaceTask, agent: AgentSpec) -> AgentRunResult:
         """Package the task natively and run the agent in Harbor."""
+        deadline = time.monotonic() + task.timeout_s
+        remaining(deadline)
         require_learner_runtime(self, agent)
         from pyforger.harbor import (
             HarborRequest,
@@ -365,15 +369,18 @@ class HarborBackend:
                 outputs,
                 trusted_verifier_files=self._trusted_verifier_files,
             )
+            remaining(deadline)
             runner = HarborTaskRunner(
                 agent=self._agent_config(agent),
                 environment=self._environment,
                 timeout_s=task.timeout_s,
+                deadline=deadline,
             )
 
             rollout = runner.run(
                 HarborRequest(trial_id="agent", task=packaged), root / "native"
             )
+            remaining(deadline)
             outcome = trial_outcome(rollout)
             trial = trial_directory(rollout)
             native_evidence = {}
@@ -404,6 +411,7 @@ class HarborBackend:
                     "trial_dir": str(retained),
                 }
             collected = _collect_outputs(rollout, task.outputs, root / "collected")
+            remaining(deadline)
             return AgentRunResult(
                 status=str(outcome["status"]),
                 trajectory=normalized_trajectory,
@@ -424,6 +432,9 @@ class HarborBackend:
         """Replay the exact retained source through Oracle, without an LLM."""
         from pyforger.harbor import execute_script
 
+        deadline = time.monotonic() + timeout_s
+        remaining(deadline)
+
         _record_key(item)
         with tempfile.TemporaryDirectory(prefix="forger-harbor-exec-") as directory:
             root = Path(directory)
@@ -442,7 +453,7 @@ class HarborBackend:
                 },
                 outputs=("result.json",),
                 network=Network.OFFLINE,
-                timeout_s=timeout_s + 30,
+                timeout_s=timeout_s,
             )
             packaged = _package(
                 task, AgentSpec(kind="nop"), root / "task", ["/work/result.json"]
@@ -458,7 +469,8 @@ class HarborBackend:
                 root / "replay",
                 environment=self._environment,
                 script_path="worker.py",
-                timeout_s=timeout_s + 5,
+                timeout_s=timeout_s,
+                deadline=deadline,
             )
             from pyforger.harbor import collect_trial_files, trial_outcome
 
@@ -475,4 +487,5 @@ class HarborBackend:
                 not isinstance(v, str) for v in result
             ):
                 raise TypeError("The pipeline must return a list of strings")
+            remaining(deadline)
             return result
