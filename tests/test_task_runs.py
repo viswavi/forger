@@ -29,6 +29,9 @@ def test_recorded_nested_artifacts_and_fresh_paths(tmp_path):
         backend=LocalBackend(),
         output=root,
     )
+    assert report["usage"]["cost_usd"] == 0.0
+    assert report["usage"]["scope"] == "call"
+    assert report["usage"]["call_id"]
     assert report["passed"] is True
     assert report["status"] == "completed"
     assert report["failure_kind"] is None

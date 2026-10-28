@@ -17,6 +17,7 @@ from pyforger.agent_diagnostics import (
 )
 from pyforger.agent_tasks import TaskSpec, run_task
 from pyforger.evidence_journal import materialize_journals
+from pyforger.usage import usage_record
 from pyforger.utils import redact, run_concurrently
 
 
@@ -82,10 +83,12 @@ def run_recorded_task(
     _validate_task(task, timeout_s)
     output = Path(output)
     output = _fresh_directory(output)
+    usage = usage_record(zero=agent.kind in {"oracle", "nop"})
     trajectory: dict[str, Any] | None = None
     diagnostics: Any = {}
     try:
         result = run_task(task, agent=agent, backend=backend, timeout_s=timeout_s)
+        usage = result["usage"]
         journal_memo: dict = {}
         diagnostics = _json_value(
             materialize_journals(
@@ -131,6 +134,8 @@ def run_recorded_task(
         }
     except Exception as error:
         evidence = getattr(error, "diagnostics", None)
+        if evidence and evidence.get("usage"):
+            usage = evidence["usage"]
         if evidence and not diagnostics:
             try:
                 diagnostics = _json_value(
@@ -154,6 +159,7 @@ def run_recorded_task(
             "diagnostics": diagnostics,
             "error": sanitizer([agent])(f"{type(error).__name__}: {error}"),
         }
+    report["usage"] = usage
     report["trial_dir"] = str(output)
     normalized: dict[str, Any] = _json_value(report)
     (output / "agent").mkdir(exist_ok=True)
