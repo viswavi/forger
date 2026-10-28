@@ -145,6 +145,7 @@ LocalModel(
     max_model_len: int | None = None,
     gpu_memory_utilization: float = 0.9,
     tensor_parallel_size: int = 1,
+    data_parallel_size: int | str = "auto",
     dtype: str = "auto",
     enable_thinking: bool = True,
     chat_template_kwargs: dict[str, Any] | None = None,
