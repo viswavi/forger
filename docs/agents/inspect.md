@@ -8,7 +8,7 @@ producing new rows in the pipeline.
 |---|---|---|
 | `topic_based_clustering` | yes | Interpretable clustering of contents of one field from the input rows. |
 | `eval_tree` | yes | Hierarchical capability tree and statistical weakness profile for scored outputs. |
-| `inspect_step` | no | Print the full report of the latest run of a `@step` and return its `StepRecord`. |
+| `inspect_step` | no | Print a `@step`'s latest full report, return its `StepRecord`; `rows=True`: its whole output. |
 | `spend` | no | Print and return the spend ledger's totals by run, pipeline, and step. |
 | `runs` | no | Print and return the saved `@pipeline` runs with step yields, e.g. `runs("main")`. |
 | `phrase_frequency` | no | Print and return, per string field, the phrases and names the most rows share. No LLM. |

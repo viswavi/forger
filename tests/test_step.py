@@ -1030,6 +1030,57 @@ def test_inspect_step_reads_a_run_from_another_process(capsys):
         inspect_step("missing")
 
 
+def test_inspect_step_rows_loads_the_whole_output_after_a_later_step_fails():
+    """rows=True returns the cached output of a step whose pipeline died later."""
+    long_text = "word " * 5000  # 25K chars: stored as a blob
+
+    @step
+    def keep(rows):
+        return _length_filter(rows)
+
+    @step
+    def explode(rows):
+        _upper(rows)
+        raise RuntimeError("quota exhausted")
+
+    @pipeline
+    def run(rows):
+        return explode(keep(rows))
+
+    with pytest.raises(RuntimeError, match="quota exhausted"):
+        run(_rows(*TEXTS) + [{"text": long_text}])
+    expected = _rows("one two", "three four five", "seven eight", long_text)
+    assert inspect_step("keep", rows=True) == expected
+    _tracking.clear_step_records()  # as in a new process
+    assert inspect_step("keep", rows=True) == expected
+    assert inspect_step(rows=True) == expected  # the latest step that finished
+
+
+def test_inspect_step_rows_after_a_cache_hit_and_when_not_cached(tmp_path):
+    """A cached rerun points at the same entry; an uncached run cannot be loaded."""
+
+    @step
+    def first(rows):
+        return _upper(rows)
+
+    first(_rows("alpha beta"))
+    first(_rows("alpha beta"))
+    assert _tracking.step_records()["first"].cache_hit
+    assert inspect_step("first", rows=True) == [{"text": "ALPHA BETA"}]
+
+    @step(cache=False)
+    def fresh(rows):
+        return _upper(rows)
+
+    fresh(_rows("gamma delta"))
+    with pytest.raises(FileNotFoundError, match="was not cached"):
+        inspect_step("fresh", rows=True)
+
+    (tmp_path / _tracking.step_records()["first"].cache_file).unlink()
+    with pytest.raises(FileNotFoundError, match="FORGER_CACHE cleared"):
+        inspect_step("first", rows=True)
+
+
 def _bins(scores):
     """(label, count, cut, kept, share, current) per histogram bin."""
     return [
