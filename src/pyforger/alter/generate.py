@@ -58,6 +58,18 @@ def _get_logger() -> logging.Logger:
     return _gf(__name__)
 
 
+def _with_hint(prompt: Prompt, hint: str) -> Prompt:
+    """``prompt`` with ``hint`` after its text (a chat's last user message)."""
+    if isinstance(prompt, str):
+        return f"{prompt}\n\n{hint}"
+    messages = [dict(m) for m in prompt]
+    for message in reversed(messages):
+        if message.get("role") == "user" and isinstance(message.get("content"), str):
+            message["content"] = f"{message['content']}\n\n{hint}"
+            return messages  # type: ignore[return-value]
+    return [*messages, {"role": "user", "content": hint}]  # type: ignore[list-item]
+
+
 def _resolve_prompt(template: PromptTemplate, item: dict) -> Prompt:
     """Resolve a prompt template against one input item.
 
@@ -459,6 +471,9 @@ def self_taught_reasoner(
     filter_fn: Callable[[list[dict]], list[dict]] | None = None,
     verifier: Callable[[str, dict], bool | None] | None = None,
     max_workers: int | None = None,
+    rationalize: bool = True,
+    hint_fn: PromptTemplate | None = None,
+    rationalized_field: str = "rationalized",
     response_field: str = "response",
     thinking_field: str = "thinking",
     answer_field: str = "answer",
@@ -500,6 +515,21 @@ def self_taught_reasoner(
     the model returns one, and otherwise the inline ``<think>`` block split out
     via `pyforger.acquire.split_reasoning`.
 
+    **Rationalization** (the paper's second pass, on by default): every item
+    left with no accepted response is sampled ``n`` more times from a prompt
+    that also gives a hint, and the accepted responses are kept as if the
+    student had answered the unhinted prompt: rows carry the item's fields,
+    not the hinted prompt. This gives rows for items the student never solves
+    on its own, in the student's own words. The default hint, as in the paper,
+    is the item's reference (``prompt_fn``'s prompt plus "Hint: a correct
+    answer is: <item[reference_field]>"); items without one are not retried.
+    ``hint_fn`` gives another hint (e.g. only the final code, or why the task
+    cannot be done). As in the paper, responses that mention the hint are not
+    filtered out. Every row gets ``rationalized_field`` (False for the first
+    pass, True for the second). ``rationalize=False`` turns this off; with
+    ``filter_fn`` it is off, since the filter judges all candidates together
+    and cannot say which items went unsolved.
+
     Args:
         items: Input rows. Each must contain ``reference_field``.
         prompt_fn: Format string (keys filled from the item) or callable
@@ -520,6 +550,12 @@ def self_taught_reasoner(
             candidate row (the item's fields plus the response fields). With
             it, ``reference_field`` is not needed and is left unchanged.
         max_workers: Verifier calls at a time (default 8).
+        rationalize: Re-sample unsolved items with a hint (default True).
+        hint_fn: Format string or ``(dict) -> Prompt`` for the hinted prompt;
+            None (default) appends the item's ``reference_field`` as the hint.
+            Needs answer matching or ``verifier``, not ``filter_fn``.
+        rationalized_field: Output key marking rationalized rows (set when
+            rationalization runs).
         response_field: Output key for the raw student response.
         thinking_field: Output key for the split-out reasoning trace.
         answer_field: Output key for the answer portion of the response.
@@ -560,37 +596,56 @@ def self_taught_reasoner(
     extract = extract_answer if extract_answer is not None else default_extract_answer
     match = match_fn if match_fn is not None else _normalized_equal
 
-    prompts: list[Prompt] = [_resolve_prompt(prompt_fn, item) for item in items]
-
-    # Sample n responses per item, batching items together for throughput.
-    item_responses: list[tuple[dict, list[str]]] = []
-    chunk = batch_size or len(prompts)
-    for start in range(0, len(prompts), chunk):
-        batch = prompts[start : start + chunk]
-        batch_results = model.generate_batch(
-            batch,
-            n=n,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            **_cache_kwargs(
-                model.generate_batch, cache_rows=items[start : start + chunk]
-            ),
+    if hint_fn is not None and filter_fn is not None:
+        raise ValueError(
+            "hint_fn needs answer matching or verifier: filter_fn judges all "
+            "candidates together, so the unsolved items are unknown"
         )
-        if len(batch_results) != len(batch):
-            log.warning(
-                "generate_batch returned %d results for %d prompts",
-                len(batch_results),
-                len(batch),
-            )
-        # zip drops items left without results; they contribute no rows.
-        item_responses.extend(zip(items[start : start + chunk], batch_results))
+    if hint_fn is not None and not rationalize:
+        raise ValueError("hint_fn is only used with rationalize=True")
+    rationalizing = rationalize and filter_fn is None
 
-    # Build one candidate row per generated response.
-    candidates: list[dict] = []
-    for item, responses in item_responses:
+    def default_hint(item: dict) -> Prompt:
+        """``prompt_fn``'s prompt, with the item's reference as a hint."""
+        hint = f"Hint: a correct answer is:\n{item[reference_field]}"
+        return _with_hint(_resolve_prompt(prompt_fn, item), hint)
+
+    def sample(template: PromptTemplate, batch_items: list[dict]) -> list[list[dict]]:
+        """``n`` candidate rows per item, from ``template``'s prompts."""
+        prompts = [_resolve_prompt(template, item) for item in batch_items]
+        per_item: list[list[dict]] = [[] for _ in batch_items]
+        # Sample n responses per item, batching items together for throughput.
+        chunk = batch_size or len(prompts)
+        for start in range(0, len(prompts), chunk):
+            batch = prompts[start : start + chunk]
+            batch_results = model.generate_batch(
+                batch,
+                n=n,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                **_cache_kwargs(
+                    model.generate_batch, cache_rows=batch_items[start : start + chunk]
+                ),
+            )
+            if len(batch_results) != len(batch):
+                log.warning(
+                    "generate_batch returned %d results for %d prompts",
+                    len(batch_results),
+                    len(batch),
+                )
+            # Items left without results contribute no rows.
+            for offset, responses in enumerate(batch_results[: len(batch)]):
+                per_item[start + offset] = candidates_for(
+                    batch_items[start + offset], responses
+                )
+        return per_item
+
+    def candidates_for(item: dict, responses: list[str]) -> list[dict]:
+        """One candidate row per generated response."""
         # Providers that return reasoning separately (GenerateResult.reasoning)
         # leave it out of the content; otherwise it is inline as <think>...</think>.
         reasoning = getattr(responses, "reasoning", None) or []
+        rows = []
         for i, raw in enumerate(responses):
             api_thinking = reasoning[i] if i < len(reasoning) else None
             if not split_thinking:
@@ -599,22 +654,24 @@ def self_taught_reasoner(
                 thinking, answer = api_thinking.strip(), raw.strip()
             else:
                 thinking, answer = split_reasoning(raw)
-            candidate = {
-                **item,
-                response_field: raw,
-                thinking_field: thinking,
-                answer_field: answer,
-                student_answer_field: extract(raw),
-            }
-            candidates.append(candidate)
+            rows.append(
+                {
+                    **item,
+                    response_field: raw,
+                    thinking_field: thinking,
+                    answer_field: answer,
+                    student_answer_field: extract(raw),
+                }
+            )
+        return rows
 
-    # Decide which candidates to keep.
-    if filter_fn is not None:
-        kept = filter_fn(candidates)
-    elif verifier is not None:
-        kept = _verified(candidates, verifier, answer_field, max_workers or 8)
-    else:
-        kept = [
+    def accept(candidates: list[dict]) -> list[dict]:
+        """The candidates to keep, in order."""
+        if filter_fn is not None:
+            return filter_fn(candidates)
+        if verifier is not None:
+            return _verified(candidates, verifier, answer_field, max_workers or 8)
+        return [
             candidate
             for candidate in candidates
             if candidate[student_answer_field] is not None
@@ -623,6 +680,43 @@ def self_taught_reasoner(
                 get_field(candidate, reference_field, "alter.self_taught_reasoner"),
             )
         ]
+
+    def accept_per_item(per_item: list[list[dict]]) -> list[list[dict]]:
+        """`accept` over all candidates at once, regrouped by item."""
+        kept_ids = {id(c) for c in accept([c for cs in per_item for c in cs])}
+        return [[c for c in cs if id(c) in kept_ids] for cs in per_item]
+
+    first = sample(prompt_fn, items)
+    n_candidates = sum(len(cs) for cs in first)
+    if not rationalizing:
+        kept = accept([c for cs in first for c in cs])
+    else:
+        kept_per_item = accept_per_item(first)
+        # The default hint is the reference, so items without one are not retried.
+        unsolved = [
+            i
+            for i, cs in enumerate(kept_per_item)
+            if not cs
+            and (hint_fn is not None or items[i].get(reference_field) is not None)
+        ]
+        hint_template = hint_fn if hint_fn is not None else default_hint
+        hinted = sample(hint_template, [items[i] for i in unsolved]) if unsolved else []
+        n_candidates += sum(len(cs) for cs in hinted)
+        for cs in kept_per_item:
+            for candidate in cs:
+                candidate[rationalized_field] = False
+        for i, cs in zip(unsolved, accept_per_item(hinted)):
+            for candidate in cs:
+                candidate[rationalized_field] = True
+            kept_per_item[i] = cs
+        kept = [c for cs in kept_per_item for c in cs]
+        log.info(
+            "self_taught_reasoner: rationalization kept %d responses for %d of %d "
+            "unsolved items",
+            sum(len(kept_per_item[i]) for i in unsolved),
+            sum(1 for i in unsolved if kept_per_item[i]),
+            len(unsolved),
+        )
 
     # The student-generated answer becomes the ground truth for kept rows.
     for candidate in kept if verifier is None else []:
@@ -633,7 +727,7 @@ def self_taught_reasoner(
     log.info(
         "self_taught_reasoner: kept %d/%d responses across %d items",
         len(kept),
-        len(candidates),
+        n_candidates,
         len(items),
     )
     return kept

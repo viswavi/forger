@@ -82,6 +82,26 @@ rows = self_taught_reasoner(problems, solver_prompt, student, n=8,
 
 `LocalModel("Qwen/Qwen3-8B", max_model_len=40960)` samples the same student on a local GPU via vLLM instead.
 
+STaR only keeps what the student already does: an item it never solves in `n` samples gives no rows, and a behavior
+it never shows (e.g. declining a task that cannot be done) is never learned. Two ways to get rows for such items:
+
+- **Rationalization** (the paper's second pass, on by default): items with no accepted response are sampled `n` more
+  times with a hint; accepted responses are kept as answers to the original item (rows carry the item's fields, not
+  the hinted prompt) and marked `rationalized=True`. The default hint is the item's `reference_field` ("Hint: a
+  correct answer is: ..."), so items without one are not retried; pass `hint_fn` for a different hint, such as only
+  the final code or why the task cannot be done, and `rationalize=False` to turn it off. As in the paper, responses
+  that mention the hint are kept. It is off with `filter_fn`, which cannot say which items went unsolved.
+- **Bootstrapping**: fine-tune briefly on a few seed rows that show the behavior, then run STaR on that checkpoint
+  (`LocalModel(checkpoint_dir)` or `TinkerModel` on the checkpoint), and train the next checkpoint from the base model
+  on the rows STaR kept. Check the seed checkpoint on items where the behavior is wrong too: a checkpoint that
+  declines solvable tasks almost as often as impossible ones yields rows that teach declining at random.
+
+```python
+solver_prompt = "Write a Python program for this problem:\n{problem}"
+rows = self_taught_reasoner(problems, solver_prompt, student, n=8, verifier=filter.program_verifier("tests"),
+                            hint_fn=solver_prompt + "\n\nHint: {key_idea}")
+```
+
 ## Running programs against tests
 
 `execute_code` runs a function, not a program: it calls the last function defined in `code_field` with the value of
