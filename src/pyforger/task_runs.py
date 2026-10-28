@@ -93,6 +93,11 @@ def run_recorded_task(
                 sanitizer([agent])(result["diagnostics"]), output, [agent], journal_memo
             )
         )
+        native_result = diagnostics.get("native_evidence", {}).get("result.json", {})
+        if "evidence_file" in native_result:
+            diagnostics["harbor_result"] = str(
+                output / native_result["evidence_file"]["path"]
+            )
         retained = result["trajectory"]
         if retained is not None and not isinstance(retained, dict):
             raise ValueError("Malformed trajectory: expected an object or null")

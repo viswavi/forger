@@ -512,3 +512,71 @@ def test_runner_bounds_transient_retries(task, tmp_path, monkeypatch):
     )
     assert result.status == "failed"
     assert len(calls) == 3
+
+
+def test_real_native_missing_reward_retains_trace_and_verifier_logs(task, tmp_path):
+    """Run Harbor's actual verifier failure locally, without model or provider calls."""
+    from pyforger.agent_backend import AgentRunResult, AgentSpec
+    from pyforger.agent_tasks import TaskSpec
+    from pyforger.artifacts import FileInput
+    from pyforger.evidence_journal import evidence_file_chunks
+    from pyforger.harbor import trial_directory, trial_outcome
+    from pyforger.task_runs import run_recorded_task
+
+    root = task.root
+    (root / "tests/test.sh").write_text(
+        '#!/bin/bash\necho "native stdout before crash"\n'
+        'echo "native stderr before crash" >&2\n'
+        "python3 -c \"raise RuntimeError('actual grader crash')\"\n"
+    )
+    rollout = HarborTaskRunner(
+        agent={"name": "nop"}, environment={"type": "docker"}
+    ).run(
+        HarborRequest(trial_id="missing-reward", task=ArtifactRef.capture(root)),
+        tmp_path / "native",
+    )
+    outcome = trial_outcome(rollout)
+    assert outcome["exception"]["exception_type"] == "RewardFileNotFoundError"
+    trial = trial_directory(rollout)
+    # The bridge below substitutes no execution: it feeds the real failed trial
+    # through the existing host persistence API after native files are removed.
+    evidence = {
+        entry.path: evidence_file_chunks(
+            FileInput.from_artifact(
+                rollout.artifacts,
+                (trial / entry.path).relative_to(rollout.artifacts.root).as_posix(),
+            ).chunks()
+        )[0]
+        for entry in ArtifactRef.capture(trial).files
+    }
+    import shutil
+
+    shutil.rmtree(tmp_path / "native")
+
+    class CompletedNativeBackend:
+        def run_agent(self, task, agent):
+            return AgentRunResult(
+                status="failed",
+                failure_kind="infrastructure",
+                diagnostics={**outcome, "native_evidence": evidence},
+            )
+
+    report = run_recorded_task(
+        TaskSpec(instruction="failed native trial"),
+        agent=AgentSpec(kind="nop"),
+        backend=CompletedNativeBackend(),
+        output=tmp_path / "retained",
+    )
+    retained = report["diagnostics"]["native_evidence"]
+
+    def text(name):
+        return (
+            tmp_path / "retained" / retained[name]["evidence_file"]["path"]
+        ).read_text()
+
+    assert "RewardFileNotFoundError" in text("result.json")
+    logs = "\n".join(text(name) for name in retained if name.startswith("verifier/"))
+    assert "native stdout before crash" in logs
+    assert "native stderr before crash" in logs
+    assert "actual grader crash" in logs
+    assert Path(report["diagnostics"]["harbor_result"]).is_file()

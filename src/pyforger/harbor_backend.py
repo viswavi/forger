@@ -35,6 +35,7 @@ from pyforger.artifacts import (
     read_text,
     write_input,
 )
+from pyforger.evidence_journal import evidence_file_chunks
 from pyforger.local_agent import _record_key
 
 _NETWORK = {
@@ -259,8 +260,8 @@ class HarborBackend:
 
         ``retain_trials`` keeps each native trial directory (trajectory,
         verifier output, result) under that root after the run; by default
-        trial directories are transient and only normalized outcomes and
-        collected files survive.
+        trial directories are transient; scrubbed native evidence is exported
+        as disk-backed references alongside normalized outcomes and collected files.
         """
         self._environment = copy.deepcopy(
             environment if environment is not None else {"type": "docker"}
@@ -348,6 +349,16 @@ class HarborBackend:
                 HarborRequest(trial_id="agent", task=packaged), root / "native"
             )
             outcome = trial_outcome(rollout)
+            trial = trial_directory(rollout)
+            native_evidence = {}
+            for entry in ArtifactRef.capture(trial).files:
+                native_evidence[entry.path] = evidence_file_chunks(
+                    FileInput.from_artifact(
+                        rollout.artifacts,
+                        str((trial / entry.path).relative_to(rollout.artifacts.root)),
+                    ).chunks()
+                )[0]
+            outcome["native_evidence"] = native_evidence
             native_trajectory = trial_directory(rollout) / "agent/trajectory.json"
             normalized_trajectory = None
             if native_trajectory.is_file():

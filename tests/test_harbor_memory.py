@@ -159,7 +159,7 @@ from pathlib import Path
 from pyforger.harbor import _scrub
 from pyforger.artifacts import OwnedFileInput, FileInput
 from pyforger._streaming_json import trajectory_events
-from pyforger.evidence_journal import journal_events, iter_trajectory_events
+from pyforger.evidence_journal import journal_events, iter_trajectory_events, evidence_file_chunks
 from pyforger.agent_backend import AgentSpec
 from pyforger.agent_diagnostics import validate_artifact_bytes
 count = int(sys.argv[1])
@@ -180,6 +180,8 @@ with tempfile.TemporaryDirectory() as directory:
     retained = journal_events(trajectory_events(root / 'trajectory.json'), [AgentSpec(kind='nop')])
     assert retained['journal']['count'] == count
     assert sum(1 for _ in iter_trajectory_events(retained)) == count
+    native_log, _ = evidence_file_chunks(FileInput.capture(root / 'large.bin').chunks())
+    assert native_log['evidence_file']['size'] == count * 65536
     output = OwnedFileInput.snapshot(root / 'large.bin')
     validate_artifact_bytes({'data': output}, [AgentSpec(kind='nop')])
     assert sum(map(len, output.chunks())) == count * 65536
@@ -321,6 +323,7 @@ def test_scrub_long_whitespace_preserves_exact_bytes(tmp_path):
 
 def test_diagnostics_standalone_worker_import_has_no_package_dependency(tmp_path):
     import shutil
+
     import pyforger.agent_diagnostics as diagnostics
 
     shutil.copyfile(diagnostics.__file__, tmp_path / "agent_diagnostics.py")
@@ -332,6 +335,84 @@ def test_diagnostics_standalone_worker_import_has_no_package_dependency(tmp_path
         "assert 'pyforger' not in sys.modules"
     )
     subprocess.run(
-        [sys.executable, "-I", "-S", "-c", code, str(tmp_path / "agent_diagnostics.py")],
-        cwd=tmp_path, check=True, capture_output=True, text=True,
+        [
+            sys.executable,
+            "-I",
+            "-S",
+            "-c",
+            code,
+            str(tmp_path / "agent_diagnostics.py"),
+        ],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
     )
+
+
+def test_native_missing_reward_evidence_survives_cleanup(tmp_path, monkeypatch):
+    """Only replace remote Harbor execution; use real retention and host persistence."""
+    from pyforger.agent_tasks import TaskSpec
+    from pyforger.harbor import HarborTaskRunner
+    from pyforger.harbor_backend import HarborBackend
+    from pyforger.task_runs import run_recorded_task
+
+    monkeypatch.setenv("FORGER_NATIVE_TEST_SECRET", "native-secret-123456")
+    native_paths = []
+
+    def native_failure(self, request, output, **kwargs):
+        trial = output / "trial-missing-reward"
+        (trial / "verifier").mkdir(parents=True)
+        (trial / "agent").mkdir()
+        (trial / "verifier/test-stdout.txt").write_text(
+            "full stdout native-secret-123456\n" + "data\n" * 10000
+        )
+        (trial / "verifier/test-stderr.txt").write_text(
+            "Traceback: actual grader import failure native-secret-123456\n"
+        )
+        payload = {
+            "exception_info": {
+                "exception_type": "RewardFileNotFoundError",
+                "exception_message": "reward missing",
+                "exception_traceback": "complete native traceback",
+            }
+        }
+        (trial / "result.json").write_text(json.dumps(payload))
+        (trial / "exception.txt").write_text("complete native exception")
+        # Real runner scrubs before returning the captured tree.
+        _scrub(output, {"native-secret-123456"})
+        native_paths.append(trial)
+        return HarborResult(
+            status="failed",
+            artifacts=ArtifactRef.capture(output),
+            metadata={
+                "harbor_result": payload,
+                "harbor_result_path": "trial-missing-reward/result.json",
+            },
+        )
+
+    monkeypatch.setattr(HarborTaskRunner, "run", native_failure)
+    report = run_recorded_task(
+        TaskSpec(instruction="fail", verifier="false"),
+        agent=AgentSpec(kind="nop"),
+        backend=HarborBackend(),
+        output=tmp_path / "retained",
+    )
+    assert not native_paths[0].exists()
+    assert report["passed"] is None
+    evidence = report["diagnostics"]["native_evidence"]
+    for name, expected in [
+        ("result.json", "RewardFileNotFoundError"),
+        ("exception.txt", "complete native exception"),
+        ("verifier/test-stdout.txt", "full stdout [REDACTED]"),
+        ("verifier/test-stderr.txt", "actual grader import failure [REDACTED]"),
+    ]:
+        path = tmp_path / "retained" / evidence[name]["evidence_file"]["path"]
+        assert expected in path.read_text()
+        assert "native-secret-123456" not in path.read_text()
+    assert (
+        tmp_path
+        / "retained"
+        / evidence["verifier/test-stdout.txt"]["evidence_file"]["path"]
+    ).stat().st_size > 32000
+    assert __import__("pathlib").Path(report["diagnostics"]["harbor_result"]).is_file()
