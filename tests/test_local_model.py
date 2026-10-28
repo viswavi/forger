@@ -125,7 +125,14 @@ class TestLazyEngine:
             "max_model_len": 40960,
             "max_num_seqs": 8,
             "revision": "abc123",
+            "max_num_batched_tokens": 1024,
         }
+
+    def test_step_tokens_default_and_override(self, engines):
+        """max_num_batched_tokens: 1024, at least max_num_seqs, or as given."""
+        LocalModel("m", max_num_seqs=4096).generate("a")
+        LocalModel("m", max_num_batched_tokens=512).generate("a")
+        assert [e.init_kwargs["max_num_batched_tokens"] for e in engines] == [4096, 512]
 
     def test_max_model_len_defaults_to_none(self, engines):
         """Without max_model_len, vLLM gets None (its own default)."""

@@ -19,6 +19,7 @@ import time
 import warnings
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from dataclasses import dataclass
 from typing import Any, Literal, Union, overload
 
 import litellm
@@ -2083,6 +2084,22 @@ class Model:
 # can be long (tens of thousands of tokens), so the LiteLLM default of "let the
 # provider decide" is replaced here by an explicit, generous ceiling.
 _DEFAULT_LOCAL_MAX_TOKENS = 32768
+_LOCAL_STEP_TOKENS = 1024  # default max_num_batched_tokens; see LocalModel._engine
+
+
+@dataclass(frozen=True)
+class TargetLogprobs:
+    """How likely a model finds one given response: see `LocalModel.target_logprobs`.
+
+    `logprobs` holds the natural-log probability of each response token given
+    the prompt and the tokens before it. `reasoning_tokens` counts the leading
+    tokens through `</think>` (0 when the response has none). `truncated` means
+    the response did not fit in the context and its end was not scored.
+    """
+
+    logprobs: list[float]
+    reasoning_tokens: int
+    truncated: bool
 
 
 def _import_vllm() -> Any:
@@ -2175,6 +2192,9 @@ class LocalModel(Model):
             **engine_kwargs: Extra keyword arguments forwarded to `vllm.LLM`
                 (e.g. `max_num_seqs` to cap concurrent sequences and avoid KV
                 cache over-admission on long-generation workloads).
+                `max_num_batched_tokens` defaults to 1024 tokens per engine
+                step (at least `max_num_seqs`), so `target_logprobs` fits in
+                memory beside the KV cache.
         """
         super().__init__(
             model_id,
@@ -2254,6 +2274,15 @@ class LocalModel(Model):
                 seed=self._seed,
                 max_model_len=self._max_model_len,
                 **self._kwargs,
+            )
+            # Scoring (`target_logprobs`) takes a full-vocabulary log-softmax of
+            # every prompt token in an engine step, outside the memory vLLM sets
+            # aside: for Qwen3 a 16K-token step needs ~10 GB and a 4K one ~2.5 GB,
+            # which ran out of memory beside the KV cache on H100s and L40S.
+            # Fewer tokens per step only changes speed.
+            engine_kwargs.setdefault(
+                "max_num_batched_tokens",
+                max(_LOCAL_STEP_TOKENS, engine_kwargs.get("max_num_seqs") or 0),
             )
             groups = _local_dp.device_groups(
                 _local_dp.visible_gpus(),
@@ -2397,6 +2426,47 @@ class LocalModel(Model):
         if n != 1:
             _check_completion_count(self._model_id, n, results, fanned_out=False)
         return results
+
+    def target_logprobs(
+        self,
+        prompts: list[Prompt],
+        targets: list[str],
+        *,
+        show_progress: bool | None = None,
+    ) -> list[TargetLogprobs]:
+        """Log-probability of each given response's tokens under this model.
+
+        Each prompt is rendered with the chat template and generation prompt, as
+        for sampling, and its target follows as the assistant's response: the
+        tokens SFT trains on, without the end-of-turn token. Nothing is sampled;
+        every visible GPU scores a share of the targets.
+
+        Args:
+            prompts: Prompts (string or OpenAI-format message list).
+            targets: One response text per prompt, e.g. an SFT target
+                `"<think>...</think>answer"`.
+            show_progress: Per-call override of the instance's show_progress.
+
+        Returns:
+            One `TargetLogprobs` per prompt, in input order.
+        """
+        if len(prompts) != len(targets):
+            raise ValueError(
+                f"{len(prompts)} prompts but {len(targets)} targets; pass one each"
+            )
+        if not prompts:
+            return []
+        pairs = [(_to_messages(p), t) for p, t in zip(prompts, targets)]
+        kwargs: dict[str, Any] = dict(
+            chat_template_kwargs=self._template_kwargs(),
+            use_tqdm=self._show_progress if show_progress is None else show_progress,
+        )
+        engine = self._engine()
+        if isinstance(engine, _local_dp.DataParallelEngine):
+            scores = engine.target_logprobs(pairs, **kwargs)
+        else:
+            scores = _local_dp.target_logprobs(engine, pairs, **kwargs)
+        return [TargetLogprobs(**score) for score in scores]
 
 
 # Marks the boundary between a reasoning model's thinking block and its answer.

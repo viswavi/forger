@@ -9,4 +9,6 @@ from multiprocessing.connection import Connection
 
 from pyforger.acquire._local_dp import serve
 
-serve(Connection(int(sys.argv[1])))
+# Importing this module, e.g. by pkgutil.walk_packages, must not start a worker.
+if __name__ == "__main__":
+    serve(Connection(int(sys.argv[1])))
