@@ -63,21 +63,77 @@ def owned_tasks() -> Iterator[set[asyncio.Task[Any]]]:
             del _FACTORIES[loop]
 
 
-async def settle(tasks: set[asyncio.Task[Any]], end: float) -> None:
-    # Native cancellation recovers in-flight create handles before stopping VMs.
+def task_snapshot(tasks: set[asyncio.Task[Any]]) -> list[dict[str, Any]]:
+    rows = []
+    for task in tasks:
+        coro = task.get_coro()
+        rows.append(
+            {
+                "coroutine": getattr(coro, "__qualname__", type(coro).__name__),
+                "done": task.done(),
+                "cancelled": task.cancelled(),
+                "stack": [
+                    {
+                        "file": frame.f_code.co_filename,
+                        "line": frame.f_lineno,
+                        "function": frame.f_code.co_name,
+                    }
+                    for frame in task.get_stack(limit=6)
+                ],
+            }
+        )
+    return rows
+
+
+class HarborCleanupError(RuntimeError):
+    def __init__(self, message: str, **diagnostics: Any) -> None:
+        super().__init__(message)
+        self.diagnostics = {
+            "cleanup": "failed",
+            "cleanup_grace_s": CLEANUP_GRACE_S,
+            **diagnostics,
+        }
+
+
+async def settle(
+    tasks: set[asyncio.Task[Any]], end: float, root: asyncio.Task[Any]
+) -> None:
+    initial = task_snapshot({task for task in tasks if not task.done()})
     while pending := {task for task in tasks if not task.done()}:
         left = end - time.monotonic()
         if left <= 0:
+            snapshot = task_snapshot(pending)
             for task in pending:
                 task.cancel()
             _, pending = await asyncio.wait(pending, timeout=1)
-            if pending:
-                raise RuntimeError("Harbor mandatory cleanup did not settle")
-            raise RuntimeError("Harbor mandatory cleanup exceeded grace")
+            raise HarborCleanupError(
+                "Harbor mandatory cleanup did not settle"
+                if pending
+                else "Harbor mandatory cleanup exceeded grace",
+                pending_tasks=snapshot,
+                settlement_start=initial,
+            )
         await asyncio.wait(pending, timeout=left, return_when=asyncio.FIRST_COMPLETED)
+    failures = []
     for task in tasks:
         if not task.cancelled():
-            task.exception()
+            # Native phase tasks may fail and be deliberately handled by their parent.
+            unobserved = getattr(task, "_log_traceback", True)
+            error = task.exception()
+            if error is not None and task is not root and unobserved:
+                failures.append(
+                    {
+                        "coroutine": getattr(
+                            task.get_coro(), "__qualname__", "unknown"
+                        ),
+                        "error_type": type(error).__name__,
+                        "error": str(error),
+                    }
+                )
+    if failures:
+        raise HarborCleanupError(
+            "Harbor owned cleanup task failed", failed_tasks=failures
+        )
 
 
 async def run_owned(
@@ -86,37 +142,41 @@ async def run_owned(
     remaining(deadline)
     with owned_tasks() as tasks:
         root = asyncio.create_task(operation())
+        error: BaseException | None = None
+        result: Any = None
         try:
             done, _ = await asyncio.wait({root}, timeout=remaining(deadline))
             if not done:
                 raise TimeoutError("Harbor end-to-end deadline exhausted")
             result = root.result()
             remaining(deadline)
-        except BaseException as error:
+        except BaseException as exc:
+            error = exc
             root.cancel()
-            cleanup = asyncio.create_task(
-                settle(tasks, time.monotonic() + CLEANUP_GRACE_S)
-            )
-            tasks.discard(cleanup)
-            # Retain ownership even if the caller repeats cancellation during teardown.
-            while not cleanup.done():
-                try:
-                    await asyncio.shield(cleanup)
-                except asyncio.CancelledError:
-                    continue
+        cleanup = asyncio.create_task(
+            settle(tasks, time.monotonic() + CLEANUP_GRACE_S, root)
+        )
+        tasks.discard(cleanup)
+        # The same settlement path owns teardown on normal and exceptional exits.
+        while not cleanup.done():
             try:
-                cleanup.result()
-            except Exception as cleanup_error:
-                setattr(
-                    cleanup_error,
-                    "diagnostics",
-                    {
-                        "deadline_exhausted": True,
-                        "cleanup": "failed",
-                        "cleanup_grace_s": CLEANUP_GRACE_S,
-                    },
-                )
-                raise
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError as exc:
+                if error is None:
+                    error = exc
+                root.cancel()
+            except Exception:
+                break
+        try:
+            cleanup.result()
+        except HarborCleanupError as cleanup_error:
+            if error is not None:
+                cleanup_error.diagnostics["primary_error"] = {
+                    "type": type(error).__name__,
+                    "message": str(error),
+                }
+            raise
+        if error is not None:
             setattr(
                 error,
                 "diagnostics",
@@ -126,7 +186,6 @@ async def run_owned(
                     "cleanup_grace_s": CLEANUP_GRACE_S,
                 },
             )
-            raise
-        await settle(tasks, time.monotonic() + CLEANUP_GRACE_S)
+            raise error
         remaining(deadline)
-        return result
+        return cast(_T, result)

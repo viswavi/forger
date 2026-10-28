@@ -482,6 +482,13 @@ class HarborTaskRunner:
                             ):
                                 value = getattr(trial, field, None)
                                 setattr(trial, field, min(value or left, left))
+                            trial.agent_environment.task_env_config.build_timeout_sec = min(
+                                trial.agent_environment.task_env_config.build_timeout_sec,
+                                left,
+                            )
+                            trial.task.config.environment.build_timeout_sec = min(
+                                trial.task.config.environment.build_timeout_sec, left
+                            )
 
                         if hasattr(trial, "add_hook"):
                             for event in (

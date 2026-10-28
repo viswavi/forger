@@ -279,3 +279,193 @@ def test_expired_backend_budget_never_provisions(native_task, tmp_path):
         backend.run_agent(
             WorkspaceTask("no time", timeout_s=1e-9), AgentSpec(kind="nop")
         )
+
+
+def test_native_provider_build_timeout_matches_remaining_deadline(
+    native_task, tmp_path, monkeypatch
+):
+    from harbor.trial.single_step import SingleStepTrial
+    from harbor.trial.hooks import TrialEvent
+
+    caps = []
+
+    async def prepare(self):
+        await self._emit(TrialEvent.ENVIRONMENT_START)
+        caps.append(
+            (
+                self._environment_build_timeout_sec,
+                self.agent_environment.task_env_config.build_timeout_sec,
+            )
+        )
+
+    async def run(self):
+        pass
+
+    async def finalize(self):
+        self.paths.result_path.write_text(self.result.model_dump_json())
+
+    monkeypatch.setattr(SingleStepTrial, "_prepare", prepare)
+    monkeypatch.setattr(SingleStepTrial, "_run", run)
+    monkeypatch.setattr(SingleStepTrial, "_finalize", finalize)
+    result = HarborTaskRunner(
+        agent={"name": "nop"}, environment={"type": "sail"}, timeout_s=2
+    ).run(HarborRequest(trial_id="provider-cap", task=native_task), tmp_path / "native")
+    assert result.status == "completed"
+    assert 0 < caps[0][1] <= caps[0][0] <= 2
+
+
+def test_native_stop_failure_is_not_successful_cleanup():
+    from types import SimpleNamespace
+    from harbor.trial.trial import Trial
+    from pyforger._harbor_deadline import run_owned
+
+    async def scenario():
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def stop(delete):
+            started.set()
+            await release.wait()
+            raise RuntimeError("remote stop failed")
+
+        trial = SimpleNamespace(
+            _is_agent_environment_stopped=False,
+            agent_environment=SimpleNamespace(stop=stop),
+            config=SimpleNamespace(
+                environment=SimpleNamespace(delete=True), trial_name="fixture"
+            ),
+            logger=SimpleNamespace(debug=lambda *a: None),
+            config_name="fixture",
+            trial_name="fixture",
+        )
+
+        async def operation():
+            stop_task = asyncio.create_task(Trial._stop_agent_environment(trial))
+            await started.wait()
+            stop_task.cancel()
+            await stop_task
+            release.set()
+            return "native finished"
+
+        with pytest.raises(RuntimeError, match="cleanup") as error:
+            await run_owned(operation, time.monotonic() + 1)
+        assert error.value.diagnostics["cleanup"] == "failed"
+        assert "remote stop failed" in str(error.value.diagnostics)
+
+    asyncio.run(scenario())
+
+
+def test_normal_native_stop_settlement_survives_repeated_caller_cancel():
+    from types import SimpleNamespace
+    from harbor.trial.trial import Trial
+    from pyforger._harbor_deadline import run_owned
+
+    async def scenario():
+        started = asyncio.Event()
+        root_done = asyncio.Event()
+        finished = asyncio.Event()
+
+        async def stop(delete):
+            started.set()
+            await asyncio.sleep(0.08)
+            finished.set()
+
+        trial = SimpleNamespace(
+            _is_agent_environment_stopped=False,
+            agent_environment=SimpleNamespace(stop=stop),
+            config=SimpleNamespace(
+                environment=SimpleNamespace(delete=True), trial_name="fixture"
+            ),
+            logger=SimpleNamespace(debug=lambda *a: None),
+            config_name="fixture",
+            trial_name="fixture",
+        )
+
+        async def operation():
+            stop_task = asyncio.create_task(Trial._stop_agent_environment(trial))
+            await started.wait()
+            stop_task.cancel()
+            await stop_task
+            root_done.set()
+
+        owner = asyncio.create_task(run_owned(operation, time.monotonic() + 1))
+        await root_done.wait()
+        await asyncio.sleep(0.01)
+        owner.cancel()
+        await asyncio.sleep(0.01)
+        owner.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await owner
+        assert finished.is_set()
+        assert not [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+
+    asyncio.run(scenario())
+
+
+def test_grace_failure_retains_pending_source_stack_before_cancel(monkeypatch):
+    import pyforger._harbor_deadline as module
+
+    monkeypatch.setattr(module, "CLEANUP_GRACE_S", 0.02)
+
+    async def scenario():
+        async def late_stop():
+            await asyncio.sleep(10)
+
+        async def operation():
+            asyncio.create_task(late_stop())
+
+        with pytest.raises(module.HarborCleanupError) as caught:
+            await module.run_owned(operation, time.monotonic() + 1)
+        pending = caught.value.diagnostics["pending_tasks"]
+        assert any("late_stop" in row["coroutine"] and row["stack"] for row in pending)
+        assert caught.value.diagnostics["cleanup"] == "failed"
+
+    asyncio.run(scenario())
+
+
+def test_real_sail_reclaimer_settles_inside_owned_grace():
+    from sail.sailbox import _reclaimed_op
+    from pyforger._harbor_deadline import run_owned
+
+    async def scenario():
+        created = asyncio.Event()
+        reclaimed = []
+
+        async def create():
+            await asyncio.sleep(0.05)
+            created.set()
+            return "real-operation-result"
+
+        async def undo(value):
+            reclaimed.append(value)
+
+        async def operation():
+            return await _reclaimed_op(asyncio.create_task(create()), undo)
+
+        with pytest.raises(TimeoutError):
+            await run_owned(operation, time.monotonic() + 0.01)
+        assert created.is_set()
+        assert reclaimed == ["real-operation-result"]
+        assert not [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+
+    asyncio.run(scenario())
+
+
+def test_handled_auxiliary_failure_is_not_mislabeled_cleanup_failure():
+    from pyforger._harbor_deadline import run_owned
+
+    async def scenario():
+        async def auxiliary():
+            raise ValueError("native phase handled this error")
+
+        async def operation():
+            child = asyncio.create_task(auxiliary())
+            try:
+                await child
+            except ValueError:
+                pass
+            return "handled"
+
+        assert await run_owned(operation, time.monotonic() + 1) == "handled"
+
+    asyncio.run(scenario())
