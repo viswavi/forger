@@ -1137,12 +1137,12 @@ Build an EvalTree report from scored model outputs.
 Not cached: a plain function.
 
 ```python
-inspect_step(name: str | None = None) -> StepRecord
+inspect_step(name: str | None = None, *, rows: bool = False) -> Any
 ```
 
 Print the full report of the latest run of step `name` and return it.
 
-**Returns:** The step's `StepRecord`, as printed.
+**Returns:** The step's `StepRecord`, as printed; with `rows=True`, its output.
 
 <a name="inspect-phrase_frequency"></a>
 

@@ -6,7 +6,7 @@ Inspect ops return a *report* about rows and never change them. Signatures are i
 |---|---|---|
 | `topic_based_clustering` | yes | Label each row with one of `num_clusters` LLM-named topics for one field. |
 | `eval_tree` | yes | Build a capability tree and weakness profile from scored model outputs. |
-| `inspect_step` | no | See more sample rows of a step: reprints its latest full report (up to 10 rows). |
+| `inspect_step` | no | See more rows of a step: reprints its latest full report (10 rows); `rows=True` returns all. |
 | `spend` | no | Print and return the spend ledger's totals by run, pipeline, and step. |
 | `runs` | no | Print and return the saved `@pipeline` runs with step yields, e.g. `runs("main")`. |
 | `phrase_frequency` | no | Print, per string field, the phrases and names the most rows share. No LLM. |
