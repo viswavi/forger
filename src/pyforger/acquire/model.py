@@ -2084,6 +2084,7 @@ class Model:
 # can be long (tens of thousands of tokens), so the LiteLLM default of "let the
 # provider decide" is replaced here by an explicit, generous ceiling.
 _DEFAULT_LOCAL_MAX_TOKENS = 32768
+_LOCAL_STEP_TOKENS = 1024  # default max_num_batched_tokens; see LocalModel._engine
 
 
 @dataclass(frozen=True)
@@ -2191,6 +2192,9 @@ class LocalModel(Model):
             **engine_kwargs: Extra keyword arguments forwarded to `vllm.LLM`
                 (e.g. `max_num_seqs` to cap concurrent sequences and avoid KV
                 cache over-admission on long-generation workloads).
+                `max_num_batched_tokens` defaults to 1024 tokens per engine
+                step (at least `max_num_seqs`), so `target_logprobs` fits in
+                memory beside the KV cache.
         """
         super().__init__(
             model_id,
@@ -2270,6 +2274,15 @@ class LocalModel(Model):
                 seed=self._seed,
                 max_model_len=self._max_model_len,
                 **self._kwargs,
+            )
+            # Scoring (`target_logprobs`) takes a full-vocabulary log-softmax of
+            # every prompt token in an engine step, outside the memory vLLM sets
+            # aside: for Qwen3 a 16K-token step needs ~10 GB and a 4K one ~2.5 GB,
+            # which ran out of memory beside the KV cache on H100s and L40S.
+            # Fewer tokens per step only changes speed.
+            engine_kwargs.setdefault(
+                "max_num_batched_tokens",
+                max(_LOCAL_STEP_TOKENS, engine_kwargs.get("max_num_seqs") or 0),
             )
             groups = _local_dp.device_groups(
                 _local_dp.visible_gpus(),
