@@ -2,16 +2,16 @@
 
 ## Steps and step reports
 
-Structure a pipeline as a `@pyforger.pipeline` function that calls named `@pyforger.step` functions. A step is a
-function from rows to rows built from Forger ops (typically acquire or alter, then filter); it may also take several
-lists of rows and return a dict of named row lists (see [Several inputs and output
-streams](#several-inputs-and-output-streams)). Each step is cached like an `@op`. A complete example with its output
-is in [Composing a pipeline](#composing-a-pipeline).
+Forger is a framework for running pipelines. Pipelines are `@pyforger.pipeline` functions that call named
+`@pyforger.step` functions. A step is a function from rows to rows built from Forger ops (typically acquire or alter,
+then filter); it may also take several lists of rows and return a dict of named row lists (see [Several inputs and
+output streams](#several-inputs-and-output-streams)). Each step is cached like an `@op`. A complete example with its
+output is in [Composing a pipeline](#composing-a-pipeline).
 
-When a step returns it prints a report: the fields of its output rows; phrases and names repeated across them; every
-op it ran with rows in/out, yield, time, tokens, and cost; a histogram of each filter's scores with what other
-thresholds would have kept; warnings; and one sample output row. The pipeline prints a summary table of its steps at
-the end, followed by every `WARNING:` line. **Read these reports after every run.**
+When a step returns, it prints a report consisting of: its rows' schema; highly-repetitive phrases occurring in these
+rows; every op it ran with rows in/out, yield, time, tokens, and cost; a histogram of each filter's scores with what
+other thresholds would have kept; warnings; and one sample output row. The pipeline prints a summary table of its steps
+at the end, followed by every `WARNING:` line. **Read these reports after every run.**
 
 - `pyforger.inspect.inspect_step("name")` re-prints the full report of a step's latest run with up to 10 sample rows,
   also from another shell while the pipeline runs. `pyforger.inspect.runs()` lists saved pipeline runs (see
@@ -234,7 +234,7 @@ Common patterns (not a complete list):
 - **Back-translation:** retrieve or generate outputs (e.g. proofs), then generate an input that could have produced
   each one.
 - **Self-Taught Reasoner (STaR):** for prompts with *verified* answers that need long chain-of-thought SFT targets,
-  generate the reasoning from the *student* you will finetune, not a stronger teacher
+  generate the reasoning from (or similar to) the *student* you will finetune, not a stronger teacher
   ([Zelikman et al., 2022](https://arxiv.org/abs/2203.14465)). `alter.self_taught_reasoner` samples `n` solutions per
   prompt (from `acquire.TinkerModel` or `acquire.LocalModel`) and keeps one row per sample whose final answer matches.
   Set a generous `max_tokens` so traces are not truncated. See [alter.md](alter.md).

@@ -63,7 +63,8 @@ clusters = topic_based_clustering(  # clusters[i] is the topic of rows[i]
 it needs, groups them into a tree, and gives each node's accuracy with a binomial interval.
 `report["weaknesses"]` lists subtrees entirely below `threshold`; with a few hundred rows it is often empty (the op
 warns), so read `report["lowest"]` (the five lowest bounds). Only the question is used to infer the capability; pass
-`reference_field` to add verified solutions. Rows that get no annotation are listed in `report["unannotated"]`.
+`reference_field` to add verified solutions. Rows that get no annotation are listed in `report["unannotated"]`. Run
+this with `reasoning_effort="none"` and with a faster/flash-style model since it will usually take too long otherwise.
 
 ## Saved pipeline runs
 

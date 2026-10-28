@@ -59,8 +59,8 @@ rows = self_taught_reasoner(problems, solver_prompt, student, n=8,
                             hint_fn=solver_prompt + "\n\nHint: {key_idea}")
 ```
 
-STaR only keeps what the student already does: an item it never solves in `n` samples gives no rows, and a behavior
-it never shows (e.g. declining an impossible task) is never learned. Two remedies:
+STaR's output is limited by the abilities of the student model. If the model never solves a task in `n` samples,
+that task will be completely omitted. A behavior it never shows is never learned. Two remedies:
 
 - **Rationalization (on by default)**: items with no accepted response are sampled `n` more times with a hint.
   The default hint is the item's `reference_field` ("Hint: a correct answer is: ..."), so items without one are
@@ -68,9 +68,8 @@ it never shows (e.g. declining an impossible task) is never learned. Two remedie
   original prompt and are marked `rationalized=True`; as in the paper, responses that mention the hint are kept.
   `rationalize=False` turns it off; it is also off with `filter_fn`.
 - **Bootstrapping** a behavior the student never shows: briefly fine-tune on a few seed rows that show it, run STaR on
-  that checkpoint, then train the next checkpoint from the base model on the rows STaR kept. First check the seed
-  checkpoint on items where the behavior is wrong: one that declines solvable tasks about as often as impossible
-  ones yields rows that teach declining at random.
+  that checkpoint, then train the next checkpoint from the base model on the rows STaR kept. It is a good idea
+  to briefly look at errors made by that checkpoint to make sure it has not learned truly degenerate behavior.
 
 ## Running programs against tests
 

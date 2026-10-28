@@ -17,7 +17,7 @@ Generate or retrieve new rows. Signatures and defaults for every export are in [
 
 ## `sample_from_LLM`
 
-Prefer it over calling `Model` directly: it batches, parses, validates and retries.
+Prefer it over calling `Model` directly: it batches, parallelizes, parses, validates and retries.
 
 - Reasoning returned separately by the provider goes to the `thinking_trace` key. `LocalModel` and `TinkerModel`
   leave `<think>` inline in the text (`thinking_trace` is `None`); use `split_reasoning` to separate it.
