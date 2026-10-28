@@ -234,3 +234,75 @@ def test_complete_generated_module_executes_without_model_transport():
     exec(compile(runner_source(), "generated-runner", "exec"), namespace)
     assert callable(namespace["main"])
     assert namespace["TaskPreservingCondenser"]
+
+
+def test_harbor_config_does_not_initialize_host_sdk_or_tokenizer(tmp_path):
+    import subprocess
+    import sys
+
+    script = r"""
+import json, os, sys
+from pyforger.acquire.model import Model
+from pyforger.harbor import harbor_agent_config
+os.environ['DIAGNOSTIC_API_KEY'] = 'diagnostic-placeholder'
+model = Model('openai/diagnostic-no-network', api_key='diagnostic-placeholder',
+              api_base='http://127.0.0.1:9/v1', custom_tokenizer='/nonexistent/guest-tokenizer',
+              temperature=None, max_tokens=1234, num_retries=4, timeout=42,
+              reasoning_effort='low', extra_body={'seed': 3}, api_mode='responses',
+              capability_overrides={'vision': False}, disable_prompt_cache_key=True)
+config = harbor_agent_config(model, api_key_env='DIAGNOSTIC_API_KEY')
+settings = json.loads(config.env['FORGER_LLM_CONFIG'])
+assert settings['custom_tokenizer'] == '/nonexistent/guest-tokenizer'
+assert settings['num_retries'] == 5
+assert settings['reasoning_effort'] == 'low'
+assert settings['temperature'] is None
+assert settings['max_output_tokens'] == 1234
+assert settings['timeout'] == 42
+assert settings['api_mode'] == 'responses'
+assert settings['litellm_extra_body'] == {'seed': 3}
+assert settings['capability_overrides'] == {'vision': False}
+assert 'api_key' not in settings
+assert config.env['LLM_API_KEY'] == '${DIAGNOSTIC_API_KEY}'
+assert 'diagnostic-placeholder' not in config.model_dump_json()
+assert 'openhands.sdk' not in sys.modules
+assert 'transformers' not in sys.modules
+assert 'pyforger._sdk_llm' not in sys.modules
+"""
+    env = dict(os.environ, HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1")
+    subprocess.run([sys.executable, "-c", script], check=True, env=env, cwd=tmp_path)
+
+
+@pytest.mark.parametrize(
+    "base_url", ["https://api.openai.com", "https://api.openai.com/"]
+)
+def test_direct_openai_endpoint_normalization_preserved(base_url, monkeypatch):
+    monkeypatch.setenv("LITELLM_API_KEY", "fixture")
+    config = harbor_agent_config(Model("openai/gpt-4o", api_base=base_url))
+    assert json.loads(config.env["FORGER_LLM_CONFIG"])["base_url"] is None
+    assert "LLM_BASE_URL" not in config.env
+    assert config.extra_allowed_hosts == []
+
+
+@pytest.mark.parametrize("configured", [False, True])
+def test_lightweight_config_matches_real_sdk_public_settings(configured, monkeypatch):
+    from pyforger.local_agent import agent_llm
+
+    monkeypatch.setenv("LITELLM_API_KEY", "fixture-parity")
+    options = (
+        dict(
+            temperature=None,
+            max_tokens=1536,
+            num_retries=4,
+            timeout=42,
+            reasoning_effort="low",
+            extra_body={"seed": 3},
+            api_mode="responses",
+            capability_overrides={"vision": False},
+            disable_prompt_cache_key=True,
+        )
+        if configured
+        else {}
+    )
+    model = Model("openai/gpt-4o", api_base="http://127.0.0.1:9/v1", **options)
+    settings = json.loads(harbor_agent_config(model).env["FORGER_LLM_CONFIG"])
+    assert settings == agent_llm(model).model_dump(mode="json", include=set(settings))

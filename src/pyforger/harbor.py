@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from pyforger._streaming_json import JSONReader
 from pyforger.acquire.model import Model
@@ -118,7 +118,7 @@ def harbor_agent_config(
     native SDK options may be supplied through agent_kwargs.
     """
     from pyforger._harbor_model import ForgerOpenHandsSDK, runner_source
-    from pyforger.local_agent import agent_llm
+    from pyforger.sdk_config import llm_options
 
     if model._kwargs.keys() - {"disable_prompt_cache_key"}:
         raise ValueError("Unsupported Harbor Model kwargs")
@@ -130,12 +130,14 @@ def harbor_agent_config(
         "config",
     }:
         raise ValueError("agent_kwargs must not override model settings")
-    llm = agent_llm(model)
-    key = (
-        llm.api_key.get_secret_value()
-        if isinstance(llm.api_key, SecretStr)
-        else llm.api_key
-    )
+    options = llm_options(model)
+    key = options.pop("api_key")
+    base_url = options["base_url"]
+    if options["model"].startswith("openai/") and base_url in {
+        "https://api.openai.com",
+        "https://api.openai.com/",
+    }:
+        base_url = options["base_url"] = None
     if api_key_env is not None:
         selected = os.environ.get(api_key_env)
         if not selected or (key is not None and selected != key):
@@ -165,8 +167,8 @@ def harbor_agent_config(
         "capability_overrides",
     )
     hosts: list[str] = []
-    if llm.base_url:
-        parsed = urlsplit(llm.base_url)
+    if base_url:
+        parsed = urlsplit(base_url)
         if (
             parsed.scheme not in {"http", "https"}
             or not parsed.hostname
@@ -177,7 +179,7 @@ def harbor_agent_config(
         ):
             raise ValueError("Model endpoint must be a credential-free http/https URL")
         hosts = [parsed.hostname]
-    settings = llm.model_dump(mode="json", include=set(fields))
+    settings = {name: options[name] for name in fields}
     # Reject embedded secrets in otherwise public model configuration.
     if _secrets(settings) or (key and key in json.dumps(settings)):
         raise ValueError("Model settings must not contain embedded credentials")
@@ -198,7 +200,7 @@ def harbor_agent_config(
         env={
             "LLM_API_KEY": "${" + api_key_env + "}",
             "FORGER_LLM_CONFIG": json.dumps(settings),
-            **({"LLM_BASE_URL": llm.base_url} if llm.base_url else {}),
+            **({"LLM_BASE_URL": base_url} if base_url else {}),
             "FORGER_DISABLE_PROMPT_CACHE": (
                 "1" if model._kwargs.get("disable_prompt_cache_key") else "0"
             ),
