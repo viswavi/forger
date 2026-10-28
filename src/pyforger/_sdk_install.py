@@ -27,4 +27,4 @@ for requirement in {(SDK_REQUIREMENT, TOOLS_REQUIREMENT)!r}:
     assert direct.get('vcs_info', {{}}).get('commit_id') == commit, (name, 'unexpected SDK commit')
     importlib.import_module(name.replace('-', '.'))
 """
-    return shlex.quote(python) + " -c " + shlex.quote(script)
+    return shlex.quote(python) + " -c " + shlex.quote(f"exec({script!r})")
