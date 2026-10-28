@@ -12,6 +12,7 @@ producing new rows in the pipeline.
 | `spend` | no | Print and return the spend ledger's totals by run, pipeline, and step. |
 | `runs` | no | Print and return the saved `@pipeline` runs with step yields, e.g. `runs("main")`. |
 | `phrase_frequency` | no | Print and return, per string field, the phrases and names the most rows share. No LLM. |
+| `student_log_likelihood` | yes | How likely the student finds each row's target, in bits, beside its own responses. |
 
 `phrase_frequency(rows, fields=None, *, ngram_range=(2, 4), top_k=10, min_share=0.05, max_rows=2000,
 max_chars=2000)` counts document frequency: the share of rows whose value contains each word n-gram (lowercased) or
@@ -20,6 +21,35 @@ capitalized name, e.g. `rewrite  phrases: "i need" 78/79 (99%) · "i need you to
 when no longer phrase containing it is in nearly as many rows, and returns a `PhraseReport` (one `FieldPhrases` per
 field, with `skipped` set for categorical, identifier, and code fields). Topic clustering can look balanced while
 every row says "I need"; run both. Rows are not modified.
+
+`student_log_likelihood(rows, model, *, prompt_field="prompt", target_field="response", own_samples=200,
+max_tokens=None, top_k=5)` scores each row's target (e.g. an SFT target `"<think>...</think>answer"`) under the student,
+a `LocalModel`, as SFT trains on it. Bits are `-log2` of each token's probability given the prompt and the earlier
+tokens. A log-likelihood alone has no natural scale, so the student also answers `own_samples` of the prompts (evenly
+spaced) and its own responses are scored the same way:
+
+```text
+                   rows   median tokens   bits/token   bits/row   total bits
+  targets         1,336           1,713         3.71       6.4k     16.8M
+    reasoning     1,336           1,600         3.90
+    answer        1,336             110         0.62
+  student's own     200           9,284         0.85      7,851   -
+
+  excess over the student's own rate (0.85 bits/token): 12.1M bits in total
+    per row: p10 1,200 · median 4,900 · p90 14.0k · max 40.0k
+```
+
+- *bits/token*, targets against the student's own: how foreign the text is, token by token.
+- *tokens*: how long the targets are against what the student writes.
+- *excess bits* (`RowLikelihood.excess_bits`): a target's bits minus what the student's own rate costs for the same
+  number of tokens. About 0 for responses the student would write itself, such as STaR traces; the total grows with
+  both foreignness and length, and is roughly how far SFT on the rows has to move the student. It describes the data;
+  it has not been validated as a predictor of what SFT will do. Compare datasets, or rows within one, rather than
+  reading one number alone.
+
+The report lists the rows with the most excess bits; `report.rows[i]` belongs to `rows[i]`. Scores and the sampled
+responses are cached, so changing `top_k` costs nothing. On 8 GPUs, scoring a few thousand rows takes minutes;
+sampling is the slow part (see `own_samples`).
 
 Topic-based clustering uses the ClusterFusion clustering algorithm ([arXiv:2512.04350](https://arxiv.org/abs/2512.04350)),
 a hybrid method in which embeddings guide how rows are partitioned and an LLM summarizes the partitions into

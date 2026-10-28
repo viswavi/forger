@@ -157,7 +157,7 @@ The detailed reference is split by topic under `docs/agents/`; read the file for
 - [`docs/agents/filter.md`](agents/filter.md): Quality and diversity filters, including the LLM judge, `by_predicate`,
   `by_tests`, the difficulty filters, and `by_topic_frequency`.
 - [`docs/agents/inspect.md`](agents/inspect.md): Reports on rows: `topic_based_clustering`, `eval_tree`,
-  `inspect_step`, `spend`, and `runs` (saved pipeline runs).
+  `inspect_step`, `spend`, `runs` (saved pipeline runs), and `student_log_likelihood`.
 - [`docs/agents/models.md`](agents/models.md): The `Model` class, gateway credentials, concurrency, `n` fan-out,
   reasoning effort, prompt types.
 - [`docs/agents/caching.md`](agents/caching.md): How `@op` caching, the request cache, and tracing work.

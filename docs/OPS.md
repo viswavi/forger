@@ -93,6 +93,8 @@ Keywords left out of the signatures below:
     per field.
   - [`runs`](#inspect-runs): Print the latest saved pipeline runs, oldest first, and return them.
   - [`spend`](#inspect-spend): Print and return the spend ledger's totals by run, pipeline, and step.
+  - [`student_log_likelihood`](#inspect-student_log_likelihood): Print and return how likely the student finds each
+    row's target, in bits.
   - [`topic_based_clustering`](#inspect-topic_based_clustering): Cluster rows into `num_clusters` LLM-named topics by
     one field.
 
@@ -103,7 +105,7 @@ Keywords left out of the signatures below:
 Acquire operations: generate or retrieve new data.
 
 Also exported, not documented here: `GenerateResult`, `TinkerModel`, `TinkerBudgetExceeded`, `PromptTooLongError`,
-`RetrievalSource`, `RetrieveMode`.
+`TargetLogprobs`, `RetrievalSource`, `RetrieveMode`.
 
 <a name="acquire-model"></a>
 
@@ -145,6 +147,7 @@ LocalModel(
     max_model_len: int | None = None,
     gpu_memory_utilization: float = 0.9,
     tensor_parallel_size: int = 1,
+    data_parallel_size: int | str = "auto",
     dtype: str = "auto",
     enable_thinking: bool = True,
     chat_template_kwargs: dict[str, Any] | None = None,
@@ -1095,7 +1098,7 @@ A `metric` for the difficulty filters that runs programs on tests.
 
 Inspect operations: analyze existing data.
 
-Also exported, not documented here: `PhraseReport`, `SpendReport`, `SpendTotal`.
+Also exported, not documented here: `LikelihoodReport`, `RowLikelihood`, `PhraseReport`, `SpendReport`, `SpendTotal`.
 
 <a name="inspect-eval_tree"></a>
 
@@ -1182,6 +1185,27 @@ spend(path: str | Path | None = None, *, since: datetime | str | None = None) ->
 ```
 
 Print and return the spend ledger's totals by run, pipeline, and step.
+
+<a name="inspect-student_log_likelihood"></a>
+
+### `inspect.student_log_likelihood`
+
+Not cached (wrap it with `@op` to memoize); listed in step reports as `inspect.student_log_likelihood`.
+
+```python
+student_log_likelihood(
+    rows: list[dict],
+    model: Any,
+    *,
+    prompt_field: str = "prompt",
+    target_field: str = "response",
+    own_samples: int = 200,
+    max_tokens: int | None = None,
+    top_k: int = 5,
+) -> LikelihoodReport
+```
+
+Print and return how likely the student finds each row's target, in bits.
 
 <a name="inspect-topic_based_clustering"></a>
 

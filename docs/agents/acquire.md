@@ -22,6 +22,11 @@ Generate or retrieve new rows.
 | `TinkerModel` |   | Base model or `tinker://` checkpoint sampled on Tinker; `Model`'s interface, `<think>` inline. |
 | `split_reasoning` |   | `str -> (thinking, answer)`: splits a reasoning-model completion on `</think>`. |
 
+`LocalModel.target_logprobs(prompts, targets)` scores given responses instead of sampling: for each prompt, the
+log-probability of every token of its target (rendered as the assistant's reply, as SFT trains on it), as a
+`TargetLogprobs` with `logprobs`, `reasoning_tokens` (through `</think>`) and `truncated`.
+`inspect.student_log_likelihood` reports these in bits for a dataset (see [inspect.md](inspect.md)).
+
 `sample_from_LLM` performs `n` LLM calls per input and returns parsed dicts. It does under-the-hood batching and
 validation, making this a superior choice to calling `Model` directly. Any reasoning traces contained in a completion are
 contained in the output dict under a `thinking_trace` key. Inline traces are not extracted: `LocalModel` and

@@ -4,8 +4,9 @@
 gets the most throughput from one full copy per GPU, each sampling its share of
 the prompts, so `DataParallelEngine` starts a worker process per GPU group
 (with `CUDA_VISIBLE_DEVICES` set to that group before vllm is imported) and
-offers the same `chat(...)` call as `vllm.LLM`. Prompts are dealt round-robin
-so long and short prompts spread evenly, and outputs come back in input order.
+offers the same `chat(...)` call as `vllm.LLM`, plus `target_logprobs(...)`.
+Prompts are dealt round-robin so long and short prompts spread evenly, and
+outputs come back in input order.
 """
 
 from __future__ import annotations
@@ -87,8 +88,72 @@ def _plain(output: Any) -> SimpleNamespace:
     )
 
 
+def target_logprobs(
+    llm: Any,
+    pairs: list[tuple[list[dict], str]],
+    *,
+    chat_template_kwargs: dict[str, Any],
+    use_tqdm: bool = False,
+) -> list[dict[str, Any]]:
+    """Log-probability of each target token given its conversation, under `llm`.
+
+    Each conversation is rendered with the chat template and the generation
+    prompt, as `chat` renders it for sampling, and its target follows as the
+    assistant's response. vLLM's prompt logprobs give each token's
+    log-probability given everything before it. A target with `</think>` is
+    tokenized in two parts, through `</think>` and after it, so the reasoning
+    tokens can be counted apart.
+
+    Returns one dict per pair: `logprobs` (natural log, one per scored target
+    token), `reasoning_tokens` (target tokens through `</think>`, 0 without
+    one), and `truncated` (the target did not fit in the context and its end
+    was not scored).
+    """
+    import vllm
+
+    tokenizer = llm.get_tokenizer()
+    max_len = llm.llm_engine.model_config.max_model_len
+    requests, spans = [], []
+    for messages, target in pairs:
+        prefix = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            **chat_template_kwargs,
+        )
+        prompt_ids = tokenizer(prefix, add_special_tokens=False)["input_ids"]
+        head, close, tail = target.partition("</think>")
+        parts = [head + close, tail] if close else [target]
+        part_ids = [tokenizer(p, add_special_tokens=False)["input_ids"] for p in parts]
+        ids = prompt_ids + [t for part in part_ids for t in part]
+        end = min(len(ids), max_len - 1)  # room for the one generated token
+        spans.append((len(prompt_ids), end, len(ids), len(part_ids[0]) if close else 0))
+        requests.append({"prompt_token_ids": ids[: max(end, 1)]})
+    params = vllm.SamplingParams(
+        max_tokens=1, temperature=0.0, prompt_logprobs=0, detokenize=False
+    )
+    outputs = llm.generate(requests, params, use_tqdm=use_tqdm)
+    scores = []
+    for request, output, (start, end, full, reasoning) in zip(requests, outputs, spans):
+        ids = request["prompt_token_ids"]
+        logprobs = [
+            output.prompt_logprobs[j][ids[j]].logprob for j in range(start, end)
+        ]
+        scores.append(
+            {
+                "logprobs": logprobs,
+                "reasoning_tokens": min(reasoning, len(logprobs)),
+                "truncated": end < full,
+            }
+        )
+    return scores
+
+
 def serve(conn: Any) -> None:
-    """Hold one `vllm.LLM`; answer `chat` requests until told to stop.
+    """Hold one `vllm.LLM`; answer requests until told to stop.
+
+    A request is `(method, args, kwargs)`: `"chat"` runs `vllm.LLM.chat` and
+    `"target_logprobs"` runs :func:`target_logprobs` on the engine.
 
     The first message is the engine kwargs; `CUDA_VISIBLE_DEVICES` was set by
     the parent before this process started.
@@ -106,10 +171,13 @@ def serve(conn: Any) -> None:
         request = conn.recv()
         if request is None:
             return
-        messages, sampling_params, kwargs = request
+        method, args, kwargs = request
         try:
-            outputs = llm.chat(messages, sampling_params, **kwargs)
-            conn.send(("ok", [_plain(o) for o in outputs]))
+            if method == "chat":
+                result: Any = [_plain(o) for o in llm.chat(*args, **kwargs)]
+            else:
+                result = target_logprobs(llm, *args, **kwargs)
+            conn.send(("ok", result))
         except BaseException:
             conn.send(("error", traceback.format_exc()))
 
@@ -166,7 +234,12 @@ class EngineProcess:
 
     def chat(self, messages: list, sampling_params: Any, **kwargs: Any) -> list:
         """Run `vllm.LLM.chat` in the worker and return its outputs."""
-        self._conn.send((messages, sampling_params, kwargs))
+        self._conn.send(("chat", (messages, sampling_params), kwargs))
+        return self._receive()
+
+    def target_logprobs(self, pairs: list, **kwargs: Any) -> list:
+        """Run :func:`target_logprobs` in the worker and return its scores."""
+        self._conn.send(("target_logprobs", (pairs,), kwargs))
         return self._receive()
 
     def close(self) -> None:
@@ -184,9 +257,10 @@ class EngineProcess:
 
 
 class DataParallelEngine:
-    """Several engines behind `vllm.LLM`'s `chat` call.
+    """Several engines behind `vllm.LLM`'s `chat` call and `target_logprobs`.
 
-    `engines` are objects with `chat(messages, sampling_params, **kwargs)`;
+    `engines` are objects with `chat(messages, sampling_params, **kwargs)` (and
+    `target_logprobs(pairs, **kwargs)` for scoring);
     `DataParallelEngine.start` builds them as worker processes.
     """
 
@@ -214,8 +288,16 @@ class DataParallelEngine:
 
     def chat(self, messages: list, sampling_params: Any, **kwargs: Any) -> list:
         """Deal `messages` round-robin to the engines; outputs return in input order."""
+        return self._deal("chat", messages, sampling_params, **kwargs)
+
+    def target_logprobs(self, pairs: list, **kwargs: Any) -> list:
+        """Deal `(conversation, target)` pairs round-robin; scores return in order."""
+        return self._deal("target_logprobs", pairs, **kwargs)
+
+    def _deal(self, method: str, items: list, *args: Any, **kwargs: Any) -> list:
+        """Call `method` on each engine with its share of `items`, in input order."""
         shards = [
-            list(range(i, len(messages), len(self.engines)))
+            list(range(i, len(items), len(self.engines)))
             for i in range(len(self.engines))
         ]
         jobs = []
@@ -224,16 +306,16 @@ class DataParallelEngine:
                 continue
             # One progress bar is enough; the others would interleave with it.
             shard_kwargs = kwargs if i == 0 else {**kwargs, "use_tqdm": False}
-            shard = [messages[j] for j in indices]
+            shard = [items[j] for j in indices]
             jobs.append(
                 (
                     indices,
                     self._pool.submit(
-                        engine.chat, shard, sampling_params, **shard_kwargs
+                        getattr(engine, method), shard, *args, **shard_kwargs
                     ),
                 )
             )
-        outputs: list[Any] = [None] * len(messages)
+        outputs: list[Any] = [None] * len(items)
         for indices, future in jobs:
             for j, output in zip(indices, future.result()):
                 outputs[j] = output
