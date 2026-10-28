@@ -181,8 +181,6 @@ def harbor_agent_config(
             raise ValueError("Model endpoint must be a credential-free http/https URL")
         hosts = [parsed.hostname]
     settings = {name: options[name] for name in fields}
-    if "max_context_tokens" in options:
-        settings["max_context_tokens"] = options["max_context_tokens"]
     # Reject embedded secrets in otherwise public model configuration.
     if _secrets(settings) or (key and key in json.dumps(settings)):
         raise ValueError("Model settings must not contain embedded credentials")

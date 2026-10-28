@@ -630,37 +630,45 @@ def test_non_context_provider_error_not_reclassified(monkeypatch):
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
-def test_prompt_fallback_still_executes_native_joint_context_guard(tmp_path, asynchronous):
+@pytest.mark.parametrize(
+    ("message", "context_error"),
+    [
+        (
+            (
+                "Requested token count exceeds the model's maximum context length "
+                "of 131066 tokens. You requested a total of 140000 tokens."
+            ),
+            True,
+        ),
+        ("Requested token count is invalid", False),
+        ("invalid tool schema", False),
+    ],
+)
+def test_installed_sdk_sglang_error_mapping(asynchronous, message, context_error):
     import asyncio
 
-    from openhands.sdk.llm import Message, TextContent
-    from openhands.sdk.llm.exceptions import LLMContextWindowExceedError
-
-    from pyforger._sdk_runtime import PromptBudgetLLM
-
-    session = LocalBackend()._sdk_session(
-        tmp_path, WorkspaceTask(instruction="test"), spec()
+    from litellm.exceptions import BadRequestError
+    from openhands.sdk import LLM
+    from openhands.sdk.llm.exceptions import (
+        LLMBadRequestError,
+        LLMContextWindowExceedError,
     )
-    try:
-        session.agent._initialize(session.state)
-        tools = list(session.agent.tools_map.values())
-        llm = PromptBudgetLLM(
-            model="openai/gpt-4o",
-            api_key="offline-test",
-            base_url="http://127.0.0.1:1/v1",
-            prompt_token_limit=80000,
-            max_context_tokens=131066,
-            max_output_tokens=131066,
-            num_retries=1,
-        )
-        messages = [Message(role="user", content=[TextContent(text="small prompt")])]
-        assert llm.get_token_count(messages, tools=tools) < 80000
-        with pytest.raises(LLMContextWindowExceedError):
+
+    expected = LLMContextWindowExceedError if context_error else LLMBadRequestError
+    error = BadRequestError(message, model="test", llm_provider="openai")
+    llm = LLM(model="openai/test", api_key="offline-test", num_retries=0)
+
+    def no_fallback(_llm):
+        pytest.fail("No fallback configured")
+
+    with pytest.raises(expected) as caught:
+        try:
+            raise error
+        except BadRequestError as original:
             if asynchronous:
-                asyncio.run(llm.agenerate(messages, tools=tools))
+                asyncio.run(llm._ahandle_error(original, no_fallback))
             else:
-                llm.generate(messages, tools=tools)
-        assert llm.max_context_tokens == 131066
-        assert llm.context_token_safety_margin == 0
-    finally:
-        session.close()
+                llm._handle_error(original, no_fallback)
+    assert type(caught.value) is expected
+    assert caught.value.__cause__ is error
+    assert str(caught.value) == str(error)

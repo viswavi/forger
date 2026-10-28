@@ -5,7 +5,7 @@ from __future__ import annotations
 import shlex
 
 SDK_VERSION = "1.58.0"
-SDK_COMMIT = "e80bfb378cd16dda3d2a267afb6054af05b4cbc4"
+SDK_COMMIT = "82327f93b4d02518a08c720f0111fa4aa13fce41"
 SDK_REQUIREMENT = (
     "openhands-sdk @ git+https://github.com/neubig/software-agent-sdk.git"
     f"@{SDK_COMMIT}#subdirectory=openhands-sdk"
