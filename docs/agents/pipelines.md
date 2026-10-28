@@ -223,8 +223,15 @@ Common patterns (not a complete list):
 - **Retrieval-augmented generation:** retrieve knowledge (e.g. from the web) first and condition generation on it,
   directly or via [`dynamic_step`](dynamic_step.md) for case-by-case extraction. This is almost always better than
   relying on the model's parametric knowledge.
+- **Find the weak spots first:** group a baseline model's failures by skill with `inspect.eval_tree` (or label them
+  with `inspect.topic_based_clustering`), then check which topics your own rows cover and rebalance them with
+  `filter.by_topic_frequency`.
 - **Overgenerate and filter:** generate more candidates than needed, especially early, then filter for quality and
-  diversity.
+  diversity: drop near-duplicates with `filter.by_exact_match`, `filter.by_rouge_l` or `filter.by_n_gram_overlap`,
+  and low-quality rows with an LLM judge (`filter.by_llm_score`).
+- **Check exactly what can be checked:** write every requirement with an exact answer (a final value, the output on
+  test inputs, a required refusal) as a code criterion, e.g. `acquire.generate_custom_rubric(...,
+  code_criteria_only=True)`, and keep LLM judges for what code cannot check.
 - **Rubric-based filtering:** for quality that simple heuristics cannot check, generate a rubric with
   `acquire.generate_custom_rubric_criteria` and use one `filter.by_llm_score` judge per rubric item.
 - **Agent-as-a-step:** an agent ([`dynamic_step`](dynamic_step.md)) handles one input with multi-turn reasoning
@@ -233,6 +240,8 @@ Common patterns (not a complete list):
   models agree with each other (likely correct) but not with the weak one (not too easy).
 - **Back-translation:** retrieve or generate outputs (e.g. proofs), then generate an input that could have produced
   each one.
+- **Cheap iteration:** every op is cached on disk, so later stages can be rerun and tuned without paying again for
+  earlier ones ([caching.md](caching.md)).
 - **Self-Taught Reasoner (STaR):** for prompts with *verified* answers that need long chain-of-thought SFT targets,
   generate the reasoning from (or similar to) the *student* you will finetune, not a stronger teacher
   ([Zelikman et al., 2022](https://arxiv.org/abs/2203.14465)). `alter.self_taught_reasoner` samples `n` solutions per
