@@ -32,6 +32,13 @@ class _Tokenizer:
         return {"input_ids": [ord(c) for c in text]}
 
 
+class _SamplingParams:
+    """Records ``vllm.SamplingParams`` kwargs (module level, so pipes can pickle it)."""
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+
 @pytest.fixture
 def engines(monkeypatch):
     """A fake ``vllm``: every character costs 1 bit, except "z" (2 bits).
@@ -53,7 +60,7 @@ def engines(monkeypatch):
             return _Tokenizer()
 
         def chat(self, messages, sampling_params, **kwargs):
-            self.calls.append("chat")
+            self.calls.append(f"chat@{sampling_params.kwargs['temperature']}")
             return [
                 SimpleNamespace(
                     prompt_token_ids=[1],
@@ -80,13 +87,9 @@ def engines(monkeypatch):
                 outputs.append(SimpleNamespace(prompt_logprobs=logprobs))
             return outputs
 
-    class SamplingParams:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-
     module = types.ModuleType("vllm")
     module.LLM = FakeLLM
-    module.SamplingParams = SamplingParams
+    module.SamplingParams = _SamplingParams
     monkeypatch.setitem(sys.modules, "vllm", module)
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")  # one in-process engine
     monkeypatch.setenv("FORGER_STEP_REPORT", "0")
@@ -155,7 +158,8 @@ class TestTargetLogprobs:
         worker.start()
         parent.send({"model": "m"})
         assert parent.recv() == ("ready", None)
-        parent.send(("chat", ([[{"role": "user", "content": "q"}]], None), {}))
+        params = _SamplingParams(temperature=0.5)
+        parent.send(("chat", ([[{"role": "user", "content": "q"}]], params), {}))
         status, [output] = parent.recv()
         assert status == "ok" and output.outputs[0].text == "aa"
         parent.send(
@@ -188,6 +192,7 @@ class TestStudentLogLikelihood:
         assert [r.row for r in report.own] == [0, 2]
         assert report.total_excess_bits == pytest.approx(8)
         assert report.rows[0].reasoning_tokens == 17
+        assert "chat@1.0" in engines[0].calls  # own responses at temperature 1
         out = capsys.readouterr().out
         assert "student_log_likelihood" in out and "excess" in out
 

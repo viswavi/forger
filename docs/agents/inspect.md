@@ -26,7 +26,7 @@ every row says "I need"; run both. Rows are not modified.
 max_tokens=None, top_k=5)` scores each row's target (e.g. an SFT target `"<think>...</think>answer"`) under the student,
 a `LocalModel`, as SFT trains on it. Bits are `-log2` of each token's probability given the prompt and the earlier
 tokens. A log-likelihood alone has no natural scale, so the student also answers `own_samples` of the prompts (evenly
-spaced) and its own responses are scored the same way:
+spaced, at temperature 1) and its own responses are scored the same way:
 
 ```text
                    rows   median tokens   bits/token   bits/row   total bits

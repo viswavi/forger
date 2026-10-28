@@ -113,7 +113,9 @@ def _own_scores(
     prompts: list[Any], *, model: Any, max_tokens: int | None
 ) -> tuple[list[TargetLogprobs], int]:
     """Sample one response per prompt and score it; also count hits of max_tokens."""
-    results = model.generate_batch(prompts, n=1, max_tokens=max_tokens)
+    # Temperature 1: a response drawn from the student itself then has expected
+    # bits per token equal to the student's own rate, so its excess is 0 on average.
+    results = model.generate_batch(prompts, n=1, temperature=1.0, max_tokens=max_tokens)
     hit_max = sum(
         1
         for r in results
@@ -139,7 +141,7 @@ def student_log_likelihood(
     student, as SFT trains on it: bits = ``-log2`` of each token's probability
     given the prompt and the tokens before it. A bare log-likelihood has no
     natural scale, so the report sets it beside the student's own responses to
-    ``own_samples`` of the same prompts, sampled at the model's temperature:
+    ``own_samples`` of the same prompts, sampled at temperature 1:
 
     - bits per token, targets against the student's own: how foreign the text
       is, token by token;
