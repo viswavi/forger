@@ -36,6 +36,7 @@ from pyforger.measurements import Measurement
 from pyforger.sail_provision import create_sailbox
 from pyforger.sdk_config import llm_options
 from pyforger.structured import generate_validated
+from pyforger.usage import combine_usage, usage_record
 from pyforger.utils import redact
 
 SDK_VERSION = "1.58.0"
@@ -123,9 +124,9 @@ class _FrameWriter:
     def __init__(self, stdin: Any, timeout_s: float = STDIN_WRITE_TIMEOUT_S) -> None:
         self._stdin = stdin
         self._timeout_s = timeout_s
-        self._queue: queue.Queue[tuple[str, threading.Event, dict[str, Any]] | None] = (
-            queue.Queue(maxsize=OUTBOUND_QUEUE_FRAMES)
-        )
+        self._queue: queue.Queue[
+            tuple[str, threading.Event, dict[str, Any]] | None
+        ] = queue.Queue(maxsize=OUTBOUND_QUEUE_FRAMES)
         self._error: BaseException | None = None
         self._pending: deque[tuple[threading.Event, float, dict[str, Any]]] = deque()
         self._lock = threading.Lock()
@@ -750,6 +751,7 @@ def remote_sdk_session(
             "_sail_sdk_worker.py",
             "_sail_sdk_transport.py",
             "_sdk_runtime.py",
+            "usage.py",
             "agent_diagnostics.py",
         ):
             worker.fs.write(
@@ -794,12 +796,18 @@ def remote_sdk_session(
         writer = _FrameWriter(connection.stdin)
         incoming = _incoming_frames(connection.stdout, writer, budget)
         event_parts: list[str] = []
+        usage_parts: list[dict[str, Any]] = []
 
         def send(value: dict[str, Any]) -> None:
             budget.remaining_s()
             writer.send(value)
 
         def handle_error(frame: dict[str, Any]) -> None:
+            if "usage" in frame:
+                usage_parts.append(frame["usage"])
+                diagnostics["usage"] = combine_usage(
+                    usage_parts, call_id=current["call_id"]
+                )
             budget.iterations = frame["iterations"]
             diagnostics["budget_exhausted"] = frame.get("budget_exhausted", False)
             diagnostics["execution_status"] = "error"
@@ -848,6 +856,9 @@ def remote_sdk_session(
             diagnostics["current_trajectory"] = current
             diagnostics["trajectory"] = current
             attempt_record["turns"].append(current)
+            diagnostics["usage"] = combine_usage(
+                [*usage_parts, usage_record()], call_id=call_id
+            )
             send(
                 {
                     "kind": "turn",
@@ -894,6 +905,11 @@ def remote_sdk_session(
                 elif kind == "error":
                     handle_error(frame)
                 elif kind == "result":
+                    if "usage" in frame:
+                        usage_parts.append(frame["usage"])
+                        diagnostics["usage"] = combine_usage(
+                            usage_parts, call_id=current["call_id"]
+                        )
                     budget.iterations = frame["iterations"]
                     diagnostics["budget_exhausted"] = (
                         frame["status"] != "finished"
@@ -962,7 +978,9 @@ def remote_sdk_session(
             next_spec: Any = None,
         ) -> Any:
             nonlocal task, validate, max_repairs, spec, call_id, current
+            usage_parts.clear()
             call_id = uuid.uuid4().hex
+            diagnostics["usage"] = usage_record({"call_id": call_id})
             current = {
                 "call_id": call_id,
                 "turn_id": None,

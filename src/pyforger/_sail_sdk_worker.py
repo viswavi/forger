@@ -189,13 +189,10 @@ def main(wire: Any) -> None:
     from openhands.sdk import LLM, Agent, AgentContext
     from openhands.sdk.conversation.impl.local_conversation import LocalConversation
     from openhands.sdk.llm import LLMCallContext
-    from openhands.sdk.tool import (
-        FinishTool,
-        Tool,
-        ToolExecutor,
-    )
+    from openhands.sdk.tool import FinishTool, Tool, ToolExecutor
     from openhands.tools.terminal import TerminalTool
     from openhands.tools.terminal.definition import TerminalAction, TerminalObservation
+    from usage import sdk_snapshot, sdk_usage
 
     class TerminalRelay(ToolExecutor[TerminalAction, TerminalObservation]):
         def __call__(self, action: Any, conversation: Any = None) -> Any:
@@ -363,9 +360,12 @@ def main(wire: Any) -> None:
         max_iteration_per_run=sdk_iteration_limit(request["max_iterations"]),
     )
 
+    usage_baseline: dict[str, Any] = {}
+
     def report_error(exc: Exception, **details: Any) -> None:
         error = {
             "kind": "error",
+            "usage": sdk_usage(session, usage_baseline, incomplete=True),
             "error_type": type(exc).__name__,
             "error_message": str(exc),
             "traceback": traceback.format_exc(),
@@ -453,6 +453,7 @@ def main(wire: Any) -> None:
                 )
                 stream_events[0] = True
                 drain_pending_events()
+                usage_baseline = sdk_snapshot(session)
                 with phase("turn.send_message"):
                     session.send_message(
                         turn["instruction"] + "\n\n" + COMMAND_GUIDANCE
@@ -466,6 +467,7 @@ def main(wire: Any) -> None:
                 send(
                     {
                         "kind": "result",
+                        "usage": sdk_usage(session, usage_baseline),
                         "status": status,
                         "iterations": iterations,
                         "conversation_id": str(session.id),

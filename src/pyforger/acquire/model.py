@@ -68,7 +68,9 @@ class Usage(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     reasoning_tokens: int = 0
-    cost_usd: float = 0.0
+    cost_usd: float | None = 0.0
+    cached_tokens: int = 0
+    cache_write_tokens: int = 0
 
 
 class ModelSettings(BaseModel):
@@ -234,8 +236,8 @@ def _extract_reasoning(response: Any, model_id: str) -> list[str | None]:
 _COST_WARNING_SEEN: set[str] = set()
 
 
-def _extract_cost(response: Any, model_id: str) -> float:
-    """Cost in USD; `0.0` when unavailable. Warns once per `model_id` on miss."""
+def _extract_cost(response: Any, model_id: str) -> float | None:
+    """Cost in USD, or None when unavailable; explicit zero remains free."""
     hidden = getattr(response, "_hidden_params", None) or {}
     cost = hidden.get("response_cost")
     if cost is None:
@@ -252,7 +254,7 @@ def _extract_cost(response: Any, model_id: str) -> float:
                 UserWarning,
                 stacklevel=2,
             )
-        return 0.0
+        return None
     return float(cost)
 
 
@@ -264,6 +266,10 @@ def _extract_usage(response: Any, *, responses_api: bool = False) -> Usage:
 
     if responses_api:
         return Usage(
+            cached_tokens=getattr(
+                getattr(usage, "input_tokens_details", None), "cached_tokens", 0
+            )
+            or 0,
             prompt_tokens=usage.input_tokens or 0,
             completion_tokens=usage.output_tokens or 0,
             reasoning_tokens=(
@@ -283,6 +289,11 @@ def _extract_usage(response: Any, *, responses_api: bool = False) -> Usage:
         prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
         completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
         reasoning_tokens=reasoning_tokens,
+        cached_tokens=getattr(
+            getattr(usage, "prompt_tokens_details", None), "cached_tokens", 0
+        )
+        or 0,
+        cache_write_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0,
     )
 
 
@@ -420,8 +431,13 @@ class Model:
 
     @property
     def total_cost(self) -> float:
-        """Sum of cost_usd across every call in this Model's history."""
-        return self.total_usage.cost_usd
+        """Legacy priced subtotal; use total_usage.cost_usd for a complete total."""
+        return sum(r.usage.cost_usd or 0.0 for r in self.history)
+
+    @property
+    def known_cost_usd(self) -> float:
+        """Priced lower bound, including priced siblings of failed batches."""
+        return self.total_cost
 
     @property
     def total_usage(self) -> Usage:
@@ -429,8 +445,14 @@ class Model:
         return Usage(
             prompt_tokens=sum(r.usage.prompt_tokens for r in self.history),
             completion_tokens=sum(r.usage.completion_tokens for r in self.history),
+            cached_tokens=sum(r.usage.cached_tokens for r in self.history),
+            cache_write_tokens=sum(r.usage.cache_write_tokens for r in self.history),
             reasoning_tokens=sum(r.usage.reasoning_tokens for r in self.history),
-            cost_usd=sum(r.usage.cost_usd for r in self.history),
+            cost_usd=(
+                sum(r.usage.cost_usd or 0.0 for r in self.history)
+                if all(r.usage.cost_usd is not None for r in self.history)
+                else None
+            ),
         )
 
     def reset_history(self) -> None:
@@ -558,14 +580,16 @@ class Model:
                 with ThreadPoolExecutor(
                     max_workers=min(100, len(all_messages))
                 ) as pool:
-                    responses = list(
-                        pool.map(
-                            lambda messages: litellm.responses(
-                                input=messages, **call_kwargs
-                            ),
-                            all_messages,
-                        )
-                    )
+                    futures = [
+                        pool.submit(litellm.responses, input=messages, **call_kwargs)
+                        for messages in all_messages
+                    ]
+                    responses = []
+                    for future in futures:
+                        try:
+                            responses.append(future.result())
+                        except Exception as error:
+                            responses.append(error)
         elif len(all_messages) == 1:
             responses = [litellm.completion(messages=all_messages[0], **call_kwargs)]
         else:
@@ -578,13 +602,11 @@ class Model:
                 responses = litellm.batch_completion(
                     messages=all_messages, **call_kwargs
                 )
-        for response in responses:
-            # batch_completion returns (rather than raises) per-request exceptions.
-            if isinstance(response, Exception):
-                raise response
-
+        errors = [response for response in responses if isinstance(response, Exception)]
         results: list[GenerateResult] = []
         for response in responses:
+            if isinstance(response, Exception):
+                continue
             if responses_api:
                 output = response.model_dump().get("output", [])
                 completions = [
@@ -621,6 +643,8 @@ class Model:
             results.append(result)
             self.history.append(result)
 
+        if errors:
+            raise errors[0]
         return results
 
 

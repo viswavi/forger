@@ -20,6 +20,7 @@ from pyforger.agent_backends import require_learner_runtime
 from pyforger.sail_provision import create_sailbox
 from pyforger.session_budget import SessionBudget
 from pyforger.structured import GenerationInconclusive, ValidationExhausted
+from pyforger.usage import sdk_snapshot, sdk_usage, usage_record
 
 
 class _DeadlineBudget(SessionBudget):
@@ -213,6 +214,9 @@ class ReusableSession:
                 "started_at": time.time(),
                 "no_current_history_reason": "turn_not_started",
             }
+            self._diagnostics["usage"] = usage_record(
+                {"call_id": current["call_id"]}, zero=agent.kind in {"oracle", "nop"}
+            )
             self._diagnostics["current_trajectory"] = current
             self._diagnostics["trajectory"] = current
             try:
@@ -226,6 +230,8 @@ class ReusableSession:
                 )
                 self._budget.remaining_s()
                 result = self._runner(task, agent, validate, max_repairs)
+                result.usage["call_id"] = current["call_id"]
+                self._diagnostics["usage"] = result.usage
                 self._agent = agent
                 self._budget.remaining_s()
                 return result
@@ -294,6 +300,7 @@ class LocalSession(ReusableSession):
                 if journal is not None:
                     journal.clean = sanitizer([], secrets=self._credential_values)
                 session.switch_llm(llm_for(next_agent))
+            baseline = sdk_snapshot(session) if agent.kind == "openhands-sdk" else {}
             _materialize(root, dict(task.files))
             try:
                 result = asyncio.run(
@@ -311,6 +318,9 @@ class LocalSession(ReusableSession):
                 )
             except BaseException:
                 if agent.kind == "openhands-sdk":
+                    self._diagnostics["usage"] = sdk_usage(
+                        session, baseline, incomplete=True
+                    )
                     retained = self._backend._trajectory(session, next_agent)
                     current = self._diagnostics["current_trajectory"]
                     current.pop("steps", None)
@@ -326,6 +336,9 @@ class LocalSession(ReusableSession):
                 files=result.output,
                 validation_attempts=result.attempts if validate is not None else (),
                 trajectory=retained,
+                usage=sdk_usage(session, baseline)
+                if agent.kind == "openhands-sdk"
+                else usage_record(zero=True),
                 diagnostics={
                     "iterations": self._budget.iterations,
                     "session_id": str(getattr(session, "id", "script")),
@@ -452,6 +465,9 @@ class SailSession(ReusableSession):
                 files=files,
                 validation_attempts=attempts,
                 diagnostics=dict(self._diagnostics),
+                usage=self._diagnostics.get(
+                    "usage", usage_record(zero=agent.kind in {"oracle", "nop"})
+                ),
                 trajectory=self._diagnostics.get("trajectory"),
             )
 

@@ -102,6 +102,7 @@ def test_real_worker_persists_repair_and_relays_commands(tmp_path, limit, turns)
         "_sail_sdk_worker.py",
         "_sail_sdk_transport.py",
         "_sdk_runtime.py",
+        "usage.py",
         "agent_diagnostics.py",
     ):
         (tmp_path / name).write_bytes(worker.with_name(name).read_bytes())
@@ -197,6 +198,10 @@ def test_real_worker_persists_repair_and_relays_commands(tmp_path, limit, turns)
                 result = receive()
             assert result["kind"] == "result", result
             assert result["status"] == "finished"
+            assert result["usage"]["prompt_tokens"] == 20, result
+            assert result["usage"]["completion_tokens"] == 10
+            assert result["usage"]["cost_usd"] > 0
+            assert result["usage"]["cost_complete"] is True
             ids.append(result["conversation_id"])
         assert ids[0] == ids[1]
         assert result["iterations"] == 2 * turns
@@ -349,7 +354,7 @@ def test_expired_remote_setup_records_no_current_history():
             AgentSpec(Model("openai/test", api_key="test-credential")),
             None,
             0,
-            diagnostics
+            diagnostics,
         ):
             pytest.fail("Expired setup must not start a worker")
     current = caught.value.diagnostics["current_trajectory"]

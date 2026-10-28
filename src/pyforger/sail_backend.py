@@ -26,6 +26,7 @@ from pyforger.agent_diagnostics import trajectory
 from pyforger.measurements import Measurement
 from pyforger.sail_provision import create_sailbox
 from pyforger.sail_sdk import SDK_VERSION
+from pyforger.usage import usage_record
 
 
 class _OracleExecutionFailed(Exception):
@@ -199,6 +200,9 @@ class SailBackend:
                         ),
                         diagnostics=diagnostics,
                         trajectory=diagnostics.get("trajectory"),
+                        usage=diagnostics.get(
+                            "usage", usage_record(zero=agent.kind in {"oracle", "nop"})
+                        ),
                     )
             else:
 
