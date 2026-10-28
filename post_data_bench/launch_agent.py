@@ -616,6 +616,7 @@ if args.training_mode == "sft-rl":
         for name in (
             "agent_training.py",
             "backends.py",
+            "decontaminate.py",
             "lineage.py",
             "local_training.py",
             "rubric_data.py",
@@ -690,6 +691,15 @@ def _task_public_copies(task_dir: str, dest_task_dir: str) -> None:
 
                 target = Path(dest_task_dir) / entry
                 target.write_text(scrub(target.read_text()))
+
+    if args.task == "coding" and args.training_mode == "sft-rl":
+        # Hashed windows of the hidden test statements, never their text: the
+        # training helpers drop rows that overlap them (rl/decontaminate.py).
+        from coding.rl.decontaminate import SIGNATURES, benchmark_signatures
+
+        target = Path(dest_task_dir) / "rl" / SIGNATURES.name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(benchmark_signatures(data_root)))
 
     if args.training_mode == "sft-rl":
         from coding.rl.agent_validation import copy_validation_evaluator

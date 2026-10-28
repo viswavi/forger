@@ -212,8 +212,23 @@ def validate_dataset(source):
 
 
 def compile_data(source, out_dir, tokenizer=None, max_length=18800):
-    """Fixed seed, 90/10 split. Fail on overlength rows rather than truncate SFT."""
-    rows = validate_dataset(source)
+    """Fixed seed, 90/10 split. Fail on overlength rows rather than truncate SFT.
+
+    Rows that overlap the held-out test problems are removed first (see
+    `decontaminate`); only their number is reported.
+    """
+    from .decontaminate import filter_rows  # noqa: ABS101
+
+    rows, removed = filter_rows(validate_dataset(source))
+    if removed:
+        print(
+            f"decontamination: removed {removed} row(s) that overlap the held-out "
+            "test problems"
+        )
+    if len(rows) < 10:
+        raise ValueError(
+            f"{len(rows)} rows remain after decontamination; submit at least 10"
+        )
     # Sort before shuffling so file reordering cannot alter the split.
     ordered = sorted(rows, key=prompt_id)
     random.Random(0).shuffle(ordered)
