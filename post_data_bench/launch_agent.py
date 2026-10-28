@@ -616,6 +616,7 @@ if args.training_mode == "sft-rl":
         for name in (
             "agent_training.py",
             "backends.py",
+            "lineage.py",
             "local_training.py",
             "rubric_data.py",
             "rubric_rm.py",
