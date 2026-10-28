@@ -754,6 +754,8 @@ def op(
 
                     result = _read_result(cache_path, cache_root)
                     cache_hit = True
+                    if is_step:
+                        _note_step_file(cache_path, cache_root)
                     if is_step and meta_path.exists():
                         _tracking.restore_step_meta(meta_path.read_text())
                     elif not is_step and scores_path.exists():
@@ -835,6 +837,8 @@ def op(
                     else:  # no log from an earlier run describing another result
                         reach_path.unlink(missing_ok=True)
                     _write_result(cache_path, result, cache_root)
+                    if is_step:
+                        _note_step_file(cache_path, cache_root)
 
             duration = time.perf_counter() - start
             # If tracing is enabled, record this call on the in-memory trace.
@@ -973,6 +977,17 @@ def _replay_reach(path: Path) -> None:
         _tracking.mark_reach_blind()
         return
     _tracking.replay_reach(text)
+
+
+def _note_step_file(cache_path: Path, cache_root: Path) -> None:
+    """Record on the running step where its output is cached.
+
+    ``inspect_step(name, rows=True)`` loads the output from there, e.g. from a
+    shell after the pipeline died in a later step.
+    """
+    rec = _tracking.active_step()
+    if rec is not None:
+        rec.cache_file = cache_path.relative_to(cache_root.resolve()).as_posix()
 
 
 def _read_result(cache_path: Path, cache_root: Path) -> Any:

@@ -344,6 +344,9 @@ class StepRecord(BaseModel):
     # In a smoke run: the row limit, and the input rows before the cut (e.g. 120).
     smoke_rows: int | None = None
     smoke_n_in: int | None = None
+    # The cache entry holding this run's output, relative to FORGER_CACHE
+    # (e.g. "step.write_targets/3f2a….pkl"); None when it was not cached.
+    cache_file: str | None = None
 
 
 class PipelineRecord(BaseModel):

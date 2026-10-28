@@ -119,7 +119,8 @@ them, and score lists of over 100,000 rows, have none: rerun with `_no_cache=Tru
   fails strict mode is not cached. `prod=True` or the environment variable `FORGER_STEP_REPORT=0` silences the reports.
   `pyforger.inspect.inspect_step(name)` re-prints the full report of the latest run of a step, with up to 10 sample
   rows. It also works from another process (e.g. a shell, while the pipeline runs under `nohup`): every step saves its
-  report under `$FORGER_CACHE/step_reports/`.
+  report under `$FORGER_CACHE/step_reports/`. `inspect_step(name, rows=True)` returns that run's whole output from
+  the cache, e.g. the rows of a step that finished before a later step failed.
 - Sample rows: `@step(sample=3)` shows three output rows (of each stream) instead of one. `@step(show=["statement"])`
   prints those fields of each sample row in full, line breaks kept, as an indented block under the row (other values
   as JSON); the other fields stay in the table, cut or summarized.
