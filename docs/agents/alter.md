@@ -1,174 +1,99 @@
 # `pyforger.alter`
 
-Transform rows without removing items.
+Transform rows without removing items. Signatures and defaults: [OPS.md](../OPS.md#alter).
 
 | Export | Description |
 |---|---|
-| `generate_from_context` |  LLM-based generation given upstream data (sample_from_LLM with wrapped dependencies) |
+| `generate_from_context` | LLM generation from each row's fields (`sample_from_LLM` over rows). |
+| `self_taught_reasoner` | STaR: keep the student's own samples that are verified correct. |
 | `translate.to_language` | LLM translation of selected fields into a target natural language. |
 | `translate.to_code` | LLM conversion of fields into code in a target programming language. Strips markdown fences. |
 | `execute_code` | Call the last function in each row's code with one argument, in-process (RestrictedPython). |
 | `run_programs` | Run each row's stdin/stdout program on its tests in subprocesses; record per-test results. |
-| `dynamic_step` | Run dynamic input-specific sub-pipelines that return a string list per input. |
-| `dynamic_step_source` | Generate or inspect sub-pipeline generated for a single input. |
+| `dynamic_step` | Run input-specific sub-pipelines (see [dynamic_step.md](dynamic_step.md)). |
+| `dynamic_step_source` | Generate or inspect the sub-pipeline for a single input. |
 
-`generate_from_context` performs `samples_per_item` LLM calls per input and returns parsed dicts, with retry against an
-optional JSON schema. A prompt whose output fails to parse (a reply arrived but did not parse) is asked again up to
-`max_retries` times; after that its slots are `None` and the other prompts' results are kept. A request that still
-fails with a transient provider error (timeout, lost connection, 429, or 5xx) after the model's own `num_retries` is
-not asked again, so with `num_retries=2` a request makes at most 3 attempts in all (for a `Model`; see
-[`TinkerModel`](models.md#tinkermodel)); its slots are `None`.
-A row error belongs to one prompt, not to the key, model, or account, so it is never retried and also leaves that
-prompt's slots `None`: the provider's content filter blocked the prompt or its reply
-(`litellm.ContentPolicyViolationError`, or a 400 whose body says `content_filter` or `content_policy`), or the prompt
-is longer than the context window (`litellm.ContextWindowExceededError`, or `pyforger.PromptTooLongError` from a
-backend that checks lengths before sending, such as `TinkerModel`). If every prompt of the call (at least 2) hits a
-row error, the op raises the first one instead, since that points at the template or the model (e.g. a system prompt
-that trips the filter).
-Other provider errors (a bad API key, an unknown model, any other 400, an exhausted quota, a spending cap) raise at
-once, since retrying cannot fix them. When any slot failed at the provider, the op logs one warning that counts the
-failures by type or reason (`3 of 64 prompts failed after the model's retries; their slots are None: 2 prompts blocked
-by the provider's content filter, InternalServerError ×1`), shows it in the step report, and is not cached (nor is its
-step). Successful requests are cached one by one in the request cache, so a rerun re-sends only the failed prompts.
-Parse-failure `None`s are cached. `inspect.topic_based_clustering` does not ask a failed request again either (see
-[LLM judges](filter.md#llm-judges)).
-As with `sample_from_LLM`, reasoning traces are included under a `thinking_trace` key. Inline traces are not extracted:
-`LocalModel` leaves `<think>` blocks in the completion text. Use `split_reasoning` to separate them out.
-`output_schema` adds an instruction about the reply's format. If your prompt also asks for a format ("reason step by
-step, then one code block"), reasoning models spend the start of their reasoning sorting out the conflict, and the
-step report warns when many traces open that way. When you will train on the reasoning, leave `output_schema` out
-and parse the answer yourself.
+## `generate_from_context`
 
-By default the op returns a flat list of `len(items) * samples_per_item` outputs (or `None`). `merge=True` returns the
-input rows with the output attached instead, one row per successful sample (failed slots dropped), with `sample_idx`
-when `samples_per_item > 1`. The output's keys win over the input's (a warning names the clashing keys);
-`output_field="name"` nests the output under one key instead (a warning also names an input key it, or `sample_idx`,
-replaces):
+Makes `samples_per_item` LLM calls per row; returns a flat list of parsed outputs (`None` for failed slots).
+`merge=True` attaches each output to its input row instead (failed slots dropped); `output_field="name"` nests it.
 
 ```python
 rows = alter.generate_from_context(problems, "Solve: {problem}", model, output_schema={"answer": str}, merge=True)
 # [{"problem": "...", "answer": "4"}, ...]
-rows = alter.generate_from_context(problems, "Solve: {problem}", model, merge=True, output_field="solution")
-# [{"problem": "...", "solution": {"text": "..."}}, ...]
 ```
 
-`self_taught_reasoner` (re-exported from `pyforger.alter`, also in `pyforger.alter.generate`) implements the
-**Self-Taught Reasoner (STaR)** approach ([Zelikman et al., 2022](https://arxiv.org/abs/2203.14465)) -- closely
-related to **On-Policy Distillation** (Agarwal et al., 2023), since both keep SFT traces drawn from the student's own
-distribution rather than a separate teacher: for each input row it samples `n` responses from a student `model` and
-keeps only those whose final answer matches the row's reference answer (`reference_field`, default `"final_answer"`).
-Each kept response becomes one
-output row carrying the student's raw response plus, when `split_thinking=True`, its reasoning and answer in
-`thinking`/`answer` fields (reasoning comes from the provider's separate reasoning field when returned, otherwise from
-the inline `<think>` block); the matched student answer becomes the new ground truth.
+Failures that do not raise (the first three below) leave that prompt's slots `None` and keep the rest:
+
+- Parse failure: retried up to `max_retries` times; these `None`s are cached.
+- Transient provider error (timeout, 429, 5xx): retried only by the model's `num_retries`.
+- **Row error**: the content filter blocked the prompt or reply, or the prompt exceeds the context window
+  (`ContextWindowExceededError` or `pyforger.PromptTooLongError`). Never retried. If every prompt of a call (at
+  least 2) hits one, the op raises instead: fix the template or model.
+- Other errors (bad API key, unknown model, other 400s, exhausted quota, spending cap) raise at once.
+- Provider failures produce one warning in the step report and leave the op and step uncached; a rerun re-sends
+  only the failed prompts.
+
+Reasoning traces go under `thinking_trace`. `LocalModel` leaves `<think>` blocks inline; separate them with
+`acquire.split_reasoning`.
+
+`output_schema` adds a format instruction. If your prompt also asks for a format, reasoning models waste the start of
+their reasoning on the conflict (the step report warns). **When you will train on the reasoning, leave
+`output_schema` out and parse the answer yourself.**
+
+## `self_taught_reasoner` (STaR)
+
+[STaR](https://arxiv.org/abs/2203.14465) samples `n` responses per row from the student (`TinkerModel` or
+`LocalModel`) and keeps the correct ones as rows, so SFT traces come from the student's own distribution. By default
+correct means the final answer matches `reference_field` (default `"final_answer"`).
+
+Pass `verifier=` for any other check: a `(answer, row) -> bool | None` that keeps a response when it returns `True`
+(`reference_field` is then not needed). Examples: `filter.program_verifier("tests")` for code, or your own rubric
+grader that returns `True` only for full-mark samples.
 
 ```python
 from pyforger.alter import self_taught_reasoner
-from pyforger.acquire import TinkerModel
 
-student = TinkerModel("Qwen/Qwen3-8B", max_tokens=16384)  # n samples per problem share one prefill
-rows = self_taught_reasoner(problems, solver_prompt, student, n=8, reference_field="final_answer")
-```
-
-When a response is right because its code passes tests, not because its answer equals a reference, pass
-`verifier=`: a `(answer, row) -> bool | None` check that sees the candidate row (the input row's fields plus the
-response fields), run `max_workers` (default 8) at a time. A response is kept when it returns `True`, and
-`reference_field` is neither needed nor changed:
-
-```python
 rows = self_taught_reasoner(problems, solver_prompt, student, n=8,
-                            verifier=filter.program_verifier("tests"))
-```
-
-`LocalModel("Qwen/Qwen3-8B", max_model_len=40960)` samples the same student on a local GPU via vLLM instead.
-
-STaR only keeps what the student already does: an item it never solves in `n` samples gives no rows, and a behavior
-it never shows (e.g. declining a task that cannot be done) is never learned. Two ways to get rows for such items:
-
-- **Rationalization** (the paper's second pass, on by default): items with no accepted response are sampled `n` more
-  times with a hint; accepted responses are kept as answers to the original item (rows carry the item's fields, not
-  the hinted prompt) and marked `rationalized=True`. The default hint is the item's `reference_field` ("Hint: a
-  correct answer is: ..."), so items without one are not retried; pass `hint_fn` for a different hint, such as only
-  the final code or why the task cannot be done, and `rationalize=False` to turn it off. As in the paper, responses
-  that mention the hint are kept. It is off with `filter_fn`, which cannot say which items went unsolved.
-- **Bootstrapping**: fine-tune briefly on a few seed rows that show the behavior, then run STaR on that checkpoint
-  (`LocalModel(checkpoint_dir)` or `TinkerModel` on the checkpoint), and train the next checkpoint from the base model
-  on the rows STaR kept. Check the seed checkpoint on items where the behavior is wrong too: a checkpoint that
-  declines solvable tasks almost as often as impossible ones yields rows that teach declining at random.
-
-```python
-solver_prompt = "Write a Python program for this problem:\n{problem}"
-rows = self_taught_reasoner(problems, solver_prompt, student, n=8, verifier=filter.program_verifier("tests"),
+                            verifier=filter.program_verifier("tests"),
                             hint_fn=solver_prompt + "\n\nHint: {key_idea}")
 ```
 
+STaR only keeps what the student already does: an item it never solves in `n` samples gives no rows, and a behavior
+it never shows (e.g. declining an impossible task) is never learned. Two remedies:
+
+- **Rationalization (on by default)**: items with no accepted response are sampled `n` more times with a hint.
+  The default hint is the item's `reference_field` ("Hint: a correct answer is: ..."), so items without one are
+  skipped; pass `hint_fn` for another hint (e.g. the key idea, or why the task cannot be done). Kept rows answer the
+  original prompt and are marked `rationalized=True`; as in the paper, responses that mention the hint are kept.
+  `rationalize=False` turns it off; it is also off with `filter_fn`.
+- **Bootstrapping** a behavior the student never shows: briefly fine-tune on a few seed rows that show it, run STaR on
+  that checkpoint, then train the next checkpoint from the base model on the rows STaR kept. First check the seed
+  checkpoint on items where the behavior is wrong: one that declines solvable tasks about as often as impossible
+  ones yields rows that teach declining at random.
+
 ## Running programs against tests
 
-`execute_code` runs a function, not a program: it calls the last function defined in `code_field` with the value of
-`arg_field`, in-process. For programs that read stdin and write stdout, use `alter.run_programs`, which runs each
-row's program on each of its tests and records what happened. A test is a dict: `{"input": "3\n1 2 3\n", "output":
-"6"}`. `"output"` is optional: without it the run is recorded but not graded, e.g. to collect a brute-force
-solution's answers as expected outputs (pass `max_chars=None` to keep whole outputs). `"args"` gives command-line
-arguments (e.g. `["7", "small"]` for a test generator) and `"timeout_s"` overrides the op's timeout for that test.
-
-Each row gets `test_results` (`result_field`), one result per test: `{"status", "passed", "exit_code", "timed_out",
-"stdout", "stderr", "seconds"}`. `status` is `"ok"`, `"wrong_answer"`, `"runtime_error"` (non-zero exit or a signal;
-running out of memory usually shows up here as a `MemoryError`), `"timeout"`, or `"output_limit"` (see below).
-`passed` is `True`, `False`, or `None` for an ungraded test. A test whose `"input"` is missing or `None` gets empty
-stdin. Output is compared with
-`outputs_match`, equality up to whitespace (`"1 2\n3"` matches `"1 2 3"`); pass `checker=(stdout, expected) -> bool`
-to change it. A row whose code is missing or empty gets `None`. Programs run in Python (this interpreter, with `-I`)
-unless `command` names another interpreter, e.g. `command=["node", "{file}"], suffix=".js"`.
+`execute_code` calls a function in-process. For stdin/stdout programs use `run_programs`: it runs each row's program
+on each test `{"input": ..., "output": ...}` and adds `test_results` (`status`, `passed`, stdout/stderr per test).
+A test without `"output"` is run but not graded (e.g. to collect a brute-force solution's outputs; pass
+`max_chars=None` to keep them whole). Output matches up to whitespace (`checker=` to change); other languages via
+`command=["node", "{file}"], suffix=".js"`.
 
 ```python
-from pyforger import alter, filter
-from pyforger.alter.programs import last_code_block
-
-rows = [{"statement": "Read two integers and print their sum.",
-         "solution": "a, b = map(int, input().split())\nprint(a + b)",
-         "tests": [{"input": "1 2\n", "output": "3"}, {"input": "5 5\n", "output": "10"}]}]
-rows = alter.run_programs(rows, code_field="solution")
-# rows[0]["test_results"][0] == {"status": "ok", "passed": True, "exit_code": 0, "timed_out": False,
-#                                "stdout": "3\n", "stderr": "", "seconds": 0.04}
-
-# Keep reference solutions that pass their statement's examples.
-verified = filter.by_tests(rows, code_field="solution", tests_field="tests")
-
-# Grade a student's sampled programs with the same tests.
+rows = alter.run_programs(rows, code_field="solution")              # adds rows[i]["test_results"]
+verified = filter.by_tests(rows, code_field="solution", tests_field="tests")  # keep passing references
 hard = filter.by_pass_at_k(verified, model=student, input_field="statement",
                            metric=filter.program_verifier("tests"), completions_field="samples")
 ```
 
-`filter.by_tests` keeps rows whose program passes at least `min_pass_rate` (default 1.0) of its graded tests; the runs
-are cached apart from `min_pass_rate`, so a new bound runs nothing, and the step report shows a few dropped rows
-with their first failing test (`test 2 of 3: wrong_answer, got '4', expected '5'`). `filter.program_verifier` takes
-the last fenced Python block from each sampled answer (`last_code_block`), runs it on the row's tests until one fails,
-and grades it `True` only if all pass. An answer with no code block (or one `extract_code` maps to `None` or blank
-code) grades `False` without running anything; only a row with no graded tests (none with an `"output"`) grades
-`None`. The verifier never sees a `None` answer: the difficulty filter grades an empty answer `None` and, with
-`by_pass_at_k`'s default `truncated="fail"`, an unclosed `<think>` block `False`, before calling it.
-`extract_code=last_code_block` does the same for `run_programs` and `by_tests` when a field holds a model's answer.
-
-Every run is its own process, so the ops are safe to call from threads and run up to `max_workers` (default
-`min(8, cpu count)`) programs at a time. `timeout_s` is wall-clock time, so too many workers on a loaded machine
-turn slow passing runs into `"timeout"`; `max_workers` is part of the cache key, so lowering it and rerunning runs
-the programs again. Each process starts with an empty environment except `PATH` and the locale, so API keys are not
-visible to it, in a fresh temporary directory that is removed afterwards. A run that exceeds `timeout_s` is killed
-with its process group, which holds every process it started unless one left the group (`setsid`, a daemon); such a
-process keeps running. `max_output_mb` (default 64, 0 for none) caps the size of every file a run writes (stdout,
-stderr, and scratch files), and a write past it fails. The status is `"output_limit"` when stdout reached the cap,
-or when the run failed after stderr or a file in its working directory reached it. `memory_mb` (default 2048) caps
-the address space with `RLIMIT_AS` on Linux; macOS has no working `RLIMIT_AS`, so there the limit is skipped and a
-warning says so once. Interpreters that reserve a large address space at startup (e.g. `node`, `java`) may need
-`memory_mb=None` on Linux.
-
-`runner=` on `run_programs`, `by_tests`, and `program_verifier` replaces the subprocess with your own executor: a
-`(code, tests) -> results` callable returning one dict per test with `"status"` (`"ok"`, `"runtime_error"`,
-`"timeout"`) and `"stdout"`, or `"passed"` when it grades a test itself (e.g. comparing a returned value). Use it to
-check solutions in the environment that will score them, such as an RL reward's sandbox, so code that passes here
-also passes there. The runner is called once per row, `max_workers` rows at a time, and is part of the cache key
-(give it a `cache_key()` method).
-
-Neither `run_programs` nor `execute_code` is a security sandbox. `execute_code`'s RestrictedPython is a guardrail
-against accidental damage from machine-generated code, not a boundary against adversarial code, and `run_programs`
-runs each program as your user, with your files and network. Run untrusted code at scale in a container or VM.
+- `filter.by_tests` keeps rows passing at least `min_pass_rate` of graded tests; changing the rate reruns nothing.
+- `filter.program_verifier` grades the last fenced code block of a model answer; no code block grades `False`.
+  For `run_programs`/`by_tests` on a field holding a model's answer, pass `extract_code=last_code_block`
+  (`pyforger.alter.programs`).
+- `timeout_s` is wall-clock: too many `max_workers` on a loaded machine turn slow passing runs into `"timeout"`.
+- `memory_mb` is not enforced on macOS (a warning says so); `node`/`java` may need `memory_mb=None` on Linux.
+- `runner=` (on `run_programs`, `by_tests`, `program_verifier`) swaps in your own executor, e.g. the RL reward's
+  sandbox, so code that passes here passes there. Give it a `cache_key()` method.
+- **Not a security sandbox**: `run_programs` runs as your user with your files and network, and `execute_code`'s
+  RestrictedPython only guards against accidents. Run untrusted code at scale in a container or VM.

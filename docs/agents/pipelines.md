@@ -2,74 +2,51 @@
 
 ## Steps and step reports
 
-Structure a pipeline as a `@pyforger.pipeline` function that calls `@pyforger.step` functions. A step is a named
+Structure a pipeline as a `@pyforger.pipeline` function that calls named `@pyforger.step` functions. A step is a
 function from rows to rows built from Forger ops (typically acquire or alter, then filter); it may also take several
 lists of rows and return a dict of named row lists (see [Several inputs and output
-streams](#several-inputs-and-output-streams)). Each step is cached like
-an `@op` and, when it returns, prints a report: the fields of its output rows; phrases and names repeated across
-them; every op it ran with rows in/out, yield, time, tokens, and cost; a histogram of each filter's scores with what
-other thresholds would have kept; warnings; and one sample output row. The pipeline prints a summary table of its
-steps at the end. Read these reports after every run. A cached step prints one line,
-`step translate · 42 → 40 rows · cached · originally 0.5s · $0.0034`, with the number of its warnings if it has any;
-`inspect_step(name)` prints its full report, which lists the ops of the run that cached it, marked `cached`, with that
-run's warnings and score histograms (`filter.by_llm_score (cached run) · …`).
-A filter whose own result came from the op cache inside a step that ran also shows the scores of the run that cached
-it, marked the same way (`×5 (2 cached)` when some chunks were cached). Results cached before scores were stored with
-them, and score lists of over 100,000 rows, have none: rerun with `_no_cache=True` to see them.
+streams](#several-inputs-and-output-streams)). Each step is cached like an `@op`. A complete example with its output
+is in [Composing a pipeline](#composing-a-pipeline).
 
-- Fields line: `fields: seed_id int · topic str · score int|None · twist str?  (+ score, twist; − draft)`. Each field
-  of the output rows with the types of its values (from all rows, or 5,000 evenly spaced rows of a longer list); `?`
-  marks a field that some rows lack; `+` / `−` are fields added or removed relative to the input rows, when the step's
-  rows arguments are lists of dicts.
-- Repeated line: `repeated: rewrite "i need" 78/79 (99%) · context "is writing to" 64/79 (81%) · context "Maya" 46/79
-  (58%)`. For string fields the step added or changed, the phrases (2–4 words) and capitalized names in a large share
-  of the output rows: templating and name collapse that exact-match and ROUGE-L filters pass, since every row is
-  distinct. A phrase needs 30% of the rows for values of up to 100 words, more for longer ones (60% at 200 words, at
-  most 90%), since long values share phrases by chance; a name needs 30%. Each field gives its most repeated phrase,
-  the most repeated name gets a place, and the line has at most 3 items, or is absent. Left out as template text:
-  markup, headings and the section under a heading most rows share (an `## Input` section's "The first line
-  contains"), lines most rows share (an instruction prefix), code (`import sys`), categorical and identifier fields,
-  stopword-only and "the problem"-style phrases, and phrases the input rows had nearly as often (the seed or the
-  template put them there). It reads at most 200 rows (evenly spaced) of 1,000 characters each, from steps with 10 or
-  more output rows, and is skipped when reports are off. For the full lists, call `inspect.phrase_frequency`.
-- Chunks of one op in a step share one row, e.g. `alter.generate_from_context ×5`, with summed rows, time, tokens,
-  and cost, and the yield of the sums. Each call is still checked against its own `min_yield` / `max_yield`
-  (`LOW 2/5 · min 0.60` means two of five calls missed, `RAISED 1/5` that one raised). Their filter scores pool into
-  one histogram when the label, keep rule, and thresholds match, and get one histogram per rule otherwise. A call
-  whose input rows are an earlier call's output rows (the same row objects, also through other ops) gets its own
-  row: two `by_llm_score` rubric judges in a row read `10 → 8` and `8 → 4`, not one summed row. Rows rebuilt in
-  Python (`{**r, ...}`) between two calls hide that, so two more things keep calls apart: different score labels
-  (`by_predicate(..., label="runs")`, then `label=">=3 outputs"`), and input rows that are all new to the step after
-  a call that took known rows. A loop over batches with one label still makes one row.
-- `(python)` rows: when rows change between two ops with no op to account for it (e.g. `[r for r in rows if ...]`
-  between `generate_from_context` and `by_exact_match`), the op table shows a dim row such as
-  `(python)  356 → 330  0.93` between them, or before the first op / after the last one. They are inferred: by row
-  identity when the next op got some of the same dicts, else from row counts (marked `inferred`) when Python rebuilt
-  them all (`{**r, ...}`) and each op row's calls are contiguous. Merged, split, or ambiguous rows (several list
-  arguments, interleaved chunks, rebuilt rows sent to two ops) show nothing. The pipeline table shows one between two
-  steps when the second got some of the first's rows, by identity only, and per stream when the first returned a dict
-  (`(python) train  5  3  0.60`). They are information, never warnings. To see why rows went, write the check as
-  `filter.by_predicate`: it gets its own row and a kept/dropped bar.
+When a step returns it prints a report: the fields of its output rows; phrases and names repeated across them; every
+op it ran with rows in/out, yield, time, tokens, and cost; a histogram of each filter's scores with what other
+thresholds would have kept; warnings; and one sample output row. The pipeline prints a summary table of its steps at
+the end, followed by every `WARNING:` line. **Read these reports after every run.**
 
+- `pyforger.inspect.inspect_step("name")` re-prints the full report of a step's latest run with up to 10 sample rows,
+  also from another shell while the pipeline runs. `pyforger.inspect.runs()` lists saved pipeline runs (see
+  [inspect.md](inspect.md)).
+- A cached step prints one line (`step translate · 42 → 40 rows · cached · originally 0.5s · $0.0034`) and costs
+  nothing this run. If a cached filter shows no score histogram, rerun it with `_no_cache=True`.
+- State the yield you expect from each op with `min_yield=` / `max_yield=`, e.g.
+  `filter.by_llm_score(rows, ..., min_yield=0.2, max_yield=0.8)`; a miss is a warning.
+- `repeated:` line: phrases or names shared by a large share of the rows (`rewrite "i need" 78/79 (99%)`). This is
+  templating or name collapse that exact-match and ROUGE-L filters let through; fix the prompt. Full lists:
+  `inspect.phrase_frequency`.
+- `(python)` rows in the op table: rows that changed between ops in plain Python (e.g. a list comprehension). To see
+  why rows went, write the check as `filter.by_predicate` instead, which gets its own row and a kept/dropped bar.
+- `@step(sample=3)` shows three sample rows; `@step(show=["statement"])` prints those fields in full. Long values
+  are otherwise summarized by shape (`def solve(n): … (312 lines, ...)`). `pyforger.steps.set_report_model(model)` or
+  `FORGER_REPORT_MODEL` adds a one-sentence LLM summary (extra LLM calls); check the value itself before trusting it.
 - Hard errors (`StepContractError` / `PipelineContractError`): a step returns neither a list nor a dict of row lists,
-  a step is called inside another step, a pipeline calls no steps, or rows do not match a `list[X]` type hint where
-  `X` is a pydantic model (rows stay dicts).
-- `WARNING:` lines are data problems: something happened to this run's rows, and the line says what. Examples: an op
-  misses its `min_yield` / `max_yield`; model calls stopped at `max_tokens` ("20 rows dropped: 34 of 120 completions
-  ... hit max_tokens=16384; raise max_tokens or lower reasoning_effort"); samples failed to parse; requests failed at
-  the provider; a judge gave no score; reasoning traces open by discussing the output format (`output_schema` and the
-  prompt's own format instructions disagree, so the reasoning is a poor training target); retrieved text reached no
-  prompt (below). In a limited run, a `min_yield` / `max_yield` miss on fewer than 20 rows is an `INFO:` line instead
-  (`limited run: ...`), since 3 rows say little about yield. The pipeline summary ends with its `INFO:` lines, then
-  every step's `WARNING:` lines, so the last lines of a log show them; a limited run's banner comes after them. Fix
-  each one; a few can be suppressed with the reason they do not matter for your data (below).
-- `INFO:` lines (dim) are about how the code is written, not the rows: a step calls no Forger ops
-  (its report cannot show what it kept or changed: write its checks as ops such as `filter.by_predicate`, and never
-  add a no-op filter only to quiet it); a step's type hints cannot be resolved; `show=` names a field no output row
-  has; a pipeline has only one step; no quality filter, no diversity filter, or no inspect op ran anywhere; an op was
-  called in the pipeline outside a step.
-- Suppressing a warning: a few problems may not matter for your data. For those, and only those, set a flag whose
-  value says why these rows are still fine:
+  a step is called inside another step, a pipeline calls no steps, or rows do not match a `list[X]` pydantic hint.
+- `strict=True` on `@step` / `@pipeline` turns `WARNING:` and `INFO:` lines into errors. `prod=True` or
+  `FORGER_STEP_REPORT=0` silences reports.
+
+### Warnings and suppression
+
+- `WARNING:` lines are data problems: something happened to this run's rows, and the line says what, e.g. a
+  `min_yield` / `max_yield` miss; completions hit `max_tokens` ("20 rows dropped: 34 of 120 completions ... hit
+  max_tokens=16384; raise max_tokens or lower reasoning_effort"); parse failures; provider errors; a judge gave no
+  score; reasoning traces that open by discussing the output format (`output_schema` and the prompt's format
+  instructions disagree, so the trace is a poor training target); retrieved text that reached no prompt. Fix each one.
+- Retrieved text must reach a prompt: if no `acquire.retrieve*` document appears in any prompt or in the returned rows,
+  the pipeline warns. A field that holds the documents but that no prompt formats does not count.
+- `INFO:` lines (dim) are about how the code is written: a step calls no Forger ops (write its checks as ops such as
+  `filter.by_predicate`), only one step, no quality / diversity filter or inspect op ran, an op ran outside a step.
+  Never add a no-op filter just to quiet one. The summary's "filters that removed nothing" notes are not warnings.
+- These checks use an op's category: your own `@op` quality filter needs `@op(category="filter")` to count.
+- Suppress only what you checked in the rows and found harmless, with a flag whose value says why:
 
   ```python
   @step(suppress_truncation_warning="<why these rows are still fine>")
@@ -79,69 +56,56 @@ them, and score lists of over 100,000 rows, have none: rerun with `_no_cache=Tru
   def main(model): ...
   ```
 
-  Step flags: `suppress_truncation_warning` (completions cut off at `max_tokens`) and `suppress_no_ops_warning` (the
-  step called no Forger ops). Pipeline flags: `suppress_no_quality_filter_warning`,
-  `suppress_no_diversity_filter_warning`, `suppress_no_inspect_warning`, and `suppress_retrieval_warning` (retrieved
-  text reached no prompt). Nothing else can be suppressed: parse failures, provider errors, and judge calls with no
-  score lose rows a fix gets back, and a yield miss means `min_yield` / `max_yield` should say the yield you expect.
-  A step's problem is suppressed on that step, never pipeline-wide: truncation in a draft step that is regenerated
-  later may not matter, while truncation in the answer step does. A suppressed problem is not printed; the step's or
-  pipeline's record keeps it, with its size and your reason, in `.suppressed` (e.g. `inspect_step("draft").suppressed`).
-  Suppressed problems do not count for `strict=True`.
-  Suppress only what you checked in the rows; when a fix exists (a larger `max_tokens`, a filter), make the fix
-  instead, and do not set a flag next to a fix "in case". A misspelled flag raises `TypeError` (with the closest
-  flag); a reason under 3 words, or a placeholder or example reason, raises `ValueError`. A flag whose problem never
-  fired in any run of that step (or the pipeline) is reported so it cannot hide a later problem: as a warning for
-  `suppress_truncation_warning` and `suppress_retrieval_warning` (`suppress_truncation_warning on draft suppressed
-  nothing (no truncation occurred); remove it`), as an `INFO:` line for the others; limited runs skip this check. A line
-  whose problem has a flag ends with it in brackets, e.g. `INFO: no inspect op ran
-  [@pipeline(suppress_no_inspect_warning=...)]`.
-- Retrieved text that reaches no prompt: inside a pipeline, each `acquire.retrieve*` call fingerprints the documents it
-  returns (three 60-character pieces of each document's `text`, or its longest string; documents under 200 characters
-  are skipped, and at most 2,000 per run are fingerprinted). Every `Model` / `LocalModel` / `TinkerModel` prompt is
-  checked for them, ignoring whitespace, also one answered from the request cache, and so are the string values of the
-  rows the pipeline returns. If none appears anywhere, the pipeline warns: `acquire.retrieve_from_web: none of the 223
-  retrieved documents were used in any of the 1,840 prompts or the output; put their text in your prompts`. A field
-  that carries the documents but that no prompt formats does not count, unless the pipeline returns the rows that hold
-  it. When fewer than 10% of the documents were used, an `INFO:` line says so instead: `acquire.retrieve_from_web: only
-  3 of 77 retrieved documents (4%) were used in a prompt or the output`. Cached ops and steps replay what their first
-  run saw, so a cached rerun gives the same verdict. A result cached outside a pipeline, or by an older Forger, has
-  unknown prompts, so the check says nothing for that run rather than warn falsely. Direct `source.fetch()` calls are
-  not tracked.
-- These checks use each op's category, not its name. Ops under `pyforger.acquire/alter/filter/inspect` have their
-  package's category; your own `@op` is `"other"` (even `@op(name="filter.x")`) unless it declares one, e.g.
-  `@op(category="filter")` for a custom quality filter.
-- Filter notes: the pipeline summary lists the steps that ran no filter and the filters that removed nothing (op, step,
-  and rows seen). These are notes, not warnings, and `strict=True` does not raise on them: a generate-only step
-  followed by a filter step is fine, and a filter that removes nothing may be a check that passed or one that tests
-  nothing. Do not add a filter only to quiet them.
-- `strict=True` on `@step` or `@pipeline` turns `WARNING:` and `INFO:` lines into errors, also on cached runs; a step that
-  fails strict mode is not cached. `prod=True` or the environment variable `FORGER_STEP_REPORT=0` silences the reports.
-  `pyforger.inspect.inspect_step(name)` re-prints the full report of the latest run of a step, with up to 10 sample
-  rows. It also works from another process (e.g. a shell, while the pipeline runs under `nohup`): every step saves its
-  report under `$FORGER_CACHE/step_reports/`.
-- Sample rows: `@step(sample=3)` shows three output rows (of each stream) instead of one. `@step(show=["statement"])`
-  prints those fields of each sample row in full, line breaks kept, as an indented block under the row (other values
-  as JSON); the other fields stay in the table, cut or summarized.
-- Long sample values are summarized by shape rather than cut, e.g. `[5 items] a.py, b.py, c.py, …` or
-  `def solve(n): … (312 lines, 9.8k chars, python)`. By default these structural summaries are all you get; they are
-  free. For a one-sentence LLM summary of each long value as well, call `pyforger.steps.set_report_model(model)` or
-  set `FORGER_REPORT_MODEL=<litellm model id>` (key from `LITELLM_API_KEY`). The sentence is an extra `LLM:` line
-  under the value's own text and says what the value says (its task, method, numbers), not whether it is good; check
-  the value itself (`show=` or `inspect_step`) before trusting it. That costs up to 8 LLM calls per printed
-  report, cached on disk and left out of the step and pipeline totals (the spend ledger and `FORGER_MAX_COST_USD`
-  still count them); silenced reports make no calls. A cheap model without reasoning is enough. Without a report
-  model, the first report with a long value logs (at INFO) how to set one; `set_report_model(None)` turns summaries
-  off and silences that.
-- Threads: ops called from `ThreadPoolExecutor` workers are not itemized in the step report (the step gets an `INFO:` line
-  instead of an error) unless submitted as `pool.submit(contextvars.copy_context().run, fn, arg)`. Steps called from
-  workers still join the pipeline, and their spend counts toward it (and its cap) as it arrives. Each op, step, and
-  pipeline counts only its own LLM calls, also when several run at the same time. An op that raised is listed as
-  `RAISED` with what it spent. LLM calls from workers that did not copy the context and run no step belong to no
-  step or pipeline: while exactly one pipeline runs, its report lists them as one `unattributed` line (it may include
-  other threads in the process), kept out of its totals and its `max_cost_usd`.
-- Concurrent steps: `my_step.submit(*args, **kwargs)` starts a step in a background thread and returns a
-  `concurrent.futures.Future`; `.result()` returns its rows or re-raises its error. Use it for independent branches:
+  A line that can be suppressed ends with its flag in brackets, e.g.
+  `INFO: no inspect op ran [@pipeline(suppress_no_inspect_warning=...)]`. Step flags: `suppress_truncation_warning`,
+  `suppress_no_ops_warning`. Pipeline flags: `suppress_no_quality_filter_warning`,
+  `suppress_no_diversity_filter_warning`, `suppress_no_inspect_warning`, `suppress_retrieval_warning`.
+- Nothing else can be suppressed: parse failures, provider errors, and missing judge scores lose rows a fix gets back;
+  for a yield miss, set `min_yield` / `max_yield` to the yield you expect.
+- Suppress on the step, not pipeline-wide: truncation in a draft step that is regenerated later may not matter;
+  in the answer step it does. When a fix exists (larger `max_tokens`, a filter), make the fix, and do not add a flag
+  next to it "in case": a flag that suppressed nothing is reported.
+- A misspelled flag raises `TypeError`; a reason under 3 words or a placeholder raises `ValueError`. Suppressed
+  problems stay in the record (`inspect_step("draft").suppressed`).
+
+### Limited runs
+
+Run every new pipeline version with `FORGER_LIMIT=3 python pipeline.py` (or `@pipeline(limit=3)`) first. Every step
+gets at most 3 rows per rows argument, so every op runs in about a minute and a wrong keyword fails at once, not
+minutes into the full run. `FORGER_LIMIT=50` is a pilot: it shows each filter's yield and the cost per row before you
+pay for every row.
+
+- Only `acquire.sample_from_LLM` (`n`) and `acquire.retrieve*` (`queries`, `n`) also cap their counts; other ops that
+  make rows from nothing still make all of them.
+- Outputs are not representative. A yield miss on fewer than 20 rows is only `INFO:`; a step that drops every row is a
+  warning, since later steps then check nothing.
+- The full run recomputes every step but reuses the limited run's completions from the request cache, e.g.
+  `sample_from_LLM(n=100)` asks only for 97 more. `limit=0` turns it off even when the variable is set.
+
+### Spending caps and the spend ledger
+
+- `@pipeline(max_cost_usd=20)` / `@pipeline(max_token_units=2e6)` cap one pipeline run; `FORGER_MAX_COST_USD` and
+  `FORGER_MAX_TOKEN_UNITS` cap all spend in the process. At a cap the next request raises
+  `pyforger.BudgetExceededError`; in-flight requests finish, so spend can pass a cap slightly.
+- Gateway models without LiteLLM pricing add $0: cap them in token units.
+- Caps are separate from the shared quotas (`FORGER_TOKEN_UNIT_LIMIT`, Tinker's dollar ledger), which also apply.
+- Every model call is appended to the spend ledger (`$FORGER_SPEND_LEDGER`, default `$FORGER_CACHE/spend.jsonl`) as
+  it happens, so killed runs keep their record. `pyforger.inspect.spend(since="2026-10-16")` totals it by run,
+  pipeline, and step.
+- Reports show a `units` column for models with token-unit weights (see the Cost section of [AGENTS.md](../AGENTS.md)).
+
+### Spend projection
+
+A batch of model requests that would not fit stops early instead of spending what is left. Once 5% of a batch has
+finished (batches under 40 completions are skipped), each new request checks that the rest fits every cap and the
+token-unit quota; if not, it raises `pyforger.SpendProjectionError` (a `BudgetExceededError`) with the projected cost.
+Make the op cheaper (fewer rows, samples, or judges, a cheaper model, shorter outputs) and rerun: finished requests
+come from the request cache. `FORGER_PROJECT_SPEND=0` turns the check off.
+
+### Concurrent steps and threads
+
+- `my_step.submit(*args)` runs a step in a background thread and returns a `Future`; use it for independent
+  branches. Call `.result()` on each one: errors re-raise there.
 
   ```python
   impossible = make_impossible.submit(verified[:n], writer, judge)
@@ -149,62 +113,8 @@ them, and score lists of over 100,000 rows, have none: rerun with `_no_cache=Tru
   rows = assemble(impossible.result(), hard)
   ```
 
-  The step runs in a copy of the caller's context, so it joins the pipeline, counts toward its caps, and keeps its own
-  report and usage. At most `pyforger.steps.SUBMIT_WORKERS` (8) submitted steps run at once; the rest queue.
-  `.submit` inside a step raises like a nested call. The summary lists steps in the order they were started or
-  submitted. When the pipeline function returns, it waits for submitted steps still running and raises the error of
-  any whose `.result()` was never called; when it raises (or on Ctrl-C), queued steps are cancelled and running ones
-  are not waited for.
-- Cost: a cached step costs nothing this run; its line shows the time and cost of the run that cached it (`cached ·
-  originally 37.9s · $0.50`), and the pipeline summary separates what was spent this run from
-  `cached (originally $X)`.
-- Spend ledger: every usage record (`Model`, `TinkerModel`, `LocalModel`, `dynamic_step` agents) is appended and
-  flushed as it is recorded to `$FORGER_SPEND_LEDGER`, else `$FORGER_CACHE/spend.jsonl` (one JSON line: timestamp,
-  pid, run id, pipeline, step, op, model id, tokens, cost, token units), so killed runs keep their record. `Model`
-  and `TinkerModel` record each request as it finishes, also when the batch later raises; `LocalModel` records a
-  batch when it returns. `FORGER_SPEND_LEDGER=0` turns the ledger off.
-  `pyforger.inspect.spend(since="2026-10-16")` prints and returns the totals by run, pipeline, and step.
-- Token units: for models with fixed token-unit weights (DeepSeek-V4-Flash, GLM-5.3; see the Cost section of
-  [AGENTS.md](../AGENTS.md)), each response's units reach its op, step, and pipeline as it arrives, and the reports
-  add a `units` column. Other models (including `TinkerModel` and `LocalModel` students) add no units; their ledger
-  lines have `"token_units": null`. A request-cache hit or a cached step adds none.
-- Spending caps: `@pipeline(max_cost_usd=20)` caps one pipeline run in dollars and `@pipeline(max_token_units=2e6)`
-  in token units; `FORGER_MAX_COST_USD=40` and `FORGER_MAX_TOKEN_UNITS=5e6` cap all spend in the process
-  (unattributed calls included). All must be numbers >= 0. Gateway models without LiteLLM pricing add $0, so cap
-  them in units. Once spend reaches a cap, the next model request raises `pyforger.BudgetExceededError`: `Model` and
-  `TinkerModel` check before each request (after it gets a concurrency slot), `LocalModel` before each batch, and
-  `dynamic_step` before starting an agent and during its run. Requests already in flight finish and are recorded, so
-  spend can pass a cap by what they cost (or by one agent step). These caps are separate from the shared quotas,
-  which also apply: the token-unit quota (`FORGER_TOKEN_USAGE_FILE` / `FORGER_TOKEN_UNIT_LIMIT`, which raises
-  `TokenUnitQuotaExceeded`; `dynamic_step` agents are charged to it and checked against it like `Model` requests)
-  and `TinkerModel`'s dollar ledger (`FORGER_TINKER_USAGE_FILE`, which raises
-  `TinkerBudgetExceeded`). The caps count this process's spend; the quotas count every process sharing the file.
-- Spend projection: a batch of model requests that would not fit stops early instead of spending what is left. Once
-  5% of a batch's completions have finished (at least 10 requests; batches under 40 completions are skipped), every
-  new request checks that the rest fits what is left under each cap above and the token-unit quota, even at the 95%
-  lower bound of the cost per completion so far. If not, it raises `pyforger.SpendProjectionError` (a
-  `BudgetExceededError`), e.g. "alter.generate_from_context in step solve: the first 160 of 3,200 completions cost
-  1,210,000 token units; the other 3,040 would cost about 22,990,000 token units (at least 20,100,000), but the
-  token-unit quota (FORGER_TOKEN_UNIT_LIMIT) has 18,000,000 token units left". A batch of several prompts is sent in
-  a fixed shuffled order (results keep the input order), so rows sorted hardest-first do not make the first requests
-  look typical. Finished requests are in the request cache, so after making the op cheaper (fewer samples or judges,
-  a cheaper model, shorter outputs, fewer rows) the rerun does not pay for them again. `FORGER_PROJECT_SPEND=0`
-  turns the check off.
-- Limited runs: `FORGER_LIMIT=3 python pipeline.py` (or `@pipeline(limit=3)`) runs every step on at most 3 rows.
-  Run every new pipeline version this way first (a smoke run): it exercises every op in about a minute, so a wrong
-  keyword or a missing argument fails at once instead of minutes into the full run. A larger limit is a pilot:
-  `FORGER_LIMIT=50` shows each filter's yield and the cost per row on a sample before you pay for every row. Inside
-  the pipeline, every `@step` call cuts each rows argument (each of several inputs, `*rows` items too) to its first
-  N rows. These ops also cap their counts: `acquire.sample_from_LLM` (`n`) and `acquire.retrieve` /
-  `retrieve_from_*` (the first N `queries`, `n` at most N). Other ops keep their counts, so a step that makes rows
-  from nothing in some other way still makes all of them. Step reports say `LIMIT: first 3 of 120 rows`, and the
-  summary ends with `LIMITED RUN (limit=3): at most 3 rows per step; outputs are not representative`. A step that
-  drops every row of a limited run is a warning, since the steps after it then check nothing. Limited results are
-  cached under keys that include the limit, so a later full run never reads or overwrites them and recomputes every
-  step. A second limited run of the same code reuses them. The request cache is not keyed on the limit, though, so
-  the full run sends no model request the limited run already sent for the same rows: `generate_from_context` asks
-  only about rows 4 onward, and `sample_from_LLM(n=100)` asks for 97 more samples. `limit=0` turns it off even when
-  the variable is set. The old names `@pipeline(smoke=3)` and `FORGER_SMOKE_ROWS=3` still work.
+- Ops called from your own `ThreadPoolExecutor` workers are not itemized in the step report, and their spend is
+  outside the pipeline's caps, unless submitted as `pool.submit(contextvars.copy_context().run, fn, arg)`.
 
 ## Composing a pipeline
 
@@ -236,11 +146,10 @@ def main(seeds, model):
     return dedupe(translate(seeds, model))
 ```
 
-Each step prints a report when it returns, and the pipeline prints a summary at the end (the `dedupe` report is left
-out here):
+Each step prints a report when it returns, and the pipeline prints a summary at the end (shortened here):
 
 ```text
-step translate ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+step translate ───────────────────────────────────────────────────────────────────
   Translate each seed into Spanish and drop empty or very long results.
   42 → 40 rows (yield 0.95) · 0.5s · 5,040 in / 630 out tokens · $0.0034
   fields: text str · spanish str  (+ spanish)
@@ -256,19 +165,14 @@ step translate ─────────────────────�
           0     1  ██▌                           no
           1     1  ██▌                           no
           5     3  ███████▋                      yes
-          6     6  ███████████████▎              yes
-          7     4  ██████████▏                   yes
           8    11  ████████████████████████████  yes
-          9    10  █████████████████████████▌    yes
-         10     3  ███████▋                      yes
-         11     3  ███████▋                      yes
+         ...
 
   sample rows (1 of 40)
   #   text                                             spanish
-  ────────────────────────────────────────────────────────────────────────────────────────────────
   0   Explain the capital of France in one sentence.   Explica la capital de Francia en una frase.
 
-pipeline main ──────────────────────────────────────────────────────────────────────────────────────────────────────────
+pipeline main ────────────────────────────────────────────────────────────────────
   2 steps · 42 → 27 rows (yield 0.64) · 0.5s · 5,040 in / 630 out tokens · $0.0034
 
   step        in   out   yield   time      cost
@@ -280,148 +184,57 @@ pipeline main ──────────────────────
   INFO: no inspect op ran [@pipeline(suppress_no_inspect_warning=...)]
 ```
 
-Run again and both steps come from the cache, one line each, before the same summary:
+For an iterative pipeline, keep the outer loop in Python and make each round a `@step`, so finished rounds come from
+the cache on the next run.
 
-```text
-step translate · 42 → 40 rows · cached · originally 0.5s · $0.0034 ─────────────────────────────────────────────────────
-
-step dedupe · 40 → 27 rows · cached · originally 0.0s ──────────────────────────────────────────────────────────────────
-```
-
-`pyforger.inspect.inspect_step("translate")` prints the full report of the latest run, with up to 10 sample rows.
-When a filter removes nothing, or a step runs no filter, the summary adds a `filters` section:
-
-```text
-  filters
-  steps without a filter: add_difficulty
-  filters that removed nothing (a check that passed, or one that tests nothing):
-    filter.by_exact_match in seed_topics · 10 rows
-```
+Module import time should not execute work. LLM calls, file I/O, and any `@op`-decorated call belong inside a function
+body.
 
 ### Several inputs and output streams
 
 A step may take several lists of rows and return a dict of named row lists (streams); a later step takes one stream.
-The rows arguments are the first argument when it is a list, and any other argument that is a non-empty list of dicts
-or is annotated `list[dict]` / `list[X]`. Models, numbers, strings, and other lists (e.g. topic names after the first
-argument) are not counted. The pipeline may return anything; its summary counts a returned list or dict of lists and
-otherwise shows only the input (`10 rows in`).
+Rows arguments are the first argument when it is a list, and any other argument that is a non-empty list of dicts or is
+annotated `list[dict]` / `list[X]`. The report and the pipeline table count each input and stream.
 
 ```python
-class Assembled(TypedDict):  # optional; dict[str, list[X]] checks every stream against X
+class Assembled(TypedDict):  # optional; validates each stream like list[X]
     train: list[TrainRow]
     refusals: list[RefusalRow]
 
 @step
 def assemble(solvable, refusals) -> Assembled:
     """Label solved problems for training and keep refusals as their own set."""
-    train = label_kind(solvable, "solve")
-    refused = label_kind(refusals, "refuse")
     return {
-        "train": filter.by_length(train, instruction_field="solution", min_len=2),
-        "refusals": filter.by_exact_match(refused, field="problem"),
+        "train": filter.by_length(label_kind(solvable, "solve"), instruction_field="solution", min_len=2),
+        "refusals": filter.by_exact_match(label_kind(refusals, "refuse"), field="problem"),
     }
 
 @pipeline
 def coding(writer, solver, judge_model):
     tried = attempt(write_problems(TOPICS, writer), solver)  # {"solvable": [...], "refusals": [...]}
     out = assemble(judge(tried["solvable"], judge_model), tried["refusals"])
-    train = [r for r in out["train"] if "heap" not in r["problem"]]
-    return {"train": format_train(train), "refusals": out["refusals"]}
+    return {"train": format_train(out["train"]), "refusals": out["refusals"]}
 ```
-
-The step report counts each input and stream, with a fields line and sample rows per stream (`sample=` and `show=`
-apply to each); the yield uses the sums. The pipeline table keeps the sums in a step's row, with its inputs (`+`) and
-streams (`→`) on dim rows below:
-
-```text
-step assemble ──────────────────────────────────────────────────────────────────────────────────────────────────────────
-  Label solved problems for training and keep refusals as their own set.
-  solvable 4 + refusals 3 → train 4 · refusals 3 (yield 1.00) · 0.0s
-  train fields: problem str · solution str · refusal str · kind str  (+ kind)
-  refusals fields: problem str · solution str · refusal str · kind str  (+ kind)
-  rows validated: any → train list[TrainRow] · refusals list[RefusalRow]
-
-pipeline coding ────────────────────────────────────────────────────────────────────────────────────────────────────────
-  5 steps · 10 → train 3 · refusals 3 (yield 0.60) · 0.0s · 12,100 in / 4,284 out tokens · $0.052
-
-  step             in   out   yield   time      cost
-  ─────────────────────────────────────────────────────
-  write_problems   10    10    1.00   0.0s    $0.018
-  attempt          10    10    1.00   0.0s    $0.031
-    → solvable            7
-    → refusals            3
-  judge             7     4    0.57   0.0s   $0.0028
-  assemble          7     7    1.00   0.0s         -
-    + solvable      4
-    + refusals      3
-    → train               4
-    → refusals            3
-  (python) train    4     3    0.75
-  format_train      3     3    1.00   0.0s         -
-```
-
-A cached step reads `step assemble · solvable 4 + refusals 3 → train 4 · refusals 3 · cached · originally 0.0s`.
-With a `TypedDict` return hint each stream is validated like `list[X]` and must be one the `TypedDict` names; errors
-name the stream and row (`output stream 'refusals' row 1 does not match RefusalRow: ...`). A `list[X]` hint on any
-rows parameter validates that input (`input refusals row 0 ...`). A dict with a value that is not a list is an error.
-
-An iterative pipeline keeps the outer loop in Python and makes each round a `@step`, so cached rounds are reused
-across runs:
-
-```python
-import random
-
-@step
-def one_round(rows, model):
-    """Sample new rows from in-context examples and keep the diverse ones."""
-    in_context_examples = random.sample(rows, min(len(rows), 5))
-    prompt = ...  # construct a prompt using the in-context examples
-    new = acquire.sample_from_LLM(prompt=prompt, model=model, n=64)
-    return rows + filter.by_rouge_l(new, field="text", threshold=0.7)
-
-@pipeline
-def run_pipeline(seeds, model, rounds=5):
-    rows = seeds
-    for _ in range(rounds):
-        rows = one_round(rows, model)
-    return rows
-```
-
-Module import time should not execute work. LLM calls, file I/O, and any `@op`-decorated call belong inside a function body.
 
 ## Data Generation Patterns
 
-We often see some common patterns in data generation pipelines. Here is an incomplete list of examples:
+Common patterns (not a complete list):
 
-- **Agent-as-a-step:** Treat an agent as a single step in a larger pipeline. The agent can perform complex reasoning or
-multi-turn interactions internally, customized to an individual input in the pipeline. This can be slower but allows for
-more sophisticated processing within a single pipeline step.
-- **Retrieval-augmented generation:** First retrieve relevant information (e.g. from the web) and then condition
-data generation on this (either directly, for simple/consistently-structured content, or using the "dynamic step"
-building block to perform case-by-case extraction of usable details from the retrieved links). It is almost always
-better to retrieve knowledge before generating content, rather than relying solely on the model's parametric knowledge.
-- **Rubric-based filtering:** For complex tasks where quality is hard to assure with simple heuristics, generate a
-rubric (using `pyforger.acquire.generate_custom_rubric_criteria`) and then use multiple `by_llm_score` calls
-with each rubric item as a separate judge to filter for high-quality outputs that meet multiple criteria.
-- **Overgenerate and filter:** Generate more candidates than needed (especially early in a pipeline) and then apply
-`pyforger.filter` operations to assure quality and diversity. Forger offers tons of filters to make this worthwhile.
-- **Strong-vs-weak gap:** For a given input, generate one output with a "weak" model (e.g. "gemini-3.1") and one with
-multiple "expert" models (e.g. multiple calls of "gemini-3.5" with slightly different
-prompts or another strong model). Then choose only the rows where the expert models agree with each other (answer is
-likely correct) but disagree with the non-expert model (input is not too easy).
-- **Back-translation:** First retrieve or generate outputs (e.g. math proofs) and then "back-translate" a suitable
-input that could have produced that output (e.g. an English description of a math problem). This can be done with two
-separate `@op`-decorated functions, one for the forward direction and one for the backward direction.
-- **Self-Taught Reasoner / STaR (extending thinking for reasoning problems):** This is the Self-Taught Reasoner (STaR)
-approach ([Zelikman et al., 2022](https://arxiv.org/abs/2203.14465)), closely related to On-Policy Distillation
-(Agarwal et al., 2023). When you have prompts paired with *verified*
-answers (e.g. competition-math problems with checked integer answers) but want long chain-of-thought traces for SFT,
-do not copy reasoning from a stronger teacher -- generate it from the *student* you intend to finetune. This is
-generally necessary for training reasoning-style models on tasks that require extended reasoning, such as difficult
-math, programming, or embodied reasoning. Sample `n` solutions per prompt from the student (use `acquire.TinkerModel`
-to sample the base student or its `tinker://` checkpoint on Tinker, where the `n` samples share one prefill, or
-`acquire.LocalModel` to run it on a local GPU via vLLM; set a generous `max_tokens` so traces are not truncated), keep
-only the solutions whose final answer matches the verified answer, and use each kept trace as a training target.
-`alter.self_taught_reasoner` implements exactly this: it returns one row per correct sample (a prompt with 0 correct
-samples drops out), with the student's reasoning trace and answer split into separate fields. Tinker samples are
-charged to the Tinker dollar budget when one is configured (see `acquire.md`).
+- **Retrieval-augmented generation:** retrieve knowledge (e.g. from the web) first and condition generation on it,
+  directly or via [`dynamic_step`](dynamic_step.md) for case-by-case extraction. This is almost always better than
+  relying on the model's parametric knowledge.
+- **Overgenerate and filter:** generate more candidates than needed, especially early, then filter for quality and
+  diversity.
+- **Rubric-based filtering:** for quality that simple heuristics cannot check, generate a rubric with
+  `acquire.generate_custom_rubric_criteria` and use one `filter.by_llm_score` judge per rubric item.
+- **Agent-as-a-step:** an agent ([`dynamic_step`](dynamic_step.md)) handles one input with multi-turn reasoning
+  inside a larger pipeline; slower, but more flexible.
+- **Strong-vs-weak gap:** answer each input with a weak model and several strong ones; keep rows where the strong
+  models agree with each other (likely correct) but not with the weak one (not too easy).
+- **Back-translation:** retrieve or generate outputs (e.g. proofs), then generate an input that could have produced
+  each one.
+- **Self-Taught Reasoner (STaR):** for prompts with *verified* answers that need long chain-of-thought SFT targets,
+  generate the reasoning from the *student* you will finetune, not a stronger teacher
+  ([Zelikman et al., 2022](https://arxiv.org/abs/2203.14465)). `alter.self_taught_reasoner` samples `n` solutions per
+  prompt (from `acquire.TinkerModel` or `acquire.LocalModel`) and keeps one row per sample whose final answer matches.
+  Set a generous `max_tokens` so traces are not truncated. See [alter.md](alter.md).
