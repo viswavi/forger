@@ -31,7 +31,14 @@ def runner_source() -> str:
     if settings.get("custom_tokenizer"):
         settings["custom_tokenizer"] = "/opt/tokenizer"
     disable_cache_key = os.environ.get("FORGER_DISABLE_PROMPT_CACHE") == "1"
-    llm_type = ConfiguredLLM if disable_cache_key else LLM
+    limit = os.environ.get("FORGER_CONDENSER_MAX_TOKENS")
+    if limit:
+        class BudgetConfiguredLLM(PromptBudgetLLM, ConfiguredLLM):
+            pass
+        llm_type = BudgetConfiguredLLM if disable_cache_key else PromptBudgetLLM
+        settings["prompt_token_limit"] = int(limit)
+    else:
+        llm_type = ConfiguredLLM if disable_cache_key else LLM
     llm = llm_type(**settings)"""
     runtime = Path(__file__).with_name("_sdk_runtime.py").read_text()
     runtime = runtime.replace("from __future__ import annotations", "")

@@ -306,3 +306,26 @@ def test_lightweight_config_matches_real_sdk_public_settings(configured, monkeyp
     model = Model("openai/gpt-4o", api_base="http://127.0.0.1:9/v1", **options)
     settings = json.loads(harbor_agent_config(model).env["FORGER_LLM_CONFIG"])
     assert settings == agent_llm(model).model_dump(mode="json", include=set(settings))
+
+
+def test_generated_budget_llm_preserves_cache_compatibility():
+    from pyforger._harbor_model import runner_source
+
+    source = runner_source()
+    assert 'settings["prompt_token_limit"] = int(limit)' in source
+    assert "class BudgetConfiguredLLM(PromptBudgetLLM, ConfiguredLLM)" in source
+    namespace = {"__name__": "generated_budget_test"}
+    exec(compile(source, "generated-runner", "exec"), namespace)
+    combined = type(
+        "BudgetConfiguredLLM",
+        (namespace["PromptBudgetLLM"], namespace["ConfiguredLLM"]),
+        {},
+    )
+    llm = combined(
+        model="openai/gpt-4o",
+        api_key="test",
+        prompt_token_limit=80000,
+        max_output_tokens=49152,
+    )
+    assert llm.prompt_token_limit == 80000
+    assert llm.max_output_tokens == 49152
