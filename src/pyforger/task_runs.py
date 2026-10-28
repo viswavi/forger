@@ -9,7 +9,12 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
-from pyforger.agent_backend import AgentBackend, AgentSpec, WorkspaceTask
+from pyforger.agent_backend import (
+    AgentBackend,
+    AgentSpec,
+    WorkspaceTask,
+    validate_workspace_path,
+)
 from pyforger.agent_diagnostics import (
     ArtifactSafetyError,
     sanitizer,
@@ -109,18 +114,18 @@ def run_recorded_task(
                 sanitizer([agent])(retained), output, [agent], journal_memo
             )
         )
-        validate_artifact_bytes(
-            {
-                name: result["files"][name]
-                for name in task.outputs
-                if name in result["files"]
-            },
-            [agent],
-        )
-        for name in task.outputs:
-            if name not in result["files"]:
-                continue
-            content = result["files"][name]
+        files = {
+            name: content
+            for name, content in result["files"].items()
+            if any(
+                name == declared or name.startswith(declared + "/")
+                for declared in task.outputs
+            )
+        }
+        for name in files:
+            validate_workspace_path(name)
+        validate_artifact_bytes(files, [agent])
+        for name, content in files.items():
             if isinstance(content, str):
                 content = content.encode("utf-8")
             if not isinstance(content, (bytes, FileInput)):
@@ -132,7 +137,11 @@ def run_recorded_task(
             else:
                 with path.open("xb") as stream:
                     stream.write(content)
-        missing = [name for name in task.outputs if name not in result["files"]]
+        missing = [
+            name
+            for name in task.outputs
+            if not any(path == name or path.startswith(name + "/") for path in files)
+        ]
         if missing and result["passed"] is True:
             raise ValueError(f"Missing declared outputs: {missing}")
         report = {

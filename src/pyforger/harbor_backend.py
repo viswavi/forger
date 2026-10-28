@@ -17,7 +17,7 @@ import shlex
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pyforger._sdk_install import SDK_COMMIT, SDK_REQUIREMENT, TOOLS_REQUIREMENT
 from pyforger.agent_backend import (
@@ -38,6 +38,9 @@ from pyforger.artifacts import (
 )
 from pyforger.evidence_journal import evidence_file_chunks
 from pyforger.local_agent import _record_key
+
+if TYPE_CHECKING:
+    from pyforger.harbor import HarborResult
 
 _NETWORK = {
     Network.OFFLINE: "no-network",
@@ -238,6 +241,33 @@ def _failure_kind(outcome: dict[str, Any]) -> str | None:
     return None if outcome["status"] == "completed" else "infrastructure"
 
 
+def _collect_outputs(
+    rollout: HarborResult, outputs: tuple[str, ...], output: Path
+) -> dict[str, FileInput]:
+    from pyforger.harbor import collect_trial_files
+
+    collected: dict[str, FileInput] = {}
+    if not outputs:
+        return collected
+    output.mkdir()
+    destinations = {name: f"artifact-{index}" for index, name in enumerate(outputs)}
+    collect_trial_files(
+        rollout,
+        {"/work/" + name: target for name, target in destinations.items()},
+        output,
+    )
+    for name, destination in destinations.items():
+        path = output / destination
+        if path.is_file():
+            collected[name] = OwnedFileInput.snapshot(path)
+        elif path.is_dir():
+            for entry in ArtifactRef.capture(path).files:
+                collected[name + "/" + entry.path] = OwnedFileInput.snapshot(
+                    path / entry.path
+                )
+    return collected
+
+
 class HarborBackend:
     """Execute agents in a Harbor environment (Docker by default)."""
 
@@ -321,7 +351,6 @@ class HarborBackend:
         from pyforger.harbor import (
             HarborRequest,
             HarborTaskRunner,
-            collect_trial_files,
             trial_directory,
             trial_outcome,
         )
@@ -374,21 +403,7 @@ class HarborBackend:
                     "harbor_result": str(retained / "result.json"),
                     "trial_dir": str(retained),
                 }
-            collected: dict[str, bytes | FileInput] = {}
-            if task.outputs:
-                (root / "collected").mkdir()
-                destinations = {
-                    name: f"artifact-{index}" for index, name in enumerate(task.outputs)
-                }
-                collect_trial_files(
-                    rollout,
-                    {"/work/" + name: target for name, target in destinations.items()},
-                    root / "collected",
-                )
-                for name in task.outputs:
-                    path = root / "collected" / destinations[name]
-                    if path.is_file():
-                        collected[name] = OwnedFileInput.snapshot(path)
+            collected = _collect_outputs(rollout, task.outputs, root / "collected")
             return AgentRunResult(
                 status=str(outcome["status"]),
                 trajectory=normalized_trajectory,

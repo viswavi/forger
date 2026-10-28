@@ -19,7 +19,13 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from pyforger._streaming_json import JSONReader
 from pyforger.acquire.model import Model
-from pyforger.artifacts import ArtifactRef, ArtifactStore, replace_file_secrets
+from pyforger.agent_backend import validate_workspace_path
+from pyforger.artifacts import (
+    ArtifactRef,
+    ArtifactStore,
+    FileInput,
+    replace_file_secrets,
+)
 from pyforger.usage import combine_usage, usage_record
 
 
@@ -647,26 +653,42 @@ def collect_trial_files(
     *,
     max_bytes: int | None = None,
 ) -> None:
-    """Collect declared files from a verified native Harbor manifest."""
-    from pyforger.artifacts import FileInput
-
+    """Collect verified files or directory descendants, preserving relative paths."""
     trial = trial_directory(rollout)
     manifest = json.loads((trial / "artifacts/manifest.json").read_text())
     output = Path(output)
+    ArtifactRef.capture(output)
     for source, name in sources.items():
-        target = output / name
-        if target.parent != output or target.is_symlink():
+        validate_workspace_path(name)
+        if len(Path(name).parts) != 1:
             raise ValueError("Output names must be plain basenames")
         entries = [
             row for row in manifest if row["source"] == source and row["status"] == "ok"
         ]
-        if entries:
-            relative = (
-                trial.relative_to(rollout.artifacts.root) / entries[0]["destination"]
-            )
-            source_file = FileInput.capture(rollout.artifacts.path(relative.as_posix()))
-            if max_bytes is not None and source_file.size > max_bytes:
+        if not entries:
+            continue
+        destination = entries[0]["destination"]
+        validate_workspace_path(destination)
+        if not destination.startswith("artifacts/"):
+            raise ValueError("Artifact destination must be under artifacts/")
+        relative = (trial.relative_to(rollout.artifacts.root) / destination).as_posix()
+        if entries[0].get("type") == "directory":
+            if not (rollout.artifacts.root / relative).is_dir():
+                raise ValueError("Missing declared artifact directory")
+            files = [
+                (entry.path, output / name / entry.path[len(relative) + 1 :])
+                for entry in rollout.artifacts.files
+                if entry.path.startswith(relative + "/")
+            ]
+        else:
+            files = [(relative, output / name)]
+        total = 0
+        for path, target in files:
+            source_file = FileInput.from_artifact(rollout.artifacts, path)
+            total += source_file.size
+            if max_bytes is not None and total > max_bytes:
                 raise ValueError("Artifact exceeds read limit")
+            target.parent.mkdir(parents=True, exist_ok=True)
             if target.exists():
                 target.unlink()
             source_file.copy_to(target)
