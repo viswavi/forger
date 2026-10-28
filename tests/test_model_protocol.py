@@ -208,3 +208,16 @@ def test_responses_missing_optional_metadata(endpoint):
     assert result.usage.completion_tokens == 0
     assert result.usage.reasoning_tokens == 0
     assert len(requests) == 1
+
+
+@pytest.mark.parametrize("mode", ["chat", "responses"])
+def test_real_native_cost_and_cache_metadata(endpoint, mode):
+    base, _ = endpoint
+    model = Model("openai/gpt-4o", api_key="test", api_base=base, api_mode=mode)
+    result = model.generate("hello")
+    assert result.usage.prompt_tokens == 7
+    assert result.usage.cost_usd > 0
+    assert model.known_cost_usd == result.usage.cost_usd
+    model.reset_history()
+    assert model.total_cost == 0
+    assert model.total_usage.cost_usd == 0

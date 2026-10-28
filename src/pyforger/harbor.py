@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, SecretStr
 
 from pyforger.acquire.model import Model
 from pyforger.artifacts import ArtifactRef, ArtifactStore
+from pyforger.usage import combine_usage, usage_record
 
 
 class HarborRequest(BaseModel):
@@ -415,29 +416,21 @@ class HarborTaskRunner:
         _, _, _, _, Trial = _sdk()
         try:
             result = None
+            attempt_usage = []
             for attempt in range(_STARTUP_MAX_ATTEMPTS):
                 trial = await Trial.create(config)
                 expected = output / config.trial_name
                 if trial.paths.trial_dir != expected:
                     raise ValueError("Harbor returned an unexpected trial output path")
                 result = await trial.run()
+                attempt_usage.append(_trial_usage(result))
                 if not _transient_startup_failure(result):
                     break
                 if attempt + 1 < _STARTUP_MAX_ATTEMPTS:
                     await asyncio.sleep(_STARTUP_BACKOFF_S[attempt])
             assert result is not None
             payload = _redact(result.model_dump(mode="json"), secrets)
-            n_input, n_cache, n_output, cost = result.compute_token_cost_totals()
-            usage = {
-                key: value
-                for key, value in {
-                    "prompt_tokens": n_input,
-                    "cached_tokens": n_cache,
-                    "completion_tokens": n_output,
-                    "cost_usd": cost,
-                }.items()
-                if value is not None
-            }
+            usage = combine_usage(attempt_usage)
             status = _status(result)
         finally:
             _scrub(output, secrets)
@@ -505,6 +498,39 @@ def execute_script(
     )
 
 
+def _trial_usage(result: Any) -> dict[str, Any]:
+    n_input, n_cache, n_output, cost = result.compute_token_cost_totals()
+    contexts = (
+        [result.agent_result]
+        if result.agent_result is not None
+        else [
+            step.agent_result
+            for step in getattr(result, "step_results", None) or []
+            if step.agent_result is not None
+        ]
+    )
+    known = 0.0
+    complete = bool(contexts)
+    for context in contexts:
+        models = getattr(context, "model_usage", None) or {}
+        if models:
+            known += sum(amount.cost_usd or 0.0 for amount in models.values())
+            complete &= all(amount.cost_usd is not None for amount in models.values())
+        else:
+            known += context.cost_usd or 0.0
+            complete &= context.cost_usd is not None
+    return usage_record(
+        {
+            "prompt_tokens": n_input,
+            "cached_tokens": n_cache,
+            "completion_tokens": n_output,
+            "cost_usd": known if complete else None,
+            "known_cost_usd": known,
+            "cost_complete": complete,
+        }
+    )
+
+
 def trial_directory(rollout: HarborResult) -> Path:
     """Locate the verified native Harbor trial directory."""
     rollout.artifacts.verify()
@@ -525,6 +551,7 @@ def trial_outcome(rollout: HarborResult) -> dict[str, Any]:
         "status": rollout.status,
         "passed": None,
         "harbor_result": str(trial / "result.json"),
+        "usage": usage_record(dict(rollout.usage)),
     }
     exception = native.get("exception_info")
     if exception:

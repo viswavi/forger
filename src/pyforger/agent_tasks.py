@@ -196,6 +196,7 @@ def run_task(
     if retained_trajectory is None and agent.kind in {"oracle", "nop"}:
         retained_trajectory = {"steps": [{"kind": agent.kind, "status": result.status}]}
     return {
+        "usage": result.usage,
         "trajectory": retained_trajectory,
         "failure_kind": result.failure_kind,
         "status": result.status,
