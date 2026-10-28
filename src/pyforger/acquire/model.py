@@ -285,6 +285,12 @@ def _extract_usage(response: Any, *, responses_api: bool = False) -> Usage:
         getattr(details, "reasoning_tokens", 0) if details is not None else 0
     ) or 0
 
+    cache_write_tokens = getattr(
+        getattr(usage, "prompt_tokens_details", None), "cache_creation_tokens", None
+    )
+    if cache_write_tokens is None:
+        cache_write_tokens = getattr(usage, "cache_creation_input_tokens", 0)
+
     return Usage(
         prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
         completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
@@ -293,7 +299,7 @@ def _extract_usage(response: Any, *, responses_api: bool = False) -> Usage:
             getattr(usage, "prompt_tokens_details", None), "cached_tokens", 0
         )
         or 0,
-        cache_write_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0,
+        cache_write_tokens=cache_write_tokens or 0,
     )
 
 

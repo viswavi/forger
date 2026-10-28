@@ -221,3 +221,36 @@ def test_real_native_cost_and_cache_metadata(endpoint, mode):
     model.reset_history()
     assert model.total_cost == 0
     assert model.total_usage.cost_usd == 0
+
+
+@pytest.mark.parametrize(
+    "details,legacy,expected",
+    [
+        ({"cache_creation_tokens": 4}, 9, 4),
+        ({"cache_creation_tokens": 0}, 9, 0),
+        ({}, 9, 9),
+    ],
+)
+def test_native_cache_write_canonical_details_and_legacy_fallback(
+    details, legacy, expected
+):
+    """Real LiteLLM usage retains canonical cache writes, including explicit zero."""
+    from litellm import ModelResponse
+    from litellm.types.utils import Usage as LiteLLMUsage
+    from pyforger.acquire.model import _extract_usage
+
+    native_usage = LiteLLMUsage(
+        prompt_tokens=10, completion_tokens=5, prompt_tokens_details=details
+    )
+    # LiteLLM's constructor overwrites canonical details if both are supplied.
+    # Assign the legacy field afterward to exercise canonical precedence.
+    response = ModelResponse(usage=native_usage)
+    response.usage.cache_creation_input_tokens = legacy
+    if "cache_creation_tokens" in details:
+        response.usage.prompt_tokens_details.cache_creation_tokens = details[
+            "cache_creation_tokens"
+        ]
+    usage = _extract_usage(response)
+    assert usage.cache_write_tokens == expected
+    assert usage.prompt_tokens == 10
+    assert usage.completion_tokens == 5
