@@ -189,9 +189,14 @@ class AgentRunResult:
     validation_attempts: tuple[GenerationAttempt[str, dict[str, bytes]], ...] = ()
     trajectory: dict[str, Any] | None = None
     failure_kind: str | None = None
+    usage: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Classify unsuccessful execution when the backend has no finer cause."""
+        from pyforger.usage import usage_record
+
+        self.usage = usage_record(self.usage or self.diagnostics.get("usage"))
+        self.diagnostics["usage"] = self.usage
         if self.failure_kind is None and self.status != "completed":
             self.failure_kind = (
                 "budget"

@@ -252,6 +252,7 @@ class HarborBackend:
             return AgentRunResult(
                 status=str(outcome["status"]),
                 trajectory=normalized_trajectory,
+                usage=outcome["usage"],
                 failure_kind=_failure_kind(outcome),
                 files=collected,
                 passed=(
