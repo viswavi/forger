@@ -588,6 +588,13 @@ if not args.hide_forger:
         "FORGER_REPORT_MODEL", "litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731"
     )
 
+# No terminal command may block the agent for more than an hour: the agent
+# server refuses a foreground command whose `timeout` exceeds 90% of this
+# threshold (3600 s) and tells the agent to run long work in the background.
+# Agents have passed milliseconds (timeout=120000, i.e. 33 h) on commands that
+# never ended and hung for hours (round 2, 2026-10-28).
+os.environ.setdefault("OH_RUNTIME_IDLE_TIMEOUT_SECONDS", "4000")
+
 os.makedirs(AGENT_SCRATCH_DIR, exist_ok=True)
 os.makedirs(os.environ["FORGER_CACHE"], exist_ok=True)
 os.makedirs(MODEL_OUTPUT_TASK_DIR, exist_ok=True)
@@ -1114,6 +1121,7 @@ try:
                 "PDB_STUDENT_MODEL",
                 "PDB_RUN_TAG",
                 "TZ",
+                "OH_RUNTIME_IDLE_TIMEOUT_SECONDS",
                 "CUDA_VISIBLE_DEVICES",
                 # slime/sglang runtime: without these the agent's RL probes rebuild
                 # the flashinfer JIT cache into the small RAM-backed --compat layer.
