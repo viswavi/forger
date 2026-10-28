@@ -571,7 +571,49 @@ def trial_outcome(rollout: HarborResult) -> dict[str, Any]:
         "usage": usage_record(dict(rollout.usage)),
     }
     exception = native.get("exception_info")
+    execution_path = trial / "verifier/execution.json"
+    if execution_path.is_file():
+        try:
+            execution = json.loads(execution_path.read_text())
+            code = execution["exit_code"]
+            if code is not None and type(code) is not int:
+                raise ValueError("Invalid verifier exit code")
+        except (ValueError, KeyError, TypeError):
+            code = None
+        result["verifier_execution"] = {
+            "exit_code": code,
+            "stdout_path": "verifier/stdout.txt",
+            "stderr_path": "verifier/stderr.txt",
+        }
+        if code != 0:
+            return {
+                **result,
+                "status": "failed",
+                "exception": {
+                    "exception_type": "VerifierExecutionError",
+                    "exception_message": (
+                        f"Verifier did not complete successfully (exit_code={code})"
+                    ),
+                },
+                **({"native_exception": exception} if exception else {}),
+            }
     if exception:
+        if execution_path.is_file() and exception.get("exception_type") in {
+            "RewardFileNotFoundError",
+            "RewardFileEmptyError",
+            "VerifierOutputParseError",
+        }:
+            return {
+                **result,
+                "status": "failed",
+                "exception": {
+                    "exception_type": "VerifierRewardProtocolError",
+                    "exception_message": (
+                        "Verifier completed without a valid binary reward"
+                    ),
+                },
+                "native_exception": exception,
+            }
         return {**result, "exception": exception}
     if exit_code.exists() and exit_code.read_text().strip() != "0":
         return {**result, "exit_code": exit_code.read_text().strip()}
@@ -585,7 +627,13 @@ def trial_outcome(rollout: HarborResult) -> dict[str, Any]:
             or set(rewards) != {"reward"}
             or rewards["reward"] not in (0, 1)
         ):
-            result["status"] = "incomplete"
+            result["status"] = "failed"
+            result["exception"] = {
+                "exception_type": "VerifierRewardProtocolError",
+                "exception_message": (
+                    "Verifier completed without a valid binary reward"
+                ),
+            }
         else:
             result["passed"] = rewards["reward"] == 1
 

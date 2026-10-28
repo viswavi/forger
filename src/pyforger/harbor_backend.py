@@ -199,8 +199,7 @@ def _package(
             "WORKSPACE=/work VERIFIER_DIR=/tests/verifier PYTHONSAFEPATH=1 sh -c "
             + shlex.quote("cd /work\n" + task.verifier)
             + "\nif [ ! -s /logs/verifier/reward.txt ]; then "
-            "cp /work/reward.txt /logs/verifier/reward.txt 2>/dev/null "
-            "|| echo 0 > /logs/verifier/reward.txt; fi\n"
+            "cp /work/reward.txt /logs/verifier/reward.txt; fi\n"
         )
     else:
         checks = " && ".join(f"test -f {shlex.quote(o)}" for o in outputs) or "true"
@@ -212,13 +211,8 @@ def _package(
     original = tests / "verifier-command.sh"
     (tests / "test.sh").rename(original)
     (tests / "test.sh").write_text("#!/bin/sh\nexec python3 -I /tests/launch.py\n")
-    (tests / "launch.py").write_text(
-        "import os, pathlib, subprocess\n"
-        "os.umask(0o077)\n"
-        "for name in ('/tests', '/logs/verifier'):\n"
-        "    pathlib.Path(name).chmod(0o700)\n"
-        "subprocess.run(['sh', '/tests/verifier-command.sh'], check=True, cwd='/tests', "
-        "env={'PATH':'/usr/local/bin:/usr/bin:/bin','HOME':'/root','PYTHONSAFEPATH':'1'})\n"
+    (tests / "launch.py").write_bytes(
+        Path(__file__).with_name("_harbor_verifier.py").read_bytes()
     )
     return ArtifactRef.capture(root)
 
@@ -295,7 +289,7 @@ class HarborBackend:
                 (name, hashlib.sha256(body).hexdigest())
                 for name, body in sorted(self._trusted_verifier_files.items())
             ),
-            "harbor-backend-v2-separate-root-verifier",
+            "harbor-backend-v3-verifier-execution-record",
             SDK_COMMIT,
             json.dumps(backend, sort_keys=True, allow_nan=False),
         )
