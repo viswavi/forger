@@ -317,3 +317,21 @@ def test_scrub_long_whitespace_preserves_exact_bytes(tmp_path):
     path.write_bytes(content)
     _scrub(tmp_path, set())
     assert path.read_bytes() == content
+
+
+def test_diagnostics_standalone_worker_import_has_no_package_dependency(tmp_path):
+    import shutil
+    import pyforger.agent_diagnostics as diagnostics
+
+    shutil.copyfile(diagnostics.__file__, tmp_path / "agent_diagnostics.py")
+    code = (
+        "import importlib.util,sys; "
+        "spec=importlib.util.spec_from_file_location('agent_diagnostics',sys.argv[1]); "
+        "module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module); "
+        "assert module.sanitizer([])({'api_key':'hidden'}) == {'api_key':'[REDACTED]'}; "
+        "assert 'pyforger' not in sys.modules"
+    )
+    subprocess.run(
+        [sys.executable, "-I", "-S", "-c", code, str(tmp_path / "agent_diagnostics.py")],
+        cwd=tmp_path, check=True, capture_output=True, text=True,
+    )

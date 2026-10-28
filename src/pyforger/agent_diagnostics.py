@@ -7,9 +7,8 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any
 
-from pyforger.artifacts import FileInput
-
 if TYPE_CHECKING:
+    from pyforger.artifacts import FileInput
     from pyforger.agent_backend import AgentSpec
 
 _SENSITIVE = re.compile(
@@ -43,6 +42,8 @@ def validate_artifact_bytes(
     files: Mapping[str, str | bytes | FileInput], specs: Iterable[AgentSpec]
 ) -> None:
     """Check exact bytes only; assignment-like scientific source is not a leak."""
+    from pyforger.artifacts import FileInput
+
     secrets = {value.encode("utf-8") for value in credential_values(specs) if value}
     overlap = max(map(len, secrets), default=1) - 1
     for content in files.values():
