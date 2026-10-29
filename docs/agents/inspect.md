@@ -104,8 +104,8 @@ clusters = topic_based_clustering(  # clusters[i] is the topic of rows[i]
 - Pass `context` (what the corpus is, what topics should capture); it improves topic names.
 - Default embeddings need `pip install "pyforger[clustering]"`; without it the op falls back to CPU TF-IDF with a
   warning. `embed_fn` plugs in another backend.
-- From 2000 values on, every visible GPU embeds a share. Batches hold up to `FORGER_EMBED_BATCH_TOKENS` padded
-  tokens (default 16384); a longer text is a batch of its own, never truncated.
+- n values embed on `min(n // 500 + 1, visible GPUs)` GPUs (400 on one, 999 on two). Batches hold up to
+  `FORGER_EMBED_BATCH_TOKENS` padded tokens (default 16384); a longer text is a batch of its own, never truncated.
 
 ## `eval_tree`
 

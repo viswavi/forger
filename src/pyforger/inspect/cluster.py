@@ -25,11 +25,12 @@ from pyforger.utils import get_field, get_formatted_logger
 
 logger = get_formatted_logger("Inspect")
 
-# Fewer documents than this embed on one GPU: each GPU's worker first spends
-# ~10 s starting Python and loading the model. With Qwen3-Embedding-0.6B on two
-# L40S (64 texts per batch then), 1000 ~400-token documents took 19 s on one GPU
-# or two; 2500 took 54 s on one and 37 s on two; 5112 took 105 s and 62 s.
-_MULTI_GPU_MIN_DOCS = 2000
+# Documents per extra GPU: n documents embed on min(n // 500 + 1, visible GPUs)
+# GPUs, e.g. 400 on one, 999 on two. Each GPU's worker first spends ~10 s
+# starting Python and loading the model. With Qwen3-Embedding-0.6B on two L40S
+# (64 texts per batch then), 1000 ~400-token documents took 19 s on one GPU or
+# two; 2500 took 54 s on one and 37 s on two; 5112 took 105 s and 62 s.
+_DOCS_PER_GPU = 500
 
 
 def _warn_if_heavy_reasoning(
@@ -413,8 +414,8 @@ def _default_embed(
 ) -> Any:
     """Embed documents with sentence-transformers, preferring the GPU.
 
-    With two or more visible GPUs and at least `_MULTI_GPU_MIN_DOCS` documents,
-    every GPU embeds a share of them in its own worker process. Batches hold up
+    With 500 or more documents and two or more visible GPUs, up to one GPU per
+    500 documents embeds a share of them in its own worker process. Batches hold up
     to `FORGER_EMBED_BATCH_TOKENS` padded tokens (see `_embed_dp.batch_tokens`).
     """
     try:
@@ -458,13 +459,15 @@ def _default_embed(
 def _embedding_gpus(num_docs: int) -> list[str]:
     """The GPUs to embed `num_docs` documents on, one worker each; [] for one process.
 
-    Every visible GPU (`CUDA_VISIBLE_DEVICES`, else `nvidia-smi`) when there
-    are two or more and at least `_MULTI_GPU_MIN_DOCS` documents: below that,
-    starting a worker and loading the model on each GPU costs more than it saves.
+    `min(num_docs // 500 + 1, visible GPUs)` of the visible GPUs
+    (`CUDA_VISIBLE_DEVICES`, else `nvidia-smi`), e.g. 400 documents on one and
+    999 on two of eight: starting a worker and loading the model on a GPU costs
+    more than it saves on fewer documents.
     """
-    if num_docs < _MULTI_GPU_MIN_DOCS:
+    wanted = num_docs // _DOCS_PER_GPU + 1
+    if wanted < 2:
         return []
-    gpus = _local_dp.visible_gpus()
+    gpus = _local_dp.visible_gpus()[:wanted]
     if len(gpus) < 2:
         return []
     import torch
