@@ -15,7 +15,8 @@ criteria, exactly as one RL reward would (``rubric_rm.code_score``), so targets
 and rubrics that disagree (a solution using ``__slots__``, a grade() that
 crashes) show up before training. ``rubric_verifier`` scores a sampled response
 the same way, e.g. to measure with ``filter.by_pass_at_k`` how often a
-checkpoint already earns full reward on a row.
+checkpoint already earns full reward on a row, and ``rubric_score`` returns the
+score itself, e.g. as the ``grade`` of ``pyforger.inspect.rubric_scores``.
 """
 from __future__ import annotations
 
@@ -201,6 +202,55 @@ def score_targets(
     return [_weighted(row, criteria) for row, criteria in zip(rows, scores)]
 
 
+_GRADER_SOURCES = ("rubric_rm.py", "rubric_worker.py", "rubric_sandbox.py")
+
+
+def _grader_sources() -> tuple[str, ...]:
+    """The reward's grading code, so a grader's cache key changes with it."""
+    return tuple(
+        (Path(__file__).with_name(name)).read_text() for name in _GRADER_SOURCES
+    )
+
+
+def _response_score(response: str, row: dict) -> float | None:
+    """The weighted code score of ``response`` on the row's rubric; may raise."""
+    jobs = _code_jobs(row, response)
+    criteria: list[float | None] = [None] * len(row["rubric"])
+    for j, *job in jobs:
+        criteria[j] = code_score(*job)
+    return _weighted(row, criteria)["score"]
+
+
+class RubricScore:
+    """``(response, row) -> float | None``: see ``rubric_score``."""
+
+    def cache_key(self) -> tuple:
+        """Stable key for Forger's op cache: the grader's sources."""
+        return ("RubricScore",) + _grader_sources()
+
+    def __repr__(self) -> str:
+        """Short name for error messages and reports."""
+        return "rubric_score()"
+
+    def __call__(self, response: str, row: dict) -> float | None:
+        """Score ``response`` with the row's code criteria in the RL sandbox."""
+        return _response_score(response, row)
+
+
+def rubric_score() -> RubricScore:
+    """Forger grade function: a response's weighted code score on its row's rubric.
+
+    ``grade(response, row)`` scores ``response`` as ``score_targets`` scores a
+    target (the RL reward's sandbox, timeouts and weights, over the code
+    criteria; prompt criteria need the judge and are not run). None when the
+    row has no weighted code criteria; an invalid rubric raises. For
+    ``pyforger.inspect.rubric_scores(rows, rubric_score(),
+    response_fields="ground_truth", model=...)``, which bins the scores of
+    targets, samples, and control responses before RL.
+    """
+    return RubricScore()
+
+
 class RubricVerifier:
     """``(response, row) -> bool | None``: see ``rubric_verifier``."""
 
@@ -210,10 +260,7 @@ class RubricVerifier:
 
     def cache_key(self) -> tuple:
         """Stable key for Forger's op cache: the threshold and the grader's sources."""
-        sources = ("rubric_rm.py", "rubric_worker.py", "rubric_sandbox.py")
-        return ("RubricVerifier", self.threshold) + tuple(
-            (Path(__file__).with_name(name)).read_text() for name in sources
-        )
+        return ("RubricVerifier", self.threshold) + _grader_sources()
 
     def __repr__(self) -> str:
         """Short name for error messages and reports."""
@@ -222,13 +269,9 @@ class RubricVerifier:
     def __call__(self, response: str, row: dict) -> bool | None:
         """Score ``response`` with the row's code criteria in the RL sandbox."""
         try:
-            jobs = _code_jobs(row, response)
-            criteria: list[float | None] = [None] * len(row["rubric"])
-            for j, *job in jobs:
-                criteria[j] = code_score(*job)
+            score = _response_score(response, row)
         except Exception:
             return None
-        score = _weighted(row, criteria)["score"]
         return None if score is None else score >= self.threshold
 
 
