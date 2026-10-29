@@ -128,6 +128,7 @@ inspect embedding_dispersion ─────────────────
   would be listed. One-line math problems score lower: one changed number 0.93 (median), a paraphrase 0.88, a
   template variant (same structure, other numbers and objects) 0.77, the nearest different problem 0.66. Lower it to
   0.9 for short rows. Under TF-IDF, one changed number in a one-line problem scores 0.83 and a paraphrase 0.20.
+  [`filter.by_embedding_similarity`](filter.md) with the same threshold and embedding drops the later row of each pair.
 - **Vendi** ([Friedman & Dieng 2023](https://arxiv.org/abs/2210.02410)): the effective number of distinct rows, from 1
   (all the same) to the sample size, on the same equal-size samples. It cannot exceed the embedding's dimension (at
   most 256 for TF-IDF).

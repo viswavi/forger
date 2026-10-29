@@ -10,6 +10,7 @@ Remove rows by criterion. If a filter empties the list, downstream operations re
 | `by_exact_match` | Keep up to `max_count` rows per unique field value. |
 | `by_rouge_l` | Pairwise ROUGE-L diversity filter. |
 | `by_n_gram_overlap` | N-gram overlap diversity filter. |
+| `by_embedding_similarity` | Semantic dedup by embedding cosine; with `reference`, also decontamination. |
 | `by_length` | Filter by word count within a given field. |
 | `by_invalid_response` | Drop empty, identical, or near-identical responses to the instruction. |
 | `by_keyword_blocklist` | Drop responses with certain keywords; default blocklist targets common refusal phrases. |
@@ -38,15 +39,50 @@ Every op that takes input rows (alter, filter, inspect) accepts `min_yield=` and
 output rows over input rows, e.g. `filter.by_llm_score(rows, ..., min_yield=0.3, max_yield=0.8)`. A violation, or an
 empty input with `min_yield`, is a warning in the step report (`strict=True` raises); neither keyword is part of the
 cache key. `acquire.*` ops reject them. Filters also record a score per row, so the step report shows a histogram and
-the fraction of rows each nearby threshold would keep; use it to choose thresholds. `by_rouge_l` and
-`by_n_gram_overlap` are the exception: each score compares a row with the rows kept so far, so another threshold would
-change the scores, and the report shows only the current threshold. `by_llm_score` and `by_tests` also note why each
+the fraction of rows each nearby threshold would keep; use it to choose thresholds. `by_rouge_l`,
+`by_n_gram_overlap`, and `by_embedding_similarity` (unless `dedupe=False`) are the exception: each score compares a row
+with the rows kept so far, so another threshold would change the scores, and the report shows only the current
+threshold. `by_llm_score` and `by_tests` also note why each
 row scored as it did (the judge's feedback, the first failing test), and under the histogram the report shows up to
 three dropped rows with their note. With `num_judges > 1`, `by_llm_score` records the
 fraction of judges scoring at least `score_threshold`, which is what `agreement_threshold` is compared with.
 `by_llm_score` caches the judge scores separately from its thresholds, so re-running it with a different
 `score_threshold` or `agreement_threshold` makes no new judge calls (`_no_cache=True` re-asks the judges;
 `_cache_only=True` finds only thresholds that were run before).
+
+`by_embedding_similarity` is the semantic counterpart of `by_rouge_l`: it walks the rows in input order and drops a
+row whose cosine similarity to a kept row is at least `threshold` (inclusive), so the first copy is kept. With a
+`reference` (e.g. an eval set or the seed rows), it also drops every row at least `threshold` similar to any reference
+row; `dedupe=False` drops only those. Reference rows are never returned. The numbers depend on the embedding
+(`embed_fn`, else `embedding_model`: a sentence-transformers id, default Qwen3-Embedding-0.6B, or `"tfidf"`, as in
+[`inspect.embedding_dispersion`](inspect.md); rows and reference are embedded in one call, so TF-IDF shares one
+vocabulary), so calibrate on your rows. With Qwen3-Embedding-0.6B the default 0.95
+catches near-verbatim copies of 220-word coding problems (a few numbers or one sentence changed: 0.95 to 1.00) while
+distinct problems rarely reach it; one-line math problems score lower (one changed number 0.93, a paraphrase 0.88), so
+use 0.9 for one-line rows. Under TF-IDF a changed number in a one-line problem scores 0.83 and a paraphrase 0.20. The
+rows it drops are those `embedding_dispersion` pairs with an earlier row at `duplicate_threshold=threshold` under the
+same embedding, except that a row near only an already dropped row is kept (A ≈ B ≈ C with A and C apart keeps A and
+C), so run `embedding_dispersion` first to see the pairs. The step report notes how many rows went for each reason and
+quotes up to three dropped rows with the row they matched. On the 29 rows of the `embedding_dispersion` example in
+[inspect.md](inspect.md) (3 exact copies), against 3 eval questions, one of them a row without its final period:
+
+```python
+rows = filter.by_embedding_similarity(
+    rows, field="problem", threshold=0.9, reference=eval_rows, reference_field="question", embedding_model="tfidf"
+)
+```
+
+```text
+  29 → 25 rows (yield 0.86) · filter.by_embedding_similarity · 0.3s
+  ...
+    dropped: 3 near a kept row, 1 near the reference (3 rows) · embedding tfidf
+    dropped, with notes:
+      1 · Solve for x: 4x + 5 = 7x - 4.
+        ↳ cosine 1.00 to reference row 1: "Solve for x: 4x + 5 = 7x - 4"
+      1 · A fair die is rolled 2 times. What is the probability that a six appears at least once?
+        ↳ cosine 1.00 to kept row 0: "A fair die is rolled 2 times. What is the probability that a six appears at least
+        once?"
+```
 
 Write a Python check on rows as `by_predicate` rather than a list comprehension, so the step report lists it with
 rows in/out and a kept/dropped bar (`label` names it there; default: the function's name, or `predicate` for a
