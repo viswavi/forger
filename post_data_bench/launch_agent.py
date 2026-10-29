@@ -655,6 +655,9 @@ if args.training_mode == "sft-rl":
             "solution_worker.py",
             "tinker_budget.py",
             "tinker_training.py",
+            # judge_cpp compiles checkers and interactors against these.
+            "testlib/testlib.h",
+            "testlib/LICENSE",
         )
     ]
 
