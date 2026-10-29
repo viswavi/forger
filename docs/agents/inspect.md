@@ -58,9 +58,10 @@ a teacher's reasoning, far from what the student writes, though at a tenth of it
   reading one number alone.
 
 The report lists the rows with the most excess bits; `report.rows[i]` belongs to `rows[i]`. Scores and the sampled
-responses are cached, so changing `top_k` costs nothing. Scoring is fast; sampling the student's own responses is
-the slow part: 134 long reasoning responses took 37 minutes on one L40S and 19 on two. Its median rate is stable with
-the default 64 samples.
+responses are cached, so changing `top_k` costs nothing. A `LocalModel` scores and samples on every visible GPU (its
+default `data_parallel_size="auto"`). Scoring is fast; sampling the student's own responses is the slow part: 134
+long reasoning responses took 37 minutes on one L40S and 19 on two. Its median rate is stable with the default 64
+samples.
 
 `rubric_scores(rows, grade, *, n=50, response_fields="response", model=None, k=4, prompt_field="prompt",
 control_columns=True, seed=0, ...)` shows a reward's distribution before RL. `grade(response, row)` returns a score in
@@ -160,13 +161,13 @@ With fewer unique `field` values than `num_clusters` (e.g. 6 for `num_clusters=2
 unique value and logs a warning, so there is no need to shrink `num_clusters` for small inputs yourself. With a single
 unique value, every row gets that value (cut to 80 characters) as its topic, without calling the LLM.
 
-Embeddings only decide which rows the LLM summarizes together. By default they come from the sentence-transformers
-model `embedding_model` (`pip install "pyforger[clustering]"`, GPU when available). `embedding_model="tfidf"` uses a
-built-in TF-IDF + SVD embedder on the CPU (scikit-learn only); if sentence-transformers cannot be imported, the op
-falls back to it with a warning. To use another backend, pass `embed_fn`: a function that takes the field values as a
-`list[str]` and returns an array-like of shape `(n_rows, dim)`, one vector per string. `embed_fn` overrides
-`embedding_model`. The fallback is resolved before the cache lookup, so its result is cached as `"tfidf"` and is not
-reused once sentence-transformers is installed.
+Embeddings only decide which rows the LLM summarizes together. By default they come from the sentence-transformers model
+`embedding_model` (`pip install "pyforger[clustering]"`, GPU when available; from 2000 values on, every visible GPU
+embeds a share). `embedding_model="tfidf"` uses a built-in TF-IDF + SVD embedder on the CPU (scikit-learn only); if
+sentence-transformers cannot be imported, the op falls back to it with a warning. To use another backend, pass
+`embed_fn`: a function that takes the field values as a `list[str]` and returns an array-like of shape `(n_rows, dim)`,
+one vector per string. `embed_fn` overrides `embedding_model`. The fallback is resolved before the cache lookup, so its
+result is cached as `"tfidf"` and is not reused once sentence-transformers is installed.
 
 EvalTree ([paper](https://arxiv.org/abs/2503.08893)) annotates each problem with a required capability,
 embeds those annotations, recursively groups them using K-means and cosine silhouette scores, and describes

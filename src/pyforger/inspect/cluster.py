@@ -12,16 +12,24 @@ from typing import Any
 
 import tiktoken
 
+from pyforger.acquire import _local_dp
 from pyforger.acquire._model_utils import (
     _catch_kwargs,
     _raise_if_systemic,
     _RequestFailures,
 )
 from pyforger.acquire.model import Message, Model, Prompt, _cache_kwargs
+from pyforger.inspect import _embed_dp
 from pyforger.op import op
 from pyforger.utils import get_field, get_formatted_logger
 
 logger = get_formatted_logger("Inspect")
+
+# Fewer documents than this embed on one GPU: each GPU's worker first spends
+# ~10 s starting Python and loading the model. With Qwen3-Embedding-0.6B on two
+# L40S, 1000 ~400-token documents took 19 s on one GPU or two; 2500 took 54 s on
+# one and 37 s on two; 5112 took 105 s and 62 s.
+_MULTI_GPU_MIN_DOCS = 2000
 
 
 def _warn_if_heavy_reasoning(
@@ -403,7 +411,11 @@ def _tfidf_embed(docs: list[str], *, seed: int = 0) -> Any:
 def _default_embed(
     docs: list[str], embedding_model: str, *, op_name: str = "topic_based_clustering"
 ) -> Any:
-    """Embed documents with sentence-transformers, preferring the GPU."""
+    """Embed documents with sentence-transformers, preferring the GPU.
+
+    With two or more visible GPUs and at least `_MULTI_GPU_MIN_DOCS` documents,
+    every GPU embeds a share of them in its own worker process.
+    """
     try:
         from sentence_transformers import SentenceTransformer
     except ImportError as e:
@@ -412,6 +424,20 @@ def _default_embed(
             "`pip install pyforger[clustering]`, or pass embed_fn=."
         ) from e
 
+    encode_kwargs = dict(
+        batch_size=64, normalize_embeddings=True, convert_to_numpy=True
+    )
+    gpus = _embedding_gpus(len(docs))
+    if gpus:
+        logger.info(
+            "%s: embedding %d documents with %s on %d GPUs (%s)",
+            op_name,
+            len(docs),
+            embedding_model,
+            len(gpus),
+            ",".join(gpus),
+        )
+        return _embed_dp.encode(docs, embedding_model, gpus, encode_kwargs)
     encoder = SentenceTransformer(embedding_model)
     if encoder.device.type == "cpu":
         logger.warning(
@@ -423,9 +449,30 @@ def _default_embed(
             embedding_model,
             _TFIDF_EMBEDDING,
         )
-    return encoder.encode(
-        docs, batch_size=64, normalize_embeddings=True, convert_to_numpy=True
-    )
+    return encoder.encode(docs, **encode_kwargs)
+
+
+def _embedding_gpus(num_docs: int) -> list[str]:
+    """The GPUs to embed `num_docs` documents on, one worker each; [] for one process.
+
+    Every visible GPU (`CUDA_VISIBLE_DEVICES`, else `nvidia-smi`) when there
+    are two or more and at least `_MULTI_GPU_MIN_DOCS` documents: below that,
+    starting a worker and loading the model on each GPU costs more than it saves.
+    """
+    if num_docs < _MULTI_GPU_MIN_DOCS:
+        return []
+    gpus = _local_dp.visible_gpus()
+    if len(gpus) < 2:
+        return []
+    import torch
+
+    if not torch.cuda.is_available():
+        return []
+    if torch.cuda.is_initialized():
+        # Memory this process cached on a GPU, e.g. from an earlier one-GPU
+        # embedding, would otherwise leave that GPU's worker short of it.
+        torch.cuda.empty_cache()
+    return gpus
 
 
 def _partition(
