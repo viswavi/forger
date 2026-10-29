@@ -64,6 +64,8 @@ Keywords left out of the signatures below:
 - [`pyforger.filter`](#filter)
   - [`by_comparative_difficulty`](#filter-by_comparative_difficulty): Keep rows the strong model answers correctly and
     the weak model does not.
+  - [`by_embedding_similarity`](#filter-by_embedding_similarity): Drop rows whose embedding is too close to a kept row
+    or a reference row.
   - [`by_exact_agreement`](#filter-by_exact_agreement): Keep items where two fields agree or disagree, by exact match.
   - [`by_exact_match`](#filter-by_exact_match): Keep up to `max_count` occurrences of each unique `field` value.
   - [`by_group_agreement`](#filter-by_group_agreement): Keep only groups of items whose outputs all agree.
@@ -638,6 +640,10 @@ self_taught_reasoner(
     rationalize: bool = True,
     hint_fn: PromptTemplate | None = None,
     rationalized_field: str = "rationalized",
+    answer_similarity: float | None = None,
+    embed_fn: Callable[[list[str]], Any] | None = None,
+    embedding_model: str = "Qwen/Qwen3-Embedding-0.6B",
+    similarity_field: str = "answer_similarity",
     response_field: str = "response",
     thinking_field: str = "thinking",
     answer_field: str = "answer",
@@ -741,6 +747,32 @@ by_comparative_difficulty(
 Keep rows the strong model answers correctly and the weak model does not.
 
 **Returns:** The kept rows, in input order.
+
+<a name="filter-by_embedding_similarity"></a>
+
+### `filter.by_embedding_similarity`
+
+Disk-cached (`@op`).
+
+```python
+by_embedding_similarity(
+    items: list[dict],
+    *,
+    field: str,
+    threshold: float = 0.95,
+    reference: list[dict] | None = None,
+    reference_field: str | None = None,
+    dedupe: bool = True,
+    embed_fn: Callable[[list[str]], Any] | None = None,
+    embedding_model: str = "Qwen/Qwen3-Embedding-0.6B",
+    seed: int = 0,
+    **op_controls: Any,
+) -> list[dict]
+```
+
+Drop rows whose embedding is too close to a kept row or a reference row.
+
+**Returns:** The kept rows, in input order and unchanged.
 
 <a name="filter-by_exact_agreement"></a>
 

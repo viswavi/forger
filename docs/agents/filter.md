@@ -14,6 +14,7 @@ defaults are in [OPS.md](../OPS.md#filter).
 | `program_verifier` | Not an op: a difficulty-filter `metric` that runs sampled programs on the row's tests. |
 | `by_exact_match` | Dedup: keep up to `max_count` rows per unique field value. |
 | `by_rouge_l` | Near-duplicates: drop rows whose ROUGE-L with any kept row exceeds `threshold`. |
+| `by_embedding_similarity` | Semantic near-duplicates by embedding cosine; with `reference=`, also decontamination. |
 | `by_n_gram_overlap` | Near-duplicates by word n-gram overlap with the kept rows. |
 | `by_topic_frequency` | Topic balance: cluster rows, downsample over-represented topics, drop rare ones. |
 | `by_exact_agreement` / `by_rouge_l_agreement` | Two fields of a row agree (or disagree, `disagree=True`). |
@@ -28,8 +29,9 @@ by every alter, filter, and inspect op: `filter.by_llm_score(rows, ..., min_yiel
 is a warning in the step report (`strict=True` raises); neither is part of the cache key.
 
 **Choose thresholds from the score histogram.** The step report shows each filter's scores and the fraction of rows
-nearby thresholds would keep (`by_rouge_l` and `by_n_gram_overlap`: current threshold only). `by_llm_score` and
-`by_tests` also show up to three dropped rows with the reason (judge feedback, first failing test).
+nearby thresholds would keep (`by_rouge_l`, `by_n_gram_overlap`, `by_embedding_similarity`: current threshold
+only). `by_llm_score` and `by_tests` also show up to three dropped rows with the reason (judge feedback, first failing
+test).
 
 `by_predicate` lists a Python check in the step report (`label` names it):
 
@@ -39,6 +41,21 @@ rows = filter.by_predicate(rows, lambda r: len(r["papers"]) >= 3, label="has ≥
 
 `by_tests` and `alter.run_programs` share their test format and options; see
 [Running programs against tests](alter.md#running-programs-against-tests).
+
+## Semantic dedup and decontamination
+
+`by_embedding_similarity` is the semantic counterpart of `by_rouge_l`: walking the rows in input order, it drops a row
+whose embedding cosine to a kept row is at least `threshold` (default 0.95, for near-verbatim copies of long problems;
+use 0.9 for one-line rows, where one changed number scores 0.93). `reference=` (e.g. an eval set) drops every row that
+close to any reference row; with a reference, `dedupe=True` (default) also dedups within the rows. The embedder is
+chosen as in [`embedding_dispersion`](inspect.md) (`embedding_model`, default Qwen3-Embedding-0.6B, or `embed_fn`).
+It drops the rows `embedding_dispersion` pairs as near-duplicates at `duplicate_threshold=threshold`, except chains:
+a row near only an already dropped row is kept (A ≈ B ≈ C with A and C apart keeps A and C).
+
+```python
+rows = filter.by_embedding_similarity(rows, field="problem", threshold=0.9, reference=eval_rows,
+                                      reference_field="question")
+```
 
 ## LLM judges
 

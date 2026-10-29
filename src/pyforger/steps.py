@@ -101,6 +101,7 @@ _logger = get_formatted_logger(__name__)
 
 _DIVERSITY_FILTERS = frozenset(
     {
+        "filter.by_embedding_similarity",
         "filter.by_exact_match",
         "filter.by_rouge_l",
         "filter.by_n_gram_overlap",

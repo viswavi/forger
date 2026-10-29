@@ -41,7 +41,8 @@ SFT set for Qwen3-4B:
 - *Excess bits*: a target's bits minus the student's own rate times its tokens. About 0 for on-policy text such as
   STaR traces; grows with foreignness and length. The report lists the rows with the most.
 - It describes the data; it is not a validated predictor of SFT results. Compare datasets or rows, not one number.
-- Sampling the student's own responses is the slow part (134 long responses: 37 minutes on one L40S); cached.
+- Sampling the student's own responses is the slow part (134 long responses: 37 minutes on one L40S, 19 on two); a
+  `LocalModel` scores and samples on every visible GPU. Cached.
 
 ## `rubric_scores`
 
@@ -81,7 +82,11 @@ gave 1.0 to any response without a python code block, the targets looked fine; `
 - *Coverage* ([Naeem et al. 2020](https://arxiv.org/abs/2002.09797)): share of reference rows with a row inside their
   k-NN ball; computed on equal-size samples (two samples of one distribution score about 0.97 at `k=5`).
 - *Off-distribution*: share of rows outside every reference row's ball. *Vendi*: effective number of distinct rows.
-- *Near-duplicates*: 0.95 counts near-verbatim copies; lower it (e.g. 0.85) to count template variants.
+- *Near-duplicates*: 0.95 counts edited copies of long problems. With Qwen3-Embedding-0.6B, 220-word coding problems
+  with whitespace, case, a few numbers, or one sentence changed score 0.95-1.00, and 1 pair among 1,131 distinct
+  LiveCodeBench problems reaches 0.95 (5% of rows at 0.9). Use 0.9 for one-line rows: one changed number scores 0.93
+  (median), the nearest different problem 0.66.
+  [`filter.by_embedding_similarity`](filter.md) with the same threshold and embedding drops the later row of each pair.
 - Same embedding backends as `topic_based_clustering`. Numbers depend on the embedding: compare datasets under one
   embedding, not one number alone. Without a `reference`, only near-duplicates and Vendi are reported.
 
@@ -100,6 +105,8 @@ clusters = topic_based_clustering(  # clusters[i] is the topic of rows[i]
 - Pass `context` (what the corpus is, what topics should capture); it improves topic names.
 - Default embeddings need `pip install "pyforger[clustering]"`; without it the op falls back to CPU TF-IDF with a
   warning. `embed_fn` plugs in another backend.
+- n values embed on `min(n // 500 + 1, visible GPUs)` GPUs (400 on one, 999 on two). Batches hold up to
+  `FORGER_EMBED_BATCH_TOKENS` padded tokens (default 16384); a longer text is a batch of its own, never truncated.
 
 ## `eval_tree`
 
