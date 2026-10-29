@@ -140,9 +140,12 @@ def embedding_dispersion(
         embedding_model: A sentence-transformers model id, or ``"tfidf"``.
         k: Neighbors that set a reference row's radius (Naeem et al. use 5).
         duplicate_threshold: Cosine similarity at or above which two rows are
-            near-duplicates. 0.95 counts near-verbatim copies: under TF-IDF a
-            17-word problem with one number changed scores 0.89 and a
-            paraphrase 0.4 to 0.5. Lower it (e.g. 0.85) to count such variants.
+            near-duplicates. 0.95 counts near-verbatim copies: with
+            Qwen3-Embedding-0.6B, a 220-word coding problem with a few numbers
+            or one sentence changed scores 0.95 to 1.00, and distinct problems
+            rarely reach 0.95. Short rows score lower: a one-line math problem
+            with one number changed scores 0.93 (median; 0.83 under TF-IDF),
+            so lower it (e.g. 0.9) for short rows.
         max_rows: Embed at most this many rows of each set (a random sample).
         examples: Example rows (or pairs) listed per metric.
         seed: Seed for the samples and for TF-IDF's SVD.
