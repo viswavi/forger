@@ -1201,7 +1201,8 @@ Print and return the phrases and names that the most rows share, per field.
 
 ### `inspect.rubric_scores`
 
-Not cached (wrap it with `@op` to memoize); listed in step reports as `inspect.rubric_scores`.
+Listed in step reports as `inspect.rubric_scores`; its expensive parts are disk-cached (`@op`
+`filter.model_difficulty.predictions`, `inspect.rubric_scores.grades`), so a rerun reuses them.
 
 ```python
 rubric_scores(
@@ -1252,7 +1253,8 @@ Print and return the spend ledger's totals by run, pipeline, and step.
 
 ### `inspect.student_log_likelihood`
 
-Not cached (wrap it with `@op` to memoize); listed in step reports as `inspect.student_log_likelihood`.
+Listed in step reports as `inspect.student_log_likelihood`; its expensive parts are disk-cached (`@op`
+`inspect.student_log_likelihood.targets`, `inspect.student_log_likelihood.own`), so a rerun reuses them.
 
 ```python
 student_log_likelihood(
