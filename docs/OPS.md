@@ -87,10 +87,13 @@ Keywords left out of the signatures below:
   - [`by_topic_frequency`](#filter-by_topic_frequency): Downsample over-represented topics and drop rare ones.
   - [`program_verifier`](#filter-program_verifier): A `metric` for the difficulty filters that runs programs on tests.
 - [`pyforger.inspect`](#inspect)
+  - [`embedding_dispersion`](#inspect-embedding_dispersion): Print and return how spread out one field's values are in
+    embedding space.
   - [`eval_tree`](#inspect-eval_tree): Build an EvalTree report from scored model outputs.
   - [`inspect_step`](#inspect-inspect_step): Print the full report of the latest run of step `name` and return it.
   - [`phrase_frequency`](#inspect-phrase_frequency): Print and return the phrases and names that the most rows share,
     per field.
+  - [`rubric_scores`](#inspect-rubric_scores): Print and return how `grade` scores responses, binned, one column each.
   - [`runs`](#inspect-runs): Print the latest saved pipeline runs, oldest first, and return them.
   - [`spend`](#inspect-spend): Print and return the spend ledger's totals by run, pipeline, and step.
   - [`student_log_likelihood`](#inspect-student_log_likelihood): Print and return how likely the student finds each
@@ -1101,7 +1104,36 @@ A `metric` for the difficulty filters that runs programs on tests.
 
 Inspect operations: analyze existing data.
 
-Also exported, not documented here: `LikelihoodReport`, `RowLikelihood`, `PhraseReport`, `SpendReport`, `SpendTotal`.
+Also exported, not documented here: `DispersionReport`, `LikelihoodReport`, `RowLikelihood`, `PhraseReport`,
+`RubricScoreReport`, `SpendReport`, `SpendTotal`.
+
+<a name="inspect-embedding_dispersion"></a>
+
+### `inspect.embedding_dispersion`
+
+Disk-cached (`@op`).
+
+```python
+embedding_dispersion(
+    rows: list[dict],
+    field: str,
+    *,
+    reference: list[dict] | None = None,
+    reference_field: str | None = None,
+    embed_fn: Callable[[list[str]], Any] | None = None,
+    embedding_model: str = "Qwen/Qwen3-Embedding-0.6B",
+    k: int = 5,
+    duplicate_threshold: float = 0.95,
+    max_rows: int = 2000,
+    examples: int = 3,
+    seed: int = 0,
+    **op_controls: Any,
+) -> DispersionReport
+```
+
+Print and return how spread out one field's values are in embedding space.
+
+**Returns:** A `DispersionReport`, also printed.
 
 <a name="inspect-eval_tree"></a>
 
@@ -1164,6 +1196,33 @@ phrase_frequency(
 ```
 
 Print and return the phrases and names that the most rows share, per field.
+
+<a name="inspect-rubric_scores"></a>
+
+### `inspect.rubric_scores`
+
+Not cached (wrap it with `@op` to memoize); listed in step reports as `inspect.rubric_scores`.
+
+```python
+rubric_scores(
+    rows: list[dict],
+    grade: Grade,
+    *,
+    n: int | None = 50,
+    response_fields: list[str] | str | None = "response",
+    model: Any = None,
+    k: int = 4,
+    prompt_field: str = "prompt",
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    control_columns: bool = True,
+    seed: int = 0,
+    workers: int = 8,
+    examples: int = 1,
+) -> RubricScoreReport
+```
+
+Print and return how `grade` scores responses, binned, one column each.
 
 <a name="inspect-runs"></a>
 
