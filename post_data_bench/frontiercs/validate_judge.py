@@ -146,15 +146,13 @@ def cmd_solutions(args) -> None:
         if not sol_dir.is_dir():
             continue
         files = sorted(f for f in sol_dir.iterdir() if f.suffix == ".cpp")
-        if models:
-            files = [f for f in files if f.stem.split("_")[0] in models]
         per_model: collections.Counter[str] = collections.Counter()
         for f in files:
-            model = (
-                f.stem.rsplit("_", 1)[0]
-                if f.stem.rsplit("_", 1)[-1].isdigit()
-                else f.stem
-            )
+            # gpt5_3.cpp is gpt5's 4th attempt; gpt5_low.cpp is another model.
+            base, _, k = f.stem.rpartition("_")
+            model = base if k.isdigit() else f.stem
+            if models and model not in models:
+                continue
             if per_model[model] >= args.per_problem:
                 continue
             per_model[model] += 1

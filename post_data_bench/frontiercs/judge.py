@@ -27,7 +27,6 @@ import json
 import math
 import os
 import re
-import resource
 import shutil
 import signal
 import subprocess
@@ -193,21 +192,77 @@ def _answer_path(pdir: Path, case: Case) -> Path:
     return ans if ans.exists() else pdir / "testdata" / case.output
 
 
-def _limit(cpu_s: float, address_space: int | None, stack: int | None):
-    """preexec_fn: own process group, CPU rlimit just above the limit, memory."""
+# The launcher sets the rlimits and reports the program's own CPU time and peak
+# resident memory. Measuring from Python instead would be wrong: Linux carries a
+# process's peak RSS across exec, so a child forked from a large Python worker
+# would inherit the worker's peak and look like it used that much memory.
+_LAUNCHER_SOURCE = r"""
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/resource.h>
+#include <sys/wait.h>
+#include <unistd.h>
+/* fcs_run REPORT CPU_S AS STACK FSIZE PROG ARGS... */
+static void lim(int what, long long v) {
+    if (v <= 0) return;
+    struct rlimit r = {(rlim_t)v, (rlim_t)v};
+    setrlimit(what, &r);
+}
+int main(int argc, char** argv) {
+    if (argc < 7) return 2;
+    pid_t pid = fork();
+    if (pid < 0) return 3;
+    if (pid == 0) {
+        lim(RLIMIT_CPU, atoll(argv[2]));
+        struct rlimit core = {0, 0};
+        setrlimit(RLIMIT_CORE, &core);
+        lim(RLIMIT_AS, atoll(argv[3]));
+        lim(RLIMIT_STACK, atoll(argv[4]));
+        lim(RLIMIT_FSIZE, atoll(argv[5]));
+        execvp(argv[6], argv + 6);
+        _exit(127);
+    }
+    int st = 0;
+    struct rusage ru;
+    while (wait4(pid, &st, 0, &ru) < 0)
+        if (errno != EINTR) return 4;
+    FILE* f = fopen(argv[1], "w");
+    if (!f) return 5;
+    fprintf(f, "%.6f %ld %d %d\n",
+            ru.ru_utime.tv_sec + ru.ru_stime.tv_sec
+                + (ru.ru_utime.tv_usec + ru.ru_stime.tv_usec) / 1e6,
+            ru.ru_maxrss, WIFEXITED(st) ? WEXITSTATUS(st) : 0,
+            WIFSIGNALED(st) ? WTERMSIG(st) : 0);
+    fclose(f);
+    return 0;
+}
+"""
+_launchers: dict[Path, Path] = {}
+_launcher_lock = threading.Lock()
 
-    def apply() -> None:
-        os.setsid()
-        hard_cpu = math.ceil(cpu_s) + 1
-        resource.setrlimit(resource.RLIMIT_CPU, (hard_cpu, hard_cpu))
-        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-        resource.setrlimit(resource.RLIMIT_FSIZE, (STDOUT_MAX * 2, STDOUT_MAX * 2))
-        if address_space:
-            resource.setrlimit(resource.RLIMIT_AS, (address_space, address_space))
-        if stack:
-            resource.setrlimit(resource.RLIMIT_STACK, (stack, stack))
 
-    return apply
+def launcher(cache_dir: Path) -> Path:
+    """The compiled process launcher in ``cache_dir`` (built once per source)."""
+    cache_dir = Path(cache_dir)
+    with _launcher_lock:
+        if cache_dir in _launchers:
+            return _launchers[cache_dir]
+        digest = hashlib.sha256(_LAUNCHER_SOURCE.encode()).hexdigest()[:16]
+        binary = cache_dir / f"fcs_run-{digest}"
+        if not binary.exists():
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix=".build-", dir=cache_dir) as tmp:
+                src = Path(tmp) / "fcs_run.c"
+                src.write_text(_LAUNCHER_SOURCE)
+                subprocess.run(
+                    ["gcc", "-O2", "-o", str(Path(tmp) / "bin"), str(src)],
+                    check=True,
+                    capture_output=True,
+                )
+                os.replace(Path(tmp) / "bin", binary)
+        _launchers[cache_dir] = binary
+        return binary
 
 
 def _drain(stream, limit: int, sink: list, over: threading.Event) -> None:
@@ -232,6 +287,7 @@ class _Process:
         self,
         args,
         *,
+        launch: Path,
         cwd,
         stdin,
         stdout,
@@ -244,16 +300,24 @@ class _Process:
         self.cpu_limit = cpu_s
         self.memory = memory
         self.killed_for_wall = False
+        self.report = tempfile.NamedTemporaryFile(prefix="fcs-run-", delete=False)
+        self.report.close()
         self.proc = subprocess.Popen(
-            args,
+            [
+                str(launch),
+                self.report.name,
+                str(math.ceil(cpu_s) + 1),  # hard stop just above the limit
+                str(memory if address_space else SAFETY_ADDRESS_SPACE),
+                str(memory),
+                str(STDOUT_MAX * 2),
+                *args,
+            ],
             cwd=cwd,
             stdin=stdin,
             stdout=stdout,
             stderr=subprocess.PIPE,
             env={"PATH": "/usr/bin:/bin"},
-            preexec_fn=_limit(
-                cpu_s, memory if address_space else SAFETY_ADDRESS_SPACE, memory
-            ),
+            start_new_session=True,
         )
         self.stdout_chunks: list[bytes] = []
         self.stderr_chunks: list[bytes] = []
@@ -300,15 +364,19 @@ class _Process:
             pass
 
     def wait(self) -> Run:
-        _, wait_status, usage = os.wait4(self.proc.pid, 0)
+        self.proc.wait()
         self.timer.cancel()
-        self.proc.returncode = os.waitstatus_to_exitcode(wait_status)
         self.kill()  # reap any children left in the group
         for reader in self.readers:
             reader.join()
-        cpu = usage.ru_utime + usage.ru_stime
-        memory = usage.ru_maxrss * 1024
-        code = self.proc.returncode
+        report = Path(self.report.name)
+        fields = report.read_text().split() if report.exists() else []
+        report.unlink(missing_ok=True)
+        if len(fields) == 4:
+            cpu, memory = float(fields[0]), int(fields[1]) * 1024
+            code = -int(fields[3]) if int(fields[3]) else int(fields[2])
+        else:  # killed before the launcher could report (wall clock)
+            cpu, memory, code = self.cpu_limit, 0, -signal.SIGKILL
         if (
             cpu > self.cpu_limit
             or self.killed_for_wall
@@ -340,6 +408,8 @@ def compile_cpp(
     binary: Path,
     include: Path | None = None,
     cpu_s: float = COMPILE_CPU_S,
+    *,
+    launch: Path,
 ) -> tuple[bool, str]:
     """``g++ src -O2 -pipe -std=gnu++17 [-I include] -o binary``; (ok, message)."""
     args = ["g++", source.name, "-O2", "-pipe", "-std=gnu++17"]
@@ -349,6 +419,7 @@ def compile_cpp(
     # The compiler itself gets a generous wall clock: the CPU limit is the rule.
     proc = _Process(
         args,
+        launch=launch,
         cwd=source.parent,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
@@ -389,6 +460,7 @@ def compiled_judge_program(
                     Path(work) / "bin",
                     include=testlib_dir,
                     cpu_s=CHECKER_COMPILE_CPU_S,
+                    launch=launcher(cache_dir),
                 )
                 if not ok:
                     raise RuntimeError(f"{source} does not compile:\n{message}")
@@ -432,7 +504,9 @@ def _case_result(ok: bool, status: str, run: Run, msg: str, judge_msg: str) -> d
     }
 
 
-def judge_case(problem: Problem, case: Case, binary: Path, checker: Path) -> dict:
+def judge_case(
+    problem: Problem, case: Case, binary: Path, checker: Path, launch: Path
+) -> dict:
     """judgeCase: run the solution on the input, then the checker on its output."""
     inp = problem.pdir / "testdata" / case.input
     with tempfile.TemporaryDirectory(prefix="fcs-case-") as tmp:
@@ -440,6 +514,7 @@ def judge_case(problem: Problem, case: Case, binary: Path, checker: Path) -> dic
         with open(inp, "rb") as stdin:
             run = _Process(
                 [str(binary)],
+                launch=launch,
                 cwd=work,
                 stdin=stdin,
                 stdout=subprocess.PIPE,
@@ -457,6 +532,7 @@ def judge_case(problem: Problem, case: Case, binary: Path, checker: Path) -> dic
         shutil.copy(_answer_path(problem.pdir, case), work / "ans.txt")
         chk = _Process(
             [str(checker), "in.txt", "out.txt", "ans.txt"],
+            launch=launch,
             cwd=work,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -478,7 +554,7 @@ def judge_case(problem: Problem, case: Case, binary: Path, checker: Path) -> dic
 
 
 def judge_interactive_case(
-    problem: Problem, case: Case, binary: Path, interactor: Path
+    problem: Problem, case: Case, binary: Path, interactor: Path, launch: Path
 ) -> dict:
     """judgeInteractiveCase: the solution and interactor talk through two pipes."""
     with tempfile.TemporaryDirectory(prefix="fcs-int-") as tmp:
@@ -492,6 +568,7 @@ def judge_interactive_case(
         try:
             solution = _Process(
                 [str(binary)],
+                launch=launch,
                 cwd=sol_dir,
                 stdin=to_solution_r,
                 stdout=to_interactor_w,
@@ -502,6 +579,7 @@ def judge_interactive_case(
             )
             judge = _Process(
                 [str(interactor), "in.txt", "tout.txt", "ans.txt"],
+                launch=launch,
                 cwd=work,
                 stdin=to_interactor_r,
                 stdout=to_solution_w,
@@ -557,12 +635,13 @@ def judge(
     testlib_dir = Path(testlib_dir)
     cache_dir = Path(cache_dir or Path(tempfile.gettempdir()) / "fcs-judge-cache")
     judge_bin = compiled_judge_program(problem, testlib_dir, cache_dir)
+    launch = launcher(cache_dir)
     with tempfile.TemporaryDirectory(prefix="fcs-sol-") as tmp:
         work = Path(tmp)
         source = work / "main.cpp"
         source.write_text(code)
         binary = work / "main"
-        ok, message = compile_cpp(source, binary)
+        ok, message = compile_cpp(source, binary, launch=launch)
         if not ok:
             return {
                 "status": "compile_error",
@@ -575,7 +654,9 @@ def judge(
         run = judge_interactive_case if problem.interactor else judge_case
         with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
             cases = list(
-                pool.map(lambda c: run(problem, c, binary, judge_bin), problem.cases)
+                pool.map(
+                    lambda c: run(problem, c, binary, judge_bin, launch), problem.cases
+                )
             )
     n = len(cases)
     return {

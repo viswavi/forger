@@ -58,6 +58,11 @@ SUM = (
     'int main(){long a,b;scanf("%ld %ld",&a,&b);printf("%ld\\n",a+b);}'
 )
 
+INTERACTIVE_OK = (
+    '#include <cstdio>\nint main(){long x;scanf("%ld",&x);'
+    'printf("%ld\\n",2*x);fflush(stdout);}'
+)
+
 
 def _problem(root: Path, *, interactive: bool) -> Path:
     pdir = root / ("interactive" if interactive else "sum")
@@ -148,12 +153,18 @@ class JudgeTests(unittest.TestCase):
         result = self.run_judge(self.sum, code)
         self.assertEqual(result["score"], 0.0)
 
+    def test_a_large_judging_process_does_not_inflate_solution_memory(self):
+        """Peak RSS is the program's own, not inherited from the forking process."""
+        ballast = bytearray(400 << 20)  # touched: more than the 256m limit
+        for i in range(0, len(ballast), 4096):
+            ballast[i] = 1
+        self.assertEqual(self.run_judge(self.sum, SUM)["score"], 100.0)
+        self.assertEqual(self.run_judge(self.inter, INTERACTIVE_OK)["score"], 100.0)
+        del ballast
+
     def test_interactive_solution_talks_through_pipes(self):
         """The interactor's verdict decides an interactive test."""
-        good = (
-            '#include <cstdio>\nint main(){long x;scanf("%ld",&x);'
-            'printf("%ld\\n",2*x);fflush(stdout);}'
-        )
+        good = INTERACTIVE_OK
         self.assertEqual(self.run_judge(self.inter, good)["score"], 100.0)
         wrong = good.replace("2*x", "3*x")
         self.assertEqual(self.run_judge(self.inter, wrong)["score"], 0.0)
