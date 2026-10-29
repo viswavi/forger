@@ -87,6 +87,8 @@ Keywords left out of the signatures below:
   - [`by_topic_frequency`](#filter-by_topic_frequency): Downsample over-represented topics and drop rare ones.
   - [`program_verifier`](#filter-program_verifier): A `metric` for the difficulty filters that runs programs on tests.
 - [`pyforger.inspect`](#inspect)
+  - [`embedding_dispersion`](#inspect-embedding_dispersion): Print and return how spread out one field's values are in
+    embedding space.
   - [`eval_tree`](#inspect-eval_tree): Build an EvalTree report from scored model outputs.
   - [`inspect_step`](#inspect-inspect_step): Print the full report of the latest run of step `name` and return it.
   - [`phrase_frequency`](#inspect-phrase_frequency): Print and return the phrases and names that the most rows share,
@@ -1099,8 +1101,36 @@ A `metric` for the difficulty filters that runs programs on tests.
 
 Inspect operations: analyze existing data.
 
-Also exported, not documented here: `LikelihoodReport`, `RowLikelihood`, `PhraseReport`, `RubricScoreReport`,
-`SpendReport`, `SpendTotal`.
+Also exported, not documented here: `DispersionReport`, `LikelihoodReport`, `RowLikelihood`, `PhraseReport`,
+`RubricScoreReport`, `SpendReport`, `SpendTotal`.
+
+<a name="inspect-embedding_dispersion"></a>
+
+### `inspect.embedding_dispersion`
+
+Disk-cached (`@op`).
+
+```python
+embedding_dispersion(
+    rows: list[dict],
+    field: str,
+    *,
+    reference: list[dict] | None = None,
+    reference_field: str | None = None,
+    embed_fn: Callable[[list[str]], Any] | None = None,
+    embedding_model: str = "Qwen/Qwen3-Embedding-0.6B",
+    k: int = 5,
+    duplicate_threshold: float = 0.95,
+    max_rows: int = 2000,
+    examples: int = 3,
+    seed: int = 0,
+    **op_controls: Any,
+) -> DispersionReport
+```
+
+Print and return how spread out one field's values are in embedding space.
+
+**Returns:** A `DispersionReport`, also printed.
 
 <a name="inspect-eval_tree"></a>
 
