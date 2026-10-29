@@ -34,6 +34,8 @@ def source_id(row):
     """Return the identity shared by all variants of one source."""
     if "private_test_case_idx" in row:
         return str(row["private_test_case_idx"])
+    if "problem_id" in row:  # FrontierCS: one row per problem
+        return f"frontiercs:{row['problem_id']}"
     return row["situation"].strip()
 
 
