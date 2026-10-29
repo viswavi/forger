@@ -202,7 +202,12 @@ def score_targets(
     return [_weighted(row, criteria) for row, criteria in zip(rows, scores)]
 
 
-_GRADER_SOURCES = ("rubric_rm.py", "rubric_worker.py", "rubric_sandbox.py")
+_GRADER_SOURCES = (
+    "rubric_rm.py",
+    "rubric_worker.py",
+    "rubric_sandbox.py",
+    "cpp_judge.py",
+)
 
 
 def _grader_sources() -> tuple[str, ...]:

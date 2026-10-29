@@ -1,7 +1,16 @@
-"""One disposable RestrictedPython execution, with no API credentials in its env."""
+"""One disposable RestrictedPython execution, with no API credentials in its env.
+
+rubric_rm runs this with ``--judge-fds R,W``: grade()'s judge_cpp sends its
+requests to the parent over those pipes (cpp_judge.JudgeChannel), since these
+limits cannot compile or run C++ here. Run without arguments, as in
+``python rl/rubric_worker.py < criterion.json``, it starts itself that way, as
+the RL reward does, and prints the result.
+"""
 import contextlib
+import importlib
 import json
 import math
+import os
 import resource
 import signal
 import sys
@@ -10,6 +19,7 @@ from pathlib import Path
 
 # -I ignores PYTHONPATH and the current directory. Import only our sibling clone.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from cpp_judge import NOT_JSON, encode_request  # noqa: E402 - see above
 from rubric_sandbox import (  # noqa: E402 - isolated worker/module bootstrap
     DEFAULT_ALLOWED_IMPORTS,
     Sandbox,
@@ -39,12 +49,30 @@ def _budgeted(fn, seconds):
         signal.setitimer(signal.ITIMER_REAL, max(left, 0.001) if remaining else 0)
 
 
-def solution_helpers():
+class JudgeClient:
+    """grade()'s end of the judge channel: one JSON line out, one back."""
+
+    def __init__(self, requests_fd, replies_fd):
+        """Wrap the two pipe ends rubric_rm passed to this worker."""
+        self.requests = os.fdopen(requests_fd, "wb")
+        self.replies = os.fdopen(replies_fd, "rb")
+        self.broken = False
+
+    def ask(self, line):
+        """Send one encoded request and return (score, statuses)."""
+        self.requests.write(line)
+        self.requests.flush()
+        reply = json.loads(self.replies.readline())
+        return float(reply["score"]), [str(s) for s in reply["statuses"]]
+
+
+def solution_helpers(judge=None):
     """Functions grade() can call to execute code from the response.
 
     The response's code runs in its own RestrictedPython namespace with captured
     stdin/stdout and competitive-programming imports, so it cannot reach this
     worker's output or the grader's names. Names starting with "_" do not compile.
+    ``judge`` (a JudgeClient) serves judge_cpp; without one it scores 0.
     """
     solutions = Sandbox(allowed_imports=DEFAULT_ALLOWED_IMPORTS)
 
@@ -71,7 +99,40 @@ def solution_helpers():
 
         return _budgeted(run, RUN_TIMEOUT_S)
 
-    return {"run_program": run_program, "call_method": call_method}
+    def judge_cpp(
+        code, tests, checker=None, interactor=None, time_limit=1.0, memory_mb=256
+    ):
+        """Compile and judge a C++ program on tests: (score in [0, 1], statuses).
+
+        Judged outside this worker (cpp_judge.judge_tests) within the
+        criterion's remaining time. Errors score 0 with one status saying why.
+        """
+        if judge is None or judge.broken:
+            return 0.0, ["Judge Unavailable: judge_cpp runs only in the RL grader"]
+        remaining = signal.getitimer(signal.ITIMER_REAL)[0]
+        line = encode_request(
+            code,
+            tests,
+            checker,
+            interactor,
+            time_limit,
+            memory_mb,
+            budget_s=remaining or GRADE_TIMEOUT_S,
+        )
+        if line is None:
+            return 0.0, [NOT_JSON]
+        ok, value = _budgeted(lambda: judge.ask(line), GRADE_TIMEOUT_S)
+        if not ok:
+            # A late reply must never be read as the answer to a later call.
+            judge.broken = True
+            return 0.0, [f"Judge Unavailable: {value}"]
+        return value
+
+    return {
+        "run_program": run_program,
+        "call_method": call_method,
+        "judge_cpp": judge_cpp,
+    }
 
 
 def apply_limits(cpu_seconds=GRADE_TIMEOUT_S + 5):
@@ -85,8 +146,29 @@ def apply_limits(cpu_seconds=GRADE_TIMEOUT_S + 5):
     resource.setrlimit(resource.RLIMIT_NPROC, (1, 1))
 
 
+def _run_as_reward():
+    """Score stdin's criterion through rubric_rm, exactly as an RL reward does."""
+    here = Path(__file__).resolve().parent
+    sys.path.insert(0, str(here.parent))
+    rubric_rm = importlib.import_module(f"{here.name}.rubric_rm")
+    result = rubric_rm._run_worker(sys.stdin.read())
+    if result is None:
+        message = f"the criterion ran past {rubric_rm.WORKER_TIMEOUT_S} seconds"
+        print(json.dumps({"error": "TimeoutExpired", "message": message}))
+    elif getattr(result, "judge_error", None):
+        print(json.dumps({"error": "JudgeError", "message": result.judge_error}))
+    elif result.returncode:
+        message = f"worker exited with {result.returncode}: {result.stderr[-1000:]}"
+        print(json.dumps({"error": "WorkerFailed", "message": message}))
+    else:
+        sys.stdout.write(result.stdout)
+
+
 def main():
     """Run the command-line utility described in the module documentation."""
+    if sys.argv[1:2] != ["--judge-fds"]:
+        return _run_as_reward()
+    judge = JudgeClient(*map(int, sys.argv[2].split(",")))
     apply_limits()
     request = json.load(sys.stdin)
     sandbox = Sandbox(
@@ -102,7 +184,7 @@ def main():
         ),
         default_timeout_s=GRADE_TIMEOUT_S,
     )
-    sandbox._globals.update(solution_helpers())
+    sandbox._globals.update(solution_helpers(judge))
 
     class Discard:
         def write(self, value):
