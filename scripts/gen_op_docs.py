@@ -304,6 +304,28 @@ def _op_info(obj: Any) -> dict[str, Any] | None:
     return next(iter(called.values())) if len(called) == 1 else None
 
 
+def _cached_children(obj: Any) -> list[str]:
+    """Names of the caching ``@op``s a tracked function calls from its module.
+
+    E.g. ``inspect.rubric_scores`` grades through a cached
+    ``inspect.rubric_scores.grades``.
+    """
+    fn = inspect.unwrap(obj)
+    if not inspect.isfunction(fn):
+        return []
+    names = []
+    for name in fn.__code__.co_names:
+        info = getattr(fn.__globals__.get(name), OP_INFO_ATTR, None)
+        if (
+            info
+            and info["kind"] == "op"
+            and info["cache"]
+            and info["name"] not in names
+        ):
+            names.append(info["name"])
+    return names
+
+
 def _status(obj: Any, qualified: str) -> str:
     """Describe caching, e.g. "Disk-cached (`@op`)." or "Not cached."."""
     if inspect.isclass(obj):
@@ -313,6 +335,13 @@ def _status(obj: Any, qualified: str) -> str:
         return "Not cached: a plain function."
     named = "" if info["name"] == qualified else f" named `{info['name']}`"
     if info["kind"] == "tracked":
+        children = _cached_children(obj)
+        if children:
+            names = ", ".join(f"`{name}`" for name in children)
+            return _markdown(
+                f"Listed in step reports as `{info['name']}`; its expensive parts are "
+                f"disk-cached (`@op` {names}), so a rerun reuses them."
+            )
         return (
             "Not cached (wrap it with `@op` to memoize); listed in step reports as "
             f"`{info['name']}`."
