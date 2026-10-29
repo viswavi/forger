@@ -9,6 +9,10 @@ from contextlib import contextmanager
 from typing import Any, Callable, Coroutine, Iterator, TypeVar, cast
 from weakref import WeakKeyDictionary
 
+IMAGE_DEADLINE: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "sail_image_deadline", default=None
+)
+
 CLEANUP_GRACE_S = 45.0
 _OWNER: contextvars.ContextVar[set[asyncio.Task[Any]] | None] = contextvars.ContextVar(
     "forger_harbor_owner", default=None

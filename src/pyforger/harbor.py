@@ -18,7 +18,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
-from pyforger._harbor_deadline import remaining, run_owned
+from pyforger._harbor_deadline import IMAGE_DEADLINE, remaining, run_owned
 from pyforger._streaming_json import JSONReader
 from pyforger.acquire.model import Model
 from pyforger.agent_backend import validate_workspace_path
@@ -396,6 +396,8 @@ class HarborTaskRunner:
             agent.kwargs["max_iterations"] = iterations
         if timeout is not None:
             agent.override_timeout_sec = timeout
+        if backend.type == "sail" and backend.import_path is None:
+            backend.import_path = "pyforger._harbor_sail:ObservedSailEnvironment"
         return TrialConfig(
             task=TaskConfig(path=task),
             trial_name="trial-" + uuid.uuid4().hex,
@@ -514,7 +516,11 @@ class HarborTaskRunner:
                 assert result is not None
                 return result
 
-            result = await run_owned(execute, deadline)
+            token = IMAGE_DEADLINE.set(deadline)
+            try:
+                result = await run_owned(execute, deadline)
+            finally:
+                IMAGE_DEADLINE.reset(token)
             payload = _redact(result.model_dump(mode="json"), secrets)
             usage = combine_usage(attempt_usage)
             status = _status(result)

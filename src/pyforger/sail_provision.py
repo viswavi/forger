@@ -52,6 +52,11 @@ def create_sailbox(
     for attempt in range(5):
         remaining = budget.remaining_s()
         started = time.monotonic()
+        evidence = None
+        if kwargs.get("image") is not None:
+            from pyforger._sail_image_provenance import observe
+
+            kwargs["image"], evidence = observe(kwargs["image"])
         try:
             box = create(
                 **kwargs,
@@ -59,6 +64,13 @@ def create_sailbox(
                 image_build_timeout=max(1, math.ceil(remaining)),
             )
         except Exception as error:
+            if evidence is not None:
+                from pyforger._sail_image_provenance import failure_image, probe
+
+                if failure_image(error):
+                    probe(error, evidence, started + remaining)
+                    error.sail_image_provenance = evidence
+                    error.add_note("Sail image provenance: " + str(evidence))
             if attempt == 4 or not _refresh_rejection(error):
                 raise
             cap = min(10.0, 2.0 * 2**attempt)
