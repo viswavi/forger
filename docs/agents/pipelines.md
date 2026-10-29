@@ -228,8 +228,8 @@ Common patterns (not a complete list):
   with `inspect.topic_based_clustering`), then check which topics your own rows cover and rebalance them with
   `filter.by_topic_frequency`.
 - **Overgenerate and filter:** generate more candidates than needed, especially early, then filter for quality and
-  diversity: drop near-duplicates with `filter.by_exact_match`, `filter.by_rouge_l` or `filter.by_n_gram_overlap`,
-  and low-quality rows with an LLM judge (`filter.by_llm_score`).
+  diversity: drop near-duplicates with `filter.by_exact_match`, `filter.by_rouge_l`, `filter.by_n_gram_overlap` or
+  `filter.by_embedding_similarity`, and low-quality rows with an LLM judge (`filter.by_llm_score`).
 - **Check exactly what can be checked:** write every requirement with an exact answer (a final value, the output on
   test inputs, a required refusal) as a code criterion, e.g. `acquire.generate_custom_rubric(...,
   code_criteria_only=True)`, and keep LLM judges for what code cannot check.
@@ -246,5 +246,6 @@ Common patterns (not a complete list):
 - **Self-Taught Reasoner (STaR):** for prompts with *verified* answers that need long chain-of-thought SFT targets,
   generate the reasoning from (or similar to) the *student* you will finetune, not a stronger teacher
   ([Zelikman et al., 2022](https://arxiv.org/abs/2203.14465)). `alter.self_taught_reasoner` samples `n` solutions per
-  prompt (from `acquire.TinkerModel` or `acquire.LocalModel`) and keeps one row per sample whose final answer matches.
-  Set a generous `max_tokens` so traces are not truncated. See [alter.md](alter.md).
+  prompt (from `acquire.TinkerModel` or `acquire.LocalModel`) and keeps one row per sample whose final answer matches;
+  for free-text answers, `answer_similarity=` keeps answers close to the reference in embedding space, which does not
+  check a yes/no verdict. Set a generous `max_tokens` so traces are not truncated. See [alter.md](alter.md).

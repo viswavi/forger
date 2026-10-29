@@ -214,20 +214,8 @@ def _embedding_dispersion(
     refs = ref_texts or []
     ref_idx = rng.permutation(len(refs))[:max_rows]
     docs = [texts[i] for i in gen_idx] + [refs[i] for i in ref_idx]
-    unique = list(dict.fromkeys(docs))
-    vectors = _unit_rows(
-        np.asarray(
-            _embed(unique, embed_fn, embedding_model, seed, op_name=_OP),
-            dtype=np.float32,
-        )
-    )
-    if vectors.shape[0] != len(unique):
-        raise ValueError(
-            f"{_OP}: the embedder returned {vectors.shape[0]} vectors "
-            f"for {len(unique)} documents"
-        )
-    position = {doc: i for i, doc in enumerate(unique)}
-    gen = vectors[[position[texts[i]] for i in gen_idx]]
+    vectors = _unit_vectors(docs, embed_fn, embedding_model, seed, _OP)
+    gen = vectors[: len(gen_idx)]
 
     report = DispersionReport(
         field=field,
@@ -249,7 +237,7 @@ def _embedding_dispersion(
         report.vendi = round(_vendi(gen), 4)
         return report
 
-    ref = vectors[[position[refs[i]] for i in ref_idx]]
+    ref = vectors[len(gen_idx) :]
     m = min(len(gen), len(ref))
     report.n_reference = len(refs)
     report.reference_embedded = len(ref_idx)
@@ -278,13 +266,46 @@ def _embedding_dispersion(
     return report
 
 
-def _unit_rows(vectors: Any) -> Any:
+def _unit_vectors(
+    docs: list[str],
+    embed_fn: Callable[[list[str]], Any] | None,
+    embedding_model: str,
+    seed: int,
+    op_name: str,
+) -> Any:
+    """Embed ``docs`` in one call: one float32 unit vector per doc, in order.
+
+    A text repeated in ``docs`` is embedded once, so TF-IDF sees each text
+    once. Cosine similarity is then a dot product; an all-zero vector (e.g.
+    empty text) stays zero, so it is 0.0 similar to everything.
+    ``filter.by_embedding_similarity`` uses it too, so both ops embed alike.
+    """
+    import numpy as np
+
+    unique = list(dict.fromkeys(docs))
+    vectors = _unit_rows(
+        np.asarray(
+            _embed(unique, embed_fn, embedding_model, seed, op_name=op_name),
+            dtype=np.float32,
+        ),
+        op_name,
+    )
+    if vectors.shape[0] != len(unique):
+        raise ValueError(
+            f"{op_name}: the embedder returned {vectors.shape[0]} vectors "
+            f"for {len(unique)} documents"
+        )
+    position = {doc: i for i, doc in enumerate(unique)}
+    return vectors[[position[doc] for doc in docs]]
+
+
+def _unit_rows(vectors: Any, op_name: str = _OP) -> Any:
     """Scale each row to length 1; all-zero rows (e.g. empty text) stay zero."""
     import numpy as np
 
     if vectors.ndim != 2:
         raise ValueError(
-            f"{_OP}: embeddings must have shape (n_docs, dim), got {vectors.shape}"
+            f"{op_name}: embeddings must have shape (n_docs, dim), got {vectors.shape}"
         )
     norms = np.linalg.norm(vectors, axis=1, keepdims=True)
     return np.divide(vectors, norms, out=np.zeros_like(vectors), where=norms > 0)

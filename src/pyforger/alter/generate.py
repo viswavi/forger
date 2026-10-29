@@ -474,6 +474,12 @@ def self_taught_reasoner(
     rationalize: bool = True,
     hint_fn: PromptTemplate | None = None,
     rationalized_field: str = "rationalized",
+    answer_similarity: float | None = None,
+    embed_fn: Callable[[list[str]], Any] | None = None,
+    # inspect.cluster's default; imported lazily there (a cycle), and a test
+    # checks the two agree.
+    embedding_model: str = "Qwen/Qwen3-Embedding-0.6B",
+    similarity_field: str = "answer_similarity",
     response_field: str = "response",
     thinking_field: str = "thinking",
     answer_field: str = "answer",
@@ -495,7 +501,7 @@ def self_taught_reasoner(
     reference, so the surviving rows carry student-generated reasoning traces that
     arrive at a verified answer.
 
-    Acceptance is decided in one of two ways:
+    Acceptance is decided in one of these ways:
 
     * **Answer matching (default):**  A response is kept when
       ``match_fn(student_answer, item[reference_field])`` is true (default:
@@ -505,6 +511,14 @@ def self_taught_reasoner(
       ``filter.program_verifier("tests")`` to run each answer's code on the
       row's tests. A response is kept when it returns True. Calls run
       ``max_workers`` at a time.
+    * **Answer similarity:** Pass ``answer_similarity`` (a cosine threshold)
+      for free-text answers. Every sample's answer and every reference are
+      embedded in one call per pass, and a response is kept when the cosine between
+      its answer and its row's reference is at least the threshold; the
+      cosine is recorded in ``similarity_field``. An empty answer is never
+      kept. Similarity checks topic and content, not correctness: with
+      Qwen3-Embedding-0.6B, "Yes, this is acceptable because ..." and "No,
+      this is not acceptable because ..." with the same reasons score 0.99.
     * **Custom filter:** Pass ``filter_fn`` -- any ``list[dict] -> list[dict]``
       callable.
 
@@ -516,19 +530,26 @@ def self_taught_reasoner(
     via `pyforger.acquire.split_reasoning`.
 
     **Rationalization** (the paper's second pass, on by default): every item
-    left with no accepted response is sampled ``n`` more times from a prompt
-    that also gives a hint, and the accepted responses are kept as if the
-    student had answered the unhinted prompt: rows carry the item's fields,
-    not the hinted prompt. This gives rows for items the student never solves
-    on its own, in the student's own words. The default hint, as in the paper,
-    is the item's reference (``prompt_fn``'s prompt plus "Hint: a correct
-    answer is: <item[reference_field]>"); items without one are not retried.
-    ``hint_fn`` gives another hint (e.g. only the final code, or why the task
-    cannot be done). As in the paper, responses that mention the hint are not
-    filtered out. Every row gets ``rationalized_field`` (False for the first
-    pass, True for the second). ``rationalize=False`` turns this off; with
-    ``filter_fn`` it is off, since the filter judges all candidates together
-    and cannot say which items went unsolved.
+    left with no accepted response (under whichever check above is active) is
+    sampled ``n`` more times from a prompt that also gives a hint, and the
+    accepted responses are kept as if the student had answered the unhinted
+    prompt: rows carry the item's fields, not the hinted prompt. This gives
+    rows for items the student never solves on its own, in the student's own
+    words. The default hint, as in the paper, is the item's reference
+    (``prompt_fn``'s prompt plus "Hint: a correct answer is:
+    <item[reference_field]>"); items without one are not retried. ``hint_fn``
+    gives another hint (e.g. only the final code, or why the task cannot be
+    done). As in the paper, responses that mention the hint are not filtered
+    out. Every row gets ``rationalized_field`` (False for the first pass, True
+    for the second). With ``answer_similarity``, rationalized rows record the
+    cosine of their own answer to the reference, like first-pass rows; under
+    the default hint the reference is in the prompt, so a copied reference
+    scores near 1 and a high cosine on such a row means less. Both passes draw
+    their samples through a cached sub-op, so a new threshold or verifier
+    re-draws neither (a newly unsolved item is hinted afresh).
+    ``rationalize=False`` turns this off; with ``filter_fn`` it is off, since
+    the filter judges all candidates together and cannot say which items went
+    unsolved.
 
     Args:
         items: Input rows. Each must contain ``reference_field``.
@@ -556,6 +577,20 @@ def self_taught_reasoner(
             Needs answer matching or ``verifier``, not ``filter_fn``.
         rationalized_field: Output key marking rationalized rows (set when
             rationalization runs).
+        answer_similarity: Cosine threshold in [-1, 1] that turns on answer
+            similarity; None (default) leaves it off. There is no default
+            threshold. With Qwen3-Embedding-0.6B, 0.75 kept 13 of 14 reworded
+            correct answers and 0 of 6 answers to other questions, but also 13
+            of 14 subtly wrong answers and 18 of 18 opposite verdicts. Without
+            ``extract_answer``, the answer embedded is ``answer_field``. Kept
+            rows keep their ``reference_field``. Not combinable with
+            ``match_fn``, ``verifier``, or ``filter_fn``.
+        embed_fn: A custom embedder, ``list[str]`` to an array of shape
+            ``(len(texts), dim)``; overrides ``embedding_model``.
+        embedding_model: A sentence-transformers model id, or ``"tfidf"`` for
+            TF-IDF + SVD on the CPU. There is no TF-IDF fallback: its cosines
+            are on another scale (reworded answers score 0.12 to 0.38).
+        similarity_field: Key holding the cosine on each kept row.
         response_field: Output key for the raw student response.
         thinking_field: Output key for the split-out reasoning trace.
         answer_field: Output key for the answer portion of the response.
@@ -582,9 +617,19 @@ def self_taught_reasoner(
     if not items:
         return []
 
+    from pyforger.inspect.cluster import _DEFAULT_EMBEDDING_MODEL
+
     log = _get_logger()
     if filter_fn is not None and verifier is not None:
         raise ValueError("pass filter_fn or verifier, not both")
+    if answer_similarity is not None:
+        _check_similarity_args(
+            answer_similarity, match_fn, verifier, filter_fn, embed_fn, embedding_model
+        )
+    elif embed_fn is not None or embedding_model != _DEFAULT_EMBEDDING_MODEL:
+        raise ValueError(
+            "embed_fn and embedding_model take effect only with answer_similarity="
+        )
     if max_workers is not None and max_workers < 1:
         raise ValueError("max_workers must be at least 1")
     if extract_answer is not None and filter_fn is not None:
@@ -593,7 +638,9 @@ def self_taught_reasoner(
             "given; it fills %r on the candidate rows filter_fn receives.",
             student_answer_field,
         )
-    extract = extract_answer if extract_answer is not None else default_extract_answer
+    extract: Callable[[str], Any] | None = extract_answer
+    if extract is None and answer_similarity is None:
+        extract = default_extract_answer
     match = match_fn if match_fn is not None else _normalized_equal
 
     if hint_fn is not None and filter_fn is not None:
@@ -605,46 +652,31 @@ def self_taught_reasoner(
         raise ValueError("hint_fn is only used with rationalize=True")
     rationalizing = rationalize and filter_fn is None
 
-    def default_hint(item: dict) -> Prompt:
-        """``prompt_fn``'s prompt, with the item's reference as a hint."""
-        hint = f"Hint: a correct answer is:\n{item[reference_field]}"
-        return _with_hint(_resolve_prompt(prompt_fn, item), hint)
-
-    def sample(template: PromptTemplate, batch_items: list[dict]) -> list[list[dict]]:
+    def sample(
+        batch_items: list[dict], template: PromptTemplate, hint_field: str | None
+    ) -> list[list[dict]]:
         """``n`` candidate rows per item, from ``template``'s prompts."""
-        prompts = [_resolve_prompt(template, item) for item in batch_items]
-        per_item: list[list[dict]] = [[] for _ in batch_items]
-        # Sample n responses per item, batching items together for throughput.
-        chunk = batch_size or len(prompts)
-        for start in range(0, len(prompts), chunk):
-            batch = prompts[start : start + chunk]
-            batch_results = model.generate_batch(
-                batch,
-                n=n,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                **_cache_kwargs(
-                    model.generate_batch, cache_rows=batch_items[start : start + chunk]
-                ),
-            )
-            if len(batch_results) != len(batch):
-                log.warning(
-                    "generate_batch returned %d results for %d prompts",
-                    len(batch_results),
-                    len(batch),
-                )
-            # Items left without results contribute no rows.
-            for offset, responses in enumerate(batch_results[: len(batch)]):
-                per_item[start + offset] = candidates_for(
-                    batch_items[start + offset], responses
-                )
-        return per_item
+        # A sub-op, so changing how answers are accepted (a threshold, a
+        # verifier) reuses these samples instead of drawing new ones.
+        sampled = _star_samples(
+            batch_items,
+            template,
+            model=model,
+            n=n,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            batch_size=batch_size,
+            hint_field=hint_field,
+        )
+        return [
+            candidates_for(item, responses, reasoning)
+            for item, (responses, reasoning) in zip(batch_items, sampled)
+        ]
 
-    def candidates_for(item: dict, responses: list[str]) -> list[dict]:
+    def candidates_for(
+        item: dict, responses: list[str], reasoning: list[str | None]
+    ) -> list[dict]:
         """One candidate row per generated response."""
-        # Providers that return reasoning separately (GenerateResult.reasoning)
-        # leave it out of the content; otherwise it is inline as <think>...</think>.
-        reasoning = getattr(responses, "reasoning", None) or []
         rows = []
         for i, raw in enumerate(responses):
             api_thinking = reasoning[i] if i < len(reasoning) else None
@@ -660,7 +692,8 @@ def self_taught_reasoner(
                     response_field: raw,
                     thinking_field: thinking,
                     answer_field: answer,
-                    student_answer_field: extract(raw),
+                    # Answer similarity embeds the answer itself by default.
+                    student_answer_field: answer if extract is None else extract(raw),
                 }
             )
         return rows
@@ -671,6 +704,16 @@ def self_taught_reasoner(
             return filter_fn(candidates)
         if verifier is not None:
             return _verified(candidates, verifier, answer_field, max_workers or 8)
+        if answer_similarity is not None:
+            return _similar(
+                candidates,
+                answer_similarity,
+                student_answer_field=student_answer_field,
+                reference_field=reference_field,
+                similarity_field=similarity_field,
+                embed_fn=embed_fn,
+                embedding_model=embedding_model,
+            )
         return [
             candidate
             for candidate in candidates
@@ -686,11 +729,12 @@ def self_taught_reasoner(
         kept_ids = {id(c) for c in accept([c for cs in per_item for c in cs])}
         return [[c for c in cs if id(c) in kept_ids] for cs in per_item]
 
-    first = sample(prompt_fn, items)
+    first = sample(items, prompt_fn, None)
     n_candidates = sum(len(cs) for cs in first)
     if not rationalizing:
         kept = accept([c for cs in first for c in cs])
     else:
+        # "Solved" is whatever accept() uses: matching, verifier, or similarity.
         kept_per_item = accept_per_item(first)
         # The default hint is the reference, so items without one are not retried.
         unsolved = [
@@ -699,16 +743,22 @@ def self_taught_reasoner(
             if not cs
             and (hint_fn is not None or items[i].get(reference_field) is not None)
         ]
-        hint_template = hint_fn if hint_fn is not None else default_hint
-        hinted = sample(hint_template, [items[i] for i in unsolved]) if unsolved else []
-        n_candidates += sum(len(cs) for cs in hinted)
         for cs in kept_per_item:
             for candidate in cs:
                 candidate[rationalized_field] = False
-        for i, cs in zip(unsolved, accept_per_item(hinted)):
-            for candidate in cs:
-                candidate[rationalized_field] = True
-            kept_per_item[i] = cs
+        if unsolved:
+            # Also a sub-op call: a new threshold that leaves the same items
+            # unsolved reuses the hinted samples too.
+            hinted = sample(
+                [items[i] for i in unsolved],
+                prompt_fn if hint_fn is None else hint_fn,
+                reference_field if hint_fn is None else None,
+            )
+            n_candidates += sum(len(cs) for cs in hinted)
+            for i, cs in zip(unsolved, accept_per_item(hinted)):
+                for candidate in cs:
+                    candidate[rationalized_field] = True
+                kept_per_item[i] = cs
         kept = [c for cs in kept_per_item for c in cs]
         log.info(
             "self_taught_reasoner: rationalization kept %d responses for %d of %d "
@@ -718,8 +768,10 @@ def self_taught_reasoner(
             len(unsolved),
         )
 
-    # The student-generated answer becomes the ground truth for kept rows.
-    for candidate in kept if verifier is None else []:
+    # The student-generated answer becomes the ground truth for kept rows; a
+    # merely similar answer does not replace the reference.
+    overwrite = verifier is None and answer_similarity is None
+    for candidate in kept if overwrite else []:
         student_answer = candidate.get(student_answer_field)
         if student_answer is not None:
             candidate[reference_field] = student_answer
@@ -731,6 +783,191 @@ def self_taught_reasoner(
         len(items),
     )
     return kept
+
+
+# A sampler, not an alter: it returns completions, not rows.
+@op(name="alter.self_taught_reasoner.samples", samples_arg="n", category="other")
+def _star_samples(
+    items: list[dict],
+    prompt_fn: PromptTemplate,
+    *,
+    model: Model,
+    n: int,
+    temperature: float | None,
+    max_tokens: int | None,
+    batch_size: int | None,
+    hint_field: str | None = None,
+) -> list[tuple[list[str], list[str | None]]]:
+    """Return each item's ``n`` completions and their API reasoning (or None).
+
+    With ``hint_field`` (rationalization's default hint), each prompt also says
+    "Hint: a correct answer is: <item[hint_field]>". An item the model returned
+    no result for gets no completions (a warning is logged).
+    """
+    prompts: list[Prompt] = [_resolve_prompt(prompt_fn, item) for item in items]
+    if hint_field is not None:
+        prompts = [
+            _with_hint(prompt, f"Hint: a correct answer is:\n{item[hint_field]}")
+            for prompt, item in zip(prompts, items)
+        ]
+    sampled: list[tuple[list[str], list[str | None]]] = []
+    chunk = batch_size or len(prompts)
+    for start in range(0, len(prompts), chunk):
+        batch = prompts[start : start + chunk]
+        batch_results = model.generate_batch(
+            batch,
+            n=n,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            **_cache_kwargs(
+                model.generate_batch, cache_rows=items[start : start + chunk]
+            ),
+        )
+        if len(batch_results) != len(batch):
+            _get_logger().warning(
+                "generate_batch returned %d results for %d prompts",
+                len(batch_results),
+                len(batch),
+            )
+        for responses in batch_results[: len(batch)]:
+            # Providers that return reasoning separately (GenerateResult.reasoning)
+            # leave it out of the content; otherwise it is inline as <think>...</think>.
+            reasoning = list(getattr(responses, "reasoning", None) or [])
+            texts = list(responses)
+            sampled.append((texts, reasoning + [None] * (len(texts) - len(reasoning))))
+        # Items left without results contribute no rows.
+        sampled += [([], [])] * (len(batch) - len(batch_results))
+    return sampled
+
+
+def _check_similarity_args(
+    threshold: float,
+    match_fn: Any,
+    verifier: Any,
+    filter_fn: Any,
+    embed_fn: Callable[[list[str]], Any] | None,
+    embedding_model: str,
+) -> None:
+    """Raise when answer_similarity is combined with another acceptance check."""
+    from pyforger.inspect.cluster import (
+        _TFIDF_EMBEDDING,
+        _sentence_transformers_importable,
+    )
+
+    if not -1.0 <= threshold <= 1.0:
+        raise ValueError("answer_similarity must be a cosine similarity in [-1, 1]")
+    others = {"match_fn": match_fn, "verifier": verifier, "filter_fn": filter_fn}
+    given = [name for name, value in others.items() if value is not None]
+    if given:
+        raise ValueError(f"pass answer_similarity or {given[0]}, not both")
+    if (
+        embed_fn is None
+        and embedding_model != _TFIDF_EMBEDDING
+        and not _sentence_transformers_importable()
+    ):
+        # No TF-IDF fallback: a threshold set for one embedding means
+        # something else under the other.
+        raise ImportError(
+            "answer_similarity embeds with sentence-transformers, which cannot be "
+            "imported: `pip install pyforger[clustering]`, or pass embed_fn= or "
+            f"embedding_model={_TFIDF_EMBEDDING!r} (and a threshold for it)."
+        )
+
+
+def _similar(
+    candidates: list[dict],
+    threshold: float,
+    *,
+    student_answer_field: str,
+    reference_field: str,
+    similarity_field: str,
+    embed_fn: Callable[[list[str]], Any] | None,
+    embedding_model: str,
+) -> list[dict]:
+    """The candidates whose answer has cosine >= ``threshold`` to its reference."""
+    answers = [_answer_text(c[student_answer_field]) for c in candidates]
+    references = [
+        _answer_text(get_field(c, reference_field, "alter.self_taught_reasoner"))
+        for c in candidates
+    ]
+    similarities = _answer_similarities(
+        answers, references, embed_fn=embed_fn, embedding_model=embedding_model
+    )
+    kept = []
+    for candidate, similarity in zip(candidates, similarities):
+        if similarity is not None and similarity >= threshold:
+            candidate[similarity_field] = similarity
+            kept.append(candidate)
+    _log_similarities(similarities, threshold)
+    return kept
+
+
+def _answer_text(value: Any) -> str:
+    """An answer as the text to embed; None is empty."""
+    return "" if value is None else str(value).strip()
+
+
+# The threshold is applied outside, so trying another one embeds nothing.
+@op(name="alter.self_taught_reasoner.similarities", category="other")
+def _answer_similarities(
+    answers: list[str],
+    references: list[str],
+    *,
+    embed_fn: Callable[[list[str]], Any] | None,
+    embedding_model: str,
+) -> list[float | None]:
+    """Cosine between each answer and its reference, rounded to 4 places.
+
+    None where either text is empty. The distinct texts of both lists are
+    embedded in one call.
+    """
+    import numpy as np
+
+    from pyforger.inspect.cluster import _embed
+
+    pairs = [i for i, (a, r) in enumerate(zip(answers, references)) if a and r]
+    if not pairs:
+        return [None] * len(answers)
+    texts = list(dict.fromkeys(t for i in pairs for t in (answers[i], references[i])))
+    vectors = np.asarray(
+        _embed(texts, embed_fn, embedding_model, 0, op_name="self_taught_reasoner"),
+        dtype=np.float64,
+    )
+    if vectors.ndim != 2 or vectors.shape[0] != len(texts):
+        raise ValueError(
+            "self_taught_reasoner: the embedder returned an array of shape "
+            f"{vectors.shape} for {len(texts)} texts; expected ({len(texts)}, dim)"
+        )
+    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+    # A zero vector (e.g. TF-IDF of text with no words) is similar to nothing.
+    vectors = np.divide(vectors, norms, out=np.zeros_like(vectors), where=norms > 0)
+    position = {text: j for j, text in enumerate(texts)}
+    similarities: list[float | None] = [None] * len(answers)
+    for i in pairs:
+        cosine = vectors[position[answers[i]]] @ vectors[position[references[i]]]
+        similarities[i] = round(float(cosine), 4)
+    return similarities
+
+
+def _log_similarities(similarities: list[float | None], threshold: float) -> None:
+    """Log the spread of the cosines, e.g. to choose a threshold."""
+    scored = sorted(s for s in similarities if s is not None)
+    empty = len(similarities) - len(scored)
+    if not scored:
+        _get_logger().info(
+            "self_taught_reasoner: all %d answers or references are empty", empty
+        )
+        return
+    quartiles = [scored[round(q * (len(scored) - 1))] for q in (0, 0.25, 0.5, 0.75, 1)]
+    _get_logger().info(
+        "self_taught_reasoner: answer similarity of %d samples: min %.2f, "
+        "quartiles %.2f / %.2f / %.2f, max %.2f; %d at or above %g%s",
+        len(scored),
+        *quartiles,
+        sum(s >= threshold for s in scored),
+        threshold,
+        f"; {empty} rejected for an empty answer or reference" if empty else "",
+    )
 
 
 def _context_run() -> Callable[..., Any]:

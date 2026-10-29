@@ -86,6 +86,7 @@ gave 1.0 to any response without a python code block, the targets looked fine; `
   with whitespace, case, a few numbers, or one sentence changed score 0.95-1.00, and 1 pair among 1,131 distinct
   LiveCodeBench problems reaches 0.95 (5% of rows at 0.9). Use 0.9 for one-line rows: one changed number scores 0.93
   (median), the nearest different problem 0.66.
+  [`filter.by_embedding_similarity`](filter.md) with the same threshold and embedding drops the later row of each pair.
 - Same embedding backends as `topic_based_clustering`. Numbers depend on the embedding: compare datasets under one
   embedding, not one number alone. Without a `reference`, only near-duplicates and Vendi are reported.
 

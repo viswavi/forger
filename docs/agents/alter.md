@@ -59,13 +59,24 @@ rows = self_taught_reasoner(problems, solver_prompt, student, n=8,
                             hint_fn=solver_prompt + "\n\nHint: {key_idea}")
 ```
 
+For free-text answers (an explanation, a verdict with its reasons), pass `answer_similarity=`, a cosine threshold:
+a sample is kept when its answer's embedding is at least that close to its row's reference (`embedding_model`, default
+`Qwen/Qwen3-Embedding-0.6B`, or `embed_fn`, as in [`embedding_dispersion`](inspect.md)). Kept rows record the cosine
+in `answer_similarity` and keep their reference. It cannot be combined with `match_fn`, `verifier`, or `filter_fn`.
+Samples and cosines are cached apart from the threshold, so trying another one samples and embeds nothing.
+There is no default threshold. With Qwen3-Embedding-0.6B, median cosines to the reference were 0.88 for correct
+rewordings, 0.96 for subtly wrong answers, 0.89 for opposite verdicts, and 0.25 for off-topic answers: ~0.75 drops
+off-topic answers but does not separate right from wrong, so check the verdict separately (e.g. with
+`filter.by_predicate` or `filter.by_llm_score`).
+
 STaR's output is limited by the abilities of the student model. If the model never solves a task in `n` samples,
 that task will be completely omitted. A behavior it never shows is never learned. Two remedies:
 
-- **Rationalization (on by default)**: items with no accepted response are sampled `n` more times with a hint.
-  The default hint is the item's `reference_field` ("Hint: a correct answer is: ..."), so items without one are
-  skipped; pass `hint_fn` for another hint (e.g. the key idea, or why the task cannot be done). Kept rows answer the
-  original prompt and are marked `rationalized=True`; as in the paper, responses that mention the hint are kept.
+- **Rationalization (on by default)**: items with no accepted response (under whichever check is active) are sampled
+  `n` more times with a hint. The default hint is the item's `reference_field` ("Hint: a correct answer is: ..."), so
+  items without one are skipped; pass `hint_fn` for another hint (e.g. the key idea, or why the task cannot be done).
+  Kept rows answer the original prompt and are marked `rationalized=True`; as in the paper, responses that mention
+  the hint are kept. With `answer_similarity` they record their own cosine, which a copied reference pushes near 1.
   `rationalize=False` turns it off; it is also off with `filter_fn`.
 - **Bootstrapping** a behavior the student never shows: briefly fine-tune on a few seed rows that show it, run STaR on
   that checkpoint, then train the next checkpoint from the base model on the rows STaR kept. It is a good idea
