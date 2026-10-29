@@ -91,6 +91,7 @@ Keywords left out of the signatures below:
   - [`inspect_step`](#inspect-inspect_step): Print the full report of the latest run of step `name` and return it.
   - [`phrase_frequency`](#inspect-phrase_frequency): Print and return the phrases and names that the most rows share,
     per field.
+  - [`rubric_scores`](#inspect-rubric_scores): Print and return how `grade` scores responses, binned, one column each.
   - [`runs`](#inspect-runs): Print the latest saved pipeline runs, oldest first, and return them.
   - [`spend`](#inspect-spend): Print and return the spend ledger's totals by run, pipeline, and step.
   - [`topic_based_clustering`](#inspect-topic_based_clustering): Cluster rows into `num_clusters` LLM-named topics by
@@ -1095,7 +1096,7 @@ A `metric` for the difficulty filters that runs programs on tests.
 
 Inspect operations: analyze existing data.
 
-Also exported, not documented here: `PhraseReport`, `SpendReport`, `SpendTotal`.
+Also exported, not documented here: `PhraseReport`, `RubricScoreReport`, `SpendReport`, `SpendTotal`.
 
 <a name="inspect-eval_tree"></a>
 
@@ -1158,6 +1159,33 @@ phrase_frequency(
 ```
 
 Print and return the phrases and names that the most rows share, per field.
+
+<a name="inspect-rubric_scores"></a>
+
+### `inspect.rubric_scores`
+
+Not cached (wrap it with `@op` to memoize); listed in step reports as `inspect.rubric_scores`.
+
+```python
+rubric_scores(
+    rows: list[dict],
+    grade: Grade,
+    *,
+    n: int | None = 50,
+    response_fields: list[str] | str | None = "response",
+    model: Any = None,
+    k: int = 4,
+    prompt_field: str = "prompt",
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    control_columns: bool = True,
+    seed: int = 0,
+    workers: int = 8,
+    examples: int = 1,
+) -> RubricScoreReport
+```
+
+Print and return how `grade` scores responses, binned, one column each.
 
 <a name="inspect-runs"></a>
 

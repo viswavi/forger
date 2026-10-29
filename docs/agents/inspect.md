@@ -12,6 +12,7 @@ producing new rows in the pipeline.
 | `spend` | no | Print and return the spend ledger's totals by run, pipeline, and step. |
 | `runs` | no | Print and return the saved `@pipeline` runs with step yields, e.g. `runs("main")`. |
 | `phrase_frequency` | no | Print and return, per string field, the phrases and names the most rows share. No LLM. |
+| `rubric_scores` | grades | Print and return a reward's score histogram on responses, samples, and controls. |
 
 `phrase_frequency(rows, fields=None, *, ngram_range=(2, 4), top_k=10, min_share=0.05, max_rows=2000,
 max_chars=2000)` counts document frequency: the share of rows whose value contains each word n-gram (lowercased) or
@@ -20,6 +21,37 @@ capitalized name, e.g. `rewrite  phrases: "i need" 78/79 (99%) · "i need you to
 when no longer phrase containing it is in nearly as many rows, and returns a `PhraseReport` (one `FieldPhrases` per
 field, with `skipped` set for categorical, identifier, and code fields). Topic clustering can look balanced while
 every row says "I need"; run both. Rows are not modified.
+
+`rubric_scores(rows, grade, *, n=50, response_fields="response", model=None, k=4, prompt_field="prompt",
+control_columns=True, seed=0, ...)` shows a reward's distribution before RL. `grade(response, row)` returns a score in
+[0, 1] (a bool counts as 0 or 1) or None when ungradable: a code rubric, an LLM judge, or exact match. It grades `n`
+rows drawn with `seed`, one column per response field (e.g. the SFT target), `k` samples per prompt from `model` (what
+RL sees; the report counts prompts whose samples all got the same score, which give no gradient), and with
+`control_columns` three responses no task should reward: `empty`, `random` (200 random characters), and `other_row`
+(another row's response, never its own). A control earning half the reference column's mean is flagged. On a rubric
+that gave 1.0 to any response without a python code block, the targets looked fine; `empty` did not:
+
+```text
+  50 of 60 rows (seed 0) · grade abstain_bug · sampled: toy-student
+
+  score          response   sampled ×3   empty   random   other_row
+  ─────────────────────────────────────────────────────────────────────
+  0                    10           25       0        0          50
+  (0, 0.25]             0            0       0        0           0
+  ...
+  1                    40          125      50       50           0
+  ungradable            0            0       0        0           0
+  mean               0.80         0.83    1.00     1.00        0.00
+
+  sampled: 25/50 prompts gave all samples the same score (0 all 0, 25 all 1): no RL gradient there
+  ! empty scores 1.00 on average, at least half of response's 0.80: RL can earn it too
+  sampled ×3 highest: row 59 1.00  I cannot
+```
+
+It returns a `RubricScoreReport`; `report.model_dump()` is plain JSON data: `bins`, and per column `counts` (aligned
+with `bins`), `mean`, `share_at_0`, `share_at_1`, `ungradable`, `errors`, the per-row `scores`, and the lowest and
+highest examples. `grade` is part of the cache key (an object by its `cache_key()`), so the grades are cached; a
+grading that raised is counted with its message and runs again next time. Rows are not modified.
 
 Topic-based clustering uses the ClusterFusion clustering algorithm ([arXiv:2512.04350](https://arxiv.org/abs/2512.04350)),
 a hybrid method in which embeddings guide how rows are partitioned and an LLM summarizes the partitions into
