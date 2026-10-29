@@ -122,8 +122,12 @@ inspect embedding_dispersion ─────────────────
   random samples of both sets. Two samples of one distribution score about 0.97 at `k=5`.
 - **off-distribution**: the share of `rows` outside every reference row's ball, e.g. off-topic or malformed rows.
 - **near-duplicates**: rows in a pair with cosine similarity of at least `duplicate_threshold`. 0.95 counts
-  near-verbatim copies; under TF-IDF one changed number in a 17-word problem scores 0.89, so lower it (e.g. 0.85) to
-  count template variants.
+  near-verbatim copies. With Qwen3-Embedding-0.6B, copies of 220-word coding problems with whitespace, case, a few
+  numbers, or one sentence changed score 0.95 to 1.00 (at least 92% of each kind), and among 1,131 distinct
+  LiveCodeBench problems one pair reaches 0.95 ("Maximum Glutton" and "Minimum Glutton"); at 0.9, 5% of those rows
+  would be listed. One-line math problems score lower: one changed number 0.93 (median), a paraphrase 0.88, a
+  template variant (same structure, other numbers and objects) 0.77, the nearest different problem 0.66. Lower it to
+  0.9 for short rows. Under TF-IDF, one changed number in a one-line problem scores 0.83 and a paraphrase 0.20.
 - **Vendi** ([Friedman & Dieng 2023](https://arxiv.org/abs/2210.02410)): the effective number of distinct rows, from 1
   (all the same) to the sample size, on the same equal-size samples. It cannot exceed the embedding's dimension (at
   most 256 for TF-IDF).
