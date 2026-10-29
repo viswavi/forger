@@ -13,22 +13,18 @@ Forger's program ops as ``runner=`` and also works on its own::
 ``score_targets`` scores each row's ``ground_truth`` with the row's own code
 criteria, exactly as one RL reward would (``rubric_rm.code_score``), so targets
 and rubrics that disagree (a solution using ``__slots__``, a grade() that
-crashes) show up before training. It also scores control responses that should
-earn nothing (an abstention on a solvable row, no answer, an empty program), so
-a rubric that rewards them shows up too. ``rubric_verifier`` scores a sampled response
+crashes) show up before training. ``rubric_verifier`` scores a sampled response
 the same way, e.g. to measure with ``filter.by_pass_at_k`` how often a
 checkpoint already earns full reward on a row.
 """
 from __future__ import annotations
 
-import ast
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import time
-import warnings
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -177,55 +173,10 @@ def _weighted(row: dict, criteria: list[float | None]) -> dict[str, Any]:
     }
 
 
-def _abstention_marker() -> str:
-    """prompt_building.ABSTENTION_MARKER, read without importing LiveCodeBench."""
-    source = Path(__file__).resolve().parents[1] / "prompt_building.py"
-    for node in ast.parse(source.read_text()).body:
-        if isinstance(node, ast.Assign) and [
-            getattr(t, "id", None) for t in node.targets
-        ] == ["ABSTENTION_MARKER"]:
-            return ast.literal_eval(node.value)
-    raise RuntimeError(f"no ABSTENTION_MARKER in {source}")
-
-
-def control_responses() -> dict[str, str]:
-    """Responses that should earn (almost) nothing on a solvable row.
-
-    ``abstain`` is the abstention answer (the right answer on an impossible
-    row, so score_targets skips it on rows whose target abstains),
-    ``no_answer`` is thinking with nothing after it, and ``empty_program`` is
-    a python fence holding ``pass``.
-    """
-    thinking = "<think>\nI have thought about this task.\n</think>\n\n"
-    return {
-        "abstain": thinking + _abstention_marker(),
-        "no_answer": thinking,
-        "empty_program": thinking + "```python\npass\n```",
-    }
-
-
-def _scores(
-    rows: list[dict], responses: list[str], max_workers: int | None
-) -> list[dict[str, Any]]:
-    """Score ``responses[i]`` with ``rows[i]``'s code criteria, in parallel."""
-    jobs = [
-        (i, *job)
-        for i, (row, response) in enumerate(zip(rows, responses))
-        for job in _code_jobs(row, response)
-    ]
-    with ThreadPoolExecutor(max_workers=max_workers or _default_workers()) as pool:
-        values = list(pool.map(lambda job: code_score(*job[2:]), jobs))
-    scores: list[list[float | None]] = [[None] * len(row["rubric"]) for row in rows]
-    for (i, j, *_), value in zip(jobs, values):
-        scores[i][j] = value
-    return [_weighted(row, criteria) for row, criteria in zip(rows, scores)]
-
-
 def score_targets(
     rows: list[dict],
     *,
     response_field: str = "ground_truth",
-    controls: bool = True,
     max_workers: int | None = None,
 ) -> list[dict[str, Any]]:
     """Score each row's target with its own code criteria, as RL would.
@@ -236,51 +187,18 @@ def score_targets(
     and ``prompt_weight`` (the weight left unscored). A correct target whose
     score is below 1 means its rubric or its code does not survive the RL
     sandbox. Rows may be raw submission rows or validated ones.
-
-    With ``controls``, each dict also gets ``controls``: the score of every
-    ``control_responses()`` entry on that row (no ``abstain`` when the target
-    itself abstains). RL rewards a control the rubric scores highly, e.g. a
-    solvable row's rubric that gives the abstention 1.0 teaches the policy to
-    abstain. A warning counts the rows where a control earns at least half
-    of the target's score.
     """
-    results = _scores(rows, [row[response_field] for row in rows], max_workers)
-    if not controls:
-        return results
-    marker = _abstention_marker()
-    flagged: dict[str, list[int]] = {}
-    for name, response in control_responses().items():
-        indices = [
-            i
-            for i, row in enumerate(rows)
-            if name != "abstain" or not row[response_field].rstrip().endswith(marker)
-        ]
-        picked = [rows[i] for i in indices]
-        for i, control in zip(
-            indices, _scores(picked, [response] * len(picked), max_workers)
-        ):
-            results[i].setdefault("controls", {})[name] = control["score"]
-            target = results[i]["score"]
-            if (
-                control["score"]
-                and target is not None
-                and control["score"] >= target / 2
-            ):
-                flagged.setdefault(name, []).append(i)
-    for result in results:
-        result.setdefault("controls", {})
-    if flagged:
-        rows_hit = sorted({i for indices in flagged.values() for i in indices})
-        counts = ", ".join(
-            f"{name}: {len(indices)}" for name, indices in flagged.items()
-        )
-        warnings.warn(
-            f"score_targets: in {len(rows_hit)} of {len(rows)} rows a control response "
-            f"earns at least half of the target's score ({counts}), so RL rewards it "
-            f"too; e.g. rows {rows_hit[:10]}. Each row's 'controls' has the scores.",
-            stacklevel=2,
-        )
-    return results
+    jobs = [
+        (i, *job)
+        for i, row in enumerate(rows)
+        for job in _code_jobs(row, row[response_field])
+    ]
+    with ThreadPoolExecutor(max_workers=max_workers or _default_workers()) as pool:
+        values = list(pool.map(lambda job: code_score(*job[2:]), jobs))
+    scores: list[list[float | None]] = [[None] * len(row["rubric"]) for row in rows]
+    for (i, j, *_), value in zip(jobs, values):
+        scores[i][j] = value
+    return [_weighted(row, criteria) for row, criteria in zip(rows, scores)]
 
 
 class RubricVerifier:
