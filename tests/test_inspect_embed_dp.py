@@ -15,7 +15,11 @@ import pytest
 from pyforger.inspect import _embed_dp, cluster, embedding_dispersion
 
 TEXTS = [f"text {i} " + "word " * (i % 7) for i in range(23)]
-ENCODE_KWARGS = dict(batch_size=64, normalize_embeddings=True, convert_to_numpy=True)
+ENCODE_KWARGS = dict(
+    batch_tokens=_embed_dp.DEFAULT_BATCH_TOKENS,
+    normalize_embeddings=True,
+    convert_to_numpy=True,
+)
 
 
 def _vectors(texts: list[str]) -> np.ndarray:
@@ -25,16 +29,23 @@ def _vectors(texts: list[str]) -> np.ndarray:
 
 
 class _FakeEncoder:
-    """Stands in for SentenceTransformer; counts constructions."""
+    """Stands in for SentenceTransformer; counts constructions and batches."""
 
     device = types.SimpleNamespace(type="cuda")
     loads = 0
+    batches: list[list[str]] = []
 
-    def __init__(self, model_id):
+    def __init__(self, model_id=None):
         type(self).loads += 1
 
     def encode(self, docs, **kwargs):
-        assert kwargs == ENCODE_KWARGS
+        assert kwargs == dict(
+            batch_size=len(docs),
+            show_progress_bar=False,
+            normalize_embeddings=True,
+            convert_to_numpy=True,
+        )
+        type(self).batches.append(list(docs))
         return _vectors(docs)
 
 
@@ -42,6 +53,7 @@ class _FakeEncoder:
 def fake_sentence_transformers(monkeypatch):
     """A `sentence_transformers` module whose encoder is `_FakeEncoder`."""
     _FakeEncoder.loads = 0
+    _FakeEncoder.batches = []
     module = types.ModuleType("sentence_transformers")
     module.SentenceTransformer = _FakeEncoder
     monkeypatch.setitem(sys.modules, "sentence_transformers", module)
@@ -244,3 +256,78 @@ def test_encode_stops_a_busy_worker_when_another_fails(
     if pid_file.exists():  # the worker got as far as embedding: it was stopped
         with pytest.raises(ProcessLookupError):
             os.kill(int(pid_file.read_text()), 0)
+
+
+def test_token_batches_respect_the_budget():
+    """Longest first; size x longest <= budget; an over-budget text is alone."""
+    assert _embed_dp.token_batches([5, 50, 20, 30], 60) == [[1], [3, 2], [0]]
+    assert _embed_dp.token_batches([100, 3, 3], 10) == [[0], [1, 2]]
+    assert _embed_dp.token_batches([], 10) == []
+    lengths = [(i * 37) % 101 + 1 for i in range(200)]
+    batches = _embed_dp.token_batches(lengths, 512)
+    assert sorted(i for b in batches for i in b) == list(range(200))
+    for batch in batches:
+        assert len(batch) == 1 or len(batch) * max(lengths[i] for i in batch) <= 512
+
+
+def test_token_lengths_use_the_tokenizer_cut_at_max_seq_length():
+    """Lengths come from the encoder's tokenizer, truncated as the model sees them."""
+
+    class _Encoder:
+        max_seq_length = 3
+
+        @staticmethod
+        def tokenizer(texts, truncation, max_length):
+            ids = [t.split() for t in texts]
+            return {"input_ids": [i[:max_length] if truncation else i for i in ids]}
+
+    assert _embed_dp.token_lengths(_Encoder(), ["a b", "a b c d e", ""]) == [2, 3, 0]
+    # No tokenizer: character counts.
+    assert _embed_dp.token_lengths(object(), ["abc", ""]) == [3, 0]
+
+
+def test_encode_in_token_batches_keeps_input_order(fake_sentence_transformers):
+    """Budgeted batches give the same vectors, in input order, as one call."""
+    texts = [("x" * ((i * 13) % 40 + 1)) + str(i) for i in range(50)]
+    encoder = _FakeEncoder()
+
+    embeddings = _embed_dp.encode_in_token_batches(
+        encoder,
+        texts,
+        batch_tokens=100,
+        normalize_embeddings=True,
+        convert_to_numpy=True,
+    )
+
+    np.testing.assert_array_equal(embeddings, _vectors(texts))
+    assert len(_FakeEncoder.batches) > 1
+    for batch in _FakeEncoder.batches:
+        assert len(batch) == 1 or len(batch) * max(map(len, batch)) <= 100
+
+
+def test_long_text_gets_its_own_batch_untruncated(fake_sentence_transformers):
+    """A text over the budget is embedded alone and whole."""
+    long_text = "y" * 1000
+    texts = ["a", long_text, "bb"]
+
+    _embed_dp.encode_in_token_batches(
+        _FakeEncoder(),
+        texts,
+        batch_tokens=100,
+        normalize_embeddings=True,
+        convert_to_numpy=True,
+    )
+
+    assert _FakeEncoder.batches[0] == [long_text]
+    assert sorted(map(len, _FakeEncoder.batches[1])) == [1, 2]
+
+
+def test_batch_tokens_env_override(monkeypatch):
+    """FORGER_EMBED_BATCH_TOKENS overrides the default; it must be positive."""
+    monkeypatch.delenv("FORGER_EMBED_BATCH_TOKENS", raising=False)
+    assert _embed_dp.batch_tokens() == _embed_dp.DEFAULT_BATCH_TOKENS
+    monkeypatch.setenv("FORGER_EMBED_BATCH_TOKENS", "4096")
+    assert _embed_dp.batch_tokens() == 4096
+    monkeypatch.setenv("FORGER_EMBED_BATCH_TOKENS", "0")
+    with pytest.raises(ValueError, match="positive"):
+        _embed_dp.batch_tokens()

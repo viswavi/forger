@@ -8,6 +8,10 @@ Each worker is a fresh `python -m pyforger.inspect._embed_dp_worker` process wit
 `start_multi_process_pool`: that pool uses multiprocessing "spawn", which
 re-imports the caller's main script and so reruns a pipeline script that has no
 `if __name__ == "__main__":` guard.
+
+Every encoder, in a worker or in the caller's process, embeds in token-budgeted
+batches (:func:`encode_in_token_batches`) rather than a fixed number of texts,
+so a batch of long texts does not run the GPU out of memory.
 """
 
 from __future__ import annotations
@@ -20,18 +24,103 @@ import traceback
 from multiprocessing.connection import wait
 from typing import Any
 
+# Padded tokens per batch (texts in the batch x tokens in its longest text);
+# FORGER_EMBED_BATCH_TOKENS overrides it. A fixed 64 texts per batch ran a 48 GB
+# L40S out of memory on SFT targets of a few thousand tokens. With this budget,
+# Qwen3-Embedding-0.6B embedded 5112 uncut targets (up to 16K tokens) on one
+# L40S with at most 4.5 GB reserved, and 2500 ~500-token texts in half the time
+# of 64 per batch (less padding). On the 300 longest, budgets of 8192 / 16384 /
+# 32768 took 48 / 79 / 100 s (4.7 / 5.4 / 9.6 GB); short texts were not timed
+# at 8192.
+DEFAULT_BATCH_TOKENS = 16384
+
+
+def batch_tokens() -> int:
+    """The token budget per batch: `FORGER_EMBED_BATCH_TOKENS`, else the default."""
+    value = os.environ.get("FORGER_EMBED_BATCH_TOKENS")
+    if value is None or not value.strip():
+        return DEFAULT_BATCH_TOKENS
+    budget = int(value)
+    if budget < 1:
+        raise ValueError(f"FORGER_EMBED_BATCH_TOKENS must be positive, not {value!r}")
+    return budget
+
+
+def token_lengths(encoder: Any, texts: list[str]) -> list[int]:
+    """Tokens per text as the encoder sees them (cut at its `max_seq_length`).
+
+    Falls back to character counts, which are at least the token counts for
+    usual tokenizers, when the encoder has no text tokenizer.
+    """
+    tokenizer = getattr(encoder, "tokenizer", None)
+    max_length = getattr(encoder, "max_seq_length", None)
+    try:
+        ids = tokenizer(  # type: ignore[misc]
+            texts, truncation=max_length is not None, max_length=max_length
+        )["input_ids"]
+        return [len(i) for i in ids]
+    except Exception:  # no tokenizer, or not a text tokenizer
+        return [len(t) for t in texts]
+
+
+def token_batches(lengths: list[int], budget: int) -> list[list[int]]:
+    """Group text indices, longest first, into batches of at most `budget` tokens.
+
+    A batch costs its size times its longest text, as padded; a text longer
+    than the budget is a batch of its own. e.g. lengths [5, 50, 20, 30] with
+    budget 60 -> [[1], [3, 2], [0]].
+    """
+    order = sorted(range(len(lengths)), key=lambda i: lengths[i], reverse=True)
+    batches: list[list[int]] = []
+    for i in order:
+        # Longest first, so a batch's first text is its longest.
+        if batches and (len(batches[-1]) + 1) * lengths[batches[-1][0]] <= budget:
+            batches[-1].append(i)
+        else:
+            batches.append([i])
+    return batches
+
+
+def encode_in_token_batches(
+    encoder: Any, texts: list[str], *, batch_tokens: int, **encode_kwargs: Any
+) -> Any:
+    """`encoder.encode(texts, **encode_kwargs)` in token-budgeted batches, in order.
+
+    Returns an array of shape ``(len(texts), dim)``; `encode_kwargs` should ask
+    for numpy (``convert_to_numpy=True``).
+    """
+    import numpy as np
+
+    if not texts:
+        return np.asarray(encoder.encode(texts, **encode_kwargs))
+    embeddings = None
+    for batch in token_batches(token_lengths(encoder, texts), batch_tokens):
+        vectors = np.asarray(
+            encoder.encode(
+                [texts[i] for i in batch],
+                batch_size=len(batch),
+                show_progress_bar=False,
+                **encode_kwargs,
+            )
+        )
+        if embeddings is None:
+            embeddings = np.empty((len(texts), *vectors.shape[1:]), vectors.dtype)
+        embeddings[batch] = vectors
+    return embeddings
+
 
 def serve(conn: Any) -> None:
     """Embed one shard: receive `(model_id, texts, encode_kwargs)`, send the array.
 
-    `CUDA_VISIBLE_DEVICES` was set to this worker's GPU by the parent.
+    `encode_kwargs` go to :func:`encode_in_token_batches`. `CUDA_VISIBLE_DEVICES`
+    was set to this worker's GPU by the parent.
     """
     try:
         model_id, texts, encode_kwargs = conn.recv()
         from sentence_transformers import SentenceTransformer
 
         encoder = SentenceTransformer(model_id)
-        conn.send(("ok", encoder.encode(texts, **encode_kwargs)))
+        conn.send(("ok", encode_in_token_batches(encoder, texts, **encode_kwargs)))
     except BaseException:  # report any failure to the parent, then exit
         conn.send(("error", traceback.format_exc()))
 
@@ -104,9 +193,8 @@ def encode(
     """Embed `texts` with `model_id`, one worker per GPU in `gpus`, in input order.
 
     Returns an array of shape ``(len(texts), dim)``, as
-    ``SentenceTransformer.encode(texts, **encode_kwargs)`` with
-    ``convert_to_numpy=True`` would. Every worker is stopped before this
-    returns or raises.
+    :func:`encode_in_token_batches` with `encode_kwargs` would in one process.
+    Every worker is stopped before this returns or raises.
     """
     import numpy as np
 

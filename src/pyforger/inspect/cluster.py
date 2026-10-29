@@ -27,8 +27,8 @@ logger = get_formatted_logger("Inspect")
 
 # Fewer documents than this embed on one GPU: each GPU's worker first spends
 # ~10 s starting Python and loading the model. With Qwen3-Embedding-0.6B on two
-# L40S, 1000 ~400-token documents took 19 s on one GPU or two; 2500 took 54 s on
-# one and 37 s on two; 5112 took 105 s and 62 s.
+# L40S (64 texts per batch then), 1000 ~400-token documents took 19 s on one GPU
+# or two; 2500 took 54 s on one and 37 s on two; 5112 took 105 s and 62 s.
 _MULTI_GPU_MIN_DOCS = 2000
 
 
@@ -414,7 +414,8 @@ def _default_embed(
     """Embed documents with sentence-transformers, preferring the GPU.
 
     With two or more visible GPUs and at least `_MULTI_GPU_MIN_DOCS` documents,
-    every GPU embeds a share of them in its own worker process.
+    every GPU embeds a share of them in its own worker process. Batches hold up
+    to `FORGER_EMBED_BATCH_TOKENS` padded tokens (see `_embed_dp.batch_tokens`).
     """
     try:
         from sentence_transformers import SentenceTransformer
@@ -425,7 +426,9 @@ def _default_embed(
         ) from e
 
     encode_kwargs = dict(
-        batch_size=64, normalize_embeddings=True, convert_to_numpy=True
+        batch_tokens=_embed_dp.batch_tokens(),
+        normalize_embeddings=True,
+        convert_to_numpy=True,
     )
     gpus = _embedding_gpus(len(docs))
     if gpus:
@@ -449,7 +452,7 @@ def _default_embed(
             embedding_model,
             _TFIDF_EMBEDDING,
         )
-    return encoder.encode(docs, **encode_kwargs)
+    return _embed_dp.encode_in_token_batches(encoder, docs, **encode_kwargs)
 
 
 def _embedding_gpus(num_docs: int) -> list[str]:
