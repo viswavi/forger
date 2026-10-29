@@ -19,6 +19,7 @@ import time
 import warnings
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from dataclasses import dataclass
 from typing import Any, Literal, Union, overload
 
 import litellm
@@ -28,7 +29,7 @@ from litellm.exceptions import BadRequestError as LitellmBadRequestError
 from litellm.exceptions import ContentPolicyViolationError, ContextWindowExceededError
 
 from pyforger import _tracking
-from pyforger.acquire import _request_cache
+from pyforger.acquire import _local_dp, _request_cache
 from pyforger.op import _NO_CACHE_SCOPE, _REQUEST_SCOPE, _hash
 from pyforger.token_units import (
     TokenUnitBudget,
@@ -2083,6 +2084,22 @@ class Model:
 # can be long (tens of thousands of tokens), so the LiteLLM default of "let the
 # provider decide" is replaced here by an explicit, generous ceiling.
 _DEFAULT_LOCAL_MAX_TOKENS = 32768
+_LOCAL_STEP_TOKENS = 1024  # default max_num_batched_tokens; see LocalModel._engine
+
+
+@dataclass(frozen=True)
+class TargetLogprobs:
+    """How likely a model finds one given response: see `LocalModel.target_logprobs`.
+
+    `logprobs` holds the natural-log probability of each response token given
+    the prompt and the tokens before it. `reasoning_tokens` counts the leading
+    tokens through `</think>` (0 when the response has none). `truncated` means
+    the response did not fit in the context and its end was not scored.
+    """
+
+    logprobs: list[float]
+    reasoning_tokens: int
+    truncated: bool
 
 
 def _import_vllm() -> Any:
@@ -2133,6 +2150,7 @@ class LocalModel(Model):
         max_model_len: int | None = None,
         gpu_memory_utilization: float = 0.9,
         tensor_parallel_size: int = 1,
+        data_parallel_size: int | str = "auto",
         dtype: str = "auto",
         enable_thinking: bool = True,
         chat_template_kwargs: dict[str, Any] | None = None,
@@ -2150,7 +2168,16 @@ class LocalModel(Model):
             max_model_len: Maximum context length (prompt + generation) for the
                 engine. None lets vLLM use the model's configured maximum.
             gpu_memory_utilization: Fraction of GPU memory vLLM may use.
-            tensor_parallel_size: Number of GPUs to shard the model across.
+            tensor_parallel_size: Number of GPUs to shard each engine across.
+                Raise it only for a model too large for one GPU.
+            data_parallel_size: Number of engines, each a full copy of the
+                model on its own `tensor_parallel_size` GPUs in its own process,
+                sampling an equal share of the prompts. "auto" (the default)
+                uses every visible GPU (`CUDA_VISIBLE_DEVICES`, else
+                `nvidia-smi`): 8 GPUs give 8 one-GPU engines. With fewer than
+                two engines the model runs in this process, as `vllm.LLM`.
+                The engines hold their GPUs until `close()` or exit, so set
+                `CUDA_VISIBLE_DEVICES` to leave GPUs free for other jobs.
             dtype: Engine dtype ("auto", "bfloat16", "float16", ...).
             enable_thinking: For reasoning models, whether the chat template
                 should enable the thinking block. Forwarded via
@@ -2165,6 +2192,9 @@ class LocalModel(Model):
             **engine_kwargs: Extra keyword arguments forwarded to `vllm.LLM`
                 (e.g. `max_num_seqs` to cap concurrent sequences and avoid KV
                 cache over-admission on long-generation workloads).
+                `max_num_batched_tokens` defaults to 1024 tokens per engine
+                step (at least `max_num_seqs`), so `target_logprobs` fits in
+                memory beside the KV cache.
         """
         super().__init__(
             model_id,
@@ -2175,6 +2205,7 @@ class LocalModel(Model):
         self._max_model_len = max_model_len
         self._gpu_memory_utilization = gpu_memory_utilization
         self._tensor_parallel_size = tensor_parallel_size
+        self._data_parallel_size = data_parallel_size
         self._dtype = dtype
         self._enable_thinking = enable_thinking
         self._chat_template_kwargs = chat_template_kwargs
@@ -2192,7 +2223,8 @@ class LocalModel(Model):
         `gpu_memory_utilization` and `tensor_parallel_size` only affect speed
         and memory, so they are left out -- except with `max_model_len=-1`,
         where vLLM (0.14+) sizes the context to fit memory and they cap
-        generation length. `show_progress` is always left out.
+        generation length. `data_parallel_size` and `show_progress` are always
+        left out.
         """
         engine_kwargs = tuple(sorted(self._kwargs.items(), key=lambda kv: str(kv[0])))
         memory = (
@@ -2227,9 +2259,14 @@ class LocalModel(Model):
         return math.nan
 
     def _engine(self) -> Any:
-        """Lazily construct and cache the vLLM engine."""
+        """Lazily construct and cache the vLLM engine (one per GPU group).
+
+        With two or more GPU groups, e.g. 8 visible GPUs and the defaults, this
+        is a `DataParallelEngine` of worker processes with `vllm.LLM`'s `chat`.
+        """
         if self._llm is None:
-            self._llm = _import_vllm().LLM(
+            vllm = _import_vllm()  # fails here, with the install hint, without vllm
+            engine_kwargs = dict(
                 model=self._model_id,
                 gpu_memory_utilization=self._gpu_memory_utilization,
                 tensor_parallel_size=self._tensor_parallel_size,
@@ -2238,7 +2275,37 @@ class LocalModel(Model):
                 max_model_len=self._max_model_len,
                 **self._kwargs,
             )
+            # Scoring (`target_logprobs`) takes a full-vocabulary log-softmax of
+            # every prompt token in an engine step, outside the memory vLLM sets
+            # aside: for Qwen3 a 16K-token step needs ~10 GB and a 4K one ~2.5 GB,
+            # which ran out of memory beside the KV cache on H100s and L40S.
+            # Fewer tokens per step only changes speed.
+            engine_kwargs.setdefault(
+                "max_num_batched_tokens",
+                max(_LOCAL_STEP_TOKENS, engine_kwargs.get("max_num_seqs") or 0),
+            )
+            groups = _local_dp.device_groups(
+                _local_dp.visible_gpus(),
+                self._tensor_parallel_size,
+                self._data_parallel_size,
+            )
+            if groups:
+                _logger.info(
+                    "LocalModel %s: %d engines, one per GPU group %s",
+                    self._model_id,
+                    len(groups),
+                    "; ".join(",".join(g) for g in groups),
+                )
+                self._llm = _local_dp.DataParallelEngine.start(groups, engine_kwargs)
+            else:
+                self._llm = vllm.LLM(**engine_kwargs)
         return self._llm
+
+    def close(self) -> None:
+        """Free the GPUs held by data-parallel engines; the next call restarts them."""
+        if isinstance(self._llm, _local_dp.DataParallelEngine):
+            self._llm.close()
+            self._llm = None
 
     def _template_kwargs(self) -> dict[str, Any]:
         """Resolve chat-template kwargs from explicit override or enable_thinking."""
@@ -2359,6 +2426,47 @@ class LocalModel(Model):
         if n != 1:
             _check_completion_count(self._model_id, n, results, fanned_out=False)
         return results
+
+    def target_logprobs(
+        self,
+        prompts: list[Prompt],
+        targets: list[str],
+        *,
+        show_progress: bool | None = None,
+    ) -> list[TargetLogprobs]:
+        """Log-probability of each given response's tokens under this model.
+
+        Each prompt is rendered with the chat template and generation prompt, as
+        for sampling, and its target follows as the assistant's response: the
+        tokens SFT trains on, without the end-of-turn token. Nothing is sampled;
+        every visible GPU scores a share of the targets.
+
+        Args:
+            prompts: Prompts (string or OpenAI-format message list).
+            targets: One response text per prompt, e.g. an SFT target
+                `"<think>...</think>answer"`.
+            show_progress: Per-call override of the instance's show_progress.
+
+        Returns:
+            One `TargetLogprobs` per prompt, in input order.
+        """
+        if len(prompts) != len(targets):
+            raise ValueError(
+                f"{len(prompts)} prompts but {len(targets)} targets; pass one each"
+            )
+        if not prompts:
+            return []
+        pairs = [(_to_messages(p), t) for p, t in zip(prompts, targets)]
+        kwargs: dict[str, Any] = dict(
+            chat_template_kwargs=self._template_kwargs(),
+            use_tqdm=self._show_progress if show_progress is None else show_progress,
+        )
+        engine = self._engine()
+        if isinstance(engine, _local_dp.DataParallelEngine):
+            scores = engine.target_logprobs(pairs, **kwargs)
+        else:
+            scores = _local_dp.target_logprobs(engine, pairs, **kwargs)
+        return [TargetLogprobs(**score) for score in scores]
 
 
 # Marks the boundary between a reasoning model's thinking block and its answer.

@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import math
+import os
+import subprocess
 import sys
 import types
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
+from pyforger.acquire import _local_dp
 from pyforger.acquire.model import GenerateResult, LocalModel, split_reasoning
 from pyforger.alter.generate import self_taught_reasoner
 
@@ -66,6 +70,7 @@ def engines(monkeypatch):
     module.LLM = FakeLLM
     module.SamplingParams = FakeSamplingParams
     monkeypatch.setitem(sys.modules, "vllm", module)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")  # one in-process engine
     return created
 
 
@@ -120,7 +125,14 @@ class TestLazyEngine:
             "max_model_len": 40960,
             "max_num_seqs": 8,
             "revision": "abc123",
+            "max_num_batched_tokens": 1024,
         }
+
+    def test_step_tokens_default_and_override(self, engines):
+        """max_num_batched_tokens: 1024, at least max_num_seqs, or as given."""
+        LocalModel("m", max_num_seqs=4096).generate("a")
+        LocalModel("m", max_num_batched_tokens=512).generate("a")
+        assert [e.init_kwargs["max_num_batched_tokens"] for e in engines] == [4096, 512]
 
     def test_max_model_len_defaults_to_none(self, engines):
         """Without max_model_len, vLLM gets None (its own default)."""
@@ -347,6 +359,8 @@ class TestCacheKey:
         [
             {"gpu_memory_utilization": 0.5},
             {"tensor_parallel_size": 4},
+            {"data_parallel_size": 4},
+            {"data_parallel_size": 1},
             {"show_progress": True},
         ],
     )
@@ -395,6 +409,158 @@ class TestCacheKey:
         assert len(engines) == 1
         self_taught_reasoner(items, "{prompt}", LocalModel("m", revision="b"), n=1)
         assert len(engines) == 2
+
+
+class TestDataParallel:
+    """With several GPUs, LocalModel runs one engine per GPU and splits the prompts."""
+
+    @pytest.mark.parametrize(
+        "env, expected",
+        [("0,1,3", ["0", "1", "3"]), ("", []), ("-1", []), (" 2 , 5 ", ["2", "5"])],
+    )
+    def test_visible_gpus_follow_cuda_visible_devices(self, monkeypatch, env, expected):
+        """CUDA_VISIBLE_DEVICES decides which GPUs are visible when it is set."""
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", env)
+        assert _local_dp.visible_gpus() == expected
+
+    @pytest.mark.parametrize(
+        "gpus, tp, dp, expected",
+        [
+            (list("01234567"), 1, "auto", [[g] for g in "01234567"]),
+            (
+                list("01234567"),
+                2,
+                "auto",
+                [["0", "1"], ["2", "3"], ["4", "5"], ["6", "7"]],
+            ),
+            (list("012"), 2, "auto", []),  # one group: in-process engine
+            (["0"], 1, "auto", []),
+            ([], 1, "auto", []),
+            (list("01234567"), 1, 3, [["0"], ["1"], ["2"]]),
+            (list("01234567"), 1, 1, []),
+        ],
+    )
+    def test_device_groups(self, gpus, tp, dp, expected):
+        """'auto' fills every visible GPU; an int asks for that many engines."""
+        assert _local_dp.device_groups(gpus, tp, dp) == expected
+
+    @pytest.mark.parametrize("dp", [5, 0, "all"])
+    def test_device_groups_reject_impossible_requests(self, dp):
+        """More engines than GPUs, or a non-count, raise ValueError."""
+        with pytest.raises(ValueError):
+            _local_dp.device_groups(list("0123"), 1, dp)
+
+    def test_chat_deals_round_robin_and_restores_order(self):
+        """Prompt i goes to engine i % k; outputs come back in input order."""
+
+        class Echo:
+            def __init__(self):
+                self.calls = []
+
+            def chat(self, messages, sampling_params, **kwargs):
+                self.calls.append((messages, kwargs))
+                return [f"out:{m}" for m in messages]
+
+        echoes = [Echo(), Echo(), Echo()]
+        engine = _local_dp.DataParallelEngine(echoes)
+        outputs = engine.chat([f"p{i}" for i in range(7)], "params", use_tqdm=True)
+        assert outputs == [f"out:p{i}" for i in range(7)]
+        assert [e.calls[0][0] for e in echoes] == [
+            ["p0", "p3", "p6"],
+            ["p1", "p4"],
+            ["p2", "p5"],
+        ]
+        assert [e.calls[0][1]["use_tqdm"] for e in echoes] == [True, False, False]
+        engine.close()
+
+    def test_engines_with_no_prompts_are_not_called(self):
+        """Fewer prompts than engines leaves the extra engines idle."""
+
+        class Echo:
+            def __init__(self):
+                self.calls = 0
+
+            def chat(self, messages, sampling_params, **kwargs):
+                self.calls += 1
+                return list(messages)
+
+        echoes = [Echo() for _ in range(4)]
+        assert _local_dp.DataParallelEngine(echoes).chat(["a"], None) == ["a"]
+        assert [e.calls for e in echoes] == [1, 0, 0, 0]
+
+    def test_local_model_uses_one_engine_per_gpu(self, engines, monkeypatch):
+        """Two visible GPUs give two engines, each sampling half the prompts."""
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+        started = []
+
+        def start(groups, engine_kwargs):
+            started.append(groups)
+            fakes = [sys.modules["vllm"].LLM(**engine_kwargs) for _ in groups]
+            return _local_dp.DataParallelEngine(fakes)
+
+        monkeypatch.setattr(_local_dp.DataParallelEngine, "start", staticmethod(start))
+        model = LocalModel("Qwen/Qwen3-4B")
+        results = model.generate_batch(["a", "b", "c"], n=1)
+        assert started == [[["0"], ["1"]]]
+        assert [len(e.chat_calls[0].messages) for e in engines] == [2, 1]
+        assert len(results) == 3 and model.history == results
+        model.close()
+        assert model._llm is None
+
+    def test_unguarded_script_runs_worker_processes(self, tmp_path):
+        """A script with no __main__ guard starts real workers, one per GPU, once.
+
+        Workers are fresh processes, so the caller's script is not re-imported
+        (multiprocessing's "spawn" would rerun it and start engines recursively).
+        Each runs its engine core in-process (VLLM_ENABLE_V1_MULTIPROCESSING=0).
+        """
+        fake = tmp_path / "vllm"
+        fake.mkdir()
+        (fake / "__init__.py").write_text(
+            "import os\n"
+            "from types import SimpleNamespace as N\n"
+            "class SamplingParams:\n"
+            "    def __init__(self, **kw): self.kw = kw\n"
+            "class LLM:\n"
+            "    def __init__(self, **kw):\n"
+            "        env = os.environ\n"
+            "        self.gpu = env['CUDA_VISIBLE_DEVICES'] + '/' + env.get(\n"
+            "            'VLLM_ENABLE_V1_MULTIPROCESSING', 'unset')\n"
+            "    def chat(self, messages, sp, **kw):\n"
+            "        return [N(prompt_token_ids=[1], outputs=[N(\n"
+            "            text=m[0]['content'] + '@' + self.gpu, token_ids=[1],\n"
+            "            finish_reason='stop')]) for m in messages]\n"
+        )
+        script = tmp_path / "unguarded.py"
+        script.write_text(
+            "from pyforger.acquire.model import LocalModel\n"
+            "m = LocalModel('x')\n"
+            "print([r[0] for r in m.generate_batch(['a', 'b', 'c'])])\n"
+            "m.close()\n"
+        )
+        src = str(Path(__file__).resolve().parents[1] / "src")
+        env = dict(
+            os.environ, CUDA_VISIBLE_DEVICES="4,5", PYTHONPATH=f"{tmp_path}:{src}"
+        )
+        env.pop("VLLM_ENABLE_V1_MULTIPROCESSING", None)
+        done = subprocess.run(
+            [sys.executable, str(script)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert done.returncode == 0, done.stderr[-2000:]
+        assert done.stdout.strip().splitlines()[-1] == "['a@4/0', 'b@5/0', 'c@4/0']"
+
+    def test_data_parallel_size_one_keeps_one_engine(self, engines, monkeypatch):
+        """data_parallel_size=1 runs in this process even with several GPUs visible."""
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2,3")
+        model = LocalModel("Qwen/Qwen3-4B", data_parallel_size=1)
+        model.generate("a")
+        assert len(engines) == 1 and not isinstance(
+            model._llm, _local_dp.DataParallelEngine
+        )
 
 
 class TestSplitReasoning:
