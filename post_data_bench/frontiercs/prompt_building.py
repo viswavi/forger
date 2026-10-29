@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 # The task's goal specification, shown to every candidate model as the system prompt.
-# Verbatim from FrontierCS's own solution generator (algorithmic/scripts/
-# generate_solutions.py, CPP_SYSTEM_PROMPT): it defines the task, so it is kept
-# unchanged. A thinking model's reasoning precedes this "code only" answer.
+# Verbatim from the benchmark's own solution generator (see make_splits.py): it
+# defines the task, so it is kept unchanged. A thinking model's reasoning precedes
+# this "code only" answer.
 SYSTEM_PROMPT = (
     "You are a competitive programmer. You will be given a problem statement, please "
     "implement a solution in C++. The execution time and memory limit are also "
@@ -15,7 +15,7 @@ SYSTEM_PROMPT = (
 
 
 def build_user_content(statement: str) -> str:
-    """Render the user-turn text for one problem, as FrontierCS's generator does."""
+    """Render the user-turn text for one problem, as the benchmark's generator does."""
     return f"Problem:\n\n{statement}\n\nGenerate solution code:"
 
 

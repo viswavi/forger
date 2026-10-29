@@ -1,4 +1,4 @@
-"""Answer extraction, scoring summaries, and row I/O for FrontierCS."""
+"""Answer extraction, scoring summaries, and row I/O for C++ problem evaluation."""
 from __future__ import annotations
 
 import json
@@ -13,7 +13,7 @@ def extract_code(completion: str | None) -> str:
     """The C++ program in a completion's answer, or "" when there is none.
 
     The answer is the text after the last ``</think>``; an unclosed reasoning trace
-    is not an answer. Within it, FrontierCS's ``extract_cpp_code`` rule: the longest
+    is not an answer. Within it, the benchmark's own extraction rule: the longest
     ```cpp (or ```c++ / bare ```) block, else the text with fences stripped.
     """
     if not completion:

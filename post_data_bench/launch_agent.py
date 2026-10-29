@@ -26,7 +26,9 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument(
     "--prompt", required=False, help="Path to a file with data-generation instructions."
 )
-parser.add_argument("--task", required=True, choices=["coding", "culture"])
+parser.add_argument(
+    "--task", required=True, choices=["coding", "culture", "frontiercs"]
+)
 parser.add_argument(
     "--backend",
     choices=["tinker", "local"],
@@ -150,14 +152,20 @@ if args.training_mode == "sft-rl" and args.model != MODELS[args.backend]:
     parser.error(
         f"the {args.backend} unified recipe supports {MODELS[args.backend]} only"
     )
-# Culture evaluates through a local server only (no Tinker sampler yet; see
-# HANDOFF_culture_tinker_eval.md).
+# Culture and frontiercs evaluate through a local server only (no Tinker sampler
+# yet; see HANDOFF_culture_tinker_eval.md).
 if (
     args.training_mode == "sft-rl"
-    and args.task == "culture"
+    and args.task in ("culture", "frontiercs")
     and args.backend != "local"
 ):
-    parser.error("the culture unified recipe needs --backend local")
+    parser.error(f"the {args.task} unified recipe needs --backend local")
+if args.task == "frontiercs" and args.training_mode != "sft-rl":
+    parser.error("frontiercs runs only in the unified recipe (--training-mode sft-rl)")
+# The task's name wherever the agent can see it: sandbox paths, the sandbox's
+# PDB_TASK and the run's token-budget policy. The agent must not learn which
+# benchmark it is evaluated on, e.g. frontiercs -> post_data_bench/algorithmic.
+PUBLIC_TASK = {"frontiercs": "algorithmic"}.get(args.task, args.task)
 if (
     args.finalize_submission or args.prepare_final_only
 ) and args.training_mode != "sft-rl":
@@ -210,6 +218,9 @@ def finalization_command(directory, output, termination_reason="manual_recovery"
         output,
         "--agent-termination-reason",
         termination_reason,
+        # The host evaluator directory, e.g. frontiercs (PDB_TASK holds PUBLIC_TASK).
+        "--task",
+        args.task,
     ]
     if args.prepare_final_only:
         command.append("--prepare-only")
@@ -311,7 +322,7 @@ def configure_run_token_budgets(directory, task):
 if args.benchmark_dir:
     os.environ["PDB_BENCHMARK_DIR"] = os.path.abspath(args.benchmark_dir)
 if args.finalize_submission:
-    configure_run_token_budgets(args.finalize_submission, args.task)
+    configure_run_token_budgets(args.finalize_submission, PUBLIC_TASK)
     subprocess.run(
         finalization_command(
             os.path.abspath(args.finalize_submission),
@@ -390,9 +401,10 @@ AGENT_GPU_DESC = os.environ.get(
 MODEL_OUTPUT_DIR = os.environ.get(
     "AGENT_MODEL_OUTPUT_DIR", "/data/user_data/vijayv/tir5/agent_data_models"
 )
-TASK_DIR = f"{FORGER_REPO}/post_data_bench/{args.task}"
+TASK_DIR = f"{FORGER_REPO}/post_data_bench/{PUBLIC_TASK}"
 HOST_TASK_DIR = f"{HOST_FORGER_REPO}/post_data_bench/{args.task}"
-MODEL_OUTPUT_TASK_DIR = f"{MODEL_OUTPUT_DIR}/{args.task}"
+# The agent's data directory is bound at this same path in the sandbox.
+MODEL_OUTPUT_TASK_DIR = f"{MODEL_OUTPUT_DIR}/{PUBLIC_TASK}"
 RUN_TAG = f"{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}"
 # Tags this run's Tinker sessions so billing records can be matched to it.
 os.environ["PDB_RUN_TAG"] = RUN_TAG
@@ -404,7 +416,7 @@ RAW_DATA_PATH = f"{AGENT_DATA_DIR}/generated_raw.jsonl"
 SUBMISSION_PATH = f"{AGENT_DATA_DIR}/submission.json"
 GENERATION_USAGE_PATH = f"{AGENT_DATA_DIR}/generation_token_usage.json"
 JUDGE_USAGE_PATH = f"{AGENT_DATA_DIR}/judge_token_usage.json"
-configure_run_token_budgets(AGENT_DATA_DIR, args.task)
+configure_run_token_budgets(AGENT_DATA_DIR, PUBLIC_TASK)
 TRL_DATA_PATH = f"{AGENT_DATA_DIR}/generated_raw_trl_format.jsonl"
 MODEL_TAG = args.model.replace("/", "__").replace(":", "__")
 OUTPUT_DIR = f"{MODEL_OUTPUT_TASK_DIR}/{MODEL_TAG}_{RUN_TAG}"
@@ -516,6 +528,12 @@ RAW_SCHEMA = {
         '"answer": ...}\n'
         '   "answer" must be one of "yes"/"no"/"neutral".'
     ),
+    # Shown only by the legacy sft mode, which frontiercs refuses; the sft-rl
+    # prompt states this row format itself.
+    "frontiercs": (
+        '{"prompt": [...chat messages...], "ground_truth": "<think>...</think>'
+        '```cpp ...```", "rubric": [[criterion, weight], ...]}'
+    ),
 }[args.task]
 
 
@@ -612,6 +630,8 @@ os.makedirs(AGENT_DATA_DIR, exist_ok=True)
 TASK_PUBLIC_FILES = {
     "coding": ["validation_tasks_de_obfuscated.jsonl", "train_model.sh"],
     "culture": ["validation_tasks_de_obfuscated.jsonl", "train_model.sh"],
+    # The evaluator copy writes validation_tasks.jsonl and problems/.
+    "frontiercs": ["train_model.sh"],
 }[args.task]
 
 if args.training_mode == "sft-rl":
@@ -623,6 +643,7 @@ if args.training_mode == "sft-rl":
         for name in (
             "agent_training.py",
             "backends.py",
+            "cpp_judge.py",
             "decontaminate.py",
             "lineage.py",
             "local_training.py",
@@ -778,20 +799,26 @@ def _task_public_copies(task_dir: str, dest_task_dir: str) -> None:
                 if os.path.isfile(host_file):
                     rel = os.path.join("model_outputs", model_name, "val", filename)
                     _copy_into(dest_task_dir, rel, host_file)
+            copied_metrics = Path(dest_task_dir) / "model_outputs" / model_name
+            copied_metrics /= "val/metrics.json"
+            # --from-raw records its input's host path, which can name the task.
+            if "source" in baseline:
+                del baseline["source"]
+                copied_metrics.write_text(json.dumps(baseline, indent=2) + "\n")
             predictions = Path(dest_task_dir) / "model_outputs" / model_name / "val"
             predictions /= "predictions.jsonl"
             if (
                 args.task == "coding" or args.training_mode == "sft-rl"
             ) and predictions.is_file():
                 from coding.rl.agent_validation import (
-                    public_culture_ids,
                     public_question_ids,
+                    public_row_ids,
                 )
 
                 # Match the copied tasks' opaque ids, e.g. "abc365_c" -> "val_017".
                 key = "question_id" if args.task == "coding" else "id"
                 ids = (
-                    public_question_ids if args.task == "coding" else public_culture_ids
+                    public_question_ids if args.task == "coding" else public_row_ids
                 )(data_root)
                 rows = [
                     json.loads(s)
@@ -800,6 +827,8 @@ def _task_public_copies(task_dir: str, dest_task_dir: str) -> None:
                 ]
                 for row in rows:
                     row[key] = ids[row[key]]
+                    # The source's own problem number, e.g. "26".
+                    row.pop("problem_id", None)
                 predictions.write_text("".join(json.dumps(r) + "\n" for r in rows))
 
 
@@ -813,11 +842,13 @@ def build_agent_mounts(
     scratch_dir: str,
     hide_forger: bool,
     hide_curator: bool,
+    sandbox_task_dir: str | None = None,
 ) -> list[str]:
     """Bind this run’s data/cache, public task files, and visible library snapshots.
 
     Allowlisted image stubs and per-run copies exclude secrets and sibling runs;
-    persistent output is mounted separately from the large data volume.
+    persistent output is mounted separately from the large data volume. The task
+    files appear at `sandbox_task_dir` (default: task_dir's place in forger_repo).
     """
     if os.path.isdir(scratch_dir):
         shutil.rmtree(scratch_dir)
@@ -834,7 +865,11 @@ def build_agent_mounts(
         _copy_into(forger_copy, "src", os.path.join(host_forger_repo, "src"))
         _copy_into(forger_copy, "docs", os.path.join(host_forger_repo, "docs"))
 
-    task_rel = os.path.relpath(task_dir, host_forger_repo)
+    task_rel = (
+        os.path.relpath(sandbox_task_dir, forger_repo)
+        if sandbox_task_dir
+        else os.path.relpath(task_dir, host_forger_repo)
+    )
     dest_task_dir = os.path.join(forger_copy, task_rel)
     os.makedirs(dest_task_dir, exist_ok=True)
     _task_public_copies(task_dir, dest_task_dir)
@@ -887,6 +922,7 @@ AGENT_BIND_MOUNTS = build_agent_mounts(
     scratch_dir=SCRATCH_COPY_DIR,
     hide_forger=args.hide_forger,
     hide_curator=args.hide_curator,
+    sandbox_task_dir=TASK_DIR,
 )
 
 # Runtime storage: node-local disk for Ray sockets/JIT caches; NFS for HF

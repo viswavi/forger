@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import re
 import shutil
@@ -68,6 +69,21 @@ CULTURE_FIELDS = (
     "task_text",
     "gold_label",
 )
+# The C++ problem evaluator, flattened the same way; judge.py is rl/cpp_judge.py.
+FRONTIERCS_EVALUATOR_FILES = {
+    **{
+        name: source
+        for name, source in CULTURE_EVALUATOR_FILES.items()
+        if not source.startswith("culture/")
+    },
+    "evaluate_model.py": "frontiercs/evaluate_model.py",
+    "checkers.py": "frontiercs/checkers.py",
+    "prompt_building.py": "frontiercs/prompt_building.py",
+    "judge.py": "coding/rl/cpp_judge.py",
+}
+# Fields of a validation problem row that the agent sees; "id" is replaced and
+# "problem_id" (the source's problem number) is dropped.
+FRONTIERCS_FIELDS = ("type", "n_tests", "statement", "task_text")
 # Agents must never learn benchmark names (contamination risk). The sandbox copy
 # renames the vendored grader package and scrubs names from code and comments,
 # e.g. LiveCodeBench/lcb_runner/lm_styles.py -> grader_lib/grader_runner/lm_styles.py.
@@ -76,9 +92,12 @@ CULTURE_FIELDS = (
 # e.g. LEETCODE = "leetcode" -> source_a = "source_a".
 BENCHMARK_NAMES = re.compile(
     r"livecodebench|lcb|impossible-?bench|normad|prbench|healthbench"
-    r"|leetcode|atcoder|codeforces",
+    r"|leetcode|atcoder|codeforces|frontier",
     re.I,
 )
+# Names checked in copied data files (problem files, testlib.h), which are copied
+# byte for byte: validation statements may name the contest site they came from.
+DATA_NAMES = re.compile(rb"frontier", re.I)
 _SCRUB = (
     (re.compile(r"LiveCodeBench-plus-impossible"), "this benchmark"),
     (re.compile(r"livecodebench", re.I), "grader_lib"),
@@ -130,11 +149,17 @@ def public_question_ids(data_root):
 VALIDATION_FIELDS = PUBLIC_FIELDS
 
 
-def public_culture_ids(data_root):
-    """Map host culture validation ids to the agent's, e.g. {1473: "val_017"}."""
+def public_row_ids(data_root):
+    """Map host validation "id"s to the agent's, e.g. {1473: "val_017"}.
+
+    Used for culture and frontiercs rows, whose task key is "id".
+    """
     with (Path(data_root) / "validation_tasks.jsonl").open() as stream:
         rows = [json.loads(line) for line in stream if line.strip()]
     return {row["id"]: f"val_{number:03d}" for number, row in enumerate(rows)}
+
+
+public_culture_ids = public_row_ids
 
 
 def _write_text(path, text, mode_from=None):
@@ -198,6 +223,61 @@ def copy_culture_evaluator(destination, data_root):
     )
 
 
+def _read_rows(path):
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def copy_frontiercs_evaluator(destination, data_root):
+    """Copy the C++ problem evaluator, validation rows and problem files.
+
+    Validation problems become val_000, val_001, ... in validation_tasks.jsonl and
+    problems/<id>/ (config.yaml, testdata/, checker or interactor). Every copied
+    problem file is checked against the build's problem_files.json, and the copy's
+    validation_manifest.json pins the rows and files the evaluator reads.
+    """
+    destination, data_root = Path(destination), Path(data_root)
+    verify_manifest(data_root)
+    validation = _read_rows(data_root / "validation_tasks.jsonl")
+    if not validation:
+        raise ValueError("validation dataset is empty")
+    assert_disjoint(validation, _read_rows(data_root / ".hidden/test_tasks.jsonl"))
+    digests = json.loads((data_root / "problem_files.json").read_text())
+    ids = public_row_ids(data_root)
+    copies = {"testlib/testlib.h": "testlib/testlib.h"}
+    for row in validation:
+        prefix = f"problems/{row['id']}/"
+        names = [name for name in digests if name.startswith(prefix)]
+        if not any(name.startswith(prefix + "testdata/") for name in names):
+            raise ValueError(f"validation problem {row['id']} has no test data")
+        for name in names:
+            if name != prefix + "statement.txt":
+                copies[f"problems/{ids[row['id']]}/{name[len(prefix):]}"] = name
+    root = Path(__file__).resolve().parents[2]
+    for name, source in FRONTIERCS_EVALUATOR_FILES.items():
+        _write_text(destination / name, (root / source).read_text(), root / source)
+    for target, name in copies.items():
+        data = (data_root / name).read_bytes()
+        if hashlib.sha256(data).hexdigest() != digests[name]:
+            raise ValueError(f"{name} differs from problem_files.json")
+        if DATA_NAMES.search(data):
+            raise ValueError(f"benchmark name in {name}")
+        (destination / target).parent.mkdir(parents=True, exist_ok=True)
+        (destination / target).write_bytes(data)
+    rows = [
+        {"id": ids[row["id"]], **{name: row[name] for name in FRONTIERCS_FIELDS}}
+        for row in validation
+    ]
+    (destination / "validation_tasks.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows)
+    )
+    public_files = ["validation_tasks.jsonl", *copies]
+    (destination / "validation_manifest.json").write_text(
+        json.dumps(
+            {"outputs": {name: sha256(destination / name) for name in public_files}}
+        )
+    )
+
+
 def copy_validation_evaluator(source, destination, data_root=None, task="coding"):
     """Copy validation rows and their private-test blobs using evaluator filenames.
 
@@ -207,6 +287,8 @@ def copy_validation_evaluator(source, destination, data_root=None, task="coding"
     data_root = Path(data_root) if data_root else source
     if task == "culture":
         return copy_culture_evaluator(destination, data_root)
+    if task == "frontiercs":
+        return copy_frontiercs_evaluator(destination, data_root)
     verify_manifest(data_root)
     rows = []
     with (data_root / "validation_tasks.jsonl").open() as stream:

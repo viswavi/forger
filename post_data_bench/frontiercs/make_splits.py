@@ -10,6 +10,10 @@ problem directories (statement, config.yaml, checker or interactor, testdata/):
     .hidden/test_tasks.jsonl          .hidden/problems/<id>/
     testlib/testlib.h                 problem_files.json (sha256 of every copied file)
 
+prompt_building.SYSTEM_PROMPT is FrontierCS's CPP_SYSTEM_PROMPT (algorithmic/scripts/
+generate_solutions.py), and checkers.extract_code its extract_cpp_code rule; those
+modules do not name FrontierCS because agent sandboxes get copies of them.
+
 Usage: python make_splits.py --source /path/to/Frontier-CS [--output-dir DIR]
 """
 from __future__ import annotations

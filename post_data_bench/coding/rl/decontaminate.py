@@ -4,11 +4,12 @@ The sandbox never holds test text: the launcher writes only hashed 13-word windo
 of each test problem's statement (`decontamination_signatures.json`, next to this
 module); short statements such as a two-sentence situation use 8-word windows
 (`SHORT`). A row overlaps a test problem when its prompt contains at least
-`FRACTION` of that problem's windows (and at least the signature's
-`min_matches`). Windows found in `COMMON` or more statements, counting the
-validation statements too, are boilerplate (e.g. a site's standard definition of
-lexicographic order) and ignored. Training data goes through `filter_rows` before
-every SFT and RL run, and only the number of removed rows is reported.
+`FRACTION` of that problem's windows (`LONG_FRACTION` for long statements) and at
+least the signature's `min_matches`. Windows found in `COMMON` or more statements,
+counting the validation statements too, are boilerplate (e.g. a site's standard
+definition of lexicographic order) and ignored. Training data goes through
+`filter_rows` before every SFT and RL run, and only the number of removed rows is
+reported.
 
   python -m rl.decontaminate --data rows.jsonl   # how many rows overlap
 """
@@ -31,8 +32,17 @@ COMMON = 3
 # half a test situation are caught, and 3 of 280 validation situations, near-copies
 # of test ones, are flagged.
 SHORT = (8, 6)
-# The statement field of each task's rows, and whether it is short.
-STATEMENT_FIELDS = {"question_content": False, "situation": True}
+# Fraction for long statements (median 700 words, 13-word windows): a copied fifth
+# of a statement is caught (162 of 179), while unrelated programming statements
+# reach at most 0.03 of a statement's windows and validation statements 0.11 (their
+# shared scoring boilerplate).
+LONG_FRACTION = 0.15
+# The statement field of each task's rows, and its length class.
+STATEMENT_FIELDS = {
+    "question_content": "default",
+    "situation": "short",
+    "statement": "long",
+}
 SIGNATURES = Path(__file__).with_name("decontamination_signatures.json")
 
 
@@ -49,7 +59,9 @@ def _windows(text, n=N):
     }
 
 
-def build_signatures(statements, background=(), n=N, min_matches=MIN_MATCHES):
+def build_signatures(
+    statements, background=(), n=N, min_matches=MIN_MATCHES, fraction=FRACTION
+):
     """Signatures of the test problem statements (no text, no ids, no order).
 
     `background` statements (e.g. the validation tasks) only count toward which
@@ -65,11 +77,17 @@ def build_signatures(statements, background=(), n=N, min_matches=MIN_MATCHES):
         sizes.append(len(kept))
         for window in kept:
             index.setdefault(window, []).append(number)
-    return {"n": n, "min_matches": min_matches, "sizes": sizes, "windows": index}
+    return {
+        "n": n,
+        "min_matches": min_matches,
+        "fraction": fraction,
+        "sizes": sizes,
+        "windows": index,
+    }
 
 
 def _statements(path):
-    """Each row's statement, and whether statements of that field are short."""
+    """Each row's statement, and the length class of that field."""
     rows = [
         json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()
     ]
@@ -80,10 +98,11 @@ def _statements(path):
 def benchmark_signatures(benchmark_dir):
     """Signatures from a benchmark build: its hidden test and its validation tasks."""
     root = Path(benchmark_dir)
-    test, short = _statements(root / ".hidden" / "test_tasks.jsonl")
+    test, kind = _statements(root / ".hidden" / "test_tasks.jsonl")
     background, _ = _statements(root / "validation_tasks.jsonl")
-    n, min_matches = SHORT if short else (N, MIN_MATCHES)
-    return build_signatures(test, background, n, min_matches)
+    n, min_matches = SHORT if kind == "short" else (N, MIN_MATCHES)
+    fraction = LONG_FRACTION if kind == "long" else FRACTION
+    return build_signatures(test, background, n, min_matches, fraction)
 
 
 @lru_cache(maxsize=1)
@@ -112,8 +131,9 @@ def overlaps(row, signature):
             hits[problem] += 1
     sizes = signature["sizes"]
     minimum = signature.get("min_matches", MIN_MATCHES)
+    fraction = signature.get("fraction", FRACTION)
     return any(
-        count >= max(minimum, FRACTION * sizes[problem])
+        count >= max(minimum, fraction * sizes[problem])
         for problem, count in hits.items()
     )
 

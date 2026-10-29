@@ -124,8 +124,11 @@ def sft(args):
     print(f"SFT complete: {output}. Use this as --checkpoint for rl.agent_training rl.")
 
 
-def _freeze_into(data, submission, agent_dir, output, backend="tinker"):
-    """Called only after the agent workspace has closed; no agent code is imported."""
+def _freeze_into(data, submission, agent_dir, output, backend="tinker", task=None):
+    """Called only after the agent workspace has closed; no agent code is imported.
+
+    `task` names the evaluator directory for the secret test (default: $PDB_TASK).
+    """
     agent_dir = Path(agent_dir).resolve()
     for source in (data, submission):
         if not Path(source).resolve(strict=True).is_relative_to(agent_dir):
@@ -184,7 +187,7 @@ def _freeze_into(data, submission, agent_dir, output, backend="tinker"):
                 "custom_rm_path": "rl.rubric_rm.custom_rm",
                 "base_model": MODELS[backend],
                 "backend": backend,
-                "task": os.environ.get("PDB_TASK", "coding"),
+                "task": task or os.environ.get("PDB_TASK", "coding"),
                 "thinking": True,
             },
             indent=2,
@@ -194,7 +197,7 @@ def _freeze_into(data, submission, agent_dir, output, backend="tinker"):
     return prepared, frozen_checkpoint
 
 
-def freeze(data, submission, agent_dir, output, backend="tinker"):
+def freeze(data, submission, agent_dir, output, backend="tinker", task=None):
     """Publish a validated submission bundle after transactional preparation."""
     output = Path(output).resolve()
     if output.exists():
@@ -202,7 +205,7 @@ def freeze(data, submission, agent_dir, output, backend="tinker"):
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".freeze-", dir=output.parent) as temporary:
         staged = Path(temporary) / "bundle"
-        _freeze_into(data, submission, agent_dir, staged, backend)
+        _freeze_into(data, submission, agent_dir, staged, backend, task)
         if output.exists():
             raise ValueError("Final bundle appeared during preparation")
         staged.rename(output)
@@ -348,7 +351,12 @@ def finalize(args):
     args.output_dir = str(Path(args.output_dir).resolve())
     backend = saved_backend(args.agent_dir, args.backend)
     data, checkpoint = freeze(
-        args.data, args.submission, args.agent_dir, args.output_dir, backend
+        args.data,
+        args.submission,
+        args.agent_dir,
+        args.output_dir,
+        backend,
+        getattr(args, "task", None),
     )
     manifest_path = Path(args.output_dir) / "submission_manifest.json"
     manifest = json.loads(manifest_path.read_text())
@@ -513,7 +521,8 @@ def final_evaluation(sampler_path, out_dir, backend="tinker", task=None):
     Uses the backend recorded by the host recipe.
     """
     task = task or os.environ.get("PDB_TASK", "coding")
-    if task not in ("coding", "culture"):
+    evaluator = CODING.parent / task / "evaluate_model.sh"
+    if "/" in task or not evaluator.is_file():
         raise ValueError(f"unknown task: {task}")
     env = {
         **os.environ,
@@ -533,7 +542,7 @@ def final_evaluation(sampler_path, out_dir, backend="tinker", task=None):
     run(
         [
             "bash",
-            CODING.parent / task / "evaluate_model.sh",
+            evaluator,
             "--server-backend",
             env["PDB_EVAL_BACKEND"],
             "--split",
