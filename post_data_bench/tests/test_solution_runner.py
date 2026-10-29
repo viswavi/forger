@@ -1,9 +1,11 @@
 """rl.solution_runner runs solutions as grade()'s run_program/call_method do."""
 import importlib.util
 import unittest
+import warnings
 
 from coding.rl.solution_runner import (
     RLSandboxRunner,
+    control_responses,
     rubric_verifier,
     run_solution,
     score_targets,
@@ -103,11 +105,67 @@ class ScoreTargetsTests(unittest.TestCase):
                 "rubric": [[{"code": GRADE}, 1.0]],
             },
         ]
-        scores = score_targets(rows)
+        scores = score_targets(rows, controls=False)
         self.assertEqual(
             scores[0], {"score": 1.0, "criteria": [1.0, None], "prompt_weight": 1.0}
         )
         self.assertEqual(scores[1]["score"], 0.0)
+
+    def test_controls_flag_a_rubric_that_rewards_abstaining(self):
+        """The 2026-10-28 bug: no code block on a solvable row scored 1.0."""
+        lenient = (
+            "def grade(prompt, response, ground_truth):\n"
+            "    if '```python' not in response:\n"
+            "        return 1.0\n"
+            "    code = response.split('```python')[-1].split('```')[0]\n"
+            "    ok, out = run_program(code, '2\\n')\n"
+            "    return 1.0 if ok and out.strip() == '4' else 0.0"
+        )
+        rows = [
+            {
+                "prompt": "Double it",
+                "ground_truth": target(DOUBLE),
+                "rubric": [[{"code": GRADE}, 1.0]],
+            },
+            {
+                "prompt": "Double it",
+                "ground_truth": target(DOUBLE),
+                "rubric": [[{"code": lenient}, 1.0]],
+            },
+        ]
+        with self.assertWarnsRegex(
+            UserWarning, r"in 1 of 2 rows .*abstain: 1, no_answer: 1"
+        ):
+            scores = score_targets(rows)
+        self.assertEqual(
+            scores[0]["controls"],
+            {"abstain": 0.0, "no_answer": 0.0, "empty_program": 0.0},
+        )
+        self.assertEqual(
+            scores[1]["controls"],
+            {"abstain": 1.0, "no_answer": 1.0, "empty_program": 0.0},
+        )
+
+    def test_controls_skip_the_abstention_on_an_impossible_row(self):
+        """An abstaining target's rubric should reward the abstention; no warning."""
+        abstain = control_responses()["abstain"]
+        exact = (
+            "def grade(prompt, response, ground_truth):\n"
+            "    return 1.0 if response.split('</think>')[-1].strip() == "
+            "ground_truth.split('</think>')[-1].strip() else 0.0"
+        )
+        row = {
+            "prompt": "Impossible",
+            "ground_truth": abstain,
+            "rubric": [[{"code": exact}, 1.0]],
+        }
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            scores = score_targets([row])
+        self.assertEqual(scores[0]["score"], 1.0)
+        self.assertEqual(
+            scores[0]["controls"], {"no_answer": 0.0, "empty_program": 0.0}
+        )
 
 
 class RubricVerifierTests(unittest.TestCase):
