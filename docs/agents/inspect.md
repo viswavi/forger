@@ -61,6 +61,7 @@ The report lists the rows with the most excess bits; `report.rows[i]` belongs to
 responses are cached, so changing `top_k` costs nothing. Scoring is fast; sampling the student's own responses is
 the slow part: 134 long reasoning responses took 37 minutes on one L40S and 19 on two. Its median rate is stable with
 the default 64 samples.
+
 `rubric_scores(rows, grade, *, n=50, response_fields="response", model=None, k=4, prompt_field="prompt",
 control_columns=True, seed=0, ...)` shows a reward's distribution before RL. `grade(response, row)` returns a score in
 [0, 1] (a bool counts as 0 or 1) or None when ungradable: a code rubric, an LLM judge, or exact match. It grades `n`
@@ -91,6 +92,7 @@ It returns a `RubricScoreReport`; `report.model_dump()` is plain JSON data: `bin
 with `bins`), `mean`, `share_at_0`, `share_at_1`, `ungradable`, `errors`, the per-row `scores`, and the lowest and
 highest examples. `grade` is part of the cache key (an object by its `cache_key()`), so the grades are cached; a
 grading that raised is counted with its message and runs again next time. Rows are not modified.
+
 `embedding_dispersion(rows, field, *, reference=None, reference_field=None, embed_fn=None, embedding_model=...,
 k=5, duplicate_threshold=0.95, max_rows=2000, examples=3, seed=0)` measures how spread out `rows` are, ideally against
 a `reference` of the rows you want to resemble (e.g. retrieved documents or a seed dataset). It returns a
