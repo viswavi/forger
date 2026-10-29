@@ -424,5 +424,6 @@ to sample the base student or its `tinker://` checkpoint on Tinker, where the `n
 `acquire.LocalModel` to run it on a local GPU via vLLM; set a generous `max_tokens` so traces are not truncated), keep
 only the solutions whose final answer matches the verified answer, and use each kept trace as a training target.
 `alter.self_taught_reasoner` implements exactly this: it returns one row per correct sample (a prompt with 0 correct
-samples drops out), with the student's reasoning trace and answer split into separate fields. Tinker samples are
-charged to the Tinker dollar budget when one is configured (see `acquire.md`).
+samples drops out), with the student's reasoning trace and answer split into separate fields; for free-text answers,
+`answer_similarity=` keeps answers close to the reference in embedding space, which does not check a yes/no verdict
+(see `alter.md`). Tinker samples are charged to the Tinker dollar budget when one is configured (see `acquire.md`).
