@@ -12,6 +12,7 @@ producing new rows in the pipeline.
 | `spend` | no | Print and return the spend ledger's totals by run, pipeline, and step. |
 | `runs` | no | Print and return the saved `@pipeline` runs with step yields, e.g. `runs("main")`. |
 | `phrase_frequency` | no | Print and return, per string field, the phrases and names the most rows share. No LLM. |
+| `embedding_dispersion` | yes | Print and return how dispersed a field is in embedding space vs. a reference. No LLM. |
 
 `phrase_frequency(rows, fields=None, *, ngram_range=(2, 4), top_k=10, min_share=0.05, max_rows=2000,
 max_chars=2000)` counts document frequency: the share of rows whose value contains each word n-gram (lowercased) or
@@ -20,6 +21,46 @@ capitalized name, e.g. `rewrite  phrases: "i need" 78/79 (99%) · "i need you to
 when no longer phrase containing it is in nearly as many rows, and returns a `PhraseReport` (one `FieldPhrases` per
 field, with `skipped` set for categorical, identifier, and code fields). Topic clustering can look balanced while
 every row says "I need"; run both. Rows are not modified.
+
+`embedding_dispersion(rows, field, *, reference=None, reference_field=None, embed_fn=None, embedding_model=...,
+k=5, duplicate_threshold=0.95, max_rows=2000, examples=3, seed=0)` measures how spread out `rows` are, ideally against
+a `reference` of the rows you want to resemble (e.g. retrieved documents or a seed dataset). It returns a
+`DispersionReport` (`report.model_dump()` gives a dict) and prints it. On 29 rows drawn from 2 of the 6 topics of a
+96-row reference of math problems, plus 3 copies and 2 rows unlike the reference (`embedding_model="tfidf"`):
+
+```text
+inspect embedding_dispersion ───────────────────────────────────────────────────────────────────────────────────────────
+  problem  29 rows · reference 96 rows · embedding tfidf
+  coverage 0.41  12/29 reference rows have a row within their 5-NN radius (29 random rows of each)
+      not covered: "Find the remainder when 8^9 is divided by 7."  nearest 0.06
+      not covered: "How many positive divisors does 560 have?"  nearest 0.00
+      not covered: "In how many ways can 9 people sit around a round table?"  nearest 0.02
+  off-distribution 0.07  2/29 rows are outside every reference row's 5-NN radius
+      outside: "Translate 'good morning' into French."  nearest 0.00
+      outside: "Write a haiku about the ocean at dawn."  nearest 0.06
+  near-duplicates 0.17  5/29 rows in 4 pairs with cosine ≥ 0.95 (3 rows repeat an earlier row exactly)
+      1.00 "A fair die is rolled 2 times. What is the probability that a six appears at least once?"  exact copy
+      1.00 "Two cards are drawn from a standard deck. What is the probability both are aces?"  exact copy
+  Vendi 11.4  effective number of distinct rows among 29 (reference 17.5)
+```
+
+- **coverage** ([Naeem et al. 2020](https://arxiv.org/abs/2002.09797)): the share of reference rows with one of
+  `rows` inside their k-NN ball (as close as their `k`-th nearest reference row). Low coverage means parts of the
+  reference are missing; `not covered:` lists them. It grows with the number of rows, so it is computed on equal-size
+  random samples of both sets. Two samples of one distribution score about 0.97 at `k=5`.
+- **off-distribution**: the share of `rows` outside every reference row's ball, e.g. off-topic or malformed rows.
+- **near-duplicates**: rows in a pair with cosine similarity of at least `duplicate_threshold`. 0.95 counts
+  near-verbatim copies; under TF-IDF one changed number in a 17-word problem scores 0.89, so lower it (e.g. 0.85) to
+  count template variants.
+- **Vendi** ([Friedman & Dieng 2023](https://arxiv.org/abs/2210.02410)): the effective number of distinct rows, from 1
+  (all the same) to the sample size, on the same equal-size samples. It cannot exceed the embedding's dimension (at
+  most 256 for TF-IDF).
+
+Without a `reference`, only near-duplicates and Vendi are reported. At most `max_rows` rows of each set are embedded
+(a random sample with `seed`); both sets are embedded in one call, with the same backends as `topic_based_clustering`
+below (`embed_fn`, `embedding_model="tfidf"`, or a sentence-transformers model, falling back to TF-IDF). The numbers
+depend on the embedding, so compare datasets (or a dataset against its reference) under the same embedding rather
+than reading one number alone.
 
 Topic-based clustering uses the ClusterFusion clustering algorithm ([arXiv:2512.04350](https://arxiv.org/abs/2512.04350)),
 a hybrid method in which embeddings guide how rows are partitioned and an LLM summarizes the partitions into

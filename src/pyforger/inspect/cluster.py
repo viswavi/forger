@@ -182,20 +182,9 @@ def topic_based_clustering(
     Returns:
         One topic name per row, aligned with ``items``.
     """
-    if (
-        embed_fn is None
-        and embedding_model != _TFIDF_EMBEDDING
-        and not _sentence_transformers_importable()
-    ):
-        logger.warning(
-            "topic_based_clustering: sentence-transformers cannot be imported, so "
-            "embedding with TF-IDF instead of %s. Install it with "
-            "`pip install pyforger[clustering]`, or pass embedding_model=%r "
-            "to choose TF-IDF explicitly.",
-            embedding_model,
-            _TFIDF_EMBEDDING,
-        )
-        embedding_model = _TFIDF_EMBEDDING
+    embedding_model = _resolve_embedding_model(
+        embed_fn, embedding_model, "topic_based_clustering"
+    )
     # Resolved outside the cached op, so its code and cache keys stay as before.
     if context is None:
         context = _default_context(field)
@@ -217,11 +206,37 @@ def topic_based_clustering(
     )
 
 
+def _resolve_embedding_model(
+    embed_fn: Callable[[list[str]], Any] | None, embedding_model: str, op_name: str
+) -> str:
+    """Return ``embedding_model``, or ``"tfidf"`` if sentence-transformers is missing.
+
+    Call it before the cached op, so a TF-IDF result is never cached under a
+    sentence-transformers key. Warns (naming ``op_name``) when it falls back.
+    """
+    if (
+        embed_fn is None
+        and embedding_model != _TFIDF_EMBEDDING
+        and not _sentence_transformers_importable()
+    ):
+        logger.warning(
+            "%s: sentence-transformers cannot be imported, so "
+            "embedding with TF-IDF instead of %s. Install it with "
+            "`pip install pyforger[clustering]`, or pass embedding_model=%r "
+            "to choose TF-IDF explicitly.",
+            op_name,
+            embedding_model,
+            _TFIDF_EMBEDDING,
+        )
+        return _TFIDF_EMBEDDING
+    return embedding_model
+
+
 def _sentence_transformers_importable() -> bool:
     """Whether the default embedding backend can be imported."""
     try:
         import sentence_transformers  # noqa: F401
-    except ImportError:
+    except Exception:  # ImportError, or e.g. a NameError from a broken torch install
         return False
     return True
 
@@ -318,13 +333,14 @@ def _embed(
     embed_fn: Callable[[list[str]], Any] | None,
     embedding_model: str,
     seed: int,
+    op_name: str = "topic_based_clustering",
 ) -> Any:
     """Embed documents with ``embed_fn``, TF-IDF, or sentence-transformers."""
     if embed_fn is not None:
         return embed_fn(docs)
     if embedding_model == _TFIDF_EMBEDDING:
         return _tfidf_embed(docs, seed=seed)
-    return _default_embed(docs, embedding_model)
+    return _default_embed(docs, embedding_model, op_name=op_name)
 
 
 def _tfidf_embed(docs: list[str], *, seed: int = 0) -> Any:
@@ -342,7 +358,7 @@ def _tfidf_embed(docs: list[str], *, seed: int = 0) -> Any:
         from sklearn.preprocessing import normalize
     except ImportError as e:
         raise ImportError(
-            "topic_based_clustering's TF-IDF embedder requires numpy and "
+            "The TF-IDF embedder requires numpy and "
             "scikit-learn: `pip install pyforger[clustering]`."
         ) from e
 
@@ -384,22 +400,25 @@ def _tfidf_embed(docs: list[str], *, seed: int = 0) -> Any:
     return normalize(vectors)
 
 
-def _default_embed(docs: list[str], embedding_model: str) -> Any:
+def _default_embed(
+    docs: list[str], embedding_model: str, *, op_name: str = "topic_based_clustering"
+) -> Any:
     """Embed documents with sentence-transformers, preferring the GPU."""
     try:
         from sentence_transformers import SentenceTransformer
     except ImportError as e:
         raise ImportError(
-            "topic_based_clustering needs its default embedding backend: "
+            f"{op_name} needs its default embedding backend: "
             "`pip install pyforger[clustering]`, or pass embed_fn=."
         ) from e
 
     encoder = SentenceTransformer(embedding_model)
     if encoder.device.type == "cpu":
         logger.warning(
-            "topic_based_clustering: no GPU detected; embedding %d documents "
+            "%s: no GPU detected; embedding %d documents "
             "with %s on CPU may be slow. Pass embedding_model=%r or embed_fn= "
             "to use a different embedding backend.",
+            op_name,
             len(docs),
             embedding_model,
             _TFIDF_EMBEDDING,
