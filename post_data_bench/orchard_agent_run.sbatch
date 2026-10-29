@@ -14,8 +14,9 @@ export PATH="$HOME/.local/apptainer/bin:$PATH"
 # node's local disk and go to GCS (pre-eval sync and results.tgz).
 unset AGENT_MODEL_OUTPUT_DIR AGENT_RL_OUTPUT_DIR AGENT_SCRATCH_ROOT
 # Submit with PDB_REPO, PDB_LAUNCHER_PYTHON, AGENT_HF_HOME, PDB_BENCHMARK_DIR
-# set, and --env-file /path/to/credentials. PDB_TASK=culture runs the culture
-# task (default coding); PDB_BENCHMARK_DIR must be that task's build.
+# set, and --env-file /path/to/credentials. PDB_TASK=culture or
+# PDB_TASK=frontiercs runs that task (default coding); PDB_BENCHMARK_DIR must be
+# that task's build.
 TASK="${PDB_TASK:-coding}"
 : "${PDB_REPO:?Set the isolated checkout path}"
 if [[ -z "${PDB_LAUNCHER_PYTHON:-}" ]]; then

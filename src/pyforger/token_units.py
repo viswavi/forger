@@ -135,7 +135,7 @@ def default_rl_limit(task):
     which must never see benchmark names.
     """
     normalized = str(task).strip().lower()
-    if normalized in ("coding", "culture"):
+    if normalized in ("coding", "culture", "algorithmic"):
         return 50_000_000
     raise ValueError("Unknown task for RL token-unit quota")
 

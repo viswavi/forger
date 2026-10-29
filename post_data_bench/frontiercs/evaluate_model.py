@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Evaluate C++ solutions to FrontierCS problems through an OpenAI-compatible server.
+"""Evaluate C++ solutions to algorithmic problems through an OpenAI-compatible server.
 
 Write resumable predictions.jsonl and metrics.json with headline ``score``: the mean
-problem score (0-100), each problem judged on all its tests by judge.py, as
-FrontierCS scores it. Secondary metrics appear under context.
+problem score (0-100), each problem judged on all its tests by judge.py, as the
+benchmark scores it. Secondary metrics appear under context. A row's ``id`` names
+its problem directory, problems/<id>/.
 
 Live mode queries concurrently, judges each answer as it arrives, and checkpoints
 every --checkpoint-every rows. --from-raw rejudges existing outputs by task ID
@@ -31,7 +32,7 @@ DATA_DIR = Path(os.environ.get("PDB_BENCHMARK_DIR", Path(__file__).resolve().par
 def parse_args() -> argparse.Namespace:
     """Parse CLI args shared by the live, --from-raw, and --merge-shards run modes."""
     p = argparse.ArgumentParser(
-        description="Evaluate a model on FrontierCS problems via a vLLM server."
+        description="Evaluate a model on C++ problems via a vLLM server."
     )
     p.add_argument("--validate-only", action="store_true", help=argparse.SUPPRESS)
     p.add_argument(
@@ -157,7 +158,6 @@ def _score_row(
         statuses[c["status"]] = statuses.get(c["status"], 0) + 1
     return {
         "id": row["id"],
-        "problem_id": row["problem_id"],
         "type": row["type"],
         "question": row["task_text"],
         "output": output,
@@ -236,9 +236,7 @@ async def generate_and_score_all(
         completion = resp.choices[0].message.content or ""
         code = checkers.extract_code(completion)
         result = (
-            await loop.run_in_executor(
-                pool, judge_code, args.split, row["problem_id"], code
-            )
+            await loop.run_in_executor(pool, judge_code, args.split, row["id"], code)
             if code
             else None
         )
@@ -266,7 +264,8 @@ async def generate_and_score_all(
 
 def compute_metrics(graded_rows: list[dict]) -> dict:
     """Score graded rows; the mean problem score is the headline."""
-    graded_rows = sorted(graded_rows, key=lambda row: int(row["problem_id"]))
+    # Numeric ids in numeric order, e.g. "9" before "10"; "val_000" ids in order.
+    graded_rows = sorted(graded_rows, key=lambda row: (len(row["id"]), row["id"]))
     scores = [float(r["score"]) for r in graded_rows]
     mean, stderr = checkers.mean_and_stderr(scores)
     by_type = {}
@@ -280,7 +279,7 @@ def compute_metrics(graded_rows: list[dict]) -> dict:
         "n_truncated": sum(bool(r.get("truncated")) for r in graded_rows),
         "n_no_code": sum(r["status"] == "no_code" for r in graded_rows),
         "n_compile_error": sum(r["status"] == "compile_error" for r in graded_rows),
-        # Headline: FrontierCS compares models on the mean problem score.
+        # Headline: the benchmark compares models on the mean problem score.
         "score": mean,
         "score_stderr": stderr,
         "context": {
@@ -339,9 +338,7 @@ def run_from_raw(args: argparse.Namespace) -> None:
         jobs.append((row, completion, checkers.extract_code(completion)))
     with ProcessPoolExecutor(args.judge_processes) as pool:
         futures = [
-            pool.submit(judge_code, args.split, row["problem_id"], code)
-            if code
-            else None
+            pool.submit(judge_code, args.split, row["id"], code) if code else None
             for row, _, code in jobs
         ]
         output_rows = [

@@ -17,6 +17,15 @@ contract. Both prompts render backend-specific commands from `backend_prompts.py
   `culture/FORGER_PROMPT.txt`, `culture/minimal_scaffold_prompt.txt`; on Orchard,
   submit `orchard_agent_run.sbatch` with `PDB_TASK=culture` and the culture build as
   `PDB_BENCHMARK_DIR`.
+- `--task frontiercs` is the same, with `--backend local` and sft-rl only. Inside the
+  sandbox the task is called `algorithmic` (`PUBLIC_TASK` in launch_agent.py: task
+  directory, agent data directory, `PDB_TASK`, token-budget policy), so no path or
+  variable names the benchmark; the finalize command passes `--task frontiercs` so
+  the bundle's secret test runs `frontiercs/evaluate_model.sh`. The sandbox gets
+  `agent_validation.copy_frontiercs_evaluator`'s flat copy (judge.py is
+  `rl/cpp_judge.py`; validation problems renamed val_000..., in problems/<id>/
+  with testlib/testlib.h) and decontamination signatures with 13-word windows and
+  `LONG_FRACTION`.
 - RL defaults on both: 80 optimizer steps, 32 prompts × 8 completions per step
   (256 completions per optimizer batch). Total: 2,560 prompt draws and 20,480
   completions; the old Tinker default was 25 × 128 × 8 = 25,600 completions.

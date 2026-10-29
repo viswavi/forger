@@ -54,7 +54,9 @@ class DecontaminateTest(unittest.TestCase):
         """Only hashes and sizes are stored: no statement words, ids or titles."""
         dumped = json.dumps(self.signature)
         self.assertNotIn("substring", dumped)
-        self.assertEqual(set(self.signature), {"n", "min_matches", "sizes", "windows"})
+        self.assertEqual(
+            set(self.signature), {"n", "min_matches", "fraction", "sizes", "windows"}
+        )
 
     def test_boilerplate_windows_are_ignored(self):
         """Windows shared by COMMON statements (with background) do not count."""
