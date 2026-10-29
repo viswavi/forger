@@ -9,6 +9,15 @@ from pathlib import Path
 FRONTIERCS = Path(__file__).resolve().parents[1] / "frontiercs"
 
 
+def _load_path(name, path):
+    """Import a file under a unique module name."""
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module  # dataclasses look their module up here
+    spec.loader.exec_module(module)
+    return module
+
+
 def _load(name):
     """Import frontiercs/<name>.py under a unique name (coding has a `checkers` too)."""
     spec = importlib.util.spec_from_file_location(
@@ -22,7 +31,11 @@ def _load(name):
 
 HAS_YAML = importlib.util.find_spec("yaml") is not None
 checkers = _load("checkers")
-judge = _load("judge") if HAS_YAML else None
+judge = (
+    _load_path("cpp_judge", FRONTIERCS.parent / "coding/rl/cpp_judge.py")
+    if HAS_YAML
+    else None
+)
 
 HAS_GXX = shutil.which("g++") is not None and sys.platform.startswith("linux")
 
