@@ -80,6 +80,42 @@ rows = self_taught_reasoner(problems, solver_prompt, student, n=8,
                             verifier=filter.program_verifier("tests"))
 ```
 
+When the answer is free text (an explanation, a cultural norm, a verdict with its reasons), no sample equals the
+reference word for word. Pass `answer_similarity=`, a cosine threshold: every sample's answer (`answer_field`, the
+response after its reasoning, or `extract_answer`'s output) and every reference are embedded in one call, and a sample
+is kept when its cosine to its row's reference is at least the threshold. The embedder is chosen as in
+[`embedding_dispersion`](inspect.md): `embedding_model` (default `Qwen/Qwen3-Embedding-0.6B`, or `"tfidf"`) or your
+own `embed_fn`. Kept rows record the cosine in `answer_similarity` (`similarity_field`) and keep their reference; an
+empty answer is never kept. It cannot be combined with `match_fn`, `verifier`, or `filter_fn`. The samples and the
+cosines are cached apart from the threshold, so trying another threshold samples and embeds nothing, and the log
+shows the spread to choose from, e.g. `answer similarity of 64 samples: min 0.41, quartiles 0.70 / 0.81 / 0.88, max
+0.97; 40 at or above 0.75`.
+
+```python
+rows = self_taught_reasoner(situations, "{situation}\nIs this acceptable? Explain.", student, n=8,
+                            reference_field="explanation", answer_similarity=0.75)
+```
+
+There is no default threshold. Cosines with Qwen3-Embedding-0.6B on 52 hand-written (reference, answer) pairs, 32 of
+one sentence and 20 of a paragraph:
+
+| Answer vs. reference | Median (range) | Kept at 0.75 | 0.85 | 0.9 |
+|---|---|---|---|---|
+| Same meaning, reworded | 0.88 (0.75–0.93) | 13/14 | 9/14 | 3/14 |
+| Subtly wrong ("1918" for "1919", "more dense" for "less dense") | 0.96 (0.71–0.99) | 13/14 | 13/14 | 11/14 |
+| Opposite verdict ("Yes, this is acceptable ..." / "No, ...") | 0.89 (0.77–0.99) | 18/18 | 13/18 | 8/18 |
+| Answer to another question | 0.25 (0.18–0.51) | 0/6 | 0/6 | 0/6 |
+
+Similarity tells whether the student answered the same question with the same content, not whether it is right: a
+wrong answer in the reference's words scores higher than a right one in other words, and no threshold separates them.
+A paragraph whose verdict alone is flipped ("Yes, it is acceptable to eat with your hands here. In Ethiopia ..." vs.
+"No, it is not acceptable ...", same reasons) scores 0.99; "Yes, this is acceptable." vs. "No, this is not
+acceptable." scores 0.83. Around 0.75 drops off-topic answers. When the verdict matters, check it separately, e.g.
+`filter.by_predicate(rows, lambda r: r["answer"].lower().startswith(r["verdict"]), label="same verdict")` on rows with
+a `"yes"`/`"no"` `verdict`, or grade the answers against the reference with an LLM judge (`filter.by_llm_score`).
+There is no TF-IDF fallback: TF-IDF cosines are on another scale (reworded answers score 0.12 to 0.38), so a missing
+sentence-transformers raises before sampling.
+
 `LocalModel("Qwen/Qwen3-8B", max_model_len=40960)` samples the same student on a local GPU via vLLM instead.
 
 ## Running programs against tests

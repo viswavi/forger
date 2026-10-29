@@ -1,6 +1,9 @@
 """Tests for self_taught_reasoner ALTER building block."""
 from __future__ import annotations
 
+import inspect
+import math
+
 import pytest
 from fixtures import MockModel
 
@@ -9,6 +12,7 @@ from pyforger.alter.generate import (
     default_extract_answer,
     self_taught_reasoner,
 )
+from pyforger.inspect import cluster
 
 
 class TestSplitThinking:
@@ -248,3 +252,223 @@ class TestDefaultExtractAnswer:
             [{"prompt": "q", "final_answer": "12"}], "{prompt}", model, n=1
         )
         assert items == []
+
+
+class _AngleEmbedder:
+    """Embeds each known text as a unit 2-D vector at a fixed angle.
+
+    The cosine of two texts is then cos(angle difference), e.g. 0.9553 for
+    0.3 radians. Records every call; ``cache_key`` leaves the record out.
+    """
+
+    def __init__(self, angles: dict[str, float], name: str = "angles") -> None:
+        self.angles = angles
+        self.name = name
+        self.calls: list[list[str]] = []
+
+    def cache_key(self) -> tuple:
+        return ("_AngleEmbedder", self.name, tuple(sorted(self.angles.items())))
+
+    def __call__(self, texts: list[str]) -> list[list[float]]:
+        self.calls.append(list(texts))
+        return [[math.cos(self.angles[t]), math.sin(self.angles[t])] for t in texts]
+
+
+_REFERENCE = "Take your shoes off at the door."
+_ANGLES = {
+    _REFERENCE: 0.0,
+    "Remove your shoes before going in.": 0.3,  # cosine 0.9553
+    "Keep your shoes on.": 1.2,  # cosine 0.3624
+    "Leave shoes outside.": 0.5,  # cosine 0.8776
+}
+
+
+class TestAnswerSimilarity:
+    """answer_similarity= keeps samples whose answer embeds close to the reference."""
+
+    def _run(self, embedder, threshold=0.9, responses=None, items=None, **kwargs):
+        model = kwargs.pop("model", None) or MockModel(
+            responses=responses
+            or [["Remove your shoes before going in.", "Keep your shoes on."]]
+        )
+        rows = self_taught_reasoner(
+            items or [{"q": "Shoes indoors?", "final_answer": _REFERENCE}],
+            "{q}",
+            model,
+            n=2,
+            answer_similarity=threshold,
+            embed_fn=embedder,
+            **kwargs,
+        )
+        return rows, model
+
+    def test_keeps_answers_at_or_above_the_threshold(self):
+        """The close answer is kept with its cosine; the far one is dropped."""
+        rows, _ = self._run(_AngleEmbedder(_ANGLES), threshold=0.9)
+        assert [r["answer"] for r in rows] == ["Remove your shoes before going in."]
+        assert rows[0]["answer_similarity"] == pytest.approx(0.9553)
+        assert rows[0]["student_final_answer"] == "Remove your shoes before going in."
+        assert rows[0]["final_answer"] == _REFERENCE  # the reference is kept
+
+    def test_threshold_is_inclusive(self):
+        """A cosine equal to the (rounded) threshold is kept."""
+        rows, _ = self._run(_AngleEmbedder(_ANGLES), threshold=0.9553)
+        assert len(rows) == 1
+        rows, _ = self._run(_AngleEmbedder(_ANGLES), threshold=0.3)
+        assert len(rows) == 2
+
+    def test_custom_field_name(self):
+        """similarity_field= renames the recorded cosine."""
+        rows, _ = self._run(_AngleEmbedder(_ANGLES), similarity_field="sim")
+        assert "sim" in rows[0] and "answer_similarity" not in rows[0]
+
+    def test_one_embed_call_with_distinct_texts(self):
+        """Every answer and reference is embedded once, in one call."""
+        embedder = _AngleEmbedder(_ANGLES)
+        items = [
+            {"q": "Shoes indoors?", "final_answer": _REFERENCE},
+            {"q": "Shoes at a temple?", "final_answer": _REFERENCE},
+        ]
+        responses = [
+            ["Remove your shoes before going in.", "Keep your shoes on."],
+            ["Leave shoes outside.", "Remove your shoes before going in."],
+        ]
+        rows, _ = self._run(embedder, threshold=0.85, responses=responses, items=items)
+        assert len(embedder.calls) == 1
+        embedded = embedder.calls[0]
+        assert sorted(embedded) == sorted(_ANGLES)  # each distinct text once
+        assert [r["answer"] for r in rows] == [
+            "Remove your shoes before going in.",
+            "Leave shoes outside.",
+            "Remove your shoes before going in.",
+        ]
+
+    def test_empty_answer_is_rejected_without_embedding(self):
+        """An answer that is empty after the reasoning never matches."""
+        embedder = _AngleEmbedder(_ANGLES)
+        rows, _ = self._run(
+            embedder,
+            threshold=-1.0,
+            responses=[["<think>hmm</think>", "Keep your shoes on."]],
+        )
+        assert [r["answer"] for r in rows] == ["Keep your shoes on."]
+        assert "" not in embedder.calls[0]
+
+    def test_extract_answer_chooses_the_text(self):
+        """With extract_answer, its output is embedded instead of the answer."""
+        embedder = _AngleEmbedder(_ANGLES)
+        rows, _ = self._run(
+            embedder,
+            responses=[["Verdict: Remove your shoes before going in.", "Verdict: "]],
+            extract_answer=lambda raw: raw.split("Verdict:")[-1],
+        )
+        # Embedded stripped; the field keeps the extractor's output as is.
+        assert len(rows) == 1
+        assert rows[0]["student_final_answer"] == " Remove your shoes before going in."
+        assert rows[0]["answer_similarity"] == pytest.approx(0.9553)
+
+    @pytest.mark.parametrize(
+        "other",
+        [
+            {"match_fn": lambda a, b: True},
+            {"verifier": lambda answer, row: True},
+            {"filter_fn": lambda rows: rows},
+        ],
+    )
+    def test_exclusive_with_other_checks(self, other):
+        """answer_similarity with match_fn, verifier, or filter_fn raises."""
+        with pytest.raises(ValueError, match="answer_similarity or"):
+            self._run(_AngleEmbedder(_ANGLES), **other)
+
+    def test_embedding_args_need_a_threshold(self):
+        """embed_fn or embedding_model without answer_similarity raises."""
+        model = MockModel(responses=["x"])
+        item = [{"q": "q", "final_answer": "x"}]
+        with pytest.raises(ValueError, match="only with answer_similarity"):
+            self_taught_reasoner(item, "{q}", model, n=1, embed_fn=lambda t: t)
+        with pytest.raises(ValueError, match="only with answer_similarity"):
+            self_taught_reasoner(item, "{q}", model, n=1, embedding_model="tfidf")
+
+    def test_threshold_must_be_a_cosine(self):
+        """A threshold outside [-1, 1] raises."""
+        with pytest.raises(ValueError, match=r"\[-1, 1\]"):
+            self._run(_AngleEmbedder(_ANGLES), threshold=1.5)
+
+    def test_missing_backend_raises_before_sampling(self, monkeypatch):
+        """No silent TF-IDF fallback: a threshold does not carry over to it."""
+        monkeypatch.setattr(cluster, "_sentence_transformers_importable", lambda: False)
+        model = MockModel(responses=["x"])
+        with pytest.raises(ImportError, match="sentence-transformers"):
+            self_taught_reasoner(
+                [{"q": "q", "final_answer": "x"}],
+                "{q}",
+                model,
+                n=1,
+                answer_similarity=0.8,
+            )
+        assert model._call_count == 0
+
+    def test_tfidf_backend(self):
+        """embedding_model="tfidf" needs no embed_fn; an identical answer scores 1."""
+        model = MockModel(responses=[["Bow when greeting.", "Shake hands firmly."]])
+        rows = self_taught_reasoner(
+            [{"q": "Greeting?", "final_answer": "Bow when greeting."}],
+            "{q}",
+            model,
+            n=2,
+            answer_similarity=0.99,
+            embedding_model="tfidf",
+        )
+        assert [r["answer"] for r in rows] == ["Bow when greeting."]
+        assert rows[0]["answer_similarity"] == pytest.approx(1.0)
+
+    def test_default_embedding_model_matches_inspect(self):
+        """The literal default (a cycle prevents importing it) is cluster's default."""
+        default = inspect.signature(self_taught_reasoner).parameters["embedding_model"]
+        assert default.default == cluster._DEFAULT_EMBEDDING_MODEL
+
+
+class TestAnswerSimilarityCache:
+    """The threshold and the backend are in the key; sampling is never redone."""
+
+    def _run(self, model, embedder, threshold):
+        return self_taught_reasoner(
+            [{"q": "Shoes indoors?", "final_answer": _REFERENCE}],
+            "{q}",
+            model,
+            n=2,
+            answer_similarity=threshold,
+            embed_fn=embedder,
+        )
+
+    def _model(self):
+        return MockModel(
+            responses=[["Remove your shoes before going in.", "Keep your shoes on."]]
+        )
+
+    def test_same_call_is_a_cache_hit(self):
+        """The same call again samples and embeds nothing."""
+        model, embedder = self._model(), _AngleEmbedder(_ANGLES)
+        first = self._run(model, embedder, 0.9)
+        assert self._run(model, embedder, 0.9) == first
+        assert model._call_count == 1
+        assert len(embedder.calls) == 1
+
+    def test_new_threshold_reuses_samples_and_embeddings(self):
+        """Another threshold changes the result without sampling or embedding again."""
+        model, embedder = self._model(), _AngleEmbedder(_ANGLES)
+        assert len(self._run(model, embedder, 0.9)) == 1
+        assert len(self._run(model, embedder, 0.3)) == 2
+        assert model._call_count == 1
+        assert len(embedder.calls) == 1
+
+    def test_new_backend_embeds_again_but_reuses_samples(self):
+        """Another embedder is another key: it embeds, and its cosines are used."""
+        model = self._model()
+        first, second = _AngleEmbedder(_ANGLES), _AngleEmbedder(
+            {**_ANGLES, "Keep your shoes on.": 0.1}, name="other"
+        )
+        assert len(self._run(model, first, 0.9)) == 1
+        assert len(self._run(model, second, 0.9)) == 2
+        assert len(first.calls) == 1 and len(second.calls) == 1
+        assert model._call_count == 1
