@@ -98,7 +98,7 @@ def fake_processes(monkeypatch):
 
 
 def test_embedding_gpus_needs_two_gpus_and_enough_docs(monkeypatch):
-    """Multi-GPU only with 2+ visible GPUs, CUDA, and at least the minimum docs."""
+    """min(n // 500 + 1, visible GPUs) GPUs; one process below two, or without CUDA."""
     fake_torch = types.ModuleType("torch")
     emptied = []
     fake_torch.cuda = types.SimpleNamespace(
@@ -107,12 +107,19 @@ def test_embedding_gpus_needs_two_gpus_and_enough_docs(monkeypatch):
         empty_cache=lambda: emptied.append(True),
     )
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
-    many = cluster._MULTI_GPU_MIN_DOCS
+    many = 5000
+
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
+    assert cluster._embedding_gpus(400) == []
+    assert cluster._embedding_gpus(499) == []
+    assert cluster._embedding_gpus(500) == ["0", "1"]
+    assert cluster._embedding_gpus(999) == ["0", "1"]
+    assert cluster._embedding_gpus(1000) == ["0", "1", "2"]
+    assert len(cluster._embedding_gpus(many)) == 8
 
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "2,5")
     assert cluster._embedding_gpus(many) == ["2", "5"]
     assert emptied  # cached GPU memory is released for the workers
-    assert cluster._embedding_gpus(many - 1) == []
 
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3")
     assert cluster._embedding_gpus(many) == []
