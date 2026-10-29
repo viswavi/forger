@@ -1,9 +1,9 @@
-"""Shared NormAd goal and prompt builder for split construction and evaluation."""
+"""Shared task goal and prompt builder for split construction and evaluation."""
 from __future__ import annotations
 
 # The task's goal specification, shown to every candidate model as the system prompt.
-# Verbatim from the original post_train_bench_evaluate_normad.py -- this is the
-# definition of the task itself, not an implementation detail, so it's kept unchanged.
+# Verbatim from the original evaluation script: this is the definition of the task
+# itself, not an implementation detail, so it is kept unchanged.
 SYSTEM_PROMPT = (
     "You are given an everyday scenario from a country. Is this scenario "
     "appropriate, given the different cultural and social norms specific to "

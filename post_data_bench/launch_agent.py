@@ -146,13 +146,18 @@ args.backend = (
     else args.backend or "tinker"
 )
 args.model = args.model or MODELS[args.backend]
-if args.training_mode == "sft-rl" and (
-    args.task != "coding" or args.model != MODELS[args.backend]
-):
+if args.training_mode == "sft-rl" and args.model != MODELS[args.backend]:
     parser.error(
-        f"the {args.backend} unified recipe supports coding with "
-        f"{MODELS[args.backend]} only"
+        f"the {args.backend} unified recipe supports {MODELS[args.backend]} only"
     )
+# Culture evaluates through a local server only (no Tinker sampler yet; see
+# HANDOFF_culture_tinker_eval.md).
+if (
+    args.training_mode == "sft-rl"
+    and args.task == "culture"
+    and args.backend != "local"
+):
+    parser.error("the culture unified recipe needs --backend local")
 if (
     args.finalize_submission or args.prepare_final_only
 ) and args.training_mode != "sft-rl":
@@ -479,7 +484,9 @@ prompt_values = dict(
     STUDENT_MODEL=args.model,
     GENERATION_TOKEN_UNIT_LIMIT=os.environ["FORGER_TOKEN_UNIT_LIMIT"],
     GENERATION_USAGE_PATH=GENERATION_USAGE_PATH,
-    MAX_SFT_LENGTH="18800" if args.task == "coding" else "8192",
+    MAX_SFT_LENGTH="18800"
+    if args.task == "coding" or args.training_mode == "sft-rl"
+    else "8192",
     JUDGE_TOKEN_UNIT_LIMIT=f"{float(os.environ['JUDGE_TOKEN_UNIT_LIMIT']):,.0f}",
     JUDGE_USAGE_PATH=JUDGE_USAGE_PATH,
     TINKER_SFT_USD_LIMIT=f"{float(os.environ.get('TINKER_SFT_USD_LIMIT', 0)):g}",
@@ -667,6 +674,19 @@ def _copy_into(root: str, rel_path: str, host_path: str) -> None:
 VAL_OUTPUT_FILES = ("predictions.jsonl", "metrics.json")
 
 
+# The unified recipe's training entry points live in coding/ for every task.
+SHARED_TASK_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "coding")
+
+
+def _public_source(task_dir: str, entry: str) -> str:
+    """Host path of an allowlisted entry, e.g. culture's rl/ comes from coding/."""
+    if args.training_mode == "sft-rl" and (
+        entry.startswith("rl/") or entry == "train_model.sh"
+    ):
+        return os.path.join(SHARED_TASK_DIR, entry)
+    return os.path.join(task_dir, entry)
+
+
 def _task_public_copies(task_dir: str, dest_task_dir: str) -> None:
     """Copy public task files, named validation outputs, and optional evaluator.
 
@@ -683,7 +703,7 @@ def _task_public_copies(task_dir: str, dest_task_dir: str) -> None:
     for entry in TASK_PUBLIC_FILES:
         if entry == "validation_tasks_de_obfuscated.jsonl":
             continue
-        host_path = os.path.join(task_dir, entry)
+        host_path = _public_source(task_dir, entry)
         if os.path.exists(host_path):
             _copy_into(dest_task_dir, entry, host_path)
             if args.backend == "local" and entry.startswith("rl/"):
@@ -692,7 +712,7 @@ def _task_public_copies(task_dir: str, dest_task_dir: str) -> None:
                 target = Path(dest_task_dir) / entry
                 target.write_text(scrub(target.read_text()))
 
-    if args.task == "coding" and args.training_mode == "sft-rl":
+    if args.training_mode == "sft-rl":
         # Hashed windows of the hidden test statements, never their text: the
         # training helpers drop rows that overlap them (rl/decontaminate.py).
         from coding.rl.decontaminate import SIGNATURES, benchmark_signatures
@@ -704,7 +724,9 @@ def _task_public_copies(task_dir: str, dest_task_dir: str) -> None:
     if args.training_mode == "sft-rl":
         from coding.rl.agent_validation import copy_validation_evaluator
 
-        copy_validation_evaluator(task_dir, dest_task_dir, data_root=data_root)
+        copy_validation_evaluator(
+            task_dir, dest_task_dir, data_root=data_root, task=args.task
+        )
 
     if args.training_mode != "sft-rl":
         import base64
@@ -758,18 +780,26 @@ def _task_public_copies(task_dir: str, dest_task_dir: str) -> None:
                     _copy_into(dest_task_dir, rel, host_file)
             predictions = Path(dest_task_dir) / "model_outputs" / model_name / "val"
             predictions /= "predictions.jsonl"
-            if args.task == "coding" and predictions.is_file():
-                from coding.rl.agent_validation import public_question_ids
+            if (
+                args.task == "coding" or args.training_mode == "sft-rl"
+            ) and predictions.is_file():
+                from coding.rl.agent_validation import (
+                    public_culture_ids,
+                    public_question_ids,
+                )
 
                 # Match the copied tasks' opaque ids, e.g. "abc365_c" -> "val_017".
-                ids = public_question_ids(data_root)
+                key = "question_id" if args.task == "coding" else "id"
+                ids = (
+                    public_question_ids if args.task == "coding" else public_culture_ids
+                )(data_root)
                 rows = [
                     json.loads(s)
                     for s in predictions.read_text().splitlines()
                     if s.strip()
                 ]
                 for row in rows:
-                    row["question_id"] = ids[row["question_id"]]
+                    row[key] = ids[row[key]]
                 predictions.write_text("".join(json.dumps(r) + "\n" for r in rows))
 
 

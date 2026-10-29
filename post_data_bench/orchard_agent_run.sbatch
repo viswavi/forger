@@ -14,7 +14,9 @@ export PATH="$HOME/.local/apptainer/bin:$PATH"
 # node's local disk and go to GCS (pre-eval sync and results.tgz).
 unset AGENT_MODEL_OUTPUT_DIR AGENT_RL_OUTPUT_DIR AGENT_SCRATCH_ROOT
 # Submit with PDB_REPO, PDB_LAUNCHER_PYTHON, AGENT_HF_HOME, PDB_BENCHMARK_DIR
-# set, and --env-file /path/to/credentials.
+# set, and --env-file /path/to/credentials. PDB_TASK=culture runs the culture
+# task (default coding); PDB_BENCHMARK_DIR must be that task's build.
+TASK="${PDB_TASK:-coding}"
 : "${PDB_REPO:?Set the isolated checkout path}"
 if [[ -z "${PDB_LAUNCHER_PYTHON:-}" ]]; then
   : "${PDB_RELEASE:?Set the prepared release identifier}"
@@ -103,11 +105,11 @@ SYNC_LOOP=$!
 # Freeze the submission without evaluating, copy everything to GCS, then run
 # secret-test evaluation on the frozen bundle, so the agent's 15 hours of work
 # are safe before the evaluation starts.
-FINAL_BUNDLE="$AGENT_MODEL_OUTPUT_DIR/coding/final_bundle_${SLURM_JOB_ID}"
+FINAL_BUNDLE="$AGENT_MODEL_OUTPUT_DIR/$TASK/final_bundle_${SLURM_JOB_ID}"
 PREPARE_ONLY=0
 for arg in "$@"; do [[ "$arg" == --prepare-final-only ]] && PREPARE_ONLY=1; done
-"$PDB_LAUNCHER_PYTHON" launch_agent.py --backend local --task coding \
-  --prompt coding/FORGER_PROMPT.txt --timeout-hours 15 "$@" \
+"$PDB_LAUNCHER_PYTHON" launch_agent.py --backend local --task "$TASK" \
+  --prompt "$TASK/FORGER_PROMPT.txt" --timeout-hours 15 "$@" \
   --prepare-final-only --final-output-dir "$FINAL_BUNDLE"
 stop_sync_loop
 if sync_to_gcs; then

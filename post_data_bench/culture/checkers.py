@@ -1,4 +1,4 @@
-"""Shared NormAd parsing, scoring, and row I/O."""
+"""Shared cultural-norm label parsing, scoring, and row I/O."""
 from __future__ import annotations
 
 import base64

@@ -10,6 +10,13 @@ contract. Both prompts render backend-specific commands from `backend_prompts.py
 - `--backend tinker` (default): Qwen/Qwen3-8B, remote LoRA training.
 - `--backend local`: Qwen/Qwen3-4B, local TRL SFT with merged LoRA weights,
   Slime full-parameter RL, and vLLM validation and final evaluation.
+- `--task culture` runs the same recipe with `--backend local` only (its evaluator
+  has no Tinker sampler yet). The sandbox gets a flat copy of the culture evaluator
+  (`agent_validation.copy_culture_evaluator`), coding's `rl/` and `train_model.sh`,
+  and decontamination signatures of the test situations (8-word windows). Prompts:
+  `culture/FORGER_PROMPT.txt`, `culture/minimal_scaffold_prompt.txt`; on Orchard,
+  submit `orchard_agent_run.sbatch` with `PDB_TASK=culture` and the culture build as
+  `PDB_BENCHMARK_DIR`.
 - RL defaults on both: 80 optimizer steps, 32 prompts × 8 completions per step
   (256 completions per optimizer batch). Total: 2,560 prompt draws and 20,480
   completions; the old Tinker default was 25 × 128 × 8 = 25,600 completions.

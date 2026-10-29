@@ -2,12 +2,13 @@
 
 The sandbox never holds test text: the launcher writes only hashed 13-word windows
 of each test problem's statement (`decontamination_signatures.json`, next to this
-module). A row overlaps a test problem when its prompt contains at least
-`FRACTION` of that problem's windows (and at least `MIN_MATCHES`). Windows found in
-`COMMON` or more statements, counting the validation statements too, are
-boilerplate (e.g. a site's standard definition of lexicographic order) and
-ignored. Training data goes through `filter_rows` before every SFT and RL run, and
-only the number of removed rows is reported.
+module); short statements such as a two-sentence situation use 8-word windows
+(`SHORT`). A row overlaps a test problem when its prompt contains at least
+`FRACTION` of that problem's windows (and at least the signature's
+`min_matches`). Windows found in `COMMON` or more statements, counting the
+validation statements too, are boilerplate (e.g. a site's standard definition of
+lexicographic order) and ignored. Training data goes through `filter_rows` before
+every SFT and RL run, and only the number of removed rows is reported.
 
   python -m rl.decontaminate --data rows.jsonl   # how many rows overlap
 """
@@ -26,6 +27,12 @@ N = 13
 FRACTION = 0.25
 MIN_MATCHES = 10
 COMMON = 3
+# Window size and minimum matches for short statements (median 37 words): copies of
+# half a test situation are caught, and 3 of 280 validation situations, near-copies
+# of test ones, are flagged.
+SHORT = (8, 6)
+# The statement field of each task's rows, and whether it is short.
+STATEMENT_FIELDS = {"question_content": False, "situation": True}
 SIGNATURES = Path(__file__).with_name("decontamination_signatures.json")
 
 
@@ -33,24 +40,24 @@ def _words(text):
     return re.findall(r"[a-z0-9]+", text.lower())
 
 
-def _windows(text):
-    """Hashed N-word windows of `text`, e.g. 2 for a 14-word statement."""
+def _windows(text, n=N):
+    """Hashed n-word windows of `text`, e.g. 2 for a 14-word statement and n=13."""
     words = _words(text)
     return {
-        hashlib.sha256(" ".join(words[i : i + N]).encode()).hexdigest()[:16]
-        for i in range(len(words) - N + 1)
+        hashlib.sha256(" ".join(words[i : i + n]).encode()).hexdigest()[:16]
+        for i in range(len(words) - n + 1)
     }
 
 
-def build_signatures(statements, background=()):
+def build_signatures(statements, background=(), n=N, min_matches=MIN_MATCHES):
     """Signatures of the test problem statements (no text, no ids, no order).
 
     `background` statements (e.g. the validation tasks) only count toward which
     windows are boilerplate; they are not matched themselves.
     """
-    per_problem = [_windows(s) for s in statements]
+    per_problem = [_windows(s, n) for s in statements]
     counts = Counter(w for windows in per_problem for w in windows)
-    counts.update(w for s in background for w in _windows(s))
+    counts.update(w for s in background for w in _windows(s, n))
     index = {}
     sizes = []
     for number, windows in enumerate(per_problem):
@@ -58,24 +65,25 @@ def build_signatures(statements, background=()):
         sizes.append(len(kept))
         for window in kept:
             index.setdefault(window, []).append(number)
-    return {"n": N, "sizes": sizes, "windows": index}
+    return {"n": n, "min_matches": min_matches, "sizes": sizes, "windows": index}
 
 
 def _statements(path):
-    return [
-        json.loads(line)["question_content"]
-        for line in Path(path).read_text().splitlines()
-        if line.strip()
+    """Each row's statement, and whether statements of that field are short."""
+    rows = [
+        json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()
     ]
+    field = next(f for f in STATEMENT_FIELDS if rows and f in rows[0])
+    return [row[field] for row in rows], STATEMENT_FIELDS[field]
 
 
 def benchmark_signatures(benchmark_dir):
     """Signatures from a benchmark build: its hidden test and its validation tasks."""
     root = Path(benchmark_dir)
-    return build_signatures(
-        _statements(root / ".hidden" / "test_tasks.jsonl"),
-        background=_statements(root / "validation_tasks.jsonl"),
-    )
+    test, short = _statements(root / ".hidden" / "test_tasks.jsonl")
+    background, _ = _statements(root / "validation_tasks.jsonl")
+    n, min_matches = SHORT if short else (N, MIN_MATCHES)
+    return build_signatures(test, background, n, min_matches)
 
 
 @lru_cache(maxsize=1)
@@ -99,12 +107,13 @@ def _prompt_text(row):
 def overlaps(row, signature):
     """Whether `row`'s prompt contains enough of one test problem's windows."""
     hits = Counter()
-    for window in _windows(_prompt_text(row)):
+    for window in _windows(_prompt_text(row), signature["n"]):
         for problem in signature["windows"].get(window, ()):
             hits[problem] += 1
     sizes = signature["sizes"]
+    minimum = signature.get("min_matches", MIN_MATCHES)
     return any(
-        count >= max(MIN_MATCHES, FRACTION * sizes[problem])
+        count >= max(minimum, FRACTION * sizes[problem])
         for problem, count in hits.items()
     )
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate NormAd through an existing OpenAI-compatible inference server.
+"""Evaluate cultural-norm judgments through an OpenAI-compatible inference server.
 
 Write resumable predictions.jsonl and metrics.json with headline macro_f1;
 secondary metrics appear under context. Split files already exclude neutral
@@ -28,13 +28,13 @@ DATA_DIR = Path(os.environ.get("PDB_BENCHMARK_DIR", Path(__file__).resolve().par
 def parse_args() -> argparse.Namespace:
     """Parse CLI args shared by the live, --from-raw, and --merge-shards run modes."""
     p = argparse.ArgumentParser(
-        description="Evaluate a model on NormAd via a vLLM server."
+        description="Evaluate a model on cultural-norm judgments via a vLLM server."
     )
     p.add_argument("--validate-only", action="store_true", help=argparse.SUPPRESS)
     p.add_argument(
         "--model-path",
         type=str,
-        default="Qwen/Qwen3-4B",
+        default=os.environ.get("PDB_STUDENT_MODEL") or "Qwen/Qwen3-4B",
         help="Model id/path; must match the name the vLLM server serves.",
     )
     p.add_argument("--split", type=str, choices=["val", "test"], default=None)

@@ -184,6 +184,7 @@ def _freeze_into(data, submission, agent_dir, output, backend="tinker"):
                 "custom_rm_path": "rl.rubric_rm.custom_rm",
                 "base_model": MODELS[backend],
                 "backend": backend,
+                "task": os.environ.get("PDB_TASK", "coding"),
                 "thinking": True,
             },
             indent=2,
@@ -393,7 +394,12 @@ def run_final(args):
             from .tinker_training import read_checkpoint  # noqa: ABS101
 
             model = read_checkpoint(checkpoint)["sampler_path"]
-        return final_evaluation(model, bundle / ".hidden/final_eval", backend=backend)
+        return final_evaluation(
+            model,
+            bundle / ".hidden/final_eval",
+            backend=backend,
+            task=submission.get("task", "coding"),
+        )
     # Recovery for bundles frozen under the previous SFT-submission contract.
     command = json.loads((bundle / "final_command.json").read_text())
     saved_config = {
@@ -501,8 +507,14 @@ def rl_run(args):
         )
 
 
-def final_evaluation(sampler_path, out_dir, backend="tinker"):
-    """Evaluate final weights using the backend recorded by the host recipe."""
+def final_evaluation(sampler_path, out_dir, backend="tinker", task=None):
+    """Evaluate final weights on `task`'s secret test (default: $PDB_TASK, else coding).
+
+    Uses the backend recorded by the host recipe.
+    """
+    task = task or os.environ.get("PDB_TASK", "coding")
+    if task not in ("coding", "culture"):
+        raise ValueError(f"unknown task: {task}")
     env = {
         **os.environ,
         "TINKER_EVAL_BUDGET": "eval",
@@ -521,7 +533,7 @@ def final_evaluation(sampler_path, out_dir, backend="tinker"):
     run(
         [
             "bash",
-            CODING / "evaluate_model.sh",
+            CODING.parent / task / "evaluate_model.sh",
             "--server-backend",
             env["PDB_EVAL_BACKEND"],
             "--split",

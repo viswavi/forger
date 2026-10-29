@@ -32,7 +32,7 @@ LOCAL_TRAINING = """Your sandbox has {GPU_DESCRIPTION}. SFT, validation and shor
   Read metrics.json and predictions.jsonl. Use a fresh output directory when weights or settings change. --model-path {STUDENT_MODEL} evaluates the base model.
 - Short RL probe (2 steps, 32 prompts x 8 samples each):
   python -m rl.agent_training probe --data {RAW_DATA_PATH} --checkpoint {AGENT_DATA_DIR}/sft_trial_1 --output-dir {AGENT_DATA_DIR}/rl_probe_1
-  This uses the separate Slime stack and your rubric reward. Read logs/reward_dump.jsonl and logs/rollouts/ for reward variation, truncation and abstention behavior; rl_result.json records the resulting checkpoint. Probes do not evaluate secret test tasks."""
+  This uses the separate Slime stack and your rubric reward. Read logs/reward_dump.jsonl and logs/rollouts/ for reward variation, truncation and final answers; rl_result.json records the resulting checkpoint. Probes do not evaluate secret test tasks."""
 
 
 TINKER_TIMING = "For planning, allow roughly 1 hour for SFT, 40 minutes to evaluate 1,500 examples, and 6 hours for an RL run."

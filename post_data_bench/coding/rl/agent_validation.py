@@ -44,6 +44,30 @@ EVALUATOR_FILES = (
     "LiveCodeBench/lcb_runner/evaluation/utils_execute.py",
     "LiveCodeBench/lcb_runner/utils/extraction_utils.py",
 )
+# Culture's evaluator, flattened: the shared launcher and contract modules that the
+# host imports from coding/ sit next to it, e.g. culture/evaluate_model.sh is
+# coding's, which runs eval_launcher.sh from its own directory.
+CULTURE_EVALUATOR_FILES = {
+    "eval_launcher.sh": "coding/eval_launcher.sh",
+    "eval_server.py": "coding/eval_server.py",
+    "eval_state.py": "coding/eval_state.py",
+    "split_contract.py": "coding/split_contract.py",
+    "evaluate_model.sh": "coding/evaluate_model.sh",
+    "evaluate_model.py": "culture/evaluate_model.py",
+    "checkers.py": "culture/checkers.py",
+    "prompt_building.py": "culture/prompt_building.py",
+}
+# Fields of a culture validation row that the agent sees; "id" is replaced.
+CULTURE_FIELDS = (
+    "country",
+    "axis",
+    "subaxis",
+    "value",
+    "rule_of_thumb",
+    "situation",
+    "task_text",
+    "gold_label",
+)
 # Agents must never learn benchmark names (contamination risk). The sandbox copy
 # renames the vendored grader package and scrubs names from code and comments,
 # e.g. LiveCodeBench/lcb_runner/lm_styles.py -> grader_lib/grader_runner/lm_styles.py.
@@ -106,13 +130,83 @@ def public_question_ids(data_root):
 VALIDATION_FIELDS = PUBLIC_FIELDS
 
 
-def copy_validation_evaluator(source, destination, data_root=None):
+def public_culture_ids(data_root):
+    """Map host culture validation ids to the agent's, e.g. {1473: "val_017"}."""
+    with (Path(data_root) / "validation_tasks.jsonl").open() as stream:
+        rows = [json.loads(line) for line in stream if line.strip()]
+    return {row["id"]: f"val_{number:03d}" for number, row in enumerate(rows)}
+
+
+def _write_text(path, text, mode_from=None):
+    """Write a scrubbed file, refusing any benchmark name in its path or content."""
+    text = scrub(text)
+    if BENCHMARK_NAMES.search(text) or BENCHMARK_NAMES.search(str(path)):
+        raise ValueError(f"benchmark name survives scrubbing in {path.name}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    if mode_from is not None:
+        shutil.copymode(mode_from, path)
+
+
+def _write_public_validation(destination, rows, decode):
+    """Write validation rows, their decoded copy, and the public manifest."""
+    (destination / "validation_tasks.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows)
+    )
+    decoded = [
+        {
+            **row,
+            decode: zlib.decompress(base64.b64decode(row[decode])).decode()
+            if row[decode] is not None
+            else None,
+        }
+        for row in rows
+    ]
+    (destination / "validation_tasks_de_obfuscated.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in decoded)
+    )
+
+
+def copy_culture_evaluator(destination, data_root):
+    """Copy the culture evaluator and its validation rows with opaque ids.
+
+    `destination` gets a flat, self-contained copy that runs without ../coding.
+    """
+    destination, data_root = Path(destination), Path(data_root)
+    verify_manifest(data_root)
+    read = lambda path: [  # noqa: E731
+        json.loads(line) for line in path.read_text().splitlines() if line.strip()
+    ]
+    validation = read(data_root / "validation_tasks.jsonl")
+    if not validation:
+        raise ValueError("validation dataset is empty")
+    assert_disjoint(validation, read(data_root / ".hidden/test_tasks.jsonl"))
+    ids = public_culture_ids(data_root)
+    rows = [
+        {"id": ids[row["id"]], **{name: row[name] for name in CULTURE_FIELDS}}
+        for row in validation
+    ]
+    root = Path(__file__).resolve().parents[2]
+    for name, source in CULTURE_EVALUATOR_FILES.items():
+        _write_text(destination / name, (root / source).read_text(), root / source)
+    _write_public_validation(destination, rows, "gold_label")
+    public_files = ("validation_tasks.jsonl", "validation_tasks_de_obfuscated.jsonl")
+    (destination / "validation_manifest.json").write_text(
+        json.dumps(
+            {"outputs": {name: sha256(destination / name) for name in public_files}}
+        )
+    )
+
+
+def copy_validation_evaluator(source, destination, data_root=None, task="coding"):
     """Copy validation rows and their private-test blobs using evaluator filenames.
 
     Exclude secret test rows and unreferenced blobs from the agent workspace.
     """
     source, destination = Path(source), Path(destination)
     data_root = Path(data_root) if data_root else source
+    if task == "culture":
+        return copy_culture_evaluator(destination, data_root)
     verify_manifest(data_root)
     rows = []
     with (data_root / "validation_tasks.jsonl").open() as stream:
@@ -150,33 +244,11 @@ def copy_validation_evaluator(source, destination, data_root=None):
         row.update(public_identity(number))
     for name in EVALUATOR_FILES:
         target = destination / agent_path(name)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        text = scrub((source / name).read_text())
-        if BENCHMARK_NAMES.search(text) or BENCHMARK_NAMES.search(str(target)):
-            raise ValueError(f"benchmark name survives scrubbing in {name}")
-        target.write_text(text)
-        shutil.copymode(source / name, target)
-    (destination / "validation_tasks.jsonl").write_text(
-        "".join(json.dumps(row) + "\n" for row in rows)
-    )
+        _write_text(target, (source / name).read_text(), source / name)
     (destination / "private_test_cases.txt").write_text(
         "".join(blobs[index] + "\n" for index in indices)
     )
-
-    decoded = [
-        {
-            **row,
-            "gold_response": zlib.decompress(
-                base64.b64decode(row["gold_response"])
-            ).decode()
-            if row["gold_response"] is not None
-            else None,
-        }
-        for row in rows
-    ]
-    (destination / "validation_tasks_de_obfuscated.jsonl").write_text(
-        "".join(json.dumps(row) + "\n" for row in decoded)
-    )
+    _write_public_validation(destination, rows, "gold_response")
     public_files = (
         "validation_tasks.jsonl",
         "validation_tasks_de_obfuscated.jsonl",

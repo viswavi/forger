@@ -54,7 +54,7 @@ class DecontaminateTest(unittest.TestCase):
         """Only hashes and sizes are stored: no statement words, ids or titles."""
         dumped = json.dumps(self.signature)
         self.assertNotIn("substring", dumped)
-        self.assertEqual(set(self.signature), {"n", "sizes", "windows"})
+        self.assertEqual(set(self.signature), {"n", "min_matches", "sizes", "windows"})
 
     def test_boilerplate_windows_are_ignored(self):
         """Windows shared by COMMON statements (with background) do not count."""
@@ -108,6 +108,36 @@ class DecontaminateTest(unittest.TestCase):
             write_rows(source, data)
             with self.assertRaisesRegex(ValueError, "after decontamination"):
                 compile_data(source, Path(tmp) / "out")
+
+    def test_short_situations_use_short_windows(self):
+        """A benchmark of short situations is matched with 8-word windows."""
+        situation = (
+            "During a visit to her friend's house, Emily was offered a cup of tea "
+            "and accepted it at once. Is what Emily did acceptable?"
+        )
+        other = (
+            "At a dinner party, Tom passed the salt to his host with his left hand. "
+            "Is what Tom did socially acceptable?"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".hidden").mkdir()
+            write = lambda path, texts: path.write_text(  # noqa: E731
+                "".join(json.dumps({"situation": t}) + "\n" for t in texts)
+            )
+            write(root / ".hidden" / "test_tasks.jsonl", [situation, other])
+            write(root / "validation_tasks.jsonl", ["Ana shook hands firmly."])
+            signature = decontaminate.benchmark_signatures(root)
+        self.assertEqual(
+            (signature["n"], signature["min_matches"]), decontaminate.SHORT
+        )
+        half = " ".join(situation.split()[:14])
+        self.assertTrue(decontaminate.overlaps(prompt_row(half), signature))
+        self.assertFalse(
+            decontaminate.overlaps(
+                prompt_row("Is what Emily did acceptable?"), signature
+            )
+        )
 
 
 if __name__ == "__main__":

@@ -9,6 +9,8 @@ explicit allowlist (`TASK_PUBLIC_FILES`, plus `copy_validation_evaluator` in
 not quote it in a prompt: it names the benchmark.
 
 Status: not implemented. Coding evaluates on Tinker; culture (NormAd) does not.
+The local backend runs culture in `sft-rl` since 2026-10-28 (branch
+`vijay_culture_local`); this handoff covers only the Tinker path.
 
 ## Goal
 
