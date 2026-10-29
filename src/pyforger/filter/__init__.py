@@ -9,7 +9,12 @@ from pyforger.filter.agreement import (
     by_rouge_l_agreement,
 )
 from pyforger.filter.difficulty import by_judged_difficulty
-from pyforger.filter.diversity import by_exact_match, by_n_gram_overlap, by_rouge_l
+from pyforger.filter.diversity import (
+    by_embedding_similarity,
+    by_exact_match,
+    by_n_gram_overlap,
+    by_rouge_l,
+)
 from pyforger.filter.format import by_invalid_response, by_keyword_blocklist, by_length
 from pyforger.filter.judge import by_llm_score
 from pyforger.filter.model_difficulty import by_comparative_difficulty, by_pass_at_k
@@ -20,6 +25,7 @@ from pyforger.filter.validation import by_syntax
 
 __all__ = [
     "by_comparative_difficulty",
+    "by_embedding_similarity",
     "by_exact_agreement",
     "by_exact_match",
     "by_group_agreement",
