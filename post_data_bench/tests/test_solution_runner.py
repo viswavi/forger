@@ -4,6 +4,7 @@ import unittest
 
 from coding.rl.solution_runner import (
     RLSandboxRunner,
+    rubric_score,
     rubric_verifier,
     run_solution,
     score_targets,
@@ -162,6 +163,58 @@ class RubricVerifierTests(unittest.TestCase):
         )
         self.assertEqual(rows[0]["grades"], {"model": [True, False]})
         self.assertEqual(student.prompts, [self.ROW["prompt"]])
+
+
+class RubricScoreTests(unittest.TestCase):
+    """rubric_score returns a response's weighted code score, for rubric_scores."""
+
+    ROW = RubricVerifierTests.ROW
+
+    def test_weighted_code_score_of_the_whole_response(self):
+        """Same weights as score_targets: the missing thinking costs 1 of 4."""
+        grade = rubric_score()
+        self.assertEqual(grade(target(DOUBLE), self.ROW), 1.0)
+        self.assertEqual(grade(f"```python\n{DOUBLE}\n```", self.ROW), 0.75)
+        self.assertEqual(grade(target("print(5)"), self.ROW), 0.25)
+        self.assertEqual(grade("", self.ROW), 0.0)
+
+    def test_none_without_code_criteria_and_raises_on_a_broken_rubric(self):
+        """Prompt criteria need the judge; a broken rubric is an error to report."""
+        grade = rubric_score()
+        judged = {**self.ROW, "rubric": [[{"prompt": "Clear?"}, 1.0]]}
+        self.assertIsNone(grade(target(DOUBLE), judged))
+        with self.assertRaises(Exception):
+            grade(target(DOUBLE), {**self.ROW, "rubric": [[{"code": "x = 1"}, 1.0]]})
+
+    def test_cache_key_is_stable_and_names_the_grader(self):
+        """Two instances share cache entries; the verifier's are its own."""
+        self.assertEqual(rubric_score().cache_key(), rubric_score().cache_key())
+        self.assertNotEqual(rubric_score().cache_key(), rubric_verifier().cache_key())
+        self.assertEqual(repr(rubric_score()), "rubric_score()")
+
+    @unittest.skipUnless(importlib.util.find_spec("pyforger"), "needs pyforger")
+    def test_grades_targets_samples_and_controls_in_rubric_scores(self):
+        """Empty and random score 0 on a sound rubric; samples land in their bins."""
+        from pyforger.inspect import rubric_scores
+
+        rows = [
+            {**self.ROW, "prompt": [{"role": "user", "content": f"Double it ({i})"}]}
+            for i in range(3)
+        ]
+        report = rubric_scores(
+            rows,
+            rubric_score(),
+            response_fields="ground_truth",
+            model=Student(),
+            k=2,
+            _no_cache=True,
+        )
+        self.assertEqual(report.column("ground_truth").counts, [0, 0, 0, 0, 0, 3])
+        self.assertEqual(report.column("sampled").counts, [0, 3, 0, 0, 0, 3])
+        for name in ("empty", "random"):
+            self.assertEqual(report.column(name).counts[0], 3)
+        # Every row is the same task, so another row's target solves it too.
+        self.assertEqual([f.split()[0] for f in report.flags], ["other_row"])
 
 
 if __name__ == "__main__":
