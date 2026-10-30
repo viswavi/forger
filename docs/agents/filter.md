@@ -7,7 +7,7 @@ defaults are in [OPS.md](../OPS.md#filter).
 |---|---|
 | `by_predicate` | Any Python check on a row; use it instead of a list comprehension. Not cached. |
 | `by_llm_score` | Quality: an LLM judge scores each row on a rubric. See [LLM judges](#llm-judges). |
-| `by_tests` | Code: run each row's stdin/stdout program on its tests, keep rows passing `min_pass_rate`. |
+| `by_tests` | Code: run each row's Python or C++ program on its tests, keep rows passing `min_pass_rate`. |
 | `by_pass_at_k` | Difficulty for *your* model: sample `k` answers, keep rows whose pass rate is in range. |
 | `by_comparative_difficulty` | Difficulty: keep rows a strong model answers correctly and a weak model does not. |
 | `by_judged_difficulty` | Cheap difficulty guess: a judge rates each task 1 to 5. |
@@ -119,7 +119,8 @@ Each takes the task in `input_field` (text or chat messages). From cheapest and 
   model gets right.
 - `by_pass_at_k`: `k` samples per row; keeps rows whose pass rate is in `[min_rate, max_rate]` (default
   `[0.1, 0.9]`). It is the only one that measures difficulty for the model you will train. With the student on your
-  own GPUs (`LocalModel`, see [acquire.md](acquire.md)) it costs only GPU time.
+  own GPUs (`LocalModel`, see [acquire.md](acquire.md)) it costs only GPU time. For code, pass
+  `metric=filter.program_verifier("tests")` (`language="cpp"` for C++, `min_score=` for partial credit).
 
 Grading guardrails for `by_comparative_difficulty` and `by_pass_at_k`:
 

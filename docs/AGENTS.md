@@ -77,10 +77,12 @@ Read the file for the ops you use:
 
 - [`docs/OPS.md`](OPS.md): every op's signature, generated from the code.
 - [`acquire.md`](agents/acquire.md): `sample_from_LLM`, student sampling (`LocalModel`, `TinkerModel`), retrieval, rubrics.
-- [`alter.md`](agents/alter.md): `generate_from_context`, translation, code execution, running programs on tests, STaR.
-- [`filter.md`](agents/filter.md): LLM judge, `by_predicate`, `by_tests`, difficulty filters, `by_topic_frequency`.
-- [`inspect.md`](agents/inspect.md): `topic_based_clustering`, `eval_tree`, `inspect_step`, `spend`, `runs`,
-  `student_log_likelihood`.
+- [`alter.md`](agents/alter.md): `generate_from_context`, translation, code execution, running Python or C++
+  programs on tests (partial scores, checker programs), STaR.
+- [`filter.md`](agents/filter.md): LLM judge, `by_predicate`, `by_tests`, difficulty filters,
+  `by_embedding_similarity`, `by_topic_frequency`.
+- [`inspect.md`](agents/inspect.md): `topic_based_clustering`, `eval_tree`, `rubric_scores`, `embedding_dispersion`,
+  `inspect_step`, `spend`, `runs`, `student_log_likelihood`.
 - [`models.md`](agents/models.md): `Model`, gateway credentials, concurrency, `n` fan-out, reasoning effort.
 - [`caching.md`](agents/caching.md): `@op` caching, the request cache, tracing.
 - [`pipelines.md`](agents/pipelines.md): `@step` / `@pipeline`, reports, spend caps, composing pipelines, patterns.

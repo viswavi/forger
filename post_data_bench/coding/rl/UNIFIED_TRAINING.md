@@ -116,6 +116,22 @@ Weights must be finite and nonnegative, with a positive sum. Reward is
   Results are JSON-normalized so returned objects cannot override comparisons,
   and the response cannot write to the worker's output. Underscore-prefixed
   names do not compile there, a known false-negative source.
+  `judge_cpp(code, tests, checker=None, interactor=None, time_limit=1.0,
+  memory_mb=256)` -> `(score, statuses)` judges a C++ program with `cpp_judge.py`
+  (g++, rlimits, testlib checkers and interactors against `testlib/testlib.h`).
+  The worker's limits cannot compile or run it, so the worker sends the request
+  over a pipe to `rubric_rm`'s unrestricted parent, which validates it, judges
+  it within the criterion's remaining time, and kills the judging when the
+  worker exits. Compiled checkers are cached in `$CPP_JUDGE_CACHE_DIR` (default
+  a private per-user directory under the tempdir). Each test is
+  `{"input": str, "answer": str, "args": [str]}`: `args` (optional) are the
+  program's command-line arguments, e.g. a test generator's, and a test without
+  `answer` passes on a clean run, unchecked. `judge_cpp(..., details=True)`
+  returns `(score, details)` instead, one dict per test: `status`, `ratio`,
+  `time` (CPU seconds), `stdout` (the first 64 KiB of the program's output)
+  and `message` (the checker's or interactor's message, or the failed run's
+  stderr). Every call shares the criterion's 20-second budget and runs at most
+  4 tests at once.
   This is the original sandbox's guardrail model, not a hardened security boundary.
 - **Prompt:** trusted reward code calls LiteLLM outside RestrictedPython with
   `litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731`, temperature 1, low reasoning,

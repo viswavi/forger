@@ -239,6 +239,10 @@ Common patterns (not a complete list):
   inside a larger pipeline; slower, but more flexible.
 - **Strong-vs-weak gap:** answer each input with a weak model and several strong ones; keep rows where the strong
   models agree with each other (likely correct) but not with the weak one (not too easy).
+- **Programming problems checked by execution:** pair each problem with a reference and a brute-force solution
+  (Python or C++); generate inputs with generator programs (tests with `"args"` and no `"output"` record stdout),
+  get expected outputs from the brute force, keep problems whose reference agrees (`filter.by_tests`), and score
+  problems without one right output with a checker program (`program_checker`, partial scores).
 - **Back-translation:** retrieve or generate outputs (e.g. proofs), then generate an input that could have produced
   each one.
 - **Cheap iteration:** every op is cached on disk, so later stages can be rerun and tuned without paying again for
