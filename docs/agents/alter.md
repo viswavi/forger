@@ -96,22 +96,6 @@ rows = self_taught_reasoner(situations, "{situation}\nIs this acceptable? Explai
                             reference_field="explanation", answer_judge=judge)
 ```
 
-Small local judges suffice for clear-cut cases. On 62 hand-written (question, reference, answer) triples, each judged 5
-times, Qwen3-4B (thinking off), Qwen3-8B, and Qwen3-32B (thinking on or off) all gave the same verdicts:
-
-| Answer vs. reference | Triples | Accepted |
-|---|---|---|
-| Same meaning, reworded | 14 | 100% |
-| Same verdict in other words ("True." for "The statement is true.") | 10 | 100% |
-| Subtly wrong ("1918" for "1919", "more dense" for "less dense") | 14 | 0% |
-| Opposite verdict ("No, it is not acceptable ..." for "Yes, it is acceptable ...") | 18 | 0% |
-| Answer to another question | 6 | 0% |
-
-Borderline answers (partly right, hedged, right for the wrong reasons) were not tested; read a sample of the kept and
-rejected rows before relying on a judge for them.
-
-`LocalModel("Qwen/Qwen3-8B", max_model_len=40960)` samples the same student on a local GPU via vLLM instead.
-
 ## Running programs against tests
 
 `execute_code` runs a function, not a program: it calls the last function defined in `code_field` with the value of
