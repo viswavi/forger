@@ -64,6 +64,8 @@ question, the reference, and the student's answer (not its reasoning), and a sam
 same verdict, values, and facts as the reference; wording does not matter). Any `Model` works, e.g. a `LocalModel` on
 your own GPUs or an API model. Kept rows keep their reference. It cannot be combined with `match_fn`, `verifier`, or
 `filter_fn`. Samples and the judge's replies are cached apart, so trying another judge samples nothing.
+For C++ answers, use `verifier=filter.program_verifier("tests", language="cpp")`; with a partial-credit
+`checker`, `min_score=` keeps responses whose mean test score reaches it.
 
 STaR's output is limited by the abilities of the student model. If the model never solves a task in `n` samples,
 that task will be completely omitted. A behavior it never shows is never learned. Two remedies:

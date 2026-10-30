@@ -119,7 +119,8 @@ Each takes the task in `input_field` (text or chat messages). From cheapest and 
   model gets right.
 - `by_pass_at_k`: `k` samples per row; keeps rows whose pass rate is in `[min_rate, max_rate]` (default
   `[0.1, 0.9]`). It is the only one that measures difficulty for the model you will train. With the student on your
-  own GPUs (`LocalModel`, see [acquire.md](acquire.md)) it costs only GPU time.
+  own GPUs (`LocalModel`, see [acquire.md](acquire.md)) it costs only GPU time. For code, pass
+  `metric=filter.program_verifier("tests")` (`language="cpp"` for C++, `min_score=` for partial credit).
 
 Grading guardrails for `by_comparative_difficulty` and `by_pass_at_k`:
 
