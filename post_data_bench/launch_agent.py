@@ -152,7 +152,7 @@ args.model = args.model or MODELS[args.backend]
 # The algorithmic task recommends a smaller dataset (~500 rows, at most 800).
 ROW_TARGET = 500 if args.task == "frontiercs" else 1250
 if args.min_rows_nudge is None:
-    args.min_rows_nudge = 300 if args.task == "frontiercs" else 1000
+    args.min_rows_nudge = 200 if args.task == "frontiercs" else 1000
 if args.training_mode == "sft-rl" and args.model != MODELS[args.backend]:
     parser.error(
         f"the {args.backend} unified recipe supports {MODELS[args.backend]} only"
