@@ -415,7 +415,7 @@ slower brute-force one (Python or C++, `language="cpp"`). Generate inputs with t
 `"args"` and no `"output"` runs the generator and records its stdout (`alter.run_programs`, `max_chars=None`). Run
 the brute force on small inputs to get expected outputs, and keep problems whose reference agrees with it
 (`filter.by_tests`). For problems with no single right output (optimization, many valid answers), score outputs with
-a checker program instead (`testlib_checker`, partial scores). `filter.by_pass_at_k` with
+a checker program instead (`program_checker`, partial scores). `filter.by_pass_at_k` with
 `filter.program_verifier(..., language="cpp")` then measures how often the student solves each problem.
 - **Back-translation:** First retrieve or generate outputs (e.g. math proofs) and then "back-translate" a suitable
 input that could have produced that output (e.g. an English description of a math problem). This can be done with two

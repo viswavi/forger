@@ -28,8 +28,7 @@ compiler's message in ``stderr``.
 A checker grades a test from the program's stdout and the expected output. It
 returns a bool, or a score in [0, 1] for partial credit; a test passes when it
 scores 1. A checker with a third parameter also gets the test, e.g. to read
-its input: ``testlib_checker(source)`` runs a testlib checker program as
-``checker input output answer`` and scores its verdict.
+its input. ``program_checker(source)`` runs a C++ or Python checker program.
 
 ``runner=`` replaces the subprocess with your own executor, e.g. the sandbox
 an RL reward will run the code in, so a solution that passes here also passes
@@ -73,7 +72,8 @@ Runner = Callable[[str, list[dict]], list[dict]]
 _COMPILERS: dict[str, tuple[list[str], str]] = {
     "cpp": (["g++", "-O2", "-pipe", "-std=gnu++17", "{file}", "-o", "{out}"], ".cpp"),
 }
-LANGUAGES = ("python", *_COMPILERS)
+_ALIASES = {"py": "python"}
+LANGUAGES = ("python", *_ALIASES, *_COMPILERS)
 # Fence tags of each language's code blocks ("" is an untagged block).
 _FENCE_TAGS = {
     "python": ("", "python", "py", "python3"),
@@ -144,9 +144,10 @@ def last_code_block(text: str, language: str = "python") -> str | None:
 
 
 def _checked_language(language: str) -> str:
+    """``language``, with aliases resolved ("py" is "python")."""
     if language not in LANGUAGES:
         raise ValueError(f"language must be one of {LANGUAGES}, got {language!r}")
-    return language
+    return _ALIASES.get(language, language)
 
 
 def compile_program(
@@ -165,7 +166,10 @@ def compile_program(
     environment as programs. The error is the compiler's output, or a note
     that it timed out. Not an op; safe to call from many threads at once.
     """
-    default, suffix = _COMPILERS[_checked_language(language)]
+    language = _checked_language(language)
+    if language not in _COMPILERS:
+        raise ValueError(f"{language} is not compiled")
+    default, suffix = _COMPILERS[language]
     command = compile_command or default
     if not command:
         raise ValueError("compile_command must not be empty")
@@ -376,7 +380,8 @@ def run_tests(
             failed = [i for i, r in enumerate(results) if r["passed"] is not True]
             results = results[: failed[0] + 1] if failed else results
         return results
-    if _checked_language(language) == "python":
+    language = _checked_language(language)
+    if language == "python":
         return _run_each(code, tests, checker, stop_on_failure, max_chars, run_kwargs)
     _check_compiled_kwargs(run_kwargs)
     with tempfile.TemporaryDirectory(prefix="forger_build_") as build:
@@ -602,8 +607,8 @@ def run_programs(
             answer. None uses the field as is.
         checker: ``(stdout, expected) -> bool | float``, or ``(stdout,
             expected, test)``; a float is a partial score in [0, 1]. Default
-            ``outputs_match`` (equal up to whitespace); ``testlib_checker``
-            runs a testlib checker program.
+            ``outputs_match`` (equal up to whitespace); ``program_checker``
+            runs a checker program.
         timeout_s: Wall-clock limit per run, in seconds.
         memory_mb: Address-space limit per run (None for none). Not enforced
             on macOS, which has no working ``RLIMIT_AS``.
@@ -625,15 +630,15 @@ def run_programs(
             and ``command`` then do not apply. E.g. run solutions in the
             sandbox that will score them, so what passes here passes there.
             Part of the cache key: give it a ``cache_key()`` method.
-        language: ``"python"`` (default) or ``"cpp"``, which compiles each
-            distinct program once and runs the binary on every test.
+        language: ``"python"`` (default; or ``"py"``) or ``"cpp"``, which
+            compiles each distinct program once.
         compile_command: The compiler command for ``language="cpp"``, with
             ``{file}`` and ``{out}``; default ``g++ -O2 -pipe -std=gnu++17``.
 
     Returns:
         New rows (inputs are not mutated), in input order.
     """
-    _checked_language(language)
+    language = _checked_language(language)
     workers = max_workers or _default_workers()
     if workers < 1:
         raise ValueError("max_workers must be at least 1")
@@ -742,55 +747,50 @@ def _run_jobs(
 
 
 # testlib's exit codes for a verdict that scores: _ok, and _points (quitp).
-_TESTLIB_SCORING_EXITS = (0, 7)
+_SCORING_EXITS = (0, 7)
 _RATIO_RE = re.compile(r"Ratio: ([\d.]+)")
 
 
-def testlib_checker(
+def program_checker(
     source: str,
+    language: str = "cpp",
     *,
     include_dirs: list[str] | tuple[str, ...] = (),
     compile_command: list[str] | None = None,
     timeout_s: float = 10.0,
     memory_mb: int | None = 256,
-) -> TestlibChecker:
-    """A checker that runs a testlib checker program on each test.
+) -> ProgramChecker:
+    """A checker program, run as ``checker input output answer`` on each test.
 
-    ``source`` is the checker's C++ source (``#include "testlib.h"``), found
-    through ``include_dirs``; it is compiled once, on first use. Each test runs
-    it as ``checker input output answer``, with the test's ``"input"``, the
-    program's stdout, and the test's ``"output"`` as files. The score is the
-    ``Ratio: x`` the checker prints when it exits with testlib's ``_ok`` (0)
-    or ``_points`` (7), else 1 for those exits; any other exit (``_wa``,
-    ``_pe``, ``_fail``, a crash, a timeout) scores 0. E.g.
-    ``run_programs(rows, code_field="solution", language="cpp",
-    checker=testlib_checker(chk, include_dirs=["rl/testlib"]))``. A checker
-    that does not compile raises, naming the compiler's error.
+    testlib's convention: exit 0 or 7 scores the printed ``Ratio: x`` (1 if
+    none); any other exit scores 0. C++ compiles once, on first use
+    (``include_dirs`` finds ``testlib.h``); a compile error raises.
     """
-    return TestlibChecker(
-        source, tuple(include_dirs), compile_command, timeout_s, memory_mb
+    return ProgramChecker(
+        source,
+        _checked_language(language),
+        tuple(include_dirs),
+        compile_command,
+        timeout_s,
+        memory_mb,
     )
 
 
-# Their names start with "test"; keep pytest from collecting them where imported.
-testlib_checker.__test__ = False  # type: ignore[attr-defined]
-
-
-class TestlibChecker:
-    """``(stdout, expected, test) -> score``: see ``testlib_checker``."""
-
-    __test__ = False
+class ProgramChecker:
+    """``(stdout, expected, test) -> score``; see ``program_checker``."""
 
     def __init__(
         self,
         source: str,
+        language: str,
         include_dirs: tuple[str, ...],
         compile_command: list[str] | None,
         timeout_s: float,
         memory_mb: int | None,
     ) -> None:
-        """Keep the settings; the checker compiles on first use."""
+        """Keep the settings; a C++ checker compiles on first use."""
         self.source = source
+        self.language = language
         self.include_dirs = include_dirs
         self.compile_command = compile_command
         self.timeout_s = timeout_s
@@ -801,8 +801,9 @@ class TestlibChecker:
     def cache_key(self) -> tuple:
         """Settings only, so equal checkers share cached results."""
         return (
-            "testlib_checker",
+            "program_checker",
             self.source,
+            self.language,
             self.include_dirs,
             self.compile_command,
             self.timeout_s,
@@ -811,32 +812,33 @@ class TestlibChecker:
 
     def __repr__(self) -> str:
         """Short name for error messages and reports."""
-        return "testlib_checker(...)"
+        return f"program_checker(..., {self.language!r})"
 
     def _compiled(self) -> str:
         with self._lock:
             if self._binary is None:
                 build = tempfile.mkdtemp(prefix="forger_checker_")
+                includes = [f"-I{os.path.abspath(d)}" for d in self.include_dirs]
                 command = self.compile_command or [
-                    *_COMPILERS["cpp"][0][:-3],
-                    *(f"-I{os.path.abspath(d)}" for d in self.include_dirs),
+                    *_COMPILERS[self.language][0][:-3],
+                    *includes,
                     "{file}",
                     "-o",
                     "{out}",
                 ]
                 binary, error = compile_program(
-                    self.source, build, "cpp", compile_command=command
+                    self.source, build, self.language, compile_command=command
                 )
                 if binary is None:
                     shutil.rmtree(build, ignore_errors=True)
-                    raise RuntimeError(f"testlib checker does not compile:\n{error}")
+                    raise RuntimeError(f"checker does not compile:\n{error}")
                 weakref.finalize(self, shutil.rmtree, build, True)
                 self._binary = binary
             return self._binary
 
     def __call__(self, stdout: str, expected: str, test: dict) -> float:
-        """Score one test's output with the checker."""
-        binary = self._compiled()
+        """Score one test's output."""
+        compiled = self.language in _COMPILERS
         with tempfile.TemporaryDirectory(prefix="forger_check_") as work:
             paths = []
             for name, text in (
@@ -844,18 +846,17 @@ class TestlibChecker:
                 ("output.txt", stdout),
                 ("answer.txt", expected),
             ):
-                path = os.path.join(work, name)
-                with open(path, "w", encoding="utf-8") as f:
+                paths.append(os.path.join(work, name))
+                with open(paths[-1], "w", encoding="utf-8") as f:
                     f.write(text)
-                paths.append(path)
             run = run_program(
-                "",
+                "" if compiled else self.source,
                 args=paths,
-                command=[binary],
+                command=[self._compiled()] if compiled else None,
                 timeout_s=self.timeout_s,
                 memory_mb=self.memory_mb,
             )
-        if run["timed_out"] or run["exit_code"] not in _TESTLIB_SCORING_EXITS:
+        if run["timed_out"] or run["exit_code"] not in _SCORING_EXITS:
             return 0.0
         match = _RATIO_RE.search(run["stdout"] or run["stderr"])
         return float(match.group(1)) if match else 1.0

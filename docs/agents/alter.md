@@ -81,7 +81,7 @@ rows = self_taught_reasoner(problems, solver_prompt, student, n=8,
 ```
 
 For C++ answers, use `filter.program_verifier("tests", language="cpp")`. When tests give partial credit (a `checker`
-that returns a score, e.g. `testlib_checker`), `min_score=` keeps responses whose mean test score reaches it; see
+that returns a score, e.g. `program_checker`), `min_score=` keeps responses whose mean test score reaches it; see
 [Running programs against tests](#running-programs-against-tests).
 
 When the answer is free text (an explanation, a cultural norm, a verdict with its reasons), no sample equals the
@@ -123,16 +123,17 @@ pass `checker=(stdout, expected) -> bool | float` to change it, returning a floa
 `language="cpp"` (on `run_programs`, `by_tests`, and `program_verifier`) compiles each distinct program once with
 `g++ -O2 -pipe -std=gnu++17` (`compile_command=` replaces it, with `{file}` and `{out}`) and runs the binary on every
 test; a program that does not compile gets `"compile_error"` on every test, with the compiler's message
-(`main.cpp:1:11: error: ...`) in `stderr`. `testlib_checker(source, include_dirs=[...])` (from
-`pyforger.alter.programs`) is a checker that compiles a testlib checker program once and runs it as `checker input
-output answer` on each test: it scores the `Ratio: x` the checker prints when it exits with testlib's `_ok` (0) or
-`_points` (7), 1 for those exits without a ratio, and 0 for any other exit, as competitive-programming judges do. A
-checker that does not compile raises.
+(`main.cpp:1:11: error: ...`) in `stderr`. `language="py"` means `"python"`.
+
+`program_checker(source, language="cpp")` (from `pyforger.alter.programs`) is a checker that runs a C++ or Python
+checker program as `checker input output answer` on each test, with testlib's convention: exit 0 or 7 scores the
+printed `Ratio: x` (1 if none), any other exit 0. C++ compiles once (`include_dirs=` finds `testlib.h`); a checker
+that does not compile raises.
 
 ```python
-from pyforger.alter.programs import testlib_checker
+from pyforger.alter.programs import program_checker
 
-checker = testlib_checker(open("chk.cpp").read(), include_dirs=["testlib"])
+checker = program_checker(open("chk.cpp").read(), include_dirs=["testlib"])
 rows = alter.run_programs(rows, code_field="solution", language="cpp", checker=checker)
 # {"status": "partial", "passed": False, "score": 0.62, ...} for an answer worth 62% of the best
 ```
