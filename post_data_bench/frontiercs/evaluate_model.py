@@ -363,6 +363,12 @@ def run_from_raw(args: argparse.Namespace) -> None:
             )
             for (row, completion, code), f in zip(jobs, futures)
         ]
+    # Keep what only generation knew, e.g. that an answer hit max_tokens.
+    for out in output_rows:
+        entry = entry_by_id.get(out["id"]) or {}
+        for key in ("finish_reason", "truncated"):
+            if key in entry:
+                out[key] = entry[key]
     n_missing = sum(1 for row in rows if row["id"] not in entry_by_id)
     if n_missing:
         print(
