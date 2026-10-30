@@ -118,14 +118,10 @@ warns), so read `report["lowest"]` (the five lowest bounds). Only the question i
 `reference_field` to add verified solutions. Rows that get no annotation are listed in `report["unannotated"]`. Run
 this with `reasoning_effort="none"` and with a faster/flash-style model since it will usually take too long otherwise.
 
-`compare_to_reference(rows, reference, *, features=None, tokenizer=None, max_length=None)` puts each feature's
-distribution in `rows` beside a `reference` set, e.g. your training rows beside the validation rows. A feature is a
-field, a `row -> value` function, or a `(rows_spec, reference_spec)` pair when the sets differ; the default is the
-fields both sets share. Text and chat messages are measured as lengths (words, or tokens with `tokenizer`: a Hugging
-Face id or anything with `encode`), numbers as quantiles, and up to 20 distinct short values as label shares.
-`max_length` adds each set's share above it. A length or number is flagged when at least 25% of rows fall outside the
-reference's 5th-95th percentiles (10% for equal distributions), a label when the total variation distance is at least
-0.2. It returns a `ReferenceReport` and prints it:
+`compare_to_reference(rows, reference, *, features=None, tokenizer=None, max_length=None)` prints each feature of
+`rows` beside the same feature of `reference`, e.g. training rows beside validation rows: text by length (words, or
+tokens with `tokenizer`), numbers by quantiles, labels by share. `!` marks a large gap. It makes no model calls. A
+feature is a field, a `row -> value` function, or a `(rows_spec, reference_spec)` pair when the sets differ:
 
 ```python
 inspect.compare_to_reference(rows, validation, features={

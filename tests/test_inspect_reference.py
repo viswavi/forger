@@ -68,6 +68,22 @@ def test_chat_messages_and_tokenizer():
     assert (feature.unit, feature.rows.p50) == ("tokens", len(LONG))
 
 
+def test_hugging_face_tokenizer_is_called_once():
+    """A callable tokenizer gets every distinct text in one batch."""
+
+    class Batch:
+        calls: list[int] = []
+
+        def __call__(self, texts, add_special_tokens=True):
+            self.calls.append(len(texts))
+            return {"input_ids": [t.split() for t in texts]}
+
+    tok = Batch()
+    rows = [{"t": _text(60)}, {"t": _text(70)}, {"t": _text(60)}]
+    report = compare_to_reference(rows, rows, tokenizer=tok, _no_cache=True)
+    assert tok.calls == [2] and report.features[0].rows.p50 == 60
+
+
 def test_numbers_and_no_shared_field():
     """Numbers stay numbers; sets with no common field need features=."""
     report = compare_to_reference(
