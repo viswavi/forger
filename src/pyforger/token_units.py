@@ -139,7 +139,7 @@ def default_rl_limit(task):
         return 50_000_000
     if normalized == "algorithmic":
         # Responses run ~15K tokens, so judging them costs more per rollout.
-        return 100_000_000
+        return 150_000_000
     raise ValueError("Unknown task for RL token-unit quota")
 
 
