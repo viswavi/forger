@@ -47,8 +47,12 @@ def task_row(problem_id, kind="default"):
         "problem_id": problem_id,
         "type": kind,
         "n_tests": 1,
+        "time_limit_s": 1.0,
+        "memory_mb": 256,
         "statement": text,
-        "task_text": f"Problem:\n\n{text}\n\nGenerate solution code:",
+        "task_text": (
+            f"Problem:\n\n{text}\n\nJudging limits ...\n\nGenerate solution code:"
+        ),
     }
 
 
@@ -133,7 +137,18 @@ class FrontierValidationTests(unittest.TestCase):
         self.assertEqual([r["id"] for r in rows], ["val_000", "val_001"])
         self.assertEqual(
             [list(r) for r in rows],
-            [["id", "type", "n_tests", "statement", "task_text"]] * 2,
+            [
+                [
+                    "id",
+                    "type",
+                    "n_tests",
+                    "time_limit_s",
+                    "memory_mb",
+                    "statement",
+                    "task_text",
+                ]
+            ]
+            * 2,
         )
         self.assertEqual(rows[1]["statement"], statement(27))
         for path in self.dest.rglob("*"):

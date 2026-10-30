@@ -14,9 +14,24 @@ SYSTEM_PROMPT = (
 )
 
 
-def build_user_content(statement: str) -> str:
-    """Render the user-turn text for one problem, as the benchmark's generator does."""
-    return f"Problem:\n\n{statement}\n\nGenerate solution code:"
+def format_limits(time_limit_s: float, memory_mb: int) -> str:
+    """The judging line after every statement, e.g. "... time limit 2 seconds ...".
+
+    About half the statements give no limits and a dozen state other ones than the
+    judge enforces, so the enforced values follow the (unedited) statement.
+    """
+    seconds = f"{time_limit_s:g} second" + ("" if time_limit_s == 1 else "s")
+    return (
+        "Judging limits (these apply even where the statement says otherwise): "
+        f"time limit {seconds} of CPU time per test; memory limit {memory_mb} MB. "
+        "The solution is compiled with g++ -O2 -std=gnu++17."
+    )
+
+
+def build_user_content(statement: str, time_limit_s: float, memory_mb: int) -> str:
+    """Render the user-turn text: the benchmark generator's, plus the judging limits."""
+    limits = format_limits(time_limit_s, memory_mb)
+    return f"Problem:\n\n{statement}\n\n{limits}\n\nGenerate solution code:"
 
 
 def build_candidate_prompt(user_content: str) -> list[dict[str, str]]:

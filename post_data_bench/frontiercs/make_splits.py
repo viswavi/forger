@@ -77,13 +77,19 @@ def _task_row(pdir: Path) -> dict:
     """One task row: the (masked) statement, its prompt text, and judging facts."""
     problem = judge.load_problem(pdir)
     statement = mask_source((pdir / "statement.txt").read_text())
+    # One time and one memory limit per problem (checked on every released one).
+    (time_limit_s,) = {c.time_s for c in problem.cases}
+    (memory,) = {c.memory for c in problem.cases}
+    memory_mb = memory >> 20
     return {
         "id": pdir.name,
         "problem_id": pdir.name,
         "type": "interactive" if problem.interactor else "default",
         "n_tests": len(problem.cases),
+        "time_limit_s": time_limit_s,
+        "memory_mb": memory_mb,
         "statement": statement,
-        "task_text": pb.build_user_content(statement),
+        "task_text": pb.build_user_content(statement, time_limit_s, memory_mb),
     }
 
 

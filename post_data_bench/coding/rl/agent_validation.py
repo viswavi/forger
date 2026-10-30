@@ -83,7 +83,14 @@ FRONTIERCS_EVALUATOR_FILES = {
 }
 # Fields of a validation problem row that the agent sees; "id" is replaced and
 # "problem_id" (the source's problem number) is dropped.
-FRONTIERCS_FIELDS = ("type", "n_tests", "statement", "task_text")
+FRONTIERCS_FIELDS = (
+    "type",
+    "n_tests",
+    "time_limit_s",
+    "memory_mb",
+    "statement",
+    "task_text",
+)
 # Agents must never learn benchmark names (contamination risk). The sandbox copy
 # renames the vendored grader package and scrubs names from code and comments,
 # e.g. LiveCodeBench/lcb_runner/lm_styles.py -> grader_lib/grader_runner/lm_styles.py.
