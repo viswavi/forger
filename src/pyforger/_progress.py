@@ -43,7 +43,7 @@ def duration(seconds: float) -> str:
 
 
 def done_line(done: int, total: int, elapsed: float) -> str:
-    """E.g. "120/500 done, 1m 31s, ~4m 48s left"."""
+    """E.g. "120/500 done, 1m 31s, ~4m 48s left", at the average rate so far."""
     left = ""
     if 0 < done < total:
         left = f", ~{duration(elapsed * (total - done) / done)} left"
@@ -62,6 +62,9 @@ class Progress:
         self.desc, self.total, self.mode = desc, total, mode
         self.done = 0
         self._start = self._last = time.monotonic()
+        # The time left uses the rate since the first finished unit, so model
+        # loading and the first batch's latency do not inflate it.
+        self._first: tuple[float, int] | None = None
         self._logged = False
         self._lock = threading.Lock()
         self._bar = None
@@ -73,6 +76,8 @@ class Progress:
     def update(self, n: int = 1) -> None:
         """Count `n` more finished units."""
         with self._lock:
+            if self._first is None:
+                self._first = (time.monotonic(), self.done + n)
             self.done += n
             if self._bar is not None:
                 self._bar.update(n)
@@ -82,7 +87,12 @@ class Progress:
     def _log(self) -> None:
         now = time.monotonic()
         self._last, self._logged = now, True
-        line = done_line(min(self.done, self.total), self.total, now - self._start)
+        done = min(self.done, self.total)
+        line = f"{done}/{self.total} done, {duration(now - self._start)}"
+        first = self._first
+        if first is not None and first[1] < done < self.total:
+            rate = (done - first[1]) / max(now - first[0], 1e-6)
+            line += f", ~{duration((self.total - done) / rate)} left"
         _logger.info("%s: %s", self.desc, line)
 
     def close(self) -> None:
