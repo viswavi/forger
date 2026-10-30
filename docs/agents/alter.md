@@ -9,7 +9,7 @@ Transform rows without removing items. Signatures and defaults: [OPS.md](../OPS.
 | `translate.to_language` | LLM translation of selected fields into a target natural language. |
 | `translate.to_code` | LLM conversion of fields into code in a target programming language. Strips markdown fences. |
 | `execute_code` | Call the last function in each row's code with one argument, in-process (RestrictedPython). |
-| `run_programs` | Run each row's stdin/stdout program on its tests in subprocesses; record per-test results. |
+| `run_programs` | Run each row's Python or C++ program on its tests in subprocesses; record per-test results. |
 | `dynamic_step` | Run input-specific sub-pipelines (see [dynamic_step.md](dynamic_step.md)). |
 | `dynamic_step_source` | Generate or inspect the sub-pipeline for a single input. |
 
@@ -83,8 +83,16 @@ that task will be completely omitted. A behavior it never shows is never learned
 `execute_code` calls a function in-process. For stdin/stdout programs use `run_programs`: it runs each row's program
 on each test `{"input": ..., "output": ...}` and adds `test_results` (`status`, `passed`, stdout/stderr per test).
 A test without `"output"` is run but not graded (e.g. to collect a brute-force solution's outputs; pass
-`max_chars=None` to keep them whole). Output matches up to whitespace (`checker=` to change); other languages via
-`command=["node", "{file}"], suffix=".js"`.
+`max_chars=None` to keep them whole). Output matches up to whitespace (`checker=` to change); other interpreted
+languages via `command=["node", "{file}"], suffix=".js"`.
+
+- `language="cpp"` (on `run_programs`, `by_tests`, `program_verifier`) compiles each distinct program once
+  (`g++ -O2 -pipe -std=gnu++17`, or `compile_command=`); a program that does not compile gets `"compile_error"` on
+  every test, with the compiler's message in `stderr`.
+- A checker may return a score in [0, 1] for partial credit, and may take the test as a third argument. Results carry
+  `score`; `passed` means a score of 1, and a score between 0 and 1 gets status `"partial"`.
+- `testlib_checker(source, include_dirs=[...])` (`pyforger.alter.programs`) runs a testlib checker as `checker input
+  output answer`: the printed `Ratio: x` on exit 0 or 7, else 1 for those exits and 0 for any other.
 
 ```python
 rows = alter.run_programs(rows, code_field="solution")              # adds rows[i]["test_results"]
@@ -93,8 +101,10 @@ hard = filter.by_pass_at_k(verified, model=student, input_field="statement",
                            metric=filter.program_verifier("tests"), completions_field="samples")
 ```
 
-- `filter.by_tests` keeps rows passing at least `min_pass_rate` of graded tests; changing the rate reruns nothing.
-- `filter.program_verifier` grades the last fenced code block of a model answer; no code block grades `False`.
+- `filter.by_tests` keeps rows passing at least `min_pass_rate` of graded tests (the mean score, with partial
+  scores); changing the rate reruns nothing.
+- `filter.program_verifier` grades the last fenced code block in its `language` of a model answer; no code block
+  grades `False`. `min_score` below 1 grades by the mean score over every test.
   For `run_programs`/`by_tests` on a field holding a model's answer, pass `extract_code=last_code_block`
   (`pyforger.alter.programs`).
 - `timeout_s` is wall-clock: too many `max_workers` on a loaded machine turn slow passing runs into `"timeout"`.

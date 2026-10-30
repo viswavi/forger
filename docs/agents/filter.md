@@ -7,7 +7,7 @@ defaults are in [OPS.md](../OPS.md#filter).
 |---|---|
 | `by_predicate` | Any Python check on a row; use it instead of a list comprehension. Not cached. |
 | `by_llm_score` | Quality: an LLM judge scores each row on a rubric. See [LLM judges](#llm-judges). |
-| `by_tests` | Code: run each row's stdin/stdout program on its tests, keep rows passing `min_pass_rate`. |
+| `by_tests` | Code: run each row's Python or C++ program on its tests, keep rows passing `min_pass_rate`. |
 | `by_pass_at_k` | Difficulty for *your* model: sample `k` answers, keep rows whose pass rate is in range. |
 | `by_comparative_difficulty` | Difficulty: keep rows a strong model answers correctly and a weak model does not. |
 | `by_judged_difficulty` | Cheap difficulty guess: a judge rates each task 1 to 5. |
