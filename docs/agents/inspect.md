@@ -13,6 +13,7 @@ Inspect ops return a *report* about rows and never change them. Signatures are i
 | `student_log_likelihood` | yes | How likely the student finds each row's target, in bits, beside its own responses. |
 | `rubric_scores` | grades | Print and return a reward's score histogram on responses, samples, and controls. |
 | `embedding_dispersion` | yes | Print and return how dispersed a field is in embedding space vs. a reference. No LLM. |
+| `compare_to_reference` | yes | Print and return feature distributions (lengths, numbers, labels) beside a reference. |
 
 Run `eval_tree` with `reasoning_effort="none"` (`"low"` cost 15 times as much and 10% of annotations ran out of
 tokens in reasoning loops); `topic_based_clustering` with `"low"` or `"none"` (higher efforts hit gateway timeouts).
@@ -116,6 +117,31 @@ it needs, groups them into a tree, and gives each node's accuracy with a binomia
 warns), so read `report["lowest"]` (the five lowest bounds). Only the question is used to infer the capability; pass
 `reference_field` to add verified solutions. Rows that get no annotation are listed in `report["unannotated"]`. Run
 this with `reasoning_effort="none"` and with a faster/flash-style model since it will usually take too long otherwise.
+
+`compare_to_reference(rows, reference, *, features=None, tokenizer=None, max_length=None)` prints each feature of
+`rows` beside the same feature of `reference`, e.g. training rows beside validation rows: text by length (words, or
+tokens with `tokenizer`), numbers by quantiles, labels by share. `!` marks a large gap. It makes no model calls. A
+feature is a field, a `row -> value` function, or a `(rows_spec, reference_spec)` pair when the sets differ:
+
+```python
+inspect.compare_to_reference(rows, validation, features={
+    "prompt": ("prompt", "task_text"),
+    "abstains": (lambda r: r["ground_truth"].endswith(MARKER), "impossible"),
+    "target": ("ground_truth", lambda v: None),  # rows only
+}, max_length=4000)
+```
+
+```text
+inspect compare_to_reference ───────────────────────────────────────────────────────────────────────────────────────────
+  300 rows vs 137 reference rows
+
+  feature            rows p10 / p50 / p90   reference p10 / p50 / p90   outside ref 5-95%   over 4,000
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────
+  prompt (words)          117 / 249 / 365             131 / 257 / 439                 11%     0% vs 0%
+  target (words)    2,387 / 4,058 / 5,620                           -                   -     52% vs -
+
+  ! abstains: False 94% vs 63%, True 6% vs 37%  (distance 0.31)
+```
 
 ## Saved pipeline runs
 

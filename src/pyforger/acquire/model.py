@@ -13,7 +13,6 @@ import math
 import os
 import random
 import statistics
-import sys
 import threading
 import time
 import warnings
@@ -29,6 +28,11 @@ from litellm.exceptions import BadRequestError as LitellmBadRequestError
 from litellm.exceptions import ContentPolicyViolationError, ContextWindowExceededError
 
 from pyforger import _tracking
+from pyforger._progress import Progress
+from pyforger._progress import done_line as _done_line
+from pyforger._progress import duration as _duration
+from pyforger._progress import progress_mode as _progress_mode
+from pyforger._progress import vllm_tqdm
 from pyforger.acquire import _local_dp, _request_cache
 from pyforger.op import _NO_CACHE_SCOPE, _REQUEST_SCOPE, _hash
 from pyforger.token_units import (
@@ -108,20 +112,6 @@ _QUOTA_MARKERS = (
 )
 
 _logger = get_formatted_logger(__name__)
-
-
-def _progress_mode(show_progress: bool | None) -> str:
-    """Return "bar" in a terminal, "log" if stderr is redirected, or "off".
-
-    `show_progress=None` reads `FORGER_PROGRESS` (on unless "0"/"false"/"no").
-    """
-    if show_progress is None:
-        flag = os.environ.get("FORGER_PROGRESS", "").strip().lower()
-        show_progress = flag not in {"0", "false", "no"}
-    if not show_progress:
-        return "off"
-    isatty = getattr(sys.stderr, "isatty", None)
-    return "bar" if isatty is not None and isatty() else "log"
 
 
 def _request_timeout(timeout: Any, max_tokens: int | None) -> Any:
@@ -331,16 +321,6 @@ def _in_flight_limit(call_kwargs: dict[str, Any]) -> _InFlightLimit:
 _sleep = time.sleep
 
 
-def _duration(seconds: float) -> str:
-    """Short duration, e.g. "41s", "9m 12s", "10m", "1h 5m"."""
-    s = int(seconds)
-    if s < 60:
-        return f"{s}s"
-    if s < 3600:
-        return f"{s // 60}m {s % 60}s" if s % 60 else f"{s // 60}m"
-    return f"{s // 3600}h {s % 3600 // 60}m"
-
-
 class _RequestClock:
     """When each request of one batch started and ended; warns about stragglers."""
 
@@ -459,14 +439,12 @@ def _watch(
         now = time.monotonic()
         if pending and now >= next_check:
             if log:
-                _logger.info("%s: %d/%d done, %.0fs", desc, done, total, now - start)
+                _logger.info("%s: %s", desc, _done_line(done, total, now - start))
                 logged = True
             clock.warn_stragglers(now)
             next_check = now + _PROGRESS_LOG_INTERVAL_S
     if logged:
-        _logger.info(
-            "%s: %d/%d done, %.0fs", desc, done, total, time.monotonic() - start
-        )
+        _logger.info("%s: %s", desc, _done_line(done, total, time.monotonic() - start))
 
 
 def _fmt_spend(amount: float, unit: str) -> str:
@@ -2155,7 +2133,7 @@ class LocalModel(Model):
         enable_thinking: bool = True,
         chat_template_kwargs: dict[str, Any] | None = None,
         seed: int = 0,
-        show_progress: bool = False,
+        show_progress: bool | None = None,
         **engine_kwargs: Any,
     ) -> None:
         """Create a vLLM-backed local model (engine is loaded lazily).
@@ -2186,9 +2164,10 @@ class LocalModel(Model):
             chat_template_kwargs: Extra kwargs for the chat template. When set,
                 it is used verbatim and `enable_thinking` is ignored.
             seed: Sampling seed for reproducible generation.
-            show_progress: When True, display vLLM's per-call progress bar (with
-                live input/output tokens-per-second) during generation. Useful
-                for long batched runs; off by default to keep logs quiet.
+            show_progress: Progress of generation and scoring, across every
+                engine: vLLM's bar (with tokens per second) in a terminal,
+                otherwise "N/total done, elapsed, ~left" every 30 s. None
+                (default) shows it unless FORGER_PROGRESS=0.
             **engine_kwargs: Extra keyword arguments forwarded to `vllm.LLM`
                 (e.g. `max_num_seqs` to cap concurrent sequences and avoid KV
                 cache over-admission on long-generation workloads).
@@ -2375,13 +2354,14 @@ class LocalModel(Model):
             seed=self._seed,
         )
         try:
-            outputs = self._engine().chat(
+            outputs = self._run(
+                "chat",
                 conversations,
                 sampling_params,
+                total=len(prompts) * n,
+                unit="completions",
+                show_progress=show_progress,
                 chat_template_kwargs=self._template_kwargs(),
-                use_tqdm=(
-                    self._show_progress if show_progress is None else show_progress
-                ),
             )
         except Exception as exc:
             if not return_exceptions:
@@ -2457,16 +2437,48 @@ class LocalModel(Model):
         if not prompts:
             return []
         pairs = [(_to_messages(p), t) for p, t in zip(prompts, targets)]
-        kwargs: dict[str, Any] = dict(
+        scores = self._run(
+            "target_logprobs",
+            pairs,
+            total=len(pairs),
+            unit="targets scored",
+            show_progress=show_progress,
             chat_template_kwargs=self._template_kwargs(),
-            use_tqdm=self._show_progress if show_progress is None else show_progress,
+        )
+        return [TargetLogprobs(**score) for score in scores]
+
+    def _run(
+        self,
+        method: str,
+        items: list,
+        *args: Any,
+        total: int,
+        unit: str,
+        show_progress: bool | None,
+        **kwargs: Any,
+    ) -> list:
+        """``chat`` or ``target_logprobs`` on the engine(s), showing progress."""
+        mode = _progress_mode(
+            self._show_progress if show_progress is None else show_progress
         )
         engine = self._engine()
+        desc = f"{self._model_id}: {unit}"
         if isinstance(engine, _local_dp.DataParallelEngine):
-            scores = engine.target_logprobs(pairs, **kwargs)
-        else:
-            scores = _local_dp.target_logprobs(engine, pairs, **kwargs)
-        return [TargetLogprobs(**score) for score in scores]
+            with Progress(desc, total, mode) as progress:
+                live = None if mode == "off" else progress
+                return getattr(engine, method)(
+                    items, *args, use_tqdm=False, progress=live, **kwargs
+                )
+
+        def call(use_tqdm: Any) -> list:
+            if method == "chat":
+                return engine.chat(items, *args, use_tqdm=use_tqdm, **kwargs)
+            return _local_dp.target_logprobs(engine, items, use_tqdm=use_tqdm, **kwargs)
+
+        if mode != "log":
+            return call(mode == "bar")  # vLLM's own bar, with tokens per second
+        with Progress(desc, total, mode) as progress:
+            return call(vllm_tqdm(progress.update))
 
 
 # Marks the boundary between a reasoning model's thinking block and its answer.
