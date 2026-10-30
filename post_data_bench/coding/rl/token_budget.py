@@ -20,6 +20,7 @@ if _units is None:
     _spec.loader.exec_module(_units)
 
 DEFAULT_GENERATION_LIMIT = _units.DEFAULT_GENERATION_LIMIT
+default_generation_limit = _units.default_generation_limit
 DEFAULT_JUDGE_MODEL = _units.DEFAULT_JUDGE_MODEL
 DEFAULT_REASONING_EFFORT = _units.DEFAULT_REASONING_EFFORT
 TokenUnitBudget = _units.TokenUnitBudget

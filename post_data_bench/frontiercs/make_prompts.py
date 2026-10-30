@@ -54,6 +54,20 @@ INSPECT_NEW = (
 GUIDELINES = """When `generate_custom_rubric` or `convert_rubric_criteria` writes code criteria, pass the sandbox rules above and the `judge_cpp` helper as `code_guidelines=` (a string), so the criteria it writes compile in the RL grader and judge responses through that helper."""
 
 
+# The task recommends a smaller dataset than coding (rubric_data.TASK_MAX_ROWS).
+ROW_EDITS = [
+    (
+        "Submit at least 10 and at most 2,000 rows, with no duplicate prompts; 2,000 "
+        "is a hard limit. About 1,250 rows is a good target: get as close to it as "
+        "your quota and time allow, and realistically aim for at least 800.",
+        "Submit at least 10 and at most 800 rows, with no duplicate prompts; 800 is "
+        "a hard limit. About 500 rows is a good target: get as close to it as your "
+        "quota and time allow, and realistically aim for at least 300.",
+    ),
+    ("Each file may have at most 2,000 rows.", "Each file may have at most 800 rows."),
+]
+
+
 def build(source: Path) -> str:
     """The FrontierCS prompt for one coding prompt file."""
     lines = source.read_text().split("\n")
@@ -77,13 +91,18 @@ def build(source: Path) -> str:
             assert "judge" not in used
             line = JUDGE_NEW + line[len(JUDGE_OLD) :]
             used.add("judge")
+        for i, (row_old, row_new) in enumerate(ROW_EDITS):
+            if row_old in line:
+                assert f"rows{i}" not in used
+                line = line.replace(row_old, row_new)
+                used.add(f"rows{i}")
         if line.startswith("SFT can establish useful behaviors"):
             assert INSPECT_OLD in line
             line = line.replace(INSPECT_OLD, INSPECT_NEW)
             used.add("inspect")
         out.append(line)
     # The native arm has no rubric-writing ops, so it lacks the guidelines line.
-    expected = {r[0] for r in rules} | {"inspect", "judge"}
+    expected = {r[0] for r in rules} | {"inspect", "judge", "rows0", "rows1"}
     if "minimal_scaffold" in source.name:
         expected.discard("When `generate_custom_rubric`")
     assert used == expected, expected - used

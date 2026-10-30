@@ -111,9 +111,10 @@ parser.add_argument("--training-mode", choices=["sft", "sft-rl"], default="sft-r
 parser.add_argument(
     "--min-rows-nudge",
     type=int,
-    default=1000,
+    default=None,
     help="If the agent finishes with fewer dataset rows than this, tell it once "
-    "and at least 7 hours remain, let it continue once; 0 disables",
+    "and at least 7 hours remain, let it continue once; 0 disables "
+    "(default: 300 for frontiercs, else 1000)",
 )
 parser.add_argument(
     "--host-python",
@@ -148,6 +149,10 @@ args.backend = (
     else args.backend or "tinker"
 )
 args.model = args.model or MODELS[args.backend]
+# The algorithmic task recommends a smaller dataset (~500 rows, at most 800).
+ROW_TARGET = 500 if args.task == "frontiercs" else 1250
+if args.min_rows_nudge is None:
+    args.min_rows_nudge = 300 if args.task == "frontiercs" else 1000
 if args.training_mode == "sft-rl" and args.model != MODELS[args.backend]:
     parser.error(
         f"the {args.backend} unified recipe supports {MODELS[args.backend]} only"
@@ -234,23 +239,24 @@ def configure_run_token_budgets(directory, task):
     from agent_boundary import atomic_text
     from coding.rl.tinker_budget import DEFAULT_LIMITS_USD, TinkerBudget
     from coding.rl.token_budget import (
-        DEFAULT_GENERATION_LIMIT,
         DEFAULT_JUDGE_MODEL,
         DEFAULT_REASONING_EFFORT,
         TokenUnitBudget,
+        default_generation_limit,
         default_rl_limit,
         validate_judge_model,
         validate_reasoning_effort,
     )
 
     judge_limit = default_rl_limit(task)
+    generation_limit = default_generation_limit(task)
     directory = os.path.abspath(directory)
     config_path = os.path.join(directory, "token_budget_config.json")
     policy = {
         "version": 2,
         "submission_kind": "final_rl",
         "task": task,
-        "generation_token_unit_limit": DEFAULT_GENERATION_LIMIT,
+        "generation_token_unit_limit": generation_limit,
         "judge_token_unit_limit": judge_limit,
         "tinker_usd_limits": DEFAULT_LIMITS_USD if args.backend == "tinker" else {},
         "backend": args.backend,
@@ -290,7 +296,7 @@ def configure_run_token_budgets(directory, task):
     os.makedirs(directory, exist_ok=True)
     budget_env = {"PDB_TASK": task, "PDB_TRAIN_BACKEND": args.backend}
     for prefix, filename, limit in (
-        ("FORGER", "generation_token_usage.json", DEFAULT_GENERATION_LIMIT),
+        ("FORGER", "generation_token_usage.json", generation_limit),
         ("JUDGE", "judge_token_usage.json", judge_limit),
     ):
         path = os.path.join(directory, filename)
@@ -507,7 +513,9 @@ prompt_values = dict(
     TINKER_RL_USAGE_PATH=os.environ.get("TINKER_RL_USAGE_FILE", ""),
 )
 
-prompt_values.update(prompt_sections(args.backend, args.hide_forger, prompt_values))
+prompt_values.update(
+    prompt_sections(args.backend, args.hide_forger, prompt_values, task=args.task)
+)
 prompt_content = raw_prompt_content.format(**prompt_values)
 
 # Task converters share evaluation prompt builders to keep train/eval aligned.
@@ -1283,7 +1291,10 @@ try:
                 # again (or running out of time) ends the session.
                 seconds_left = AGENT_ALARM_AT - time.time()
                 nudge = low_rows_message(
-                    RAW_DATA_PATH, args.min_rows_nudge, seconds_left
+                    RAW_DATA_PATH,
+                    args.min_rows_nudge,
+                    seconds_left,
+                    target=ROW_TARGET,
                 )
                 if nudge is not None:
                     logger.info(f"Low-row nudge sent to the agent: {nudge}")

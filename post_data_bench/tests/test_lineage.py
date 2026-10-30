@@ -64,7 +64,7 @@ class LineageTests(unittest.TestCase):
 
     def test_run_over_the_row_cap_is_rejected(self):
         """Each run in the lineage has the same cap as the final dataset."""
-        with patch.object(lineage, "MAX_ROWS", 18):
+        with patch.object(data, "MAX_ROWS", 18):
             with self.assertRaisesRegex(
                 ValueError, "RL run .* 20 rows; the limit is 18"
             ):
@@ -85,6 +85,18 @@ class LineageTests(unittest.TestCase):
         with patch.object(data, "MAX_ROWS", 19):
             with self.assertRaisesRegex(ValueError, "at most 19"):
                 data.validate_dataset(path)
+
+    def test_algorithmic_task_caps_rows_at_800(self):
+        """$PDB_TASK picks the task's cap; other tasks keep MAX_ROWS."""
+        self.assertEqual(data.max_rows("algorithmic"), 800)
+        self.assertEqual(data.max_rows("coding"), data.MAX_ROWS)
+        with patch.dict("os.environ", {"PDB_TASK": "algorithmic"}):
+            self.assertEqual(data.max_rows(), 800)
+            with patch.object(data, "TASK_MAX_ROWS", {"algorithmic": 19}):
+                path = self.root / "big_algorithmic.jsonl"
+                write_rows(path, rows())
+                with self.assertRaisesRegex(ValueError, "at most 19"):
+                    data.validate_dataset(path)
 
 
 if __name__ == "__main__":

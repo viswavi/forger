@@ -26,7 +26,9 @@ def count_rows(path: str | Path) -> int | None:
         return None
 
 
-def low_rows_message(path: str | Path, minimum: int, seconds_left: float) -> str | None:
+def low_rows_message(
+    path: str | Path, minimum: int, seconds_left: float, target: int = 1250
+) -> str | None:
     """A note for an agent that finished with fewer than ``minimum`` rows.
 
     e.g. 321 rows with ``minimum=1000``: the note says RL would see each
@@ -52,7 +54,8 @@ def low_rows_message(path: str | Path, minimum: int, seconds_left: float) -> str
         found = (
             f"Your dataset at {path} has {rows} rows. The default RL recipe draws "
             f"{RL_PROMPT_DRAWS:,} prompts from your training rows, so each would be "
-            f"seen about {visits:.0f} times; about 1,250 rows is a good target, and "
+            f"seen about {visits:.0f} times; about {target:,} rows is a good target, "
+            "and "
             f"at least {minimum:,} is what we expect realistically."
         )
     return (

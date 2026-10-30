@@ -2,7 +2,8 @@
 
 The final submission allows any number of experiments, but the selected checkpoint's
 own training (its SFT trial and every RL run on the way to it) must use at most
-MAX_ROWS rows per run, all with prompts from the final dataset. Each RL run records
+max_rows() rows per run (2,000; 800 for algorithmic), all with prompts from the final
+dataset. Each RL run records
 the checkpoint it started from in `lineage.json`, inside its compiled data directory
 (`<run>.data/`); SFT and RL receipts name that directory.
 """
@@ -11,7 +12,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .rubric_data import MAX_ROWS, prompt_id, read_rows  # noqa: ABS101
+from .rubric_data import max_rows, prompt_id, read_rows  # noqa: ABS101
 
 LINEAGE = "lineage.json"
 
@@ -67,14 +68,14 @@ def stages(checkpoint):
 
 
 def check(checkpoint, final_data):
-    """Raise unless each run behind `checkpoint` used <= MAX_ROWS final prompts."""
+    """Raise unless each run behind `checkpoint` used <= max_rows() final prompts."""
     allowed = {prompt_id(row) for row in read_rows(final_data)}
     runs = stages(checkpoint)
     for run in runs:
         rows = read_rows(Path(run["data_directory"]) / "submitted.jsonl")
         name = f"{run['stage'].upper()} run for {run['checkpoint']}"
-        if len(rows) > MAX_ROWS:
-            raise ValueError(f"{name} used {len(rows)} rows; the limit is {MAX_ROWS}")
+        if len(rows) > max_rows():
+            raise ValueError(f"{name} used {len(rows)} rows; the limit is {max_rows()}")
         missing = {prompt_id(row) for row in rows} - allowed
         if missing:
             raise ValueError(

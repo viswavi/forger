@@ -128,6 +128,20 @@ def validate_reasoning_effort(effort):
     return effort
 
 
+def default_generation_limit(task):
+    """Return the generation quota for a launcher task name.
+
+    The algorithmic task recommends ~500 rows (800 at most) instead of ~1,250,
+    so its quota shrinks to match.
+    """
+    normalized = str(task).strip().lower()
+    if normalized in ("coding", "culture"):
+        return DEFAULT_GENERATION_LIMIT
+    if normalized == "algorithmic":
+        return 100_000_000
+    raise ValueError("Unknown task for the generation token-unit quota")
+
+
 def default_rl_limit(task):
     """Return the fixed RL quota for a launcher task name.
 

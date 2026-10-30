@@ -157,10 +157,16 @@ fi
 [ -d "$INIT_CHECKPOINT" ] || { echo "!!! --init-checkpoint must be a local HF directory: $INIT_CHECKPOINT" >&2; exit 1; }
 
 # Use a shorter cap for no-thinking answers and room for long thinking traces.
+# Algorithmic (C++) answers run ~15K tokens at the median, so that task gets
+# 32,768 and packs up to Qwen3's 40,960-token context per GPU.
+MAX_TOKENS_PER_GPU=24576
 if [ -z "$MAX_RESPONSE_LEN" ]; then
-  if [ "$NO_THINKING" -eq 1 ]; then MAX_RESPONSE_LEN=3072; else MAX_RESPONSE_LEN=16384; fi
+  if [ "$NO_THINKING" -eq 1 ]; then MAX_RESPONSE_LEN=3072
+  elif [ "${PDB_TASK:-coding}" = algorithmic ]; then MAX_RESPONSE_LEN=32768
+  else MAX_RESPONSE_LEN=16384; fi
   echo ">>> defaulting --max-response-len -> $MAX_RESPONSE_LEN"
 fi
+if [ "${PDB_TASK:-coding}" = algorithmic ]; then MAX_TOKENS_PER_GPU=40960; fi
 
 [ -n "$RUN_TAG" ] || RUN_TAG="$(basename "$RL_DATA_DIR")_$(date +%Y%m%d_%H%M%S)"
 # A HuggingFace cache path ends in a snapshot hash, which makes an unreadable run
@@ -450,7 +456,7 @@ ray job submit --address=http://127.0.0.1:8265 --submission-id=\"\$RAY_JOB_ID\" 
   --recompute-method uniform \
   --recompute-num-layers 1 \
   --use-dynamic-batch-size \
-  --max-tokens-per-gpu 24576 \
+  --max-tokens-per-gpu "$MAX_TOKENS_PER_GPU" \
   --rollout-num-gpus-per-engine 2 \
   --sglang-mem-fraction-static 0.5 \
   --attention-dropout 0.0 \

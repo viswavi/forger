@@ -16,6 +16,7 @@ from pyforger.token_units import (
     DEFAULT_GENERATION_LIMIT,
     TokenUnitBudget,
     TokenUnitQuotaExceeded,
+    default_generation_limit,
     default_rl_limit,
     response_cost_usd,
     response_token_counts,
@@ -135,6 +136,11 @@ def test_task_quotas():
     assert default_rl_limit("algorithmic") == 150_000_000
     with pytest.raises(ValueError):
         default_rl_limit("unknown")
+    for task in ("coding", "culture"):
+        assert default_generation_limit(task) == DEFAULT_GENERATION_LIMIT
+    assert default_generation_limit("algorithmic") == 100_000_000
+    with pytest.raises(ValueError):
+        default_generation_limit("unknown")
 
 
 def test_quota_survives_restarts_and_records_inflight_calls(tmp_path):

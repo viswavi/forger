@@ -51,8 +51,36 @@ RL_COMMAND = """
 """
 
 
-def prompt_sections(backend, hide_forger, values):
-    """Format only selected backend instructions; keep the surrounding task shared."""
+# Per-task edits to the backend sections, as (old text, new text). The algorithmic
+# (C++) task samples and trains on much longer answers and a smaller dataset; its
+# RL step time is extrapolated from the 16,384-token measurement, not measured.
+TASK_EDITS = {
+    "frontiercs": [
+        ("max_tokens=16384", "max_tokens=32768"),
+        (
+            "an SFT trial on about 1,300 rows",
+            "an SFT trial on about 500 rows",
+        ),
+        (
+            "5 hours for an 80-step RL run (3-4 minutes per step)",
+            "more than 5 hours for an 80-step RL run (3-4 minutes per step were "
+            "measured with responses of up to 16,384 tokens; RL here allows 32,768)",
+        ),
+        (
+            "about 240 thinking responses of up to 16,384 tokens (60 prompts, 4 "
+            "samples each) in about 7 minutes",
+            "about 240 thinking responses of up to 32,768 tokens (60 prompts, 4 "
+            "samples each) in roughly 15 minutes",
+        ),
+    ],
+}
+
+
+def prompt_sections(backend, hide_forger, values, task=None):
+    """Format only selected backend instructions; keep the surrounding task shared.
+
+    `task` applies that task's TASK_EDITS, e.g. longer sampling for frontiercs.
+    """
     if backend == "tinker":
         sections = {
             "BACKEND_STUDENT_USAGE": TINKER_MINIMAL_STUDENT
@@ -77,4 +105,10 @@ def prompt_sections(backend, hide_forger, values):
             "PROBE_BUDGET": "Probes consume your agent time and shared judge quota; leave time for final submission.",
             "BACKEND_TIMING": LOCAL_TIMING,
         }
+    for old, new in TASK_EDITS.get(task, []):
+        hits = [key for key, value in sections.items() if old in value]
+        if not hits:
+            raise ValueError(f"task edit for {task} no longer matches: {old!r}")
+        for key in hits:
+            sections[key] = sections[key].replace(old, new)
     return {key: value.format(**values) for key, value in sections.items()}

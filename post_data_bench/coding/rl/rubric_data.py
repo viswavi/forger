@@ -6,12 +6,21 @@ import ast
 import hashlib
 import json
 import math
+import os
 import random
 from functools import lru_cache
 from pathlib import Path
 
 # Rows per SFT or RL run (and in the final dataset); experiments are unlimited.
 MAX_ROWS = 2000
+# Tasks with a smaller cap, by the launcher's public task name ($PDB_TASK).
+TASK_MAX_ROWS = {"algorithmic": 800}
+
+
+def max_rows(task=None):
+    """The row cap for `task` (default: $PDB_TASK), e.g. 800 for algorithmic."""
+    task = task if task is not None else os.environ.get("PDB_TASK", "")
+    return TASK_MAX_ROWS.get(str(task).strip().lower(), MAX_ROWS)
 
 
 def score(value):
@@ -205,8 +214,9 @@ def validate_dataset(source):
     rows = read_rows(source)
     if len(rows) < 10:
         raise ValueError("submit at least 10 distinct prompts for the 90/10 split")
-    if len(rows) > MAX_ROWS:
-        raise ValueError(f"{len(rows)} rows; each dataset may have at most {MAX_ROWS}")
+    limit = max_rows()
+    if len(rows) > limit:
+        raise ValueError(f"{len(rows)} rows; each dataset may have at most {limit}")
     if len({prompt_id(r) for r in rows}) != len(rows):
         raise ValueError(
             "duplicate prompts are not allowed (prevents train/eval leakage)"
