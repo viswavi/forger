@@ -104,13 +104,16 @@ trap archive_outputs EXIT
 ( while sleep "$(( ${PDB_SYNC_MINUTES:-30} * 60 ))"; do sync_to_gcs || true; done ) &
 SYNC_LOOP=$!
 # Freeze the submission without evaluating, copy everything to GCS, then run
-# secret-test evaluation on the frozen bundle, so the agent's 15 hours of work
+# secret-test evaluation on the frozen bundle, so the agent's hours of work
 # are safe before the evaluation starts.
 FINAL_BUNDLE="$AGENT_MODEL_OUTPUT_DIR/$TASK/final_bundle_${SLURM_JOB_ID}"
+# Agent hours: 20 for frontiercs (80 RL steps take ~10 h), else 15.
+[[ "$TASK" == frontiercs ]] && AGENT_HOURS=20 || AGENT_HOURS=15
+AGENT_HOURS=${PDB_TIMEOUT_HOURS:-$AGENT_HOURS}
 PREPARE_ONLY=0
 for arg in "$@"; do [[ "$arg" == --prepare-final-only ]] && PREPARE_ONLY=1; done
 "$PDB_LAUNCHER_PYTHON" launch_agent.py --backend local --task "$TASK" \
-  --prompt "$TASK/FORGER_PROMPT.txt" --timeout-hours 15 "$@" \
+  --prompt "$TASK/FORGER_PROMPT.txt" --timeout-hours "$AGENT_HOURS" "$@" \
   --prepare-final-only --final-output-dir "$FINAL_BUNDLE"
 stop_sync_loop
 if sync_to_gcs; then

@@ -68,9 +68,8 @@ TASK_EDITS = {
         ),
         (
             "5 hours for an 80-step RL run (3-4 minutes per step)",
-            "up to 11 hours for an 80-step RL run (about 8 minutes per step were "
-            "measured with responses capped at 32,768 tokens; RL here caps them at "
-            "24,576)",
+            "about 10 hours for an 80-step RL run (7-8 minutes per step, measured "
+            "at this task's 24,576-token cap)",
         ),
         (
             "about 240 thinking responses of up to 16,384 tokens (60 prompts, 4 "

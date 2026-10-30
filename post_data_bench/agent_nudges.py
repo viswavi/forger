@@ -13,7 +13,8 @@ from pathlib import Path
 RL_PROMPT_DRAWS = 80 * 32
 TRAIN_SHARE = 0.9
 # Adding rows means regenerating data and retraining SFT; with less time
-# left, a half-finished attempt could break a valid submission.
+# left, a half-finished attempt could break a valid submission. The default
+# leaves SFT plus a 5-hour RL run; tasks with longer RL pass their own.
 MIN_SECONDS_LEFT = 7 * 60 * 60
 
 
@@ -27,16 +28,20 @@ def count_rows(path: str | Path) -> int | None:
 
 
 def low_rows_message(
-    path: str | Path, minimum: int, seconds_left: float, target: int = 1250
+    path: str | Path,
+    minimum: int,
+    seconds_left: float,
+    target: int = 1250,
+    min_seconds_left: float = MIN_SECONDS_LEFT,
 ) -> str | None:
     """A note for an agent that finished with fewer than ``minimum`` rows.
 
     e.g. 321 rows with ``minimum=1000``: the note says RL would see each
     training prompt about 11 times, and that finishing again keeps the
     dataset as it is. None when ``minimum`` is 0, the dataset has enough rows,
-    or under seven hours are left (leave time for SFT and RL).
+    or under ``min_seconds_left`` are left (leave time for SFT and RL).
     """
-    if minimum <= 0 or seconds_left < MIN_SECONDS_LEFT:
+    if minimum <= 0 or seconds_left < min_seconds_left:
         return None
     rows = count_rows(path)
     if rows is not None and rows >= minimum:

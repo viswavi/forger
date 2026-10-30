@@ -113,8 +113,8 @@ parser.add_argument(
     type=int,
     default=None,
     help="If the agent finishes with fewer dataset rows than this, tell it once "
-    "and at least 7 hours remain, let it continue once; 0 disables "
-    "(default: 300 for frontiercs, else 1000)",
+    "and at least 7 hours (11 for frontiercs) remain, let it continue once; "
+    "0 disables (default: 200 for frontiercs, else 1000)",
 )
 parser.add_argument(
     "--host-python",
@@ -153,6 +153,8 @@ args.model = args.model or MODELS[args.backend]
 ROW_TARGET = 500 if args.task == "frontiercs" else 1250
 if args.min_rows_nudge is None:
     args.min_rows_nudge = 200 if args.task == "frontiercs" else 1000
+# Time a nudged agent needs for SFT plus RL (80 algorithmic RL steps take ~10 h).
+NUDGE_SECONDS_LEFT = (11 if args.task == "frontiercs" else 7) * 3600
 if args.training_mode == "sft-rl" and args.model != MODELS[args.backend]:
     parser.error(
         f"the {args.backend} unified recipe supports {MODELS[args.backend]} only"
@@ -1297,6 +1299,7 @@ try:
                     args.min_rows_nudge,
                     seconds_left,
                     target=ROW_TARGET,
+                    min_seconds_left=NUDGE_SECONDS_LEFT,
                 )
                 if nudge is not None:
                     logger.info(f"Low-row nudge sent to the agent: {nudge}")
