@@ -12,16 +12,25 @@ from typing import Any
 
 import tiktoken
 
+from pyforger.acquire import _local_dp
 from pyforger.acquire._model_utils import (
     _catch_kwargs,
     _raise_if_systemic,
     _RequestFailures,
 )
 from pyforger.acquire.model import Message, Model, Prompt, _cache_kwargs
+from pyforger.inspect import _embed_dp
 from pyforger.op import op
 from pyforger.utils import get_field, get_formatted_logger
 
 logger = get_formatted_logger("Inspect")
+
+# Documents per extra GPU: n documents embed on min(n // 500 + 1, visible GPUs)
+# GPUs, e.g. 400 on one, 999 on two. Each GPU's worker first spends ~10 s
+# starting Python and loading the model. With Qwen3-Embedding-0.6B on two L40S
+# (64 texts per batch then), 1000 ~400-token documents took 19 s on one GPU or
+# two; 2500 took 54 s on one and 37 s on two; 5112 took 105 s and 62 s.
+_DOCS_PER_GPU = 500
 
 
 def _warn_if_heavy_reasoning(
@@ -182,20 +191,9 @@ def topic_based_clustering(
     Returns:
         One topic name per row, aligned with ``items``.
     """
-    if (
-        embed_fn is None
-        and embedding_model != _TFIDF_EMBEDDING
-        and not _sentence_transformers_importable()
-    ):
-        logger.warning(
-            "topic_based_clustering: sentence-transformers cannot be imported, so "
-            "embedding with TF-IDF instead of %s. Install it with "
-            "`pip install pyforger[clustering]`, or pass embedding_model=%r "
-            "to choose TF-IDF explicitly.",
-            embedding_model,
-            _TFIDF_EMBEDDING,
-        )
-        embedding_model = _TFIDF_EMBEDDING
+    embedding_model = _resolve_embedding_model(
+        embed_fn, embedding_model, "topic_based_clustering"
+    )
     # Resolved outside the cached op, so its code and cache keys stay as before.
     if context is None:
         context = _default_context(field)
@@ -217,11 +215,37 @@ def topic_based_clustering(
     )
 
 
+def _resolve_embedding_model(
+    embed_fn: Callable[[list[str]], Any] | None, embedding_model: str, op_name: str
+) -> str:
+    """Return ``embedding_model``, or ``"tfidf"`` if sentence-transformers is missing.
+
+    Call it before the cached op, so a TF-IDF result is never cached under a
+    sentence-transformers key. Warns (naming ``op_name``) when it falls back.
+    """
+    if (
+        embed_fn is None
+        and embedding_model != _TFIDF_EMBEDDING
+        and not _sentence_transformers_importable()
+    ):
+        logger.warning(
+            "%s: sentence-transformers cannot be imported, so "
+            "embedding with TF-IDF instead of %s. Install it with "
+            "`pip install pyforger[clustering]`, or pass embedding_model=%r "
+            "to choose TF-IDF explicitly.",
+            op_name,
+            embedding_model,
+            _TFIDF_EMBEDDING,
+        )
+        return _TFIDF_EMBEDDING
+    return embedding_model
+
+
 def _sentence_transformers_importable() -> bool:
     """Whether the default embedding backend can be imported."""
     try:
         import sentence_transformers  # noqa: F401
-    except ImportError:
+    except Exception:  # ImportError, or e.g. a NameError from a broken torch install
         return False
     return True
 
@@ -318,13 +342,14 @@ def _embed(
     embed_fn: Callable[[list[str]], Any] | None,
     embedding_model: str,
     seed: int,
+    op_name: str = "topic_based_clustering",
 ) -> Any:
     """Embed documents with ``embed_fn``, TF-IDF, or sentence-transformers."""
     if embed_fn is not None:
         return embed_fn(docs)
     if embedding_model == _TFIDF_EMBEDDING:
         return _tfidf_embed(docs, seed=seed)
-    return _default_embed(docs, embedding_model)
+    return _default_embed(docs, embedding_model, op_name=op_name)
 
 
 def _tfidf_embed(docs: list[str], *, seed: int = 0) -> Any:
@@ -342,7 +367,7 @@ def _tfidf_embed(docs: list[str], *, seed: int = 0) -> Any:
         from sklearn.preprocessing import normalize
     except ImportError as e:
         raise ImportError(
-            "topic_based_clustering's TF-IDF embedder requires numpy and "
+            "The TF-IDF embedder requires numpy and "
             "scikit-learn: `pip install pyforger[clustering]`."
         ) from e
 
@@ -384,29 +409,76 @@ def _tfidf_embed(docs: list[str], *, seed: int = 0) -> Any:
     return normalize(vectors)
 
 
-def _default_embed(docs: list[str], embedding_model: str) -> Any:
-    """Embed documents with sentence-transformers, preferring the GPU."""
+def _default_embed(
+    docs: list[str], embedding_model: str, *, op_name: str = "topic_based_clustering"
+) -> Any:
+    """Embed documents with sentence-transformers, preferring the GPU.
+
+    With 500 or more documents and two or more visible GPUs, up to one GPU per
+    500 documents embeds a share of them in its own worker process. Batches hold up
+    to `FORGER_EMBED_BATCH_TOKENS` padded tokens (see `_embed_dp.batch_tokens`).
+    """
     try:
         from sentence_transformers import SentenceTransformer
     except ImportError as e:
         raise ImportError(
-            "topic_based_clustering needs its default embedding backend: "
+            f"{op_name} needs its default embedding backend: "
             "`pip install pyforger[clustering]`, or pass embed_fn=."
         ) from e
 
+    encode_kwargs = dict(
+        batch_tokens=_embed_dp.batch_tokens(),
+        normalize_embeddings=True,
+        convert_to_numpy=True,
+    )
+    gpus = _embedding_gpus(len(docs))
+    if gpus:
+        logger.info(
+            "%s: embedding %d documents with %s on %d GPUs (%s)",
+            op_name,
+            len(docs),
+            embedding_model,
+            len(gpus),
+            ",".join(gpus),
+        )
+        return _embed_dp.encode(docs, embedding_model, gpus, encode_kwargs)
     encoder = SentenceTransformer(embedding_model)
     if encoder.device.type == "cpu":
         logger.warning(
-            "topic_based_clustering: no GPU detected; embedding %d documents "
+            "%s: no GPU detected; embedding %d documents "
             "with %s on CPU may be slow. Pass embedding_model=%r or embed_fn= "
             "to use a different embedding backend.",
+            op_name,
             len(docs),
             embedding_model,
             _TFIDF_EMBEDDING,
         )
-    return encoder.encode(
-        docs, batch_size=64, normalize_embeddings=True, convert_to_numpy=True
-    )
+    return _embed_dp.encode_in_token_batches(encoder, docs, **encode_kwargs)
+
+
+def _embedding_gpus(num_docs: int) -> list[str]:
+    """The GPUs to embed `num_docs` documents on, one worker each; [] for one process.
+
+    `min(num_docs // 500 + 1, visible GPUs)` of the visible GPUs
+    (`CUDA_VISIBLE_DEVICES`, else `nvidia-smi`), e.g. 400 documents on one and
+    999 on two of eight: starting a worker and loading the model on a GPU costs
+    more than it saves on fewer documents.
+    """
+    wanted = num_docs // _DOCS_PER_GPU + 1
+    if wanted < 2:
+        return []
+    gpus = _local_dp.visible_gpus()[:wanted]
+    if len(gpus) < 2:
+        return []
+    import torch
+
+    if not torch.cuda.is_available():
+        return []
+    if torch.cuda.is_initialized():
+        # Memory this process cached on a GPU, e.g. from an earlier one-GPU
+        # embedding, would otherwise leave that GPU's worker short of it.
+        torch.cuda.empty_cache()
+    return gpus
 
 
 def _partition(

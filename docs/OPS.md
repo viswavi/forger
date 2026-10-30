@@ -64,6 +64,8 @@ Keywords left out of the signatures below:
 - [`pyforger.filter`](#filter)
   - [`by_comparative_difficulty`](#filter-by_comparative_difficulty): Keep rows the strong model answers correctly and
     the weak model does not.
+  - [`by_embedding_similarity`](#filter-by_embedding_similarity): Drop rows whose embedding is too close to a kept row
+    or a reference row.
   - [`by_exact_agreement`](#filter-by_exact_agreement): Keep items where two fields agree or disagree, by exact match.
   - [`by_exact_match`](#filter-by_exact_match): Keep up to `max_count` occurrences of each unique `field` value.
   - [`by_group_agreement`](#filter-by_group_agreement): Keep only groups of items whose outputs all agree.
@@ -87,10 +89,13 @@ Keywords left out of the signatures below:
   - [`by_topic_frequency`](#filter-by_topic_frequency): Downsample over-represented topics and drop rare ones.
   - [`program_verifier`](#filter-program_verifier): A `metric` for the difficulty filters that runs programs on tests.
 - [`pyforger.inspect`](#inspect)
+  - [`embedding_dispersion`](#inspect-embedding_dispersion): Print and return how spread out one field's values are in
+    embedding space.
   - [`eval_tree`](#inspect-eval_tree): Build an EvalTree report from scored model outputs.
   - [`inspect_step`](#inspect-inspect_step): Print the full report of the latest run of step `name` and return it.
   - [`phrase_frequency`](#inspect-phrase_frequency): Print and return the phrases and names that the most rows share,
     per field.
+  - [`rubric_scores`](#inspect-rubric_scores): Print and return how `grade` scores responses, binned, one column each.
   - [`runs`](#inspect-runs): Print the latest saved pipeline runs, oldest first, and return them.
   - [`spend`](#inspect-spend): Print and return the spend ledger's totals by run, pipeline, and step.
   - [`student_log_likelihood`](#inspect-student_log_likelihood): Print and return how likely the student finds each
@@ -635,6 +640,7 @@ self_taught_reasoner(
     rationalize: bool = True,
     hint_fn: PromptTemplate | None = None,
     rationalized_field: str = "rationalized",
+    answer_judge: Model | None = None,
     response_field: str = "response",
     thinking_field: str = "thinking",
     answer_field: str = "answer",
@@ -738,6 +744,32 @@ by_comparative_difficulty(
 Keep rows the strong model answers correctly and the weak model does not.
 
 **Returns:** The kept rows, in input order.
+
+<a name="filter-by_embedding_similarity"></a>
+
+### `filter.by_embedding_similarity`
+
+Disk-cached (`@op`).
+
+```python
+by_embedding_similarity(
+    items: list[dict],
+    *,
+    field: str,
+    threshold: float = 0.95,
+    reference: list[dict] | None = None,
+    reference_field: str | None = None,
+    dedupe: bool = True,
+    embed_fn: Callable[[list[str]], Any] | None = None,
+    embedding_model: str = "Qwen/Qwen3-Embedding-0.6B",
+    seed: int = 0,
+    **op_controls: Any,
+) -> list[dict]
+```
+
+Drop rows whose embedding is too close to a kept row or a reference row.
+
+**Returns:** The kept rows, in input order and unchanged.
 
 <a name="filter-by_exact_agreement"></a>
 
@@ -1101,7 +1133,36 @@ A `metric` for the difficulty filters that runs programs on tests.
 
 Inspect operations: analyze existing data.
 
-Also exported, not documented here: `LikelihoodReport`, `RowLikelihood`, `PhraseReport`, `SpendReport`, `SpendTotal`.
+Also exported, not documented here: `DispersionReport`, `LikelihoodReport`, `RowLikelihood`, `PhraseReport`,
+`RubricScoreReport`, `SpendReport`, `SpendTotal`.
+
+<a name="inspect-embedding_dispersion"></a>
+
+### `inspect.embedding_dispersion`
+
+Disk-cached (`@op`).
+
+```python
+embedding_dispersion(
+    rows: list[dict],
+    field: str,
+    *,
+    reference: list[dict] | None = None,
+    reference_field: str | None = None,
+    embed_fn: Callable[[list[str]], Any] | None = None,
+    embedding_model: str = "Qwen/Qwen3-Embedding-0.6B",
+    k: int = 5,
+    duplicate_threshold: float = 0.95,
+    max_rows: int = 2000,
+    examples: int = 3,
+    seed: int = 0,
+    **op_controls: Any,
+) -> DispersionReport
+```
+
+Print and return how spread out one field's values are in embedding space.
+
+**Returns:** A `DispersionReport`, also printed.
 
 <a name="inspect-eval_tree"></a>
 
@@ -1165,6 +1226,34 @@ phrase_frequency(
 
 Print and return the phrases and names that the most rows share, per field.
 
+<a name="inspect-rubric_scores"></a>
+
+### `inspect.rubric_scores`
+
+Listed in step reports as `inspect.rubric_scores`; its expensive parts are disk-cached (`@op`
+`filter.model_difficulty.predictions`, `inspect.rubric_scores.grades`), so a rerun reuses them.
+
+```python
+rubric_scores(
+    rows: list[dict],
+    grade: Grade,
+    *,
+    n: int | None = 50,
+    response_fields: list[str] | str | None = "response",
+    model: Any = None,
+    k: int = 4,
+    prompt_field: str = "prompt",
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    control_columns: bool = True,
+    seed: int = 0,
+    workers: int = 8,
+    examples: int = 1,
+) -> RubricScoreReport
+```
+
+Print and return how `grade` scores responses, binned, one column each.
+
 <a name="inspect-runs"></a>
 
 ### `inspect.runs`
@@ -1193,7 +1282,8 @@ Print and return the spend ledger's totals by run, pipeline, and step.
 
 ### `inspect.student_log_likelihood`
 
-Not cached (wrap it with `@op` to memoize); listed in step reports as `inspect.student_log_likelihood`.
+Listed in step reports as `inspect.student_log_likelihood`; its expensive parts are disk-cached (`@op`
+`inspect.student_log_likelihood.targets`, `inspect.student_log_likelihood.own`), so a rerun reuses them.
 
 ```python
 student_log_likelihood(

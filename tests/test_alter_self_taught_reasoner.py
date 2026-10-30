@@ -394,3 +394,225 @@ class TestRationalization:
                 hint_fn="{prompt} hint",
                 _no_cache=True,
             )
+
+
+class _Judge:
+    """Answers YES when ``rule(prompt)`` is true, else NO; records every prompt.
+
+    ``replies`` overrides the reply for a prompt containing a key, e.g. to
+    return a thinking block or no verdict. ``cache_key`` leaves the record out.
+    """
+
+    def __init__(self, rule, replies=None, name="judge"):
+        self.rule = rule
+        self.replies = replies or {}
+        self.name = name
+        self.calls: list[list[str]] = []
+
+    def cache_key(self) -> tuple:
+        return ("_Judge", self.name, tuple(sorted(self.replies.items())))
+
+    def generate_batch(self, prompts, n=1, **kwargs):
+        self.calls.append(list(prompts))
+        out = []
+        for prompt in prompts:
+            reply = next((r for k, r in self.replies.items() if k in prompt), None)
+            out.append([reply or ("YES" if self.rule(prompt) else "NO")])
+        return out
+
+
+def _answers_shoes_off(prompt: str) -> bool:
+    """The rule of a judge that accepts answers about taking shoes off."""
+    answer = prompt.split("<student_answer>")[1].split("</student_answer>")[0]
+    return "Remove" in answer or "Leave" in answer
+
+
+_REFERENCE = "Take your shoes off at the door."
+
+
+class TestAnswerJudge:
+    """answer_judge= keeps samples the judge says reach the reference's conclusion."""
+
+    def _run(self, judge, responses=None, items=None, **kwargs):
+        model = kwargs.pop("model", None) or MockModel(
+            responses=responses
+            or [["Remove your shoes before going in.", "Keep your shoes on."]]
+        )
+        rows = self_taught_reasoner(
+            items or [{"q": "Shoes indoors?", "final_answer": _REFERENCE}],
+            "Question: {q}",
+            model,
+            n=2,
+            answer_judge=judge,
+            **kwargs,
+        )
+        return rows, model
+
+    def test_keeps_answers_the_judge_accepts(self):
+        """YES is kept with the reference unchanged; NO is dropped."""
+        rows, _ = self._run(_Judge(_answers_shoes_off))
+        assert [r["answer"] for r in rows] == ["Remove your shoes before going in."]
+        assert rows[0]["student_final_answer"] == "Remove your shoes before going in."
+        assert rows[0]["final_answer"] == _REFERENCE  # the reference is kept
+
+    def test_prompt_shows_question_reference_and_answer_not_reasoning(self):
+        """The judge sees the student's prompt and final answer, not its thinking."""
+        judge = _Judge(_answers_shoes_off)
+        self._run(
+            judge, responses=[["<think>secret</think>Remove them.", "Keep them on."]]
+        )
+        prompt = judge.calls[0][0]
+        assert "<question>\nQuestion: Shoes indoors?\n</question>" in prompt
+        assert f"<reference_answer>\n{_REFERENCE}\n" in prompt
+        assert "<student_answer>\nRemove them.\n" in prompt
+        assert "secret" not in prompt
+
+    def test_identical_answers_are_judged_once_in_one_call(self):
+        """Distinct (question, reference, answer) prompts, all in one batch."""
+        judge = _Judge(_answers_shoes_off)
+        items = [
+            {"q": "Shoes indoors?", "final_answer": _REFERENCE},
+            {"q": "Shoes at a temple?", "final_answer": _REFERENCE},
+        ]
+        responses = [
+            ["Remove your shoes.", "Remove your shoes."],
+            ["Remove your shoes.", "Keep them on."],
+        ]
+        rows, _ = self._run(judge, responses=responses, items=items)
+        assert len(judge.calls) == 1
+        assert len(judge.calls[0]) == 3
+        assert [r["q"] for r in rows] == ["Shoes indoors?"] * 2 + ["Shoes at a temple?"]
+
+    def test_verdict_after_thinking_and_unclear_replies(self, caplog):
+        """A draft verdict inside <think> does not count; no verdict rejects."""
+        judge = _Judge(
+            lambda prompt: True,
+            replies={
+                "Remove": "<think>maybe NO</think>**YES**",
+                "Keep": "I cannot tell.",
+            },
+        )
+        rows, _ = self._run(judge)
+        assert [r["answer"] for r in rows] == ["Remove your shoes before going in."]
+        assert "had no YES or NO" in caplog.text
+
+    def test_empty_answer_is_rejected_without_asking(self):
+        """An answer that is empty after the reasoning is never judged."""
+        judge = _Judge(lambda prompt: True)
+        rows, _ = self._run(
+            judge, responses=[["<think>hmm</think>", "Keep your shoes on."]]
+        )
+        assert [r["answer"] for r in rows] == ["Keep your shoes on."]
+        assert len(judge.calls[0]) == 1
+
+    def test_extract_answer_chooses_the_text(self):
+        """With extract_answer, its output is judged instead of the answer."""
+        judge = _Judge(_answers_shoes_off)
+        rows, _ = self._run(
+            judge,
+            responses=[["Verdict: Remove your shoes.", "Remove? Verdict: Keep them."]],
+            extract_answer=lambda raw: raw.split("Verdict:")[-1],
+        )
+        assert [r["student_final_answer"] for r in rows] == [" Remove your shoes."]
+
+    @pytest.mark.parametrize(
+        "other",
+        [
+            {"match_fn": lambda a, b: True},
+            {"verifier": lambda answer, row: True},
+            {"filter_fn": lambda rows: rows},
+        ],
+    )
+    def test_exclusive_with_other_checks(self, other):
+        """answer_judge with match_fn, verifier, or filter_fn raises."""
+        with pytest.raises(ValueError, match="answer_judge or"):
+            self._run(_Judge(lambda prompt: True), **other)
+
+
+class TestAnswerJudgeCache:
+    """The judge is in the key; sampling is never redone for another judge."""
+
+    def _run(self, model, judge):
+        return self_taught_reasoner(
+            [{"q": "Shoes indoors?", "final_answer": _REFERENCE}],
+            "{q}",
+            model,
+            n=2,
+            answer_judge=judge,
+        )
+
+    def _model(self):
+        return MockModel(
+            responses=[["Remove your shoes before going in.", "Keep your shoes on."]]
+        )
+
+    def test_same_call_is_a_cache_hit(self):
+        """The same call again samples and judges nothing."""
+        model, judge = self._model(), _Judge(_answers_shoes_off)
+        first = self._run(model, judge)
+        assert self._run(model, judge) == first
+        assert model._call_count == 1
+        assert len(judge.calls) == 1
+
+    def test_new_judge_reuses_samples(self):
+        """Another judge changes the result without sampling again."""
+        model = self._model()
+        assert len(self._run(model, _Judge(_answers_shoes_off))) == 1
+        assert len(self._run(model, _Judge(lambda p: True, name="lenient"))) == 2
+        assert model._call_count == 1
+
+
+class _HintedResponses:
+    """Gives ``first`` to unhinted prompts and ``hinted`` to hinted ones."""
+
+    def __init__(self, first: list[str], hinted: list[str]) -> None:
+        self.first, self.hinted = first, hinted
+        self.prompts: list[str] = []
+        self.calls = 0
+
+    def cache_key(self) -> tuple:
+        """Stable identity for @op caching; leaves out the call record."""
+        return ("hinted-responses", tuple(self.first), tuple(self.hinted))
+
+    def generate_batch(self, prompts, *, n=1, temperature=None, max_tokens=None):
+        """``first`` or ``hinted`` (the first ``n``) for each prompt."""
+        self.calls += 1
+        self.prompts.extend(prompts)
+        return [list(self.hinted if "Hint:" in p else self.first)[:n] for p in prompts]
+
+
+class TestRationalizationWithAnswerJudge:
+    """The judge decides which items are unsolved; it never sees the hint."""
+
+    ITEM = {"q": "Shoes indoors?", "final_answer": _REFERENCE}
+
+    def _run(self, model, judge):
+        return self_taught_reasoner([self.ITEM], "{q}", model, n=2, answer_judge=judge)
+
+    def test_unsolved_by_the_judge_is_rationalized_and_cached(self):
+        """Rejected answers are hinted; another judge re-draws nothing."""
+        model = _HintedResponses(
+            first=["Keep your shoes on.", "Keep them on."],
+            hinted=["Remove your shoes before going in.", "Keep your shoes on."],
+        )
+        judge = _Judge(_answers_shoes_off)
+        rows = self._run(model, judge)
+        assert model.prompts == [
+            "Shoes indoors?",
+            f"Shoes indoors?\n\nHint: a correct answer is:\n{_REFERENCE}",
+        ]
+        assert [(r["answer"], r["rationalized"]) for r in rows] == [
+            ("Remove your shoes before going in.", True)
+        ]
+        assert rows[0]["final_answer"] == _REFERENCE
+        # One judge call per pass, each with the original question.
+        assert len(judge.calls) == 2
+        assert all("Hint:" not in p for call in judge.calls for p in call)
+
+        # A lenient judge solves the item in the first pass, from cached samples.
+        rows = self._run(model, _Judge(lambda p: True, name="lenient"))
+        assert [(r["answer"], r["rationalized"]) for r in rows] == [
+            ("Keep your shoes on.", False),
+            ("Keep them on.", False),
+        ]
+        assert model.calls == 2

@@ -12,6 +12,7 @@ from pyforger import _tracking
 from pyforger.acquire._model_utils import (
     _accepts_kwarg,
     _build_prompt,
+    _catch_kwargs,
     _failure_label,
     _is_row_error,
     _is_transient,
@@ -19,6 +20,7 @@ from pyforger.acquire._model_utils import (
     _raise_if_systemic,
     _reasoning_for,
     _report_provider_failures,
+    _RequestFailures,
 )
 from pyforger.acquire.model import Model, Prompt, _cache_kwargs, split_reasoning
 from pyforger.op import op
@@ -474,6 +476,7 @@ def self_taught_reasoner(
     rationalize: bool = True,
     hint_fn: PromptTemplate | None = None,
     rationalized_field: str = "rationalized",
+    answer_judge: Model | None = None,
     response_field: str = "response",
     thinking_field: str = "thinking",
     answer_field: str = "answer",
@@ -495,7 +498,7 @@ def self_taught_reasoner(
     reference, so the surviving rows carry student-generated reasoning traces that
     arrive at a verified answer.
 
-    Acceptance is decided in one of two ways:
+    Acceptance is decided in one of these ways:
 
     * **Answer matching (default):**  A response is kept when
       ``match_fn(student_answer, item[reference_field])`` is true (default:
@@ -505,6 +508,11 @@ def self_taught_reasoner(
       ``filter.program_verifier("tests")`` to run each answer's code on the
       row's tests. A response is kept when it returns True. Calls run
       ``max_workers`` at a time.
+    * **Answer judge:** Pass ``answer_judge``, a model, for free-text answers
+      that no exact match can check. The judge sees the question (the
+      student's prompt), the reference, and the student's answer (not its
+      reasoning), and replies YES when the answer reaches the same conclusion
+      as the reference. A response is kept on YES.
     * **Custom filter:** Pass ``filter_fn`` -- any ``list[dict] -> list[dict]``
       callable.
 
@@ -516,19 +524,25 @@ def self_taught_reasoner(
     via `pyforger.acquire.split_reasoning`.
 
     **Rationalization** (the paper's second pass, on by default): every item
-    left with no accepted response is sampled ``n`` more times from a prompt
-    that also gives a hint, and the accepted responses are kept as if the
-    student had answered the unhinted prompt: rows carry the item's fields,
-    not the hinted prompt. This gives rows for items the student never solves
-    on its own, in the student's own words. The default hint, as in the paper,
-    is the item's reference (``prompt_fn``'s prompt plus "Hint: a correct
-    answer is: <item[reference_field]>"); items without one are not retried.
-    ``hint_fn`` gives another hint (e.g. only the final code, or why the task
-    cannot be done). As in the paper, responses that mention the hint are not
-    filtered out. Every row gets ``rationalized_field`` (False for the first
-    pass, True for the second). ``rationalize=False`` turns this off; with
-    ``filter_fn`` it is off, since the filter judges all candidates together
-    and cannot say which items went unsolved.
+    left with no accepted response (under whichever check above is active) is
+    sampled ``n`` more times from a prompt that also gives a hint, and the
+    accepted responses are kept as if the student had answered the unhinted
+    prompt: rows carry the item's fields, not the hinted prompt. This gives
+    rows for items the student never solves on its own, in the student's own
+    words. The default hint, as in the paper, is the item's reference
+    (``prompt_fn``'s prompt plus "Hint: a correct answer is:
+    <item[reference_field]>"); items without one are not retried. ``hint_fn``
+    gives another hint (e.g. only the final code, or why the task cannot be
+    done). As in the paper, responses that mention the hint are not filtered
+    out. Every row gets ``rationalized_field`` (False for the first pass, True
+    for the second). With ``answer_judge``, the judge sees ``prompt_fn``'s
+    question, not the hinted prompt; under the default hint the reference is
+    in the prompt, so an answer that copies it is accepted. Both passes draw
+    their samples through a cached sub-op, so a new judge or verifier
+    re-draws neither (a newly unsolved item is hinted afresh).
+    ``rationalize=False`` turns this off; with ``filter_fn`` it is off, since
+    the filter judges all candidates together and cannot say which items went
+    unsolved.
 
     Args:
         items: Input rows. Each must contain ``reference_field``.
@@ -556,6 +570,14 @@ def self_taught_reasoner(
             Needs answer matching or ``verifier``, not ``filter_fn``.
         rationalized_field: Output key marking rationalized rows (set when
             rationalization runs).
+        answer_judge: Model that judges each answer against its row's
+            reference; None (default) leaves it off. Any ``Model`` works, e.g.
+            a ``LocalModel`` on your own GPUs or an API model. Without
+            ``extract_answer``, the answer judged is ``answer_field``. An
+            empty answer, a failed request, and a reply with no YES or NO are
+            rejections. Identical (question, reference, answer) triples are
+            judged once. Kept rows keep their ``reference_field``. Not
+            combinable with ``match_fn``, ``verifier``, or ``filter_fn``.
         response_field: Output key for the raw student response.
         thinking_field: Output key for the split-out reasoning trace.
         answer_field: Output key for the answer portion of the response.
@@ -585,6 +607,11 @@ def self_taught_reasoner(
     log = _get_logger()
     if filter_fn is not None and verifier is not None:
         raise ValueError("pass filter_fn or verifier, not both")
+    if answer_judge is not None:
+        others = {"match_fn": match_fn, "verifier": verifier, "filter_fn": filter_fn}
+        given = [name for name, value in others.items() if value is not None]
+        if given:
+            raise ValueError(f"pass answer_judge or {given[0]}, not both")
     if max_workers is not None and max_workers < 1:
         raise ValueError("max_workers must be at least 1")
     if extract_answer is not None and filter_fn is not None:
@@ -593,7 +620,9 @@ def self_taught_reasoner(
             "given; it fills %r on the candidate rows filter_fn receives.",
             student_answer_field,
         )
-    extract = extract_answer if extract_answer is not None else default_extract_answer
+    extract: Callable[[str], Any] | None = extract_answer
+    if extract is None and answer_judge is None:
+        extract = default_extract_answer
     match = match_fn if match_fn is not None else _normalized_equal
 
     if hint_fn is not None and filter_fn is not None:
@@ -605,46 +634,31 @@ def self_taught_reasoner(
         raise ValueError("hint_fn is only used with rationalize=True")
     rationalizing = rationalize and filter_fn is None
 
-    def default_hint(item: dict) -> Prompt:
-        """``prompt_fn``'s prompt, with the item's reference as a hint."""
-        hint = f"Hint: a correct answer is:\n{item[reference_field]}"
-        return _with_hint(_resolve_prompt(prompt_fn, item), hint)
-
-    def sample(template: PromptTemplate, batch_items: list[dict]) -> list[list[dict]]:
+    def sample(
+        batch_items: list[dict], template: PromptTemplate, hint_field: str | None
+    ) -> list[list[dict]]:
         """``n`` candidate rows per item, from ``template``'s prompts."""
-        prompts = [_resolve_prompt(template, item) for item in batch_items]
-        per_item: list[list[dict]] = [[] for _ in batch_items]
-        # Sample n responses per item, batching items together for throughput.
-        chunk = batch_size or len(prompts)
-        for start in range(0, len(prompts), chunk):
-            batch = prompts[start : start + chunk]
-            batch_results = model.generate_batch(
-                batch,
-                n=n,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                **_cache_kwargs(
-                    model.generate_batch, cache_rows=batch_items[start : start + chunk]
-                ),
-            )
-            if len(batch_results) != len(batch):
-                log.warning(
-                    "generate_batch returned %d results for %d prompts",
-                    len(batch_results),
-                    len(batch),
-                )
-            # Items left without results contribute no rows.
-            for offset, responses in enumerate(batch_results[: len(batch)]):
-                per_item[start + offset] = candidates_for(
-                    batch_items[start + offset], responses
-                )
-        return per_item
+        # A sub-op, so changing how answers are accepted (a judge, a
+        # verifier) reuses these samples instead of drawing new ones.
+        sampled = _star_samples(
+            batch_items,
+            template,
+            model=model,
+            n=n,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            batch_size=batch_size,
+            hint_field=hint_field,
+        )
+        return [
+            candidates_for(item, responses, reasoning)
+            for item, (responses, reasoning) in zip(batch_items, sampled)
+        ]
 
-    def candidates_for(item: dict, responses: list[str]) -> list[dict]:
+    def candidates_for(
+        item: dict, responses: list[str], reasoning: list[str | None]
+    ) -> list[dict]:
         """One candidate row per generated response."""
-        # Providers that return reasoning separately (GenerateResult.reasoning)
-        # leave it out of the content; otherwise it is inline as <think>...</think>.
-        reasoning = getattr(responses, "reasoning", None) or []
         rows = []
         for i, raw in enumerate(responses):
             api_thinking = reasoning[i] if i < len(reasoning) else None
@@ -660,7 +674,8 @@ def self_taught_reasoner(
                     response_field: raw,
                     thinking_field: thinking,
                     answer_field: answer,
-                    student_answer_field: extract(raw),
+                    # The answer judge sees the answer itself by default.
+                    student_answer_field: answer if extract is None else extract(raw),
                 }
             )
         return rows
@@ -671,6 +686,14 @@ def self_taught_reasoner(
             return filter_fn(candidates)
         if verifier is not None:
             return _verified(candidates, verifier, answer_field, max_workers or 8)
+        if answer_judge is not None:
+            return _judged(
+                candidates,
+                answer_judge,
+                prompt_fn,
+                student_answer_field=student_answer_field,
+                reference_field=reference_field,
+            )
         return [
             candidate
             for candidate in candidates
@@ -686,11 +709,12 @@ def self_taught_reasoner(
         kept_ids = {id(c) for c in accept([c for cs in per_item for c in cs])}
         return [[c for c in cs if id(c) in kept_ids] for cs in per_item]
 
-    first = sample(prompt_fn, items)
+    first = sample(items, prompt_fn, None)
     n_candidates = sum(len(cs) for cs in first)
     if not rationalizing:
         kept = accept([c for cs in first for c in cs])
     else:
+        # "Solved" is whatever accept() uses: matching, verifier, or the judge.
         kept_per_item = accept_per_item(first)
         # The default hint is the reference, so items without one are not retried.
         unsolved = [
@@ -699,16 +723,22 @@ def self_taught_reasoner(
             if not cs
             and (hint_fn is not None or items[i].get(reference_field) is not None)
         ]
-        hint_template = hint_fn if hint_fn is not None else default_hint
-        hinted = sample(hint_template, [items[i] for i in unsolved]) if unsolved else []
-        n_candidates += sum(len(cs) for cs in hinted)
         for cs in kept_per_item:
             for candidate in cs:
                 candidate[rationalized_field] = False
-        for i, cs in zip(unsolved, accept_per_item(hinted)):
-            for candidate in cs:
-                candidate[rationalized_field] = True
-            kept_per_item[i] = cs
+        if unsolved:
+            # Also a sub-op call: a new threshold that leaves the same items
+            # unsolved reuses the hinted samples too.
+            hinted = sample(
+                [items[i] for i in unsolved],
+                prompt_fn if hint_fn is None else hint_fn,
+                reference_field if hint_fn is None else None,
+            )
+            n_candidates += sum(len(cs) for cs in hinted)
+            for i, cs in zip(unsolved, accept_per_item(hinted)):
+                for candidate in cs:
+                    candidate[rationalized_field] = True
+                kept_per_item[i] = cs
         kept = [c for cs in kept_per_item for c in cs]
         log.info(
             "self_taught_reasoner: rationalization kept %d responses for %d of %d "
@@ -718,8 +748,10 @@ def self_taught_reasoner(
             len(unsolved),
         )
 
-    # The student-generated answer becomes the ground truth for kept rows.
-    for candidate in kept if verifier is None else []:
+    # The student-generated answer becomes the ground truth for kept rows; a
+    # judged answer does not replace the reference.
+    overwrite = verifier is None and answer_judge is None
+    for candidate in kept if overwrite else []:
         student_answer = candidate.get(student_answer_field)
         if student_answer is not None:
             candidate[reference_field] = student_answer
@@ -731,6 +763,196 @@ def self_taught_reasoner(
         len(items),
     )
     return kept
+
+
+# A sampler, not an alter: it returns completions, not rows.
+@op(name="alter.self_taught_reasoner.samples", samples_arg="n", category="other")
+def _star_samples(
+    items: list[dict],
+    prompt_fn: PromptTemplate,
+    *,
+    model: Model,
+    n: int,
+    temperature: float | None,
+    max_tokens: int | None,
+    batch_size: int | None,
+    hint_field: str | None = None,
+) -> list[tuple[list[str], list[str | None]]]:
+    """Return each item's ``n`` completions and their API reasoning (or None).
+
+    With ``hint_field`` (rationalization's default hint), each prompt also says
+    "Hint: a correct answer is: <item[hint_field]>". An item the model returned
+    no result for gets no completions (a warning is logged).
+    """
+    prompts: list[Prompt] = [_resolve_prompt(prompt_fn, item) for item in items]
+    if hint_field is not None:
+        prompts = [
+            _with_hint(prompt, f"Hint: a correct answer is:\n{item[hint_field]}")
+            for prompt, item in zip(prompts, items)
+        ]
+    sampled: list[tuple[list[str], list[str | None]]] = []
+    chunk = batch_size or len(prompts)
+    for start in range(0, len(prompts), chunk):
+        batch = prompts[start : start + chunk]
+        batch_results = model.generate_batch(
+            batch,
+            n=n,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            **_cache_kwargs(
+                model.generate_batch, cache_rows=items[start : start + chunk]
+            ),
+        )
+        if len(batch_results) != len(batch):
+            _get_logger().warning(
+                "generate_batch returned %d results for %d prompts",
+                len(batch_results),
+                len(batch),
+            )
+        for responses in batch_results[: len(batch)]:
+            # Providers that return reasoning separately (GenerateResult.reasoning)
+            # leave it out of the content; otherwise it is inline as <think>...</think>.
+            reasoning = list(getattr(responses, "reasoning", None) or [])
+            texts = list(responses)
+            sampled.append((texts, reasoning + [None] * (len(texts) - len(reasoning))))
+        # Items left without results contribute no rows.
+        sampled += [([], [])] * (len(batch) - len(batch_results))
+    return sampled
+
+
+_JUDGE_PROMPT = """\
+You are checking a student's answer to a question against a reference answer.
+
+<question>
+{question}
+</question>
+
+<reference_answer>
+{reference}
+</reference_answer>
+
+<student_answer>
+{answer}
+</student_answer>
+
+Does the student's answer reach the same conclusion as the reference answer? \
+Compare what the question asks for: the verdict (e.g. yes or no, acceptable or \
+not), and the values, names, and facts the answer gives. Wording, length, and \
+extra explanation do not matter. A different verdict, a wrong value or fact, or \
+a missing final answer does. Reply with one word: YES or NO."""
+
+# The judge's verdict: the last standalone YES or NO, e.g. "**YES**".
+_VERDICT_RE = re.compile(r"\b(yes|no)\b", re.I)
+
+
+def _judged(
+    candidates: list[dict],
+    judge: Model,
+    prompt_fn: PromptTemplate,
+    *,
+    student_answer_field: str,
+    reference_field: str,
+) -> list[dict]:
+    """The candidates whose answer ``judge`` says matches the reference."""
+    from pyforger.filter.judge import _prompt_text
+
+    prompts: list[str | None] = []
+    for candidate in candidates:
+        answer = _answer_text(candidate[student_answer_field])
+        reference = _answer_text(
+            get_field(candidate, reference_field, "alter.self_taught_reasoner")
+        )
+        if not answer or not reference:
+            prompts.append(None)
+            continue
+        question = _prompt_text(_resolve_prompt(prompt_fn, candidate)).strip()
+        prompts.append(
+            _JUDGE_PROMPT.format(question=question, reference=reference, answer=answer)
+        )
+    distinct = list(dict.fromkeys(p for p in prompts if p is not None))
+    replies = dict(zip(distinct, _judge_answers(distinct, judge=judge)))
+    verdicts = [None if p is None else _verdict(replies[p]) for p in prompts]
+    _log_judgments(prompts, replies, verdicts, len(distinct))
+    return [c for c, ok in zip(candidates, verdicts) if ok is True]
+
+
+def _answer_text(value: Any) -> str:
+    """An answer as the text to judge; None is empty."""
+    return "" if value is None else str(value).strip()
+
+
+# Applying the verdicts outside keeps other acceptance settings from asking again.
+@op(name="alter.self_taught_reasoner.judgments", category="other")
+def _judge_answers(prompts: list[str], *, judge: Model) -> list[str | None]:
+    """One raw judge reply per prompt; None for a request that failed.
+
+    As in ``filter.by_llm_score``: a request that still fails after the
+    model's retries gives None, one warning names the count, and the result is
+    not cached; failures on every prompt raise.
+    """
+    if not prompts:
+        return []
+    results = judge.generate_batch(
+        list[Prompt](prompts),
+        n=1,
+        **_cache_kwargs(judge.generate_batch, cache_rows=list(prompts)),
+        **_catch_kwargs(judge),
+    )
+    failures = _RequestFailures()
+    replies = [
+        None if failures.failed(result) else (result[0] if result else "")
+        for result in results
+    ]
+    failures.raise_if_systemic(len(prompts))
+    failures.report(
+        f"self_taught_reasoner: {len(failures)} of {len(prompts)} answer-judge "
+        "requests failed after retries; their answers are rejected"
+    )
+    return replies
+
+
+def _verdict(reply: str | None) -> bool | None:
+    """True for YES, False for NO, None for no reply or no verdict.
+
+    Only the text after a closed thinking block counts, as in
+    ``filter.by_llm_score``.
+    """
+    from pyforger.filter.judge import _answer_text as _after_thinking
+
+    text = _after_thinking(reply)
+    found = _VERDICT_RE.findall(text or "")
+    return found[-1].lower() == "yes" if found else None
+
+
+def _log_judgments(
+    prompts: list[str | None],
+    replies: dict[str, str | None],
+    verdicts: list[bool | None],
+    distinct: int,
+) -> None:
+    """Log how the judge decided, and warn about replies with no verdict."""
+    empty = sum(p is None for p in prompts)
+    unclear = [
+        reply
+        for p, v in zip(prompts, verdicts)
+        if p is not None and v is None and (reply := replies[p]) is not None
+    ]
+    _get_logger().info(
+        "self_taught_reasoner: the answer judge accepted %d of %d answers "
+        "(%d distinct judged)%s",
+        sum(v is True for v in verdicts),
+        len(prompts),
+        distinct,
+        f"; {empty} rejected for an empty answer or reference" if empty else "",
+    )
+    if unclear:
+        _get_logger().warning(
+            "self_taught_reasoner: %d answer-judge replies had no YES or NO and "
+            "were rejected (raise the judge's max_tokens if it stops mid-thought); "
+            "e.g. %r",
+            len(unclear),
+            unclear[0][-300:],
+        )
 
 
 def _context_run() -> Callable[..., Any]:

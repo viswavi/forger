@@ -59,13 +59,20 @@ rows = self_taught_reasoner(problems, solver_prompt, student, n=8,
                             hint_fn=solver_prompt + "\n\nHint: {key_idea}")
 ```
 
+For free-text answers (an explanation, a verdict with its reasons), pass `answer_judge=`, a model: it sees the
+question, the reference, and the student's answer (not its reasoning), and a sample is kept when it replies YES (the
+same verdict, values, and facts as the reference; wording does not matter). Any `Model` works, e.g. a `LocalModel` on
+your own GPUs or an API model. Kept rows keep their reference. It cannot be combined with `match_fn`, `verifier`, or
+`filter_fn`. Samples and the judge's replies are cached apart, so trying another judge samples nothing.
+
 STaR's output is limited by the abilities of the student model. If the model never solves a task in `n` samples,
 that task will be completely omitted. A behavior it never shows is never learned. Two remedies:
 
-- **Rationalization (on by default)**: items with no accepted response are sampled `n` more times with a hint.
-  The default hint is the item's `reference_field` ("Hint: a correct answer is: ..."), so items without one are
-  skipped; pass `hint_fn` for another hint (e.g. the key idea, or why the task cannot be done). Kept rows answer the
-  original prompt and are marked `rationalized=True`; as in the paper, responses that mention the hint are kept.
+- **Rationalization (on by default)**: items with no accepted response (under whichever check is active) are sampled
+  `n` more times with a hint. The default hint is the item's `reference_field` ("Hint: a correct answer is: ..."), so
+  items without one are skipped; pass `hint_fn` for another hint (e.g. the key idea, or why the task cannot be done).
+  Kept rows answer the original prompt and are marked `rationalized=True`; as in the paper, responses that mention
+  the hint are kept. The answer judge sees the original question, not the hint.
   `rationalize=False` turns it off; it is also off with `filter_fn`.
 - **Bootstrapping** a behavior the student never shows: briefly fine-tune on a few seed rows that show it, run STaR on
   that checkpoint, then train the next checkpoint from the base model on the rows STaR kept. It is a good idea
