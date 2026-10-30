@@ -334,8 +334,29 @@ def code_score(code, prompt, response, ground_truth):
         return 0.0
 
 
-async def prompt_score(criterion, prompt, response, ground_truth):
-    """Score one prompt criterion with the separately budgeted LM judge."""
+def final_answer(text):
+    """The text after the last ``</think>``, stripped; "" while a ``<think>`` is open.
+
+    A truncated trace has no answer. The same rule as the evaluators'
+    (``coding.answer_text.final_answer``); kept here so the reward needs no
+    imports outside ``rl``.
+    """
+    text = text or ""
+    if "</think>" in text:
+        text = text.rsplit("</think>", 1)[1]
+    if "<think>" in text:
+        return ""
+    return text.strip()
+
+
+async def prompt_score(criterion, prompt, response, ground_truth, answer_only=False):
+    """Score one prompt criterion with the separately budgeted LM judge.
+
+    With ``answer_only``, the judge sees only the final answers of ``response``
+    and ``ground_truth`` (see ``final_answer``); ``prompt`` is always sent whole.
+    """
+    if answer_only:
+        response, ground_truth = final_answer(response), final_answer(ground_truth)
     if not os.environ.get("LITELLM_JUDGE_API_KEY"):
         raise JudgeUnavailable("LM rubrics require a separate LITELLM_JUDGE_API_KEY")
     base_url = os.environ.get("LITELLM_JUDGE_BASE_URL") or os.environ.get(
@@ -487,7 +508,11 @@ async def custom_rm(args, sample, **kwargs):
                 )
             else:
                 value = await prompt_score(
-                    criterion["prompt"], prompt, response, sample.label
+                    criterion["prompt"],
+                    prompt,
+                    response,
+                    sample.label,
+                    answer_only=criterion.get("answer_only", False),
                 )
         total += weight * value
     reward = total / sum(weight for _, weight in rubric)

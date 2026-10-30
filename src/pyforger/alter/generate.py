@@ -12,6 +12,7 @@ from pyforger import _tracking
 from pyforger.acquire._model_utils import (
     _accepts_kwarg,
     _build_prompt,
+    _catch_kwargs,
     _failure_label,
     _is_row_error,
     _is_transient,
@@ -19,6 +20,7 @@ from pyforger.acquire._model_utils import (
     _raise_if_systemic,
     _reasoning_for,
     _report_provider_failures,
+    _RequestFailures,
 )
 from pyforger.acquire.model import Model, Prompt, _cache_kwargs, split_reasoning
 from pyforger.op import op
@@ -474,12 +476,7 @@ def self_taught_reasoner(
     rationalize: bool = True,
     hint_fn: PromptTemplate | None = None,
     rationalized_field: str = "rationalized",
-    answer_similarity: float | None = None,
-    embed_fn: Callable[[list[str]], Any] | None = None,
-    # inspect.cluster's default; imported lazily there (a cycle), and a test
-    # checks the two agree.
-    embedding_model: str = "Qwen/Qwen3-Embedding-0.6B",
-    similarity_field: str = "answer_similarity",
+    answer_judge: Model | None = None,
     response_field: str = "response",
     thinking_field: str = "thinking",
     answer_field: str = "answer",
@@ -511,14 +508,11 @@ def self_taught_reasoner(
       ``filter.program_verifier("tests")`` to run each answer's code on the
       row's tests. A response is kept when it returns True. Calls run
       ``max_workers`` at a time.
-    * **Answer similarity:** Pass ``answer_similarity`` (a cosine threshold)
-      for free-text answers. Every sample's answer and every reference are
-      embedded in one call per pass, and a response is kept when the cosine between
-      its answer and its row's reference is at least the threshold; the
-      cosine is recorded in ``similarity_field``. An empty answer is never
-      kept. Similarity checks topic and content, not correctness: with
-      Qwen3-Embedding-0.6B, "Yes, this is acceptable because ..." and "No,
-      this is not acceptable because ..." with the same reasons score 0.99.
+    * **Answer judge:** Pass ``answer_judge``, a model, for free-text answers
+      that no exact match can check. The judge sees the question (the
+      student's prompt), the reference, and the student's answer (not its
+      reasoning), and replies YES when the answer reaches the same conclusion
+      as the reference. A response is kept on YES.
     * **Custom filter:** Pass ``filter_fn`` -- any ``list[dict] -> list[dict]``
       callable.
 
@@ -541,11 +535,10 @@ def self_taught_reasoner(
     gives another hint (e.g. only the final code, or why the task cannot be
     done). As in the paper, responses that mention the hint are not filtered
     out. Every row gets ``rationalized_field`` (False for the first pass, True
-    for the second). With ``answer_similarity``, rationalized rows record the
-    cosine of their own answer to the reference, like first-pass rows; under
-    the default hint the reference is in the prompt, so a copied reference
-    scores near 1 and a high cosine on such a row means less. Both passes draw
-    their samples through a cached sub-op, so a new threshold or verifier
+    for the second). With ``answer_judge``, the judge sees ``prompt_fn``'s
+    question, not the hinted prompt; under the default hint the reference is
+    in the prompt, so an answer that copies it is accepted. Both passes draw
+    their samples through a cached sub-op, so a new judge or verifier
     re-draws neither (a newly unsolved item is hinted afresh).
     ``rationalize=False`` turns this off; with ``filter_fn`` it is off, since
     the filter judges all candidates together and cannot say which items went
@@ -577,20 +570,14 @@ def self_taught_reasoner(
             Needs answer matching or ``verifier``, not ``filter_fn``.
         rationalized_field: Output key marking rationalized rows (set when
             rationalization runs).
-        answer_similarity: Cosine threshold in [-1, 1] that turns on answer
-            similarity; None (default) leaves it off. There is no default
-            threshold. With Qwen3-Embedding-0.6B, 0.75 kept 13 of 14 reworded
-            correct answers and 0 of 6 answers to other questions, but also 13
-            of 14 subtly wrong answers and 18 of 18 opposite verdicts. Without
-            ``extract_answer``, the answer embedded is ``answer_field``. Kept
-            rows keep their ``reference_field``. Not combinable with
-            ``match_fn``, ``verifier``, or ``filter_fn``.
-        embed_fn: A custom embedder, ``list[str]`` to an array of shape
-            ``(len(texts), dim)``; overrides ``embedding_model``.
-        embedding_model: A sentence-transformers model id, or ``"tfidf"`` for
-            TF-IDF + SVD on the CPU. There is no TF-IDF fallback: its cosines
-            are on another scale (reworded answers score 0.12 to 0.38).
-        similarity_field: Key holding the cosine on each kept row.
+        answer_judge: Model that judges each answer against its row's
+            reference; None (default) leaves it off. Any ``Model`` works, e.g.
+            a ``LocalModel`` on your own GPUs or an API model. Without
+            ``extract_answer``, the answer judged is ``answer_field``. An
+            empty answer, a failed request, and a reply with no YES or NO are
+            rejections. Identical (question, reference, answer) triples are
+            judged once. Kept rows keep their ``reference_field``. Not
+            combinable with ``match_fn``, ``verifier``, or ``filter_fn``.
         response_field: Output key for the raw student response.
         thinking_field: Output key for the split-out reasoning trace.
         answer_field: Output key for the answer portion of the response.
@@ -617,19 +604,14 @@ def self_taught_reasoner(
     if not items:
         return []
 
-    from pyforger.inspect.cluster import _DEFAULT_EMBEDDING_MODEL
-
     log = _get_logger()
     if filter_fn is not None and verifier is not None:
         raise ValueError("pass filter_fn or verifier, not both")
-    if answer_similarity is not None:
-        _check_similarity_args(
-            answer_similarity, match_fn, verifier, filter_fn, embed_fn, embedding_model
-        )
-    elif embed_fn is not None or embedding_model != _DEFAULT_EMBEDDING_MODEL:
-        raise ValueError(
-            "embed_fn and embedding_model take effect only with answer_similarity="
-        )
+    if answer_judge is not None:
+        others = {"match_fn": match_fn, "verifier": verifier, "filter_fn": filter_fn}
+        given = [name for name, value in others.items() if value is not None]
+        if given:
+            raise ValueError(f"pass answer_judge or {given[0]}, not both")
     if max_workers is not None and max_workers < 1:
         raise ValueError("max_workers must be at least 1")
     if extract_answer is not None and filter_fn is not None:
@@ -639,7 +621,7 @@ def self_taught_reasoner(
             student_answer_field,
         )
     extract: Callable[[str], Any] | None = extract_answer
-    if extract is None and answer_similarity is None:
+    if extract is None and answer_judge is None:
         extract = default_extract_answer
     match = match_fn if match_fn is not None else _normalized_equal
 
@@ -656,7 +638,7 @@ def self_taught_reasoner(
         batch_items: list[dict], template: PromptTemplate, hint_field: str | None
     ) -> list[list[dict]]:
         """``n`` candidate rows per item, from ``template``'s prompts."""
-        # A sub-op, so changing how answers are accepted (a threshold, a
+        # A sub-op, so changing how answers are accepted (a judge, a
         # verifier) reuses these samples instead of drawing new ones.
         sampled = _star_samples(
             batch_items,
@@ -692,7 +674,7 @@ def self_taught_reasoner(
                     response_field: raw,
                     thinking_field: thinking,
                     answer_field: answer,
-                    # Answer similarity embeds the answer itself by default.
+                    # The answer judge sees the answer itself by default.
                     student_answer_field: answer if extract is None else extract(raw),
                 }
             )
@@ -704,15 +686,13 @@ def self_taught_reasoner(
             return filter_fn(candidates)
         if verifier is not None:
             return _verified(candidates, verifier, answer_field, max_workers or 8)
-        if answer_similarity is not None:
-            return _similar(
+        if answer_judge is not None:
+            return _judged(
                 candidates,
-                answer_similarity,
+                answer_judge,
+                prompt_fn,
                 student_answer_field=student_answer_field,
                 reference_field=reference_field,
-                similarity_field=similarity_field,
-                embed_fn=embed_fn,
-                embedding_model=embedding_model,
             )
         return [
             candidate
@@ -734,7 +714,7 @@ def self_taught_reasoner(
     if not rationalizing:
         kept = accept([c for cs in first for c in cs])
     else:
-        # "Solved" is whatever accept() uses: matching, verifier, or similarity.
+        # "Solved" is whatever accept() uses: matching, verifier, or the judge.
         kept_per_item = accept_per_item(first)
         # The default hint is the reference, so items without one are not retried.
         unsolved = [
@@ -769,8 +749,8 @@ def self_taught_reasoner(
         )
 
     # The student-generated answer becomes the ground truth for kept rows; a
-    # merely similar answer does not replace the reference.
-    overwrite = verifier is None and answer_similarity is None
+    # judged answer does not replace the reference.
+    overwrite = verifier is None and answer_judge is None
     for candidate in kept if overwrite else []:
         student_answer = candidate.get(student_answer_field)
         if student_answer is not None:
@@ -840,134 +820,139 @@ def _star_samples(
     return sampled
 
 
-def _check_similarity_args(
-    threshold: float,
-    match_fn: Any,
-    verifier: Any,
-    filter_fn: Any,
-    embed_fn: Callable[[list[str]], Any] | None,
-    embedding_model: str,
-) -> None:
-    """Raise when answer_similarity is combined with another acceptance check."""
-    from pyforger.inspect.cluster import (
-        _TFIDF_EMBEDDING,
-        _sentence_transformers_importable,
-    )
+_JUDGE_PROMPT = """\
+You are checking a student's answer to a question against a reference answer.
 
-    if not -1.0 <= threshold <= 1.0:
-        raise ValueError("answer_similarity must be a cosine similarity in [-1, 1]")
-    others = {"match_fn": match_fn, "verifier": verifier, "filter_fn": filter_fn}
-    given = [name for name, value in others.items() if value is not None]
-    if given:
-        raise ValueError(f"pass answer_similarity or {given[0]}, not both")
-    if (
-        embed_fn is None
-        and embedding_model != _TFIDF_EMBEDDING
-        and not _sentence_transformers_importable()
-    ):
-        # No TF-IDF fallback: a threshold set for one embedding means
-        # something else under the other.
-        raise ImportError(
-            "answer_similarity embeds with sentence-transformers, which cannot be "
-            "imported: `pip install pyforger[clustering]`, or pass embed_fn= or "
-            f"embedding_model={_TFIDF_EMBEDDING!r} (and a threshold for it)."
-        )
+<question>
+{question}
+</question>
+
+<reference_answer>
+{reference}
+</reference_answer>
+
+<student_answer>
+{answer}
+</student_answer>
+
+Does the student's answer reach the same conclusion as the reference answer? \
+Compare what the question asks for: the verdict (e.g. yes or no, acceptable or \
+not), and the values, names, and facts the answer gives. Wording, length, and \
+extra explanation do not matter. A different verdict, a wrong value or fact, or \
+a missing final answer does. Reply with one word: YES or NO."""
+
+# The judge's verdict: the last standalone YES or NO, e.g. "**YES**".
+_VERDICT_RE = re.compile(r"\b(yes|no)\b", re.I)
 
 
-def _similar(
+def _judged(
     candidates: list[dict],
-    threshold: float,
+    judge: Model,
+    prompt_fn: PromptTemplate,
     *,
     student_answer_field: str,
     reference_field: str,
-    similarity_field: str,
-    embed_fn: Callable[[list[str]], Any] | None,
-    embedding_model: str,
 ) -> list[dict]:
-    """The candidates whose answer has cosine >= ``threshold`` to its reference."""
-    answers = [_answer_text(c[student_answer_field]) for c in candidates]
-    references = [
-        _answer_text(get_field(c, reference_field, "alter.self_taught_reasoner"))
-        for c in candidates
-    ]
-    similarities = _answer_similarities(
-        answers, references, embed_fn=embed_fn, embedding_model=embedding_model
-    )
-    kept = []
-    for candidate, similarity in zip(candidates, similarities):
-        if similarity is not None and similarity >= threshold:
-            candidate[similarity_field] = similarity
-            kept.append(candidate)
-    _log_similarities(similarities, threshold)
-    return kept
+    """The candidates whose answer ``judge`` says matches the reference."""
+    from pyforger.filter.judge import _prompt_text
+
+    prompts: list[str | None] = []
+    for candidate in candidates:
+        answer = _answer_text(candidate[student_answer_field])
+        reference = _answer_text(
+            get_field(candidate, reference_field, "alter.self_taught_reasoner")
+        )
+        if not answer or not reference:
+            prompts.append(None)
+            continue
+        question = _prompt_text(_resolve_prompt(prompt_fn, candidate)).strip()
+        prompts.append(
+            _JUDGE_PROMPT.format(question=question, reference=reference, answer=answer)
+        )
+    distinct = list(dict.fromkeys(p for p in prompts if p is not None))
+    replies = dict(zip(distinct, _judge_answers(distinct, judge=judge)))
+    verdicts = [None if p is None else _verdict(replies[p]) for p in prompts]
+    _log_judgments(prompts, replies, verdicts, len(distinct))
+    return [c for c, ok in zip(candidates, verdicts) if ok is True]
 
 
 def _answer_text(value: Any) -> str:
-    """An answer as the text to embed; None is empty."""
+    """An answer as the text to judge; None is empty."""
     return "" if value is None else str(value).strip()
 
 
-# The threshold is applied outside, so trying another one embeds nothing.
-@op(name="alter.self_taught_reasoner.similarities", category="other")
-def _answer_similarities(
-    answers: list[str],
-    references: list[str],
-    *,
-    embed_fn: Callable[[list[str]], Any] | None,
-    embedding_model: str,
-) -> list[float | None]:
-    """Cosine between each answer and its reference, rounded to 4 places.
+# Applying the verdicts outside keeps other acceptance settings from asking again.
+@op(name="alter.self_taught_reasoner.judgments", category="other")
+def _judge_answers(prompts: list[str], *, judge: Model) -> list[str | None]:
+    """One raw judge reply per prompt; None for a request that failed.
 
-    None where either text is empty. The distinct texts of both lists are
-    embedded in one call.
+    As in ``filter.by_llm_score``: a request that still fails after the
+    model's retries gives None, one warning names the count, and the result is
+    not cached; failures on every prompt raise.
     """
-    import numpy as np
-
-    from pyforger.inspect.cluster import _embed
-
-    pairs = [i for i, (a, r) in enumerate(zip(answers, references)) if a and r]
-    if not pairs:
-        return [None] * len(answers)
-    texts = list(dict.fromkeys(t for i in pairs for t in (answers[i], references[i])))
-    vectors = np.asarray(
-        _embed(texts, embed_fn, embedding_model, 0, op_name="self_taught_reasoner"),
-        dtype=np.float64,
+    if not prompts:
+        return []
+    results = judge.generate_batch(
+        list[Prompt](prompts),
+        n=1,
+        **_cache_kwargs(judge.generate_batch, cache_rows=list(prompts)),
+        **_catch_kwargs(judge),
     )
-    if vectors.ndim != 2 or vectors.shape[0] != len(texts):
-        raise ValueError(
-            "self_taught_reasoner: the embedder returned an array of shape "
-            f"{vectors.shape} for {len(texts)} texts; expected ({len(texts)}, dim)"
-        )
-    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
-    # A zero vector (e.g. TF-IDF of text with no words) is similar to nothing.
-    vectors = np.divide(vectors, norms, out=np.zeros_like(vectors), where=norms > 0)
-    position = {text: j for j, text in enumerate(texts)}
-    similarities: list[float | None] = [None] * len(answers)
-    for i in pairs:
-        cosine = vectors[position[answers[i]]] @ vectors[position[references[i]]]
-        similarities[i] = round(float(cosine), 4)
-    return similarities
+    failures = _RequestFailures()
+    replies = [
+        None if failures.failed(result) else (result[0] if result else "")
+        for result in results
+    ]
+    failures.raise_if_systemic(len(prompts))
+    failures.report(
+        f"self_taught_reasoner: {len(failures)} of {len(prompts)} answer-judge "
+        "requests failed after retries; their answers are rejected"
+    )
+    return replies
 
 
-def _log_similarities(similarities: list[float | None], threshold: float) -> None:
-    """Log the spread of the cosines, e.g. to choose a threshold."""
-    scored = sorted(s for s in similarities if s is not None)
-    empty = len(similarities) - len(scored)
-    if not scored:
-        _get_logger().info(
-            "self_taught_reasoner: all %d answers or references are empty", empty
-        )
-        return
-    quartiles = [scored[round(q * (len(scored) - 1))] for q in (0, 0.25, 0.5, 0.75, 1)]
+def _verdict(reply: str | None) -> bool | None:
+    """True for YES, False for NO, None for no reply or no verdict.
+
+    Only the text after a closed thinking block counts, as in
+    ``filter.by_llm_score``.
+    """
+    from pyforger.filter.judge import _answer_text as _after_thinking
+
+    text = _after_thinking(reply)
+    found = _VERDICT_RE.findall(text or "")
+    return found[-1].lower() == "yes" if found else None
+
+
+def _log_judgments(
+    prompts: list[str | None],
+    replies: dict[str, str | None],
+    verdicts: list[bool | None],
+    distinct: int,
+) -> None:
+    """Log how the judge decided, and warn about replies with no verdict."""
+    empty = sum(p is None for p in prompts)
+    unclear = [
+        reply
+        for p, v in zip(prompts, verdicts)
+        if p is not None and v is None and (reply := replies[p]) is not None
+    ]
     _get_logger().info(
-        "self_taught_reasoner: answer similarity of %d samples: min %.2f, "
-        "quartiles %.2f / %.2f / %.2f, max %.2f; %d at or above %g%s",
-        len(scored),
-        *quartiles,
-        sum(s >= threshold for s in scored),
-        threshold,
+        "self_taught_reasoner: the answer judge accepted %d of %d answers "
+        "(%d distinct judged)%s",
+        sum(v is True for v in verdicts),
+        len(prompts),
+        distinct,
         f"; {empty} rejected for an empty answer or reference" if empty else "",
     )
+    if unclear:
+        _get_logger().warning(
+            "self_taught_reasoner: %d answer-judge replies had no YES or NO and "
+            "were rejected (raise the judge's max_tokens if it stops mid-thought); "
+            "e.g. %r",
+            len(unclear),
+            unclear[0][-300:],
+        )
 
 
 def _context_run() -> Callable[..., Any]:

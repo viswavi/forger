@@ -97,6 +97,29 @@ class DatasetTests(unittest.TestCase):
             with self.subTest(rubric=rubric), self.assertRaises(ValueError):
                 data.validate_rubric(rubric)
 
+    def test_answer_only_on_prompt_criteria(self):
+        """answer_only is a bool on prompt criteria only, in either key order."""
+        for criterion in (
+            {"prompt": "x", "answer_only": True},
+            {"answer_only": False, "prompt": "x"},
+        ):
+            with self.subTest(criterion=criterion):
+                data.validate_rubric([[criterion, 1]])
+        for criterion, message in (
+            (
+                {"code": "def grade(p, r, g):\n    return 1.0", "answer_only": True},
+                "only to",
+            ),
+            ({"prompt": "x", "answer_only": "yes"}, "true or false"),
+            ({"prompt": "x", "answer_only": 1}, "true or false"),
+            ({"prompt": " ", "answer_only": True}, "nonempty"),
+            ({"answer_only": True}, "exactly one"),
+        ):
+            with self.subTest(criterion=criterion), self.assertRaisesRegex(
+                ValueError, message
+            ):
+                data.validate_rubric([[criterion, 1]])
+
     def test_thinking_and_overlength(self):
         """Verify thinking and overlength."""
         with self.assertRaises(ValueError):
@@ -331,6 +354,66 @@ class RewardTests(unittest.IsolatedAsyncioTestCase):
                 judge.call_args.args[1], sample.metadata["original_prompt"]
             )
             self.assertEqual(judge.call_args.args[2], sample.response)
+
+    async def test_answer_only_reaches_the_judge(self):
+        """custom_rm passes each prompt criterion's answer_only to prompt_score."""
+        sample = SimpleNamespace(
+            response="<think>trace</think>answer",
+            label="gold",
+            prompt="templated",
+            metadata={
+                "original_prompt": [{"role": "user", "content": "original"}],
+                "rubric": [
+                    [{"prompt": "a", "answer_only": True}, 1],
+                    [{"prompt": "b"}, 1],
+                ],
+            },
+        )
+        with patch.object(rm, "prompt_score", new=AsyncMock(return_value=1)) as judge:
+            await rm.custom_rm(None, sample)
+        self.assertEqual(
+            [c.kwargs["answer_only"] for c in judge.call_args_list], [True, False]
+        )
+
+    async def test_answer_only_payload_has_no_thinking(self):
+        """With answer_only the judge sees final answers; the prompt stays whole."""
+        result = SimpleNamespace(
+            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=2),
+            choices=[SimpleNamespace(message=SimpleNamespace(content='{"score": 1}'))],
+        )
+        prompt = [{"role": "user", "content": "<think>not a trace</think> task"}]
+        response = "<think>long trace</think>\n```cpp\nint main(){}\n```\n"
+        gold = "<think>gold trace</think>gold answer"
+
+        async def payload(**kwargs):
+            with patch(
+                "litellm.acompletion", new=AsyncMock(return_value=result)
+            ) as completion:
+                await rm.prompt_score("c", prompt, response, gold, **kwargs)
+            return json.loads(completion.call_args.kwargs["messages"][1]["content"])
+
+        with patch.dict(
+            os.environ,
+            {
+                "LITELLM_JUDGE_API_KEY": "test-judge",
+                "LITELLM_BASE_URL": "https://example.test",
+            },
+        ):
+            sent = await payload(answer_only=True)
+            self.assertEqual(sent["response"], "```cpp\nint main(){}\n```")
+            self.assertEqual(sent["ground_truth"], "gold answer")
+            self.assertEqual(sent["prompt"], prompt)
+            default = await payload()
+            self.assertEqual(
+                (default["response"], default["ground_truth"]), (response, gold)
+            )
+
+    def test_final_answer(self):
+        """After the last </think>; an unclosed <think> has no answer."""
+        self.assertEqual(rm.final_answer("<think>a</think>b</think> c "), "c")
+        self.assertEqual(rm.final_answer("<think>cut off mid-trace"), "")
+        self.assertEqual(rm.final_answer(" plain "), "plain")
+        self.assertEqual(rm.final_answer(None), "")
 
     async def test_judge_model_and_separate_key(self):
         """Verify judge model and separate key."""

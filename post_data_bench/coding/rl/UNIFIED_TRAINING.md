@@ -97,8 +97,9 @@ old unfrozen agent runs should use the launcher version that created them.
 ## Rubric execution and token-unit quotas
 
 A rubric is a nonempty list of `[criterion, weight]` pairs. A criterion contains
-exactly one of `code` or `prompt`. Weights must be finite and nonnegative, with a
-positive sum. Reward is `sum(weight * score) / sum(weight)`.
+exactly one of `code` or `prompt` (a prompt criterion may also set `answer_only`).
+Weights must be finite and nonnegative, with a positive sum. Reward is
+`sum(weight * score) / sum(weight)`.
 
 - **Code:** defines `grade(prompt, response, ground_truth) -> float` in `[0,1]`.
   Define exactly one top-level synchronous `grade` function with exactly three
@@ -140,7 +141,11 @@ positive sum. Reward is `sum(weight * score) / sum(weight)`.
   `low` (default), or `high`; LiteLLM receives `reasoning={"effort": ...}`.
   The judge receives the criterion, original prompt, full response,
   and ground truth and returns a JSON score. This is the explicit non-RP branch;
-  arbitrary Python inside a code criterion cannot call the judge.
+  arbitrary Python inside a code criterion cannot call the judge. A prompt
+  criterion may add `"answer_only": true` (a JSON boolean; not allowed on code
+  criteria): the judge then sees only the final answers, the text after the last
+  `</think>` of the response and of the ground truth (`""` when the response's
+  thinking is never closed). The prompt is always sent whole.
 
 Credentials are loaded only from environment variables. Never print their
 values, include them in prompts, or pass them on command lines:

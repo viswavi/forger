@@ -247,5 +247,5 @@ Common patterns (not a complete list):
   generate the reasoning from (or similar to) the *student* you will finetune, not a stronger teacher
   ([Zelikman et al., 2022](https://arxiv.org/abs/2203.14465)). `alter.self_taught_reasoner` samples `n` solutions per
   prompt (from `acquire.TinkerModel` or `acquire.LocalModel`) and keeps one row per sample whose final answer matches;
-  for free-text answers, `answer_similarity=` keeps answers close to the reference in embedding space, which does not
-  check a yes/no verdict. Set a generous `max_tokens` so traces are not truncated. See [alter.md](alter.md).
+  for free-text answers, `answer_judge=` has a model judge each answer against the reference. Set a generous
+  `max_tokens` so traces are not truncated. See [alter.md](alter.md).
