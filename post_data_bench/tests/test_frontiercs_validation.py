@@ -188,6 +188,43 @@ class FrontierValidationTests(unittest.TestCase):
             [json.loads(p)["id"] for p in predictions], ["val_000", "val_001"]
         )
 
+    def test_from_raw_rejudges_every_saved_sample(self):
+        """A problem scores the mean of its samples; metrics count each sample."""
+        self.copy()
+        raw = self.dest / "raw.jsonl"
+        sample = {"output": "<think>reasoning cut off", "finish_reason": "length"}
+        raw.write_text(
+            "".join(
+                json.dumps({"id": f"val_00{k}", "samples": [sample, sample, sample]})
+                + "\n"
+                for k in range(2)
+            )
+        )
+        out = self.dest / "out_samples"
+        subprocess.run(
+            [
+                sys.executable,
+                "evaluate_model.py",
+                "--split",
+                "val",
+                "--from-raw",
+                str(raw),
+                "--log-dir",
+                str(out),
+            ],
+            cwd=self.dest,
+            env={**os.environ, "PYTHONPATH": "", "PDB_BENCHMARK_DIR": str(self.dest)},
+            check=True,
+            capture_output=True,
+        )
+        metrics = json.loads((out / "metrics.json").read_text())
+        self.assertEqual(
+            (metrics["n_total"], metrics["n_samples"], metrics["n_truncated"]),
+            (2, 6, 6),
+        )
+        row = json.loads((out / "predictions.jsonl").read_text().splitlines()[0])
+        self.assertEqual((row["n_samples"], row["score"]), (3, 0.0))
+
     @unittest.skipUnless(
         shutil.which("g++") and sys.platform.startswith("linux") and HAS_YAML,
         "needs g++ on Linux and PyYAML",
@@ -233,7 +270,8 @@ class FrontierValidationTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr[-2000:])
         row = json.loads((out / "predictions.jsonl").read_text().splitlines()[0])
-        self.assertEqual((row["status"], row["score"]), ("done", 100.0))
+        self.assertEqual(row["score"], 100.0)
+        self.assertEqual([s["status"] for s in row["samples"]], ["done"])
 
     def test_launcher_remaps_baseline_and_writes_signatures(self):
         """Baseline rows get val ids without problem_id; signatures hold no text."""

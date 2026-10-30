@@ -52,8 +52,9 @@ RL_COMMAND = """
 
 
 # Per-task edits to the backend sections, as (old text, new text). The algorithmic
-# (C++) task samples and trains on much longer answers and a smaller dataset; its
-# RL step time is extrapolated from the 16,384-token measurement, not measured.
+# (C++) task samples and trains on much longer answers and a smaller dataset. RL
+# steps took ~8 min on Orchard 8x H100 (job 163543: 3 steps, 32x8 rollouts, 32,768
+# cap, mean response ~16K); a 1-sample validation run took ~6 min (job 163561).
 TASK_EDITS = {
     "frontiercs": [
         ("max_tokens=16384", "max_tokens=32768"),
@@ -62,9 +63,13 @@ TASK_EDITS = {
             "an SFT trial on about 500 rows",
         ),
         (
+            "10 minutes for a validation evaluation",
+            "25 minutes for a validation evaluation (4 sampled answers per problem)",
+        ),
+        (
             "5 hours for an 80-step RL run (3-4 minutes per step)",
-            "more than 5 hours for an 80-step RL run (3-4 minutes per step were "
-            "measured with responses of up to 16,384 tokens; RL here allows 32,768)",
+            "11 hours for an 80-step RL run (about 8 minutes per step with this "
+            "task's responses, which average ~16K tokens)",
         ),
         (
             "about 240 thinking responses of up to 16,384 tokens (60 prompts, 4 "
@@ -72,6 +77,7 @@ TASK_EDITS = {
             "about 240 thinking responses of up to 32,768 tokens (60 prompts, 4 "
             "samples each) in roughly 15 minutes",
         ),
+        ("one GPU takes about 20 minutes", "one GPU takes roughly 40 minutes"),
     ],
 }
 

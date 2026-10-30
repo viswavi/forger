@@ -2,9 +2,11 @@
 """Evaluate C++ solutions to algorithmic problems through an OpenAI-compatible server.
 
 Write resumable predictions.jsonl and metrics.json with headline ``score``: the mean
-problem score (0-100), each problem judged on all its tests by judge.py, as the
-benchmark scores it. Secondary metrics appear under context. A row's ``id`` names
-its problem directory, problems/<id>/.
+problem score (0-100). Each problem gets --n-samples answers (default 4), each
+judged on all its tests by judge.py as the benchmark scores it, and scores their
+mean (Avg@n), since one sample per problem is too noisy at low scores. Secondary
+metrics appear under context. A row's ``id`` names its problem directory,
+problems/<id>/.
 
 Live mode queries concurrently, judges each answer as it arrives, and checkpoints
 every --checkpoint-every rows. --from-raw rejudges existing outputs by task ID
@@ -62,6 +64,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--top-k", type=int, default=20)
     p.add_argument("--min-p", type=float, default=0.0)
     p.add_argument("--max-connections", type=int, default=128)
+    p.add_argument(
+        "--n-samples",
+        type=int,
+        default=4,
+        help="Answers sampled per problem; a problem scores their mean (Avg@n).",
+    )
     p.add_argument(
         "--judge-processes",
         type=int,
@@ -153,10 +161,13 @@ def _clip(text: str, limit: int = 200) -> str:
     return text[:half] + " ... " + text[-half:]
 
 
-def _score_row(
-    row: dict, *, output: str | None, code: str, result: dict | None
+def _score_sample(
+    output: str | None,
+    code: str,
+    result: dict | None,
+    finish_reason: str | None = None,
 ) -> dict:
-    """One prediction row: the completion, its program, and the judge's verdict."""
+    """One sampled answer: the completion, its program, and the judge's verdict."""
     if not code or result is None:
         status, score, unbounded, passed, cases = "no_code", 0.0, 0.0, False, []
     else:
@@ -167,15 +178,14 @@ def _score_row(
     for c in cases:
         statuses[c["status"]] = statuses.get(c["status"], 0) + 1
     return {
-        "id": row["id"],
-        "type": row["type"],
-        "question": row["task_text"],
         "output": output,
         "code": code,
         "status": status,
         "score": score,
         "score_unbounded": unbounded,
         "passed": passed,
+        "finish_reason": finish_reason,
+        "truncated": finish_reason == "length",
         "n_cases": len(cases),
         "case_statuses": statuses,
         # One entry per test file, in judging order, e.g. {"test": "3.in",
@@ -193,6 +203,25 @@ def _score_row(
             }
             for c in cases
         ],
+    }
+
+
+def _score_row(row: dict, samples: list[dict]) -> dict:
+    """One prediction row: the problem's sampled answers and their mean score."""
+    scores = [s["score"] for s in samples]
+    return {
+        "id": row["id"],
+        "type": row["type"],
+        "question": row["task_text"],
+        "n_samples": len(samples),
+        "score": sum(scores) / len(scores) if scores else 0.0,
+        "best_score": max(scores, default=0.0),
+        "score_unbounded": (
+            sum(s["score_unbounded"] for s in samples) / len(samples)
+            if samples
+            else 0.0
+        ),
+        "samples": samples,
     }
 
 
@@ -239,8 +268,14 @@ async def generate_and_score_all(
                         max_tokens=args.max_tokens,
                         temperature=args.temperature,
                         top_p=args.top_p,
+                        n=args.n_samples,
                         extra_body=extra_body,
                     )
+                    if len(resp.choices) != args.n_samples:
+                        raise RuntimeError(
+                            f"server returned {len(resp.choices)} of "
+                            f"{args.n_samples} samples"
+                        )
                     break
                 except Exception as e:  # noqa: BLE001
                     if attempt == 3 or getattr(e, "status_code", None) in (
@@ -257,16 +292,21 @@ async def generate_and_score_all(
                             "Evaluation request exhausted retries"
                         ) from e
                     await asyncio.sleep(2 * (attempt + 1))
-        completion = resp.choices[0].message.content or ""
-        code = checkers.extract_code(completion)
-        result = (
-            await loop.run_in_executor(pool, judge_code, args.split, row["id"], code)
-            if code
-            else None
-        )
-        out = _score_row(row, output=completion, code=code, result=result)
-        out["finish_reason"] = resp.choices[0].finish_reason
-        out["truncated"] = resp.choices[0].finish_reason == "length"
+
+        async def judge_choice(choice) -> dict:
+            completion = choice.message.content or ""
+            code = checkers.extract_code(completion)
+            result = (
+                await loop.run_in_executor(
+                    pool, judge_code, args.split, row["id"], code
+                )
+                if code
+                else None
+            )
+            return _score_sample(completion, code, result, choice.finish_reason)
+
+        samples = await asyncio.gather(*(judge_choice(c) for c in resp.choices))
+        out = _score_row(row, list(samples))
         output_rows.append(out)
         pending.append(out)
         flush()
@@ -287,7 +327,7 @@ async def generate_and_score_all(
 
 
 def compute_metrics(graded_rows: list[dict]) -> dict:
-    """Score graded rows; the mean problem score is the headline."""
+    """Score graded rows; the headline is the mean problem score (Avg@n)."""
     # Numeric ids in numeric order, e.g. "9" before "10"; "val_000" ids in order.
     graded_rows = sorted(graded_rows, key=lambda row: (len(row["id"]), row["id"]))
     scores = [float(r["score"]) for r in graded_rows]
@@ -297,20 +337,27 @@ def compute_metrics(graded_rows: list[dict]) -> dict:
         values = [float(r["score"]) for r in graded_rows if r["type"] == kind]
         if values:
             by_type[kind] = {"n": len(values), "score": sum(values) / len(values)}
+    samples = [s for r in graded_rows for s in r["samples"]]
+    best = [float(r["best_score"]) for r in graded_rows]
+    first = [float(r["samples"][0]["score"]) for r in graded_rows if r["samples"]]
     unbounded = [float(r["score_unbounded"]) for r in graded_rows]
     return {
         "n_total": len(graded_rows),
-        "n_truncated": sum(bool(r.get("truncated")) for r in graded_rows),
-        "n_no_code": sum(r["status"] == "no_code" for r in graded_rows),
-        "n_compile_error": sum(r["status"] == "compile_error" for r in graded_rows),
-        # Headline: the benchmark compares models on the mean problem score.
+        "n_samples": len(samples),
+        "n_truncated": sum(bool(s.get("truncated")) for s in samples),
+        "n_no_code": sum(s["status"] == "no_code" for s in samples),
+        "n_compile_error": sum(s["status"] == "compile_error" for s in samples),
+        # Headline: each problem's score is the mean over its sampled answers, and
+        # the benchmark compares models on the mean problem score.
         "score": mean,
         "score_stderr": stderr,
         "context": {
+            "best_of_n": sum(best) / len(best) if best else 0.0,
+            "first_sample": sum(first) / len(first) if first else 0.0,
             "score_unbounded": sum(unbounded) / len(unbounded) if unbounded else 0.0,
             "n_zero": sum(s == 0 for s in scores),
             "n_at_least_60": sum(s >= 60 for s in scores),
-            "n_all_tests_full": sum(bool(r["passed"]) for r in graded_rows),
+            "n_all_tests_full": sum(bool(s["passed"]) for s in samples),
             "by_type": by_type,
         },
     }
@@ -330,7 +377,14 @@ def _write_outputs(
     if out_file:
         atomic_json(out_file, stamp_metrics(metrics, args, DATA_DIR))
         print(f">>> wrote metrics to {out_file}")
-    headline = ("score", "score_stderr", "n_total", "n_no_code", "n_truncated")
+    headline = (
+        "score",
+        "score_stderr",
+        "n_total",
+        "n_samples",
+        "n_no_code",
+        "n_truncated",
+    )
     print(json.dumps({k: metrics[k] for k in headline}, indent=2))
 
 
@@ -352,34 +406,42 @@ def run_merge(args: argparse.Namespace) -> None:
 
 
 def run_from_raw(args: argparse.Namespace) -> None:
-    """Rejudge saved outputs against split task IDs without querying the server."""
+    """Rejudge saved outputs against split task IDs without querying the server.
+
+    Rows with "samples" rejudge every sample; an older row's single "output" (or
+    "raw") counts as one sample. finish_reason / truncated are kept as saved.
+    """
     rows = load_tasks(args)
     entry_by_id = {r["id"]: r for r in checkers.read_jsonl(args.from_raw)}
-    jobs = []
-    for row in rows:
-        entry = entry_by_id.get(row["id"])
-        completion = None if entry is None else entry.get("output", entry.get("raw"))
-        jobs.append((row, completion, checkers.extract_code(completion)))
+    jobs = []  # (row index, completion, code, finish_reason)
+    for k, row in enumerate(rows):
+        entry = entry_by_id.get(row["id"]) or {}
+        saved = entry.get("samples") or [
+            {
+                "output": entry.get("output", entry.get("raw")),
+                "finish_reason": entry.get("finish_reason"),
+            }
+        ]
+        for s in saved:
+            completion = s.get("output")
+            jobs.append(
+                (
+                    k,
+                    completion,
+                    checkers.extract_code(completion),
+                    s.get("finish_reason"),
+                )
+            )
     with ProcessPoolExecutor(args.judge_processes) as pool:
         futures = [
-            pool.submit(judge_code, args.split, row["id"], code) if code else None
-            for row, _, code in jobs
+            pool.submit(judge_code, args.split, rows[k]["id"], code) if code else None
+            for k, _, code, _ in jobs
         ]
-        output_rows = [
-            _score_row(
-                row,
-                output=completion,
-                code=code,
-                result=f.result() if f is not None else None,
-            )
-            for (row, completion, code), f in zip(jobs, futures)
-        ]
-    # Keep what only generation knew, e.g. that an answer hit max_tokens.
-    for out in output_rows:
-        entry = entry_by_id.get(out["id"]) or {}
-        for key in ("finish_reason", "truncated"):
-            if key in entry:
-                out[key] = entry[key]
+        per_row: list[list[dict]] = [[] for _ in rows]
+        for (k, completion, code, finish), f in zip(jobs, futures):
+            result = f.result() if f is not None else None
+            per_row[k].append(_score_sample(completion, code, result, finish))
+    output_rows = [_score_row(row, samples) for row, samples in zip(rows, per_row)]
     n_missing = sum(1 for row in rows if row["id"] not in entry_by_id)
     if n_missing:
         print(
@@ -412,6 +474,10 @@ def main() -> None:
     if any(row["id"] not in expected_ids for row in done_rows):
         raise SystemExit(
             "Resume contains rows outside this shard; use a new output directory"
+        )
+    if any(r.get("n_samples") != args.n_samples for r in done_rows):
+        raise SystemExit(
+            "Saved predictions used a different --n-samples; use a new output directory"
         )
     done_ids = {r["id"] for r in done_rows}
     if done_ids:
