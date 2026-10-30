@@ -425,5 +425,5 @@ to sample the base student or its `tinker://` checkpoint on Tinker, where the `n
 only the solutions whose final answer matches the verified answer, and use each kept trace as a training target.
 `alter.self_taught_reasoner` implements exactly this: it returns one row per correct sample (a prompt with 0 correct
 samples drops out), with the student's reasoning trace and answer split into separate fields; for free-text answers,
-`answer_similarity=` keeps answers close to the reference in embedding space, which does not check a yes/no verdict
-(see `alter.md`). Tinker samples are charged to the Tinker dollar budget when one is configured (see `acquire.md`).
+`answer_judge=` has a model judge each answer against the reference (see `alter.md`). Tinker samples are charged to the
+Tinker dollar budget when one is configured (see `acquire.md`).
