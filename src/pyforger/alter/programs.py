@@ -209,6 +209,8 @@ def run_program(
 ) -> dict[str, Any]:
     """Run ``code`` once as a script with ``stdin``; return what happened.
 
+    Runs in a subprocess, unlike ``execute_code``, which runs in this process.
+
     Not an op: no caching, and safe to call from many threads at once.
 
     Returns:
@@ -578,6 +580,8 @@ def run_programs(
     compile_command: list[str] | None = None,
 ) -> list[dict]:
     r"""Run each row's stdin/stdout program on each of its tests.
+
+    Runs each program in a subprocess, unlike ``execute_code`` (in this process).
 
     Every row gets ``result_field``: one result per test, in test order, e.g.
     ``{"status": "wrong_answer", "passed": False, "score": 0.0, "exit_code":

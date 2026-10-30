@@ -19,6 +19,8 @@ def execute_code(
 ) -> list[dict]:
     """Compile each item's code and call it with ``arg_field``'s value.
 
+    Runs in this process, unlike ``run_programs``, which runs programs in subprocesses.
+
     The Sandbox caches by source string, so a snippet reused across items
     pays compile cost once. Exceptions land in ``error_field`` (set to
     ``None`` to omit) rather than raising, so one bad row doesn't kill
