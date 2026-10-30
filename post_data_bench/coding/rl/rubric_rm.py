@@ -135,26 +135,60 @@ _WORKER_ENV = {
 _HEALTHY_WORKER: list[bool] = []  # [True] once a trivial criterion has run
 
 
+WORKER_TIMEOUT_S = 30  # rubric_worker.GRADE_TIMEOUT_S plus startup
+
+
 def _run_worker(payload):
-    """Run rubric_worker.py on one JSON payload; None when it times out."""
-    with tempfile.TemporaryDirectory(prefix="rubric-") as directory:
-        try:
-            return subprocess.run(
-                [
-                    sys.executable,
-                    "-I",
-                    str(Path(__file__).with_name("rubric_worker.py")),
-                ],
-                input=payload,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                cwd=directory,
-                env=_WORKER_ENV,
-                timeout=30,  # rubric_worker.GRADE_TIMEOUT_S plus startup
-            )
-        except subprocess.TimeoutExpired:
-            return None
+    """Run rubric_worker.py on one JSON payload; None when it times out.
+
+    grade()'s judge_cpp calls come back to this process over two pipes and are
+    judged here (cpp_judge.JudgeChannel): the worker's own limits cannot fork
+    or write files. Judging never outlives the worker. The result's
+    ``judge_error`` says why judging itself failed (e.g. no g++), else None.
+    """
+    from .cpp_judge import JudgeChannel  # noqa: ABS101
+
+    requests_r, requests_w = os.pipe()
+    replies_r, replies_w = os.pipe()
+    channel = None
+    try:
+        with tempfile.TemporaryDirectory(prefix="rubric-") as directory:
+            try:
+                proc = subprocess.Popen(
+                    [
+                        sys.executable,
+                        "-I",
+                        str(Path(__file__).with_name("rubric_worker.py")),
+                        "--judge-fds",
+                        f"{requests_w},{replies_r}",
+                    ],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    cwd=directory,
+                    env=_WORKER_ENV,
+                    pass_fds=(requests_w, replies_r),
+                )
+            finally:
+                os.close(requests_w)  # the worker holds the only copies now
+                os.close(replies_r)
+            channel = JudgeChannel(requests_r, replies_w, WORKER_TIMEOUT_S)
+            try:
+                stdout, stderr = proc.communicate(payload, timeout=WORKER_TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.communicate()
+                return None
+    finally:
+        if channel is not None:
+            channel.close()
+        else:
+            os.close(requests_r)
+            os.close(replies_w)
+    result = subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
+    result.judge_error = channel.failure  # type: ignore[attr-defined]
+    return result
 
 
 def _worker_healthy():
@@ -187,6 +221,9 @@ def code_score(code, prompt, response, ground_truth):
     result = _run_worker(payload)
     if result is None:
         return 0.0
+    if getattr(result, "judge_error", None):
+        # e.g. no g++ on this node: every response would score 0.
+        raise RuntimeError(f"judge_cpp cannot judge: {result.judge_error}")
     if result.returncode:
         # Resource-limit termination is a failed criterion, and so is a crash a
         # trivial criterion does not reproduce (the response's code took the

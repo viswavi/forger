@@ -574,6 +574,7 @@ if args.training_mode == "sft-rl":
         f"rl/{name}"
         for name in (
             "agent_training.py",
+            "cpp_judge.py",
             "rubric_data.py",
             "rubric_rm.py",
             "rubric_worker.py",
@@ -582,6 +583,9 @@ if args.training_mode == "sft-rl":
             "solution_worker.py",
             "tinker_budget.py",
             "tinker_training.py",
+            # judge_cpp compiles checkers and interactors against these.
+            "testlib/testlib.h",
+            "testlib/LICENSE",
         )
     ]
 
