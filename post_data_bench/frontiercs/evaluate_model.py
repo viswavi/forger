@@ -138,7 +138,9 @@ def judge_code(split: str, problem_id: str, code: str) -> dict:
         root / "problems" / problem_id,
         code,
         testlib_dir=DATA_DIR / "testlib",
-        cache_dir=root / ".judge_cache",
+        # The benchmark is mounted read-only for host and sandbox evaluation, so
+        # compiled checkers go to a private writable cache instead.
+        cache_dir=judge.default_cache_dir(),
         workers=4,
     )
 

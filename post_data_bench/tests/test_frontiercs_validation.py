@@ -188,6 +188,53 @@ class FrontierValidationTests(unittest.TestCase):
             [json.loads(p)["id"] for p in predictions], ["val_000", "val_001"]
         )
 
+    @unittest.skipUnless(
+        shutil.which("g++") and sys.platform.startswith("linux") and HAS_YAML,
+        "needs g++ on Linux and PyYAML",
+    )
+    def test_copy_judges_programs_from_a_read_only_mount(self):
+        """Hosts mount the benchmark read-only: compiled judges go elsewhere."""
+        self.copy()
+        raw = Path(self.tmp.name) / "raw.jsonl"
+        program = '#include <cstdio>\nint main(){puts("3");}'
+        raw.write_text(
+            json.dumps(
+                {"id": "val_000", "output": f"<think>r</think>```cpp\n{program}\n```"}
+            )
+            + "\n"
+        )
+        out = Path(self.tmp.name) / "out"
+        subprocess.run(["chmod", "-R", "a-w", str(self.dest)], check=True)
+        self.addCleanup(subprocess.run, ["chmod", "-R", "u+w", str(self.dest)])
+        env = {
+            **os.environ,
+            "PYTHONPATH": "",
+            "PDB_BENCHMARK_DIR": str(self.dest),
+            "CPP_JUDGE_CACHE_DIR": str(Path(self.tmp.name) / "cache"),
+        }
+        (Path(self.tmp.name) / "cache").mkdir(mode=0o700)
+        result = subprocess.run(
+            [
+                sys.executable,
+                "evaluate_model.py",
+                "--split",
+                "val",
+                "--from-raw",
+                str(raw),
+                "--log-dir",
+                str(out),
+                "--limit",
+                "1",
+            ],
+            cwd=self.dest,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+        row = json.loads((out / "predictions.jsonl").read_text().splitlines()[0])
+        self.assertEqual((row["status"], row["score"]), ("done", 100.0))
+
     def test_launcher_remaps_baseline_and_writes_signatures(self):
         """Baseline rows get val ids without problem_id; signatures hold no text."""
         tree = ast.parse((ROOT / "launch_agent.py").read_text())
