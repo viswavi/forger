@@ -410,6 +410,13 @@ with each rubric item as a separate judge to filter for high-quality outputs tha
 multiple "expert" models (e.g. multiple calls of "gemini-3.5" with slightly different
 prompts or another strong model). Then choose only the rows where the expert models agree with each other (answer is
 likely correct) but disagree with the non-expert model (input is not too easy).
+- **Programming problems checked by execution:** Write or generate each problem with a reference solution and a
+slower brute-force one (Python or C++, `language="cpp"`). Generate inputs with test-generator programs: a test with
+`"args"` and no `"output"` runs the generator and records its stdout (`alter.run_programs`, `max_chars=None`). Run
+the brute force on small inputs to get expected outputs, and keep problems whose reference agrees with it
+(`filter.by_tests`). For problems with no single right output (optimization, many valid answers), score outputs with
+a checker program instead (`testlib_checker`, partial scores). `filter.by_pass_at_k` with
+`filter.program_verifier(..., language="cpp")` then measures how often the student solves each problem.
 - **Back-translation:** First retrieve or generate outputs (e.g. math proofs) and then "back-translate" a suitable
 input that could have produced that output (e.g. an English description of a math problem). This can be done with two
 separate `@op`-decorated functions, one for the forward direction and one for the backward direction.
