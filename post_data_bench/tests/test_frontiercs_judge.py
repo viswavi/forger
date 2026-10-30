@@ -128,6 +128,7 @@ class JudgeTests(unittest.TestCase):
         """Configured tests and extra testdata pairs all count."""
         result = self.run_judge(self.sum, SUM)
         self.assertEqual(len(result["cases"]), 3)
+        self.assertEqual([c["test"] for c in result["cases"]], ["1.in", "2.in", "3.in"])
         self.assertEqual(result["score"], 100.0)
         self.assertTrue(result["passed"])
 

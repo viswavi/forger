@@ -767,6 +767,8 @@ def judge(
                     lambda c: run(problem, c, binary, judge_bin, launch), problem.cases
                 )
             )
+    for case, result in zip(problem.cases, cases):
+        result["test"] = case.input  # e.g. "3.in", next to its answer in testdata/
     n = len(cases)
     return {
         "status": "done",

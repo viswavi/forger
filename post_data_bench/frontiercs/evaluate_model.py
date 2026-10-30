@@ -168,7 +168,20 @@ def _score_row(
         "passed": passed,
         "n_cases": len(cases),
         "case_statuses": statuses,
-        "case_ratios": [round(c["ratio"], 6) for c in cases],
+        # One entry per test file, in judging order, e.g. {"test": "3.in",
+        # "status": "Wrong Answer", "ratio": 0.42, "time": 0.31, "msg": "points
+        # Ratio: 0.42 ..."}: msg is the start of the checker's or interactor's
+        # message, or of the program's stderr when the run itself failed.
+        "cases": [
+            {
+                "test": c.get("test"),
+                "status": c["status"],
+                "ratio": round(c["ratio"], 6),
+                "time": c["time"],
+                "msg": (c.get("msg") or "")[:200],
+            }
+            for c in cases
+        ],
     }
 
 
