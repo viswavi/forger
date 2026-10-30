@@ -85,6 +85,7 @@ class Run:
     exit_status: int
     cpu_s: float
     memory: int
+    note: str = ""  # e.g. "killed at the 2 s wall-clock limit after 0.04 s of CPU"
     stdout: bytes = b""
     stderr: bytes = b""
 
@@ -202,19 +203,30 @@ def _answer_path(pdir: Path, case: Case) -> Path:
 # would inherit the worker's peak and look like it used that much memory.
 _LAUNCHER_SOURCE = r"""
 #include <errno.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/resource.h>
+#include <sys/time.h>
 #include <sys/wait.h>
 #include <unistd.h>
-/* fcs_run REPORT CPU_S AS STACK FSIZE PROG ARGS... */
+/* fcs_run REPORT CPU_S AS STACK FSIZE WALL_MS PROG ARGS...
+   At WALL_MS of wall-clock time the program is killed, and its usage is still
+   reported, so a program stuck waiting is told apart from a slow one. */
+static volatile pid_t child = 0;
+static volatile sig_atomic_t walled = 0;
+static void on_alarm(int sig) {
+    (void)sig;
+    walled = 1;
+    if (child > 0) kill(child, SIGKILL);
+}
 static void lim(int what, long long v) {
     if (v <= 0) return;
     struct rlimit r = {(rlim_t)v, (rlim_t)v};
     setrlimit(what, &r);
 }
 int main(int argc, char** argv) {
-    if (argc < 7) return 2;
+    if (argc < 8) return 2;
     pid_t pid = fork();
     if (pid < 0) return 3;
     if (pid == 0) {
@@ -224,20 +236,28 @@ int main(int argc, char** argv) {
         lim(RLIMIT_AS, atoll(argv[3]));
         lim(RLIMIT_STACK, atoll(argv[4]));
         lim(RLIMIT_FSIZE, atoll(argv[5]));
-        execvp(argv[6], argv + 6);
+        execvp(argv[7], argv + 7);
         _exit(127);
     }
+    child = pid;
+    struct sigaction sa = {0};
+    sa.sa_handler = on_alarm;
+    sigaction(SIGALRM, &sa, NULL);
+    long long ms = atoll(argv[6]);
+    struct itimerval wall = {
+        {0, 0}, {(time_t)(ms / 1000), (suseconds_t)(ms % 1000) * 1000}};
+    if (ms > 0) setitimer(ITIMER_REAL, &wall, NULL);
     int st = 0;
     struct rusage ru;
     while (wait4(pid, &st, 0, &ru) < 0)
         if (errno != EINTR) return 4;
     FILE* f = fopen(argv[1], "w");
     if (!f) return 5;
-    fprintf(f, "%.6f %ld %d %d\n",
+    fprintf(f, "%.6f %ld %d %d %d\n",
             ru.ru_utime.tv_sec + ru.ru_stime.tv_sec
                 + (ru.ru_utime.tv_usec + ru.ru_stime.tv_usec) / 1e6,
             ru.ru_maxrss, WIFEXITED(st) ? WEXITSTATUS(st) : 0,
-            WIFSIGNALED(st) ? WTERMSIG(st) : 0);
+            WIFSIGNALED(st) ? WTERMSIG(st) : 0, (int)walled);
     fclose(f);
     return 0;
 }
@@ -352,6 +372,7 @@ class _Process:
                 raise Cancelled("judging deadline passed")
         self.deadline = deadline
         self.cpu_limit = cpu_s
+        self.wall_s = wall_s
         self.memory = memory
         self.killed_for_wall = False
         self.report = tempfile.NamedTemporaryFile(prefix="fcs-run-", delete=False)
@@ -364,6 +385,7 @@ class _Process:
                 str(memory if address_space else SAFETY_ADDRESS_SPACE),
                 str(memory),
                 str(STDOUT_MAX * 2),
+                str(max(1, round(wall_s * 1000))),  # the launcher's wall clock
                 *args,
             ],
             cwd=cwd,
@@ -406,7 +428,8 @@ class _Process:
             )
         for reader in self.readers:
             reader.start()
-        self.timer = threading.Timer(wall_s, self._kill_for_wall)
+        # Backstop only: the launcher enforces wall_s and still reports usage.
+        self.timer = threading.Timer(wall_s + 5, self._kill_for_wall)
         self.timer.start()
 
     def _kill_for_wall(self) -> None:
@@ -430,11 +453,19 @@ class _Process:
         report = Path(self.report.name)
         fields = report.read_text().split() if report.exists() else []
         report.unlink(missing_ok=True)
-        if len(fields) == 4:
+        note = ""
+        if len(fields) == 5:
             cpu, memory = float(fields[0]), int(fields[1]) * 1024
             code = -int(fields[3]) if int(fields[3]) else int(fields[2])
-        else:  # killed before the launcher could report (wall clock)
+            if int(fields[4]):
+                self.killed_for_wall = True
+                note = (
+                    f"killed at the {self.wall_s:g} s wall-clock limit after "
+                    f"{cpu:.2f} s of CPU"
+                )
+        else:  # killed before the launcher could report (backstop or budget)
             cpu, memory, code = self.cpu_limit, 0, -signal.SIGKILL
+            note = "killed before its CPU time could be measured"
         if (
             cpu > self.cpu_limit
             or self.killed_for_wall
@@ -456,6 +487,7 @@ class _Process:
             exit_status=code,
             cpu_s=cpu,
             memory=memory,
+            note=note,
             stdout=b"".join(self.stdout_chunks),
             stderr=b"".join(self.stderr_chunks),
         )
@@ -616,6 +648,7 @@ def judge_case(
             ).wait()
         if run.status != "Accepted":
             extra = f" (signal={-run.exit_status})" if run.status == "Signalled" else ""
+            extra += f" ({run.note})" if run.note else ""
             msg = run.stderr.decode(errors="replace") + extra
             return _case_result(False, run.status, run, msg, "")
         if checker is None:
@@ -715,6 +748,7 @@ def judge_interactive_case(
     if sub.status != "Accepted":
         # The run itself failed: no credit, whatever either side printed.
         extra = f" (signal={-sub.exit_status})" if sub.status == "Signalled" else ""
+        extra += f" ({sub.note})" if sub.note else ""
         msg = sub.stderr.decode(errors="replace") + extra
         result = _case_result(False, sub.status, sub, msg, "")
         result[

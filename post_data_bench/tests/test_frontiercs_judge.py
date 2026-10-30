@@ -193,6 +193,19 @@ class JudgeTests(unittest.TestCase):
         result = self.run_judge(self.inter, stuck)
         self.assertEqual(result["score"], 0.0)
         self.assertIn("Time Limit Exceeded", {c["status"] for c in result["cases"]})
+        stuck_case = next(
+            c for c in result["cases"] if c["status"] == "Time Limit Exceeded"
+        )
+        # Measured, not a placeholder: almost no CPU, and the message says why.
+        self.assertLess(stuck_case["time"], 0.5)
+        self.assertIn("wall-clock limit after", stuck_case["msg"])
+
+    def test_a_cpu_bound_time_limit_reports_its_cpu_time(self):
+        """A busy program is stopped by its CPU limit, with no wall-clock note."""
+        spin = "int main(){volatile long x=0;for(;;)x++;}"
+        case = self.run_judge(self.sum, spin)["cases"][0]
+        self.assertEqual(case["status"], "Time Limit Exceeded")
+        self.assertGreater(case["time"], 1.0)
 
 
 class LimitsAndExtractionTests(unittest.TestCase):

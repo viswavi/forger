@@ -143,6 +143,14 @@ def judge_code(split: str, problem_id: str, code: str) -> dict:
     )
 
 
+def _clip(text: str, limit: int = 200) -> str:
+    """Keep a message's start and end: verdicts lead, timing notes trail."""
+    if len(text) <= limit:
+        return text
+    half = (limit - 5) // 2
+    return text[:half] + " ... " + text[-half:]
+
+
 def _score_row(
     row: dict, *, output: str | None, code: str, result: dict | None
 ) -> dict:
@@ -170,15 +178,16 @@ def _score_row(
         "case_statuses": statuses,
         # One entry per test file, in judging order, e.g. {"test": "3.in",
         # "status": "Wrong Answer", "ratio": 0.42, "time": 0.31, "msg": "points
-        # Ratio: 0.42 ..."}: msg is the start of the checker's or interactor's
-        # message, or of the program's stderr when the run itself failed.
+        # Ratio: 0.42 ..."}: msg is the checker's or interactor's message, or the
+        # program's stderr plus e.g. "(killed at the 2 s wall-clock limit after
+        # 0.04 s of CPU)" when the run itself failed; long ones keep both ends.
         "cases": [
             {
                 "test": c.get("test"),
                 "status": c["status"],
                 "ratio": round(c["ratio"], 6),
                 "time": c["time"],
-                "msg": (c.get("msg") or "")[:200],
+                "msg": _clip(c.get("msg") or ""),
             }
             for c in cases
         ],
