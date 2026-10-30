@@ -203,8 +203,8 @@ Each completion is graded on what `extract_answer` takes from it. The default,
 `pyforger.filter.model_difficulty.answer_segment`, is the text after the completion's closed `<think>` block, stripped
 of surrounding whitespace. `metric` is `"exact_match"` (normalized equality with the reference), `"rouge_l"` (F1 at
 least `rouge_l_threshold`), or a verifier `(prediction, row) -> bool | None`, e.g. `filter.program_verifier("tests")`,
-which runs generated programs on the row's tests (see
-[Running programs against tests](alter.md#running-programs-against-tests)).
+which runs generated programs on the row's tests (`language="cpp"` for C++; `min_score=` to grade by a partial-credit
+checker's mean score; see [Running programs against tests](alter.md#running-programs-against-tests)).
 `ground_truth_field` is needed only for `exact_match` and `rouge_l`; a verifier reads the row itself. Verifiers run
 `verifier_workers` (default 8) calls at a time, so one must be safe to call from several threads. It is part of the
 cache key, since a verifier with wall-clock timeouts (e.g. `program_verifier`) can grade differently under load.

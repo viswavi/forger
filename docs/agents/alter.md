@@ -80,6 +80,10 @@ rows = self_taught_reasoner(problems, solver_prompt, student, n=8,
                             verifier=filter.program_verifier("tests"))
 ```
 
+For C++ answers, use `filter.program_verifier("tests", language="cpp")`. When tests give partial credit (a `checker`
+that returns a score, e.g. `testlib_checker`), `min_score=` keeps responses whose mean test score reaches it; see
+[Running programs against tests](#running-programs-against-tests).
+
 When the answer is free text (an explanation, a cultural norm, a verdict with its reasons), no sample equals the
 reference word for word. Pass `answer_judge=`, a model that judges each answer: it sees the question (the student's
 prompt), the reference, and the student's answer (`answer_field`, the response after its reasoning, or
