@@ -10,6 +10,10 @@ problem directories (statement, config.yaml, checker or interactor, testdata/):
     .hidden/test_tasks.jsonl          .hidden/problems/<id>/
     testlib/testlib.h                 problem_files.json (sha256 of every copied file)
 
+Statements are masked so they do not name the contest site they came from (see
+mask_source): agents read the validation statements, and the site's contest pages
+would point them at the test problems and their published solutions.
+
 prompt_building.SYSTEM_PROMPT is FrontierCS's CPP_SYSTEM_PROMPT (algorithmic/scripts/
 generate_solutions.py), and checkers.extract_code its extract_cpp_code rule; those
 modules do not name FrontierCS because agent sandboxes get copies of them.
@@ -22,6 +26,7 @@ import argparse
 import hashlib
 import json
 import random
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -46,10 +51,32 @@ def _problem_ids(problems_root: Path) -> list[str]:
     )
 
 
+# Lines that only link to the site's pages, tools, or social-media threads.
+_SOURCE_LINE = re.compile(r"atcoder\.jp|twitter", re.IGNORECASE)
+# What may not survive masking: the site, its contest ids, social media.
+_SOURCE_TRACE = re.compile(r"atcoder|\bahc\d|twitter", re.IGNORECASE)
+MASKED_NAME = "Algoria"
+
+
+def mask_source(statement: str) -> str:
+    """The statement without its source site, e.g. "AtCoder's CEO" -> "Algoria's CEO".
+
+    Lines linking to the site (visualizers, tool downloads, example pages) or to
+    social media are dropped; they are of no use to a model without a browser.
+    """
+    lines = [line for line in statement.split("\n") if not _SOURCE_LINE.search(line)]
+    masked = re.sub(r"AtCoder", MASKED_NAME, "\n".join(lines), flags=re.IGNORECASE)
+    if _SOURCE_TRACE.search(masked):
+        raise ValueError(
+            f"source trace survives masking: {_SOURCE_TRACE.search(masked)}"
+        )
+    return masked
+
+
 def _task_row(pdir: Path) -> dict:
-    """One task row: the statement, its prompt text, and judging facts."""
+    """One task row: the (masked) statement, its prompt text, and judging facts."""
     problem = judge.load_problem(pdir)
-    statement = (pdir / "statement.txt").read_text()
+    statement = mask_source((pdir / "statement.txt").read_text())
     return {
         "id": pdir.name,
         "problem_id": pdir.name,
@@ -64,9 +91,11 @@ def _copy_problem(src: Path, dst: Path) -> None:
     """Copy the files judging needs: statement, config, checker/interactor, tests."""
     problem = judge.load_problem(src)
     dst.mkdir(parents=True)
-    names = ["statement.txt", "config.yaml", problem.interactor or problem.checker]
+    names = ["config.yaml", problem.interactor or problem.checker]
     for name in names:
         shutil.copy(src / name, dst / name)
+    statement = mask_source((src / "statement.txt").read_text())
+    (dst / "statement.txt").write_text(statement)
     shutil.copytree(src / "testdata", dst / "testdata")
 
 
