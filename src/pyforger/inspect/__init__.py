@@ -8,6 +8,7 @@ from pyforger.inspect.likelihood import (
     student_log_likelihood,
 )
 from pyforger.inspect.phrases import PhraseReport, phrase_frequency
+from pyforger.inspect.reference import ReferenceReport, compare_to_reference
 from pyforger.inspect.report import inspect_step
 from pyforger.inspect.runs import runs
 from pyforger.inspect.scores import RubricScoreReport, rubric_scores
@@ -18,10 +19,12 @@ __all__ = [
     "LikelihoodReport",
     "RowLikelihood",
     "PhraseReport",
+    "ReferenceReport",
     "RubricScoreReport",
     "SpendReport",
     "SpendTotal",
     "embedding_dispersion",
+    "compare_to_reference",
     "eval_tree",
     "inspect_step",
     "phrase_frequency",
