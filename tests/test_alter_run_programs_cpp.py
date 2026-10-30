@@ -10,8 +10,8 @@ from pyforger.alter import run_programs
 from pyforger.alter.programs import (
     compile_program,
     last_code_block,
+    program_checker,
     run_tests,
-    testlib_checker,
 )
 from pyforger.filter import by_tests, program_verifier
 
@@ -130,9 +130,9 @@ class TestScores:
         ]
         assert seen == ["1 2\n", "2 2\n"]
 
-    def test_testlib_checker(self):
+    def test_program_checker(self):
         """Ratio on _points, 1 on _ok, 0 on _wa."""
-        checker = testlib_checker(CHECKER)
+        checker = program_checker(CHECKER)
         rows = run_programs(
             [
                 {"code": OFF_BY.format(d), "tests": [{"input": "5 5", "output": "10"}]}
@@ -146,14 +146,30 @@ class TestScores:
         scores = [row["test_results"][0]["score"] for row in rows]
         assert scores == [1.0, 0.5, 0.0]
 
+    def test_python_checker(self):
+        """The same convention in Python: the exit code and a printed Ratio."""
+        source = (
+            "import sys\n"
+            "want, got = (int(open(p).read()) for p in sys.argv[3:1:-1])\n"
+            "print(f'Ratio: {got / want}')\n"
+            "sys.exit(0 if got == want else 7 if got < want else 1)\n"
+        )
+        results = run_tests(
+            ADD,
+            [{"input": "5 5", "output": "20"}],
+            checker=program_checker(source, "py"),
+            language="cpp",
+        )
+        assert results[0]["score"] == 0.5
+
     def test_broken_checker_raises(self):
         """A checker that does not compile is an error, not a zero score."""
         with pytest.raises(RuntimeError, match="does not compile"):
-            run_tests(ADD, TESTS[:1], checker=testlib_checker(BROKEN), language="cpp")
+            run_tests(ADD, TESTS[:1], checker=program_checker(BROKEN), language="cpp")
 
     def test_by_tests_uses_the_mean_score(self):
         """A row scoring 1 and 0.5 has pass rate 0.75."""
-        checker = testlib_checker(CHECKER)
+        checker = program_checker(CHECKER)
         tests = [{"input": "5 5", "output": "10"}, {"input": "4 4", "output": "8"}]
         rows = [{"code": OFF_BY.format(d), "tests": tests} for d in (0, 4)]
         kept = by_tests(
@@ -181,7 +197,7 @@ class TestProgramVerifier:
 
     def test_min_score(self):
         """Below 1, the mean score over every test decides."""
-        checker = testlib_checker(CHECKER)
+        checker = program_checker(CHECKER)
         row = {
             "tests": [{"input": "5 5", "output": "10"}, {"input": "4 4", "output": "8"}]
         }
@@ -197,6 +213,17 @@ class TestProgramVerifier:
         """Python verifiers keep their cache keys (no language entries)."""
         key = program_verifier().cache_key()
         assert "language" not in str(key) and "min_score" not in str(key)
+
+
+def test_py_is_python():
+    """Language "py" runs Python, as "python" does."""
+    rows = run_programs(
+        [{"code": "print(int(input()) * 2)", "tests": [{"input": "4", "output": "8"}]}],
+        code_field="code",
+        language="py",
+        _no_cache=True,
+    )
+    assert rows[0]["test_results"][0]["passed"] is True
 
 
 def test_last_code_block_by_language():

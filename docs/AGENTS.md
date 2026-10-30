@@ -153,7 +153,7 @@ The detailed reference is split by topic under `docs/agents/`; read the file for
 - [`docs/agents/acquire.md`](agents/acquire.md): Generation with `sample_from_LLM`, `TinkerModel` student sampling,
   retrieval, rubric generation.
 - [`docs/agents/alter.md`](agents/alter.md): Row transforms: `generate_from_context`, translation, code execution,
-  running Python or C++ programs against tests (partial scores, testlib checkers), STaR.
+  running Python or C++ programs against tests (partial scores, checker programs), STaR.
 - [`docs/agents/filter.md`](agents/filter.md): Quality and diversity filters, including the LLM judge, `by_predicate`,
   `by_tests`, the difficulty filters, `by_embedding_similarity`, and `by_topic_frequency`.
 - [`docs/agents/inspect.md`](agents/inspect.md): Reports on rows: `topic_based_clustering`, `eval_tree`,
