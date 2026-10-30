@@ -159,7 +159,7 @@ LocalModel(
     enable_thinking: bool = True,
     chat_template_kwargs: dict[str, Any] | None = None,
     seed: int = 0,
-    show_progress: bool = False,
+    show_progress: bool | None = None,
     **engine_kwargs: Any,
 )
 ```

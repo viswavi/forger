@@ -82,12 +82,18 @@ def token_batches(lengths: list[int], budget: int) -> list[list[int]]:
 
 
 def encode_in_token_batches(
-    encoder: Any, texts: list[str], *, batch_tokens: int, **encode_kwargs: Any
+    encoder: Any,
+    texts: list[str],
+    *,
+    batch_tokens: int,
+    on_batch: Any = None,
+    **encode_kwargs: Any,
 ) -> Any:
     """`encoder.encode(texts, **encode_kwargs)` in token-budgeted batches, in order.
 
     Returns an array of shape ``(len(texts), dim)``; `encode_kwargs` should ask
-    for numpy (``convert_to_numpy=True``).
+    for numpy (``convert_to_numpy=True``). `on_batch(n)` runs after each batch
+    of `n` texts.
     """
     import numpy as np
 
@@ -106,6 +112,8 @@ def encode_in_token_batches(
         if embeddings is None:
             embeddings = np.empty((len(texts), *vectors.shape[1:]), vectors.dtype)
         embeddings[batch] = vectors
+        if on_batch is not None:
+            on_batch(len(batch))
     return embeddings
 
 
@@ -120,7 +128,14 @@ def serve(conn: Any) -> None:
         from sentence_transformers import SentenceTransformer
 
         encoder = SentenceTransformer(model_id)
-        conn.send(("ok", encode_in_token_batches(encoder, texts, **encode_kwargs)))
+
+        def report(n: int) -> None:
+            conn.send(("progress", n))
+
+        vectors = encode_in_token_batches(
+            encoder, texts, on_batch=report, **encode_kwargs
+        )
+        conn.send(("ok", vectors))
     except BaseException:  # report any failure to the parent, then exit
         conn.send(("error", traceback.format_exc()))
 
@@ -162,15 +177,18 @@ class EmbedProcess:
         except OSError:  # e.g. BrokenPipeError: the worker died while starting
             raise self._exited() from None
 
-    def result(self) -> Any:
-        """The shard's embeddings; a worker error or exit raises RuntimeError."""
+    def message(self) -> tuple[str, Any]:
+        """The worker's next message: ``("progress", n)`` or ``("ok", embeddings)``.
+
+        A worker error or exit raises RuntimeError.
+        """
         try:
             status, payload = self.connection.recv()
         except EOFError:
             raise self._exited() from None
         if status == "error":
             raise RuntimeError(f"embedding worker on GPU {self.gpu} failed:\n{payload}")
-        return payload
+        return status, payload
 
     def close(self) -> None:
         """Stop the worker, if it is still running, and free its GPU."""
@@ -189,6 +207,7 @@ def encode(
     model_id: str,
     gpus: list[str],
     encode_kwargs: dict[str, Any],
+    progress: Any = None,
 ) -> Any:
     """Embed `texts` with `model_id`, one worker per GPU in `gpus`, in input order.
 
@@ -215,8 +234,14 @@ def encode(
         pending = {worker.connection: (indices, worker) for indices, worker in workers}
         while pending:
             for connection in wait(list(pending)):
-                indices, worker = pending.pop(connection)  # type: ignore[arg-type]
-                vectors = np.asarray(worker.result())
+                indices, worker = pending[connection]  # type: ignore[index]
+                status, payload = worker.message()
+                if status == "progress":
+                    if progress is not None:
+                        progress.update(payload)
+                    continue
+                del pending[connection]  # type: ignore[arg-type]
+                vectors = np.asarray(payload)
                 if embeddings is None:
                     shape = (len(texts), *vectors.shape[1:])
                     embeddings = np.empty(shape, vectors.dtype)
