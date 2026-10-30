@@ -64,8 +64,6 @@ question, the reference, and the student's answer (not its reasoning), and a sam
 same verdict, values, and facts as the reference; wording does not matter). Any `Model` works, e.g. a `LocalModel` on
 your own GPUs or an API model. Kept rows keep their reference. It cannot be combined with `match_fn`, `verifier`, or
 `filter_fn`. Samples and the judge's replies are cached apart, so trying another judge samples nothing.
-On 62 hand-written clear-cut cases (rewordings, subtly wrong facts, flipped yes/no verdicts, off-topic answers),
-Qwen3-4B (thinking off), Qwen3-8B, and Qwen3-32B judged every one correctly; borderline answers were not tested.
 
 STaR's output is limited by the abilities of the student model. If the model never solves a task in `n` samples,
 that task will be completely omitted. A behavior it never shows is never learned. Two remedies:
