@@ -18,7 +18,7 @@ Remove rows by criterion. If a filter empties the list, downstream operations re
 | `by_judged_difficulty` | LLM judge rates each task's difficulty from 1 to 5; keeps rows within a range. |
 | `by_syntax` | Validate JSON, YAML, Python, or XML, optionally against required keys or a JSON schema. |
 | `by_predicate` | Keep rows where `fn(row)` is truthy: a plain Python check that shows in the step report. Not cached. |
-| `by_tests` | Run each row's stdin/stdout program on its tests; keep rows passing at least `min_pass_rate`. |
+| `by_tests` | Run each row's Python or C++ program on its tests; keep rows passing at least `min_pass_rate`. |
 | `by_comparative_difficulty` | Keep rows a strong model answers correctly and a weak model does not. |
 | `by_pass_at_k` | Sample `k` answers per row; keep rows whose pass rate is within `[min_rate, max_rate]`. |
 | `program_verifier` | Not an op: a `metric` for the difficulty filters that runs sampled programs on the row's tests. |

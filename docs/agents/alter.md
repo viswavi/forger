@@ -8,7 +8,7 @@ Transform rows without removing items.
 | `translate.to_language` | LLM translation of selected fields into a target natural language. |
 | `translate.to_code` | LLM conversion of fields into code in a target programming language. Strips markdown fences. |
 | `execute_code` | Call the last function in each row's code with one argument, in-process (RestrictedPython). |
-| `run_programs` | Run each row's stdin/stdout program on its tests in subprocesses; record per-test results. |
+| `run_programs` | Run each row's Python or C++ program on its tests in subprocesses; record per-test results. |
 | `dynamic_step` | Run dynamic input-specific sub-pipelines that return a string list per input. |
 | `dynamic_step_source` | Generate or inspect sub-pipeline generated for a single input. |
 
@@ -105,14 +105,33 @@ row's program on each of its tests and records what happened. A test is a dict: 
 solution's answers as expected outputs (pass `max_chars=None` to keep whole outputs). `"args"` gives command-line
 arguments (e.g. `["7", "small"]` for a test generator) and `"timeout_s"` overrides the op's timeout for that test.
 
-Each row gets `test_results` (`result_field`), one result per test: `{"status", "passed", "exit_code", "timed_out",
-"stdout", "stderr", "seconds"}`. `status` is `"ok"`, `"wrong_answer"`, `"runtime_error"` (non-zero exit or a signal;
-running out of memory usually shows up here as a `MemoryError`), `"timeout"`, or `"output_limit"` (see below).
-`passed` is `True`, `False`, or `None` for an ungraded test. A test whose `"input"` is missing or `None` gets empty
-stdin. Output is compared with
-`outputs_match`, equality up to whitespace (`"1 2\n3"` matches `"1 2 3"`); pass `checker=(stdout, expected) -> bool`
-to change it. A row whose code is missing or empty gets `None`. Programs run in Python (this interpreter, with `-I`)
-unless `command` names another interpreter, e.g. `command=["node", "{file}"], suffix=".js"`.
+Each row gets `test_results` (`result_field`), one result per test: `{"status", "passed", "score", "exit_code",
+"timed_out", "stdout", "stderr", "seconds"}`. `status` is `"ok"`, `"wrong_answer"`, `"partial"` (a score between 0
+and 1), `"runtime_error"` (non-zero exit or a signal; running out of memory usually shows up here as a
+`MemoryError`), `"timeout"`, `"output_limit"` (see below), or `"compile_error"`. `score` is the checker's score in
+[0, 1] and `passed` whether it is 1; both are `None` for an ungraded test. A test whose `"input"` is missing or `None`
+gets empty stdin. Output is compared with `outputs_match`, equality up to whitespace (`"1 2\n3"` matches `"1 2 3"`);
+pass `checker=(stdout, expected) -> bool | float` to change it, returning a float for partial credit, or
+`checker=(stdout, expected, test)` to also see the test (e.g. its input). A row whose code is missing or empty gets
+`None`. Programs run in Python (this interpreter, with `-I`) unless `command` names another interpreter, e.g.
+`command=["node", "{file}"], suffix=".js"`.
+
+`language="cpp"` (on `run_programs`, `by_tests`, and `program_verifier`) compiles each distinct program once with
+`g++ -O2 -pipe -std=gnu++17` (`compile_command=` replaces it, with `{file}` and `{out}`) and runs the binary on every
+test; a program that does not compile gets `"compile_error"` on every test, with the compiler's message
+(`main.cpp:1:11: error: ...`) in `stderr`. `testlib_checker(source, include_dirs=[...])` (from
+`pyforger.alter.programs`) is a checker that compiles a testlib checker program once and runs it as `checker input
+output answer` on each test: it scores the `Ratio: x` the checker prints when it exits with testlib's `_ok` (0) or
+`_points` (7), 1 for those exits without a ratio, and 0 for any other exit, as competitive-programming judges do. A
+checker that does not compile raises.
+
+```python
+from pyforger.alter.programs import testlib_checker
+
+checker = testlib_checker(open("chk.cpp").read(), include_dirs=["testlib"])
+rows = alter.run_programs(rows, code_field="solution", language="cpp", checker=checker)
+# {"status": "partial", "passed": False, "score": 0.62, ...} for an answer worth 62% of the best
+```
 
 ```python
 from pyforger import alter, filter
@@ -133,12 +152,14 @@ hard = filter.by_pass_at_k(verified, model=student, input_field="statement",
                            metric=filter.program_verifier("tests"), completions_field="samples")
 ```
 
-`filter.by_tests` keeps rows whose program passes at least `min_pass_rate` (default 1.0) of its graded tests; the runs
-are cached apart from `min_pass_rate`, so a new bound runs nothing, and the step report shows a few dropped rows
-with their first failing test (`test 2 of 3: wrong_answer, got '4', expected '5'`). `filter.program_verifier` takes
-the last fenced Python block from each sampled answer (`last_code_block`), runs it on the row's tests until one fails,
-and grades it `True` only if all pass. An answer with no code block (or one `extract_code` maps to `None` or blank
-code) grades `False` without running anything; only a row with no graded tests (none with an `"output"`) grades
+`filter.by_tests` keeps rows whose program passes at least `min_pass_rate` (default 1.0) of its graded tests (with
+partial scores, the mean score); the runs are cached apart from `min_pass_rate`, so a new bound runs nothing, and the
+step report shows a few dropped rows with their first failing test (`test 2 of 3: wrong_answer, got '4', expected
+'5'`). `filter.program_verifier` takes the last fenced code block in its `language` from each sampled answer
+(`last_code_block`), runs it on the row's tests until one fails, and grades it `True` only if all pass; with
+`min_score` below 1 it runs every test and grades `True` when the mean score reaches `min_score`. An answer with no
+code block (or one `extract_code` maps to `None` or blank code) grades `False` without running anything; only a row
+with no graded tests (none with an `"output"`) grades
 `None`. The verifier never sees a `None` answer: the difficulty filter grades an empty answer `None` and, with
 `by_pass_at_k`'s default `truncated="fail"`, an unclosed `<think>` block `False`, before calling it.
 `extract_code=last_code_block` does the same for `run_programs` and `by_tests` when a field holds a model's answer.
@@ -158,7 +179,8 @@ warning says so once. Interpreters that reserve a large address space at startup
 
 `runner=` on `run_programs`, `by_tests`, and `program_verifier` replaces the subprocess with your own executor: a
 `(code, tests) -> results` callable returning one dict per test with `"status"` (`"ok"`, `"runtime_error"`,
-`"timeout"`) and `"stdout"`, or `"passed"` when it grades a test itself (e.g. comparing a returned value). Use it to
+`"timeout"`) and `"stdout"`, or `"passed"` or `"score"` when it grades a test itself (e.g. comparing a returned
+value, or a judge's partial score). Use it to
 check solutions in the environment that will score them, such as an RL reward's sandbox, so code that passes here
 also passes there. The runner is called once per row, `max_workers` rows at a time, and is part of the cache key
 (give it a `cache_key()` method).
