@@ -57,7 +57,7 @@ RL_COMMAND = """
 # cap, mean response ~16K); a 1-sample validation run took ~6 min (job 163561).
 TASK_EDITS = {
     "frontiercs": [
-        ("max_tokens=16384", "max_tokens=32768"),
+        ("max_tokens=16384", "max_tokens=24576"),
         (
             "an SFT trial on about 1,300 rows",
             "an SFT trial on about 500 rows",
@@ -68,16 +68,17 @@ TASK_EDITS = {
         ),
         (
             "5 hours for an 80-step RL run (3-4 minutes per step)",
-            "11 hours for an 80-step RL run (about 8 minutes per step with this "
-            "task's responses, which average ~16K tokens)",
+            "up to 11 hours for an 80-step RL run (about 8 minutes per step were "
+            "measured with responses capped at 32,768 tokens; RL here caps them at "
+            "24,576)",
         ),
         (
             "about 240 thinking responses of up to 16,384 tokens (60 prompts, 4 "
             "samples each) in about 7 minutes",
-            "about 240 thinking responses of up to 32,768 tokens (60 prompts, 4 "
-            "samples each) in roughly 15 minutes",
+            "about 240 thinking responses of up to 24,576 tokens (60 prompts, 4 "
+            "samples each) in roughly 12 minutes",
         ),
-        ("one GPU takes about 20 minutes", "one GPU takes roughly 40 minutes"),
+        ("one GPU takes about 20 minutes", "one GPU takes roughly 30 minutes"),
     ],
 }
 

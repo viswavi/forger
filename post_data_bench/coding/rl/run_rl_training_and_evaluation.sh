@@ -157,16 +157,17 @@ fi
 [ -d "$INIT_CHECKPOINT" ] || { echo "!!! --init-checkpoint must be a local HF directory: $INIT_CHECKPOINT" >&2; exit 1; }
 
 # Use a shorter cap for no-thinking answers and room for long thinking traces.
-# Algorithmic (C++) answers run ~15K tokens at the median, so that task gets
-# 32,768 and packs up to Qwen3's 40,960-token context per GPU.
+# Algorithmic (C++) answers run ~15K tokens at the median (p90 20.6K) with the
+# student's own thinking; none longer than 24K scored, so that task gets 24,576
+# and packs 32,768 tokens per GPU (a ~7K-token prompt plus a full response).
 MAX_TOKENS_PER_GPU=24576
 if [ -z "$MAX_RESPONSE_LEN" ]; then
   if [ "$NO_THINKING" -eq 1 ]; then MAX_RESPONSE_LEN=3072
-  elif [ "${PDB_TASK:-coding}" = algorithmic ]; then MAX_RESPONSE_LEN=32768
+  elif [ "${PDB_TASK:-coding}" = algorithmic ]; then MAX_RESPONSE_LEN=24576
   else MAX_RESPONSE_LEN=16384; fi
   echo ">>> defaulting --max-response-len -> $MAX_RESPONSE_LEN"
 fi
-if [ "${PDB_TASK:-coding}" = algorithmic ]; then MAX_TOKENS_PER_GPU=40960; fi
+if [ "${PDB_TASK:-coding}" = algorithmic ]; then MAX_TOKENS_PER_GPU=32768; fi
 
 [ -n "$RUN_TAG" ] || RUN_TAG="$(basename "$RL_DATA_DIR")_$(date +%Y%m%d_%H%M%S)"
 # A HuggingFace cache path ends in a snapshot hash, which makes an unreadable run
