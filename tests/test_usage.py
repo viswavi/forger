@@ -51,6 +51,30 @@ def test_sdk_deltas_include_condenser_and_preserve_failed_subtotal():
     assert first["call_id"] != second["call_id"]
 
 
+def test_combine_usage_tolerates_non_numeric_provider_usage():
+    combined = combine_usage(
+        [
+            {"prompt_tokens": "123", "known_cost_usd": "0.01"},
+            {"prompt_tokens": 7, "cost_usd": "bad", "cached_tokens": "x"},
+            usage_record({"prompt_tokens": 3, "cost_usd": 0.2}),
+        ]
+    )
+    # A malformed token/cost field means that field is unknown, not fatal.
+    assert combined["prompt_tokens"] is None
+    assert combined["cached_tokens"] is None
+    assert combined["known_cost_usd"] == 0.2
+    assert combined["cost_usd"] is None
+
+
+def test_usage_record_normalizes_malformed_values():
+    record = usage_record(
+        {"prompt_tokens": "10", "cost_usd": "0.5", "cost_complete": True}
+    )
+    assert record["prompt_tokens"] is None
+    assert record["cost_usd"] is None
+    assert record["cost_complete"] is False
+
+
 def test_unknown_attempt_never_becomes_free():
     priced = usage_record({"cost_usd": 0.2, "prompt_tokens": 10})
     combined = combine_usage([priced, usage_record()])

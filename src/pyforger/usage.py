@@ -14,18 +14,50 @@ TOKENS = (
 )
 
 
+def _token_value(value: Any) -> int | None:
+    if type(value) is int and value >= 0:
+        return value
+    return None
+
+
+def _cost_value(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if number == number and abs(number) != float("inf") and number >= 0 else None
+
+
+def _normalize_usage(value: Any) -> dict[str, Any]:
+    source = value if isinstance(value, dict) else {}
+    cost = _cost_value(source.get("cost_usd"))
+    known = _cost_value(source.get("known_cost_usd"))
+    if known is None:
+        known = cost or 0.0
+    raw_complete = source.get("cost_complete")
+    complete = cost is not None if raw_complete is None else raw_complete is True
+    return {
+        **{key: _token_value(source.get(key)) for key in TOKENS},
+        "cost_usd": cost,
+        "known_cost_usd": known,
+        "cost_complete": complete and cost is not None,
+        "call_id": source.get("call_id"),
+        "scope": "call",
+    }
+
+
 def usage_record(
     value: dict[str, Any] | None = None, *, zero: bool = False
 ) -> dict[str, Any]:
-    value = value or {}
-    cost = value.get("cost_usd", 0.0 if zero else None)
+    normalized = _normalize_usage(value)
+    if zero:
+        for key in TOKENS:
+            normalized[key] = 0 if normalized[key] is None else normalized[key]
+        normalized["cost_usd"] = 0.0 if normalized["cost_usd"] is None else normalized["cost_usd"]
+        source = value if isinstance(value, dict) else {}
+        normalized["cost_complete"] = source.get("cost_complete") is not False
     return {
-        **{key: value.get(key, 0 if zero else None) for key in TOKENS},
-        "cost_usd": cost,
-        "known_cost_usd": value.get("known_cost_usd", cost or 0.0),
-        "cost_complete": value.get("cost_complete", cost is not None),
-        "call_id": value.get("call_id") or uuid.uuid4().hex,
-        "scope": "call",
+        **normalized,
+        "call_id": normalized.get("call_id") or uuid.uuid4().hex,
     }
 
 
@@ -35,19 +67,16 @@ def combine_usage(
     result = usage_record(zero=True)
     if call_id is not None:
         result["call_id"] = call_id
-    for value in values:
+    for raw in values:
+        value = _normalize_usage(raw)
         for key in TOKENS:
             result[key] = (
                 result[key] + value[key]
-                if result[key] is not None and value.get(key) is not None
+                if result[key] is not None and value[key] is not None
                 else None
             )
-        result["known_cost_usd"] += value.get(
-            "known_cost_usd", value.get("cost_usd") or 0.0
-        )
-        result["cost_complete"] &= value.get(
-            "cost_complete", value.get("cost_usd") is not None
-        )
+        result["known_cost_usd"] += value["known_cost_usd"]
+        result["cost_complete"] &= value["cost_complete"]
     result["cost_usd"] = result["known_cost_usd"] if result["cost_complete"] else None
     return result
 
