@@ -30,8 +30,6 @@ GROUND_TRUTH = """- "ground_truth" is the complete SFT target: a nonempty thinki
 # C++ do not exist yet; this paragraph documents the intended interface.
 CODE = """  - {{"code": ...}}: Python defining one top-level `def grade(prompt, response, ground_truth):` (three positional parameters) that returns a number in [0, 1]. `prompt` is the chat messages; `response` and `ground_truth` include their thinking traces. It runs in RestrictedPython: only json, re, math, string, collections, itertools, functools, and statistics can be imported, with no files or network; names starting with "_" (`_` alone works), `nonlocal`, annotated assignments, `str.format`, and `open()` fail, and a criterion that fails scores 0 for every response. grade() can call `judge_cpp(code, tests, checker=None, interactor=None, time_limit=1.0, memory_mb=256, details=False)`, which compiles and judges a C++ program as the evaluator does. `tests` is a list of {{"input": stdin, "answer": answer file, "args": [command-line arguments]}} ("answer" and "args" are optional; without "answer", a clean run passes). `checker` or `interactor` is testlib C++ source (with neither, the output must equal the answer up to whitespace) that scores a test by exiting with `quitf(_ok, ...)` (1), `quitp(x, ...)` printing `Ratio: <x>` (x), or `quitf(_wa, ...)` (0). It returns (mean score, per-test statuses), or with `details=True` (mean score, one {{"status", "ratio", "time", "stdout", "message"}} dict per test). Each criterion gets 20 seconds in total, compilation included, and runs on every sampled RL response, so use a few small, fast tests. From {TASK_DIR}: `from rl.rubric_sandbox import Sandbox` gives `Sandbox().judge_cpp(...)`; `python rl/rubric_worker.py < criterion.json` (a JSON object with "code", "prompt", "response", and "ground_truth") prints the score RL would give; and `from rl.solution_runner import score_targets` scores each row's ground_truth with its own code criteria (`score_targets(rows)`), so a target that scores lower than you expect has a rubric, checker, or program that fails in RL."""
 
-# Forger arm only: the native arm has no pyforger.
-RUBRIC_SCORES = """ Before RL, `pyforger.inspect.rubric_scores(rows, rubric_score(), response_fields="ground_truth")` (with `from rl.solution_runner import rubric_score`) bins the rubric scores of your targets and of control responses no task should reward, such as an empty response."""
 
 PROMPT_CRITERION = """  - {{"prompt": ...}}: a natural-language criterion. The judge model (DeepSeek-V4-Flash) scores it given the criterion, the prompt, the full response, and the ground truth. With {{"prompt": ..., "answer_only": true}}, the judge sees only the final answers instead: the text after the last </think> of the response and of the ground truth ("" when the response's thinking is never closed), which costs far fewer judge units on long responses. For this task, code criteria are usually the better choice: a program's validity and the quality of its answers can be measured exactly, while prompted criteria use judge quota and make the RL reward noisier."""
 
@@ -61,8 +59,8 @@ GUIDELINES = """When `generate_custom_rubric` or `convert_rubric_criteria` write
 ROW_EDITS = [
     (
         "Submit at least 10 and at most 2,000 rows, with no duplicate prompts; 2,000 "
-        "is a hard limit. About 1,250 rows is a good target: get as close to it as "
-        "your quota and time allow, and realistically aim for at least 800.",
+        "is a hard limit. About 1,250 rows is a good target that should yield good "
+        "results, and try to generate no fewer than 800 examples.",
         "Submit at least 10 and at most 800 rows, with no duplicate prompts; 800 is "
         "a hard limit. About 500 rows is a good target that should yield good "
         "results, and try to generate no fewer than 200 examples.",
@@ -78,7 +76,7 @@ def build(source: Path) -> str:
     native = "minimal_scaffold" in source.name
     rules = [
         ('- "ground_truth" is the complete SFT target', GROUND_TRUTH),
-        ('  - {{"code": ...}}', CODE if native else CODE + RUBRIC_SCORES),
+        ('  - {{"code": ...}}', CODE),
         ('  - {{"prompt": ...}}', PROMPT_CRITERION),
         ("Your trained models will be evaluated against", CONTAMINATION),
         ("When `generate_custom_rubric`", GUIDELINES),
