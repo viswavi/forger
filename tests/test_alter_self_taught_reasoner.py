@@ -1,9 +1,6 @@
 """Tests for self_taught_reasoner ALTER building block."""
 from __future__ import annotations
 
-import inspect
-import math
-
 import pytest
 from fixtures import MockModel
 
@@ -13,7 +10,6 @@ from pyforger.alter.generate import (
     default_extract_answer,
     self_taught_reasoner,
 )
-from pyforger.inspect import cluster
 
 
 class TestSplitThinking:
@@ -400,118 +396,124 @@ class TestRationalization:
             )
 
 
-class _AngleEmbedder:
-    """Embeds each known text as a unit 2-D vector at a fixed angle.
+class _Judge:
+    """Answers YES when ``rule(prompt)`` is true, else NO; records every prompt.
 
-    The cosine of two texts is then cos(angle difference), e.g. 0.9553 for
-    0.3 radians. Records every call; ``cache_key`` leaves the record out.
+    ``replies`` overrides the reply for a prompt containing a key, e.g. to
+    return a thinking block or no verdict. ``cache_key`` leaves the record out.
     """
 
-    def __init__(self, angles: dict[str, float], name: str = "angles") -> None:
-        self.angles = angles
+    def __init__(self, rule, replies=None, name="judge"):
+        self.rule = rule
+        self.replies = replies or {}
         self.name = name
         self.calls: list[list[str]] = []
 
     def cache_key(self) -> tuple:
-        return ("_AngleEmbedder", self.name, tuple(sorted(self.angles.items())))
+        return ("_Judge", self.name, tuple(sorted(self.replies.items())))
 
-    def __call__(self, texts: list[str]) -> list[list[float]]:
-        self.calls.append(list(texts))
-        return [[math.cos(self.angles[t]), math.sin(self.angles[t])] for t in texts]
+    def generate_batch(self, prompts, n=1, **kwargs):
+        self.calls.append(list(prompts))
+        out = []
+        for prompt in prompts:
+            reply = next((r for k, r in self.replies.items() if k in prompt), None)
+            out.append([reply or ("YES" if self.rule(prompt) else "NO")])
+        return out
+
+
+def _answers_shoes_off(prompt: str) -> bool:
+    """The rule of a judge that accepts answers about taking shoes off."""
+    answer = prompt.split("<student_answer>")[1].split("</student_answer>")[0]
+    return "Remove" in answer or "Leave" in answer
 
 
 _REFERENCE = "Take your shoes off at the door."
-_ANGLES = {
-    _REFERENCE: 0.0,
-    "Remove your shoes before going in.": 0.3,  # cosine 0.9553
-    "Keep your shoes on.": 1.2,  # cosine 0.3624
-    "Leave shoes outside.": 0.5,  # cosine 0.8776
-}
 
 
-class TestAnswerSimilarity:
-    """answer_similarity= keeps samples whose answer embeds close to the reference."""
+class TestAnswerJudge:
+    """answer_judge= keeps samples the judge says reach the reference's conclusion."""
 
-    def _run(self, embedder, threshold=0.9, responses=None, items=None, **kwargs):
+    def _run(self, judge, responses=None, items=None, **kwargs):
         model = kwargs.pop("model", None) or MockModel(
             responses=responses
             or [["Remove your shoes before going in.", "Keep your shoes on."]]
         )
         rows = self_taught_reasoner(
             items or [{"q": "Shoes indoors?", "final_answer": _REFERENCE}],
-            "{q}",
+            "Question: {q}",
             model,
             n=2,
-            answer_similarity=threshold,
-            embed_fn=embedder,
+            answer_judge=judge,
             **kwargs,
         )
         return rows, model
 
-    def test_keeps_answers_at_or_above_the_threshold(self):
-        """The close answer is kept with its cosine; the far one is dropped."""
-        rows, _ = self._run(_AngleEmbedder(_ANGLES), threshold=0.9)
+    def test_keeps_answers_the_judge_accepts(self):
+        """YES is kept with the reference unchanged; NO is dropped."""
+        rows, _ = self._run(_Judge(_answers_shoes_off))
         assert [r["answer"] for r in rows] == ["Remove your shoes before going in."]
-        assert rows[0]["answer_similarity"] == pytest.approx(0.9553)
         assert rows[0]["student_final_answer"] == "Remove your shoes before going in."
         assert rows[0]["final_answer"] == _REFERENCE  # the reference is kept
 
-    def test_threshold_is_inclusive(self):
-        """A cosine equal to the (rounded) threshold is kept."""
-        rows, _ = self._run(_AngleEmbedder(_ANGLES), threshold=0.9553)
-        assert len(rows) == 1
-        rows, _ = self._run(_AngleEmbedder(_ANGLES), threshold=0.3)
-        assert len(rows) == 2
+    def test_prompt_shows_question_reference_and_answer_not_reasoning(self):
+        """The judge sees the student's prompt and final answer, not its thinking."""
+        judge = _Judge(_answers_shoes_off)
+        self._run(
+            judge, responses=[["<think>secret</think>Remove them.", "Keep them on."]]
+        )
+        prompt = judge.calls[0][0]
+        assert "<question>\nQuestion: Shoes indoors?\n</question>" in prompt
+        assert f"<reference_answer>\n{_REFERENCE}\n" in prompt
+        assert "<student_answer>\nRemove them.\n" in prompt
+        assert "secret" not in prompt
 
-    def test_custom_field_name(self):
-        """similarity_field= renames the recorded cosine."""
-        rows, _ = self._run(_AngleEmbedder(_ANGLES), similarity_field="sim")
-        assert "sim" in rows[0] and "answer_similarity" not in rows[0]
-
-    def test_one_embed_call_with_distinct_texts(self):
-        """Every answer and reference is embedded once, in one call."""
-        embedder = _AngleEmbedder(_ANGLES)
+    def test_identical_answers_are_judged_once_in_one_call(self):
+        """Distinct (question, reference, answer) prompts, all in one batch."""
+        judge = _Judge(_answers_shoes_off)
         items = [
             {"q": "Shoes indoors?", "final_answer": _REFERENCE},
             {"q": "Shoes at a temple?", "final_answer": _REFERENCE},
         ]
         responses = [
-            ["Remove your shoes before going in.", "Keep your shoes on."],
-            ["Leave shoes outside.", "Remove your shoes before going in."],
+            ["Remove your shoes.", "Remove your shoes."],
+            ["Remove your shoes.", "Keep them on."],
         ]
-        rows, _ = self._run(embedder, threshold=0.85, responses=responses, items=items)
-        assert len(embedder.calls) == 1
-        embedded = embedder.calls[0]
-        assert sorted(embedded) == sorted(_ANGLES)  # each distinct text once
-        assert [r["answer"] for r in rows] == [
-            "Remove your shoes before going in.",
-            "Leave shoes outside.",
-            "Remove your shoes before going in.",
-        ]
+        rows, _ = self._run(judge, responses=responses, items=items)
+        assert len(judge.calls) == 1
+        assert len(judge.calls[0]) == 3
+        assert [r["q"] for r in rows] == ["Shoes indoors?"] * 2 + ["Shoes at a temple?"]
 
-    def test_empty_answer_is_rejected_without_embedding(self):
-        """An answer that is empty after the reasoning never matches."""
-        embedder = _AngleEmbedder(_ANGLES)
+    def test_verdict_after_thinking_and_unclear_replies(self, caplog):
+        """A draft verdict inside <think> does not count; no verdict rejects."""
+        judge = _Judge(
+            lambda prompt: True,
+            replies={
+                "Remove": "<think>maybe NO</think>**YES**",
+                "Keep": "I cannot tell.",
+            },
+        )
+        rows, _ = self._run(judge)
+        assert [r["answer"] for r in rows] == ["Remove your shoes before going in."]
+        assert "had no YES or NO" in caplog.text
+
+    def test_empty_answer_is_rejected_without_asking(self):
+        """An answer that is empty after the reasoning is never judged."""
+        judge = _Judge(lambda prompt: True)
         rows, _ = self._run(
-            embedder,
-            threshold=-1.0,
-            responses=[["<think>hmm</think>", "Keep your shoes on."]],
+            judge, responses=[["<think>hmm</think>", "Keep your shoes on."]]
         )
         assert [r["answer"] for r in rows] == ["Keep your shoes on."]
-        assert "" not in embedder.calls[0]
+        assert len(judge.calls[0]) == 1
 
     def test_extract_answer_chooses_the_text(self):
-        """With extract_answer, its output is embedded instead of the answer."""
-        embedder = _AngleEmbedder(_ANGLES)
+        """With extract_answer, its output is judged instead of the answer."""
+        judge = _Judge(_answers_shoes_off)
         rows, _ = self._run(
-            embedder,
-            responses=[["Verdict: Remove your shoes before going in.", "Verdict: "]],
+            judge,
+            responses=[["Verdict: Remove your shoes.", "Remove? Verdict: Keep them."]],
             extract_answer=lambda raw: raw.split("Verdict:")[-1],
         )
-        # Embedded stripped; the field keeps the extractor's output as is.
-        assert len(rows) == 1
-        assert rows[0]["student_final_answer"] == " Remove your shoes before going in."
-        assert rows[0]["answer_similarity"] == pytest.approx(0.9553)
+        assert [r["student_final_answer"] for r in rows] == [" Remove your shoes."]
 
     @pytest.mark.parametrize(
         "other",
@@ -522,69 +524,21 @@ class TestAnswerSimilarity:
         ],
     )
     def test_exclusive_with_other_checks(self, other):
-        """answer_similarity with match_fn, verifier, or filter_fn raises."""
-        with pytest.raises(ValueError, match="answer_similarity or"):
-            self._run(_AngleEmbedder(_ANGLES), **other)
-
-    def test_embedding_args_need_a_threshold(self):
-        """embed_fn or embedding_model without answer_similarity raises."""
-        model = MockModel(responses=["x"])
-        item = [{"q": "q", "final_answer": "x"}]
-        with pytest.raises(ValueError, match="only with answer_similarity"):
-            self_taught_reasoner(item, "{q}", model, n=1, embed_fn=lambda t: t)
-        with pytest.raises(ValueError, match="only with answer_similarity"):
-            self_taught_reasoner(item, "{q}", model, n=1, embedding_model="tfidf")
-
-    def test_threshold_must_be_a_cosine(self):
-        """A threshold outside [-1, 1] raises."""
-        with pytest.raises(ValueError, match=r"\[-1, 1\]"):
-            self._run(_AngleEmbedder(_ANGLES), threshold=1.5)
-
-    def test_missing_backend_raises_before_sampling(self, monkeypatch):
-        """No silent TF-IDF fallback: a threshold does not carry over to it."""
-        monkeypatch.setattr(cluster, "_sentence_transformers_importable", lambda: False)
-        model = MockModel(responses=["x"])
-        with pytest.raises(ImportError, match="sentence-transformers"):
-            self_taught_reasoner(
-                [{"q": "q", "final_answer": "x"}],
-                "{q}",
-                model,
-                n=1,
-                answer_similarity=0.8,
-            )
-        assert model._call_count == 0
-
-    def test_tfidf_backend(self):
-        """embedding_model="tfidf" needs no embed_fn; an identical answer scores 1."""
-        model = MockModel(responses=[["Bow when greeting.", "Shake hands firmly."]])
-        rows = self_taught_reasoner(
-            [{"q": "Greeting?", "final_answer": "Bow when greeting."}],
-            "{q}",
-            model,
-            n=2,
-            answer_similarity=0.99,
-            embedding_model="tfidf",
-        )
-        assert [r["answer"] for r in rows] == ["Bow when greeting."]
-        assert rows[0]["answer_similarity"] == pytest.approx(1.0)
-
-    def test_default_embedding_model_matches_inspect(self):
-        """The literal default (a cycle prevents importing it) is cluster's default."""
-        default = inspect.signature(self_taught_reasoner).parameters["embedding_model"]
-        assert default.default == cluster._DEFAULT_EMBEDDING_MODEL
+        """answer_judge with match_fn, verifier, or filter_fn raises."""
+        with pytest.raises(ValueError, match="answer_judge or"):
+            self._run(_Judge(lambda prompt: True), **other)
 
 
-class TestAnswerSimilarityCache:
-    """The threshold and the backend are in the key; sampling is never redone."""
+class TestAnswerJudgeCache:
+    """The judge is in the key; sampling is never redone for another judge."""
 
-    def _run(self, model, embedder, threshold):
+    def _run(self, model, judge):
         return self_taught_reasoner(
             [{"q": "Shoes indoors?", "final_answer": _REFERENCE}],
             "{q}",
             model,
             n=2,
-            answer_similarity=threshold,
-            embed_fn=embedder,
+            answer_judge=judge,
         )
 
     def _model(self):
@@ -593,30 +547,18 @@ class TestAnswerSimilarityCache:
         )
 
     def test_same_call_is_a_cache_hit(self):
-        """The same call again samples and embeds nothing."""
-        model, embedder = self._model(), _AngleEmbedder(_ANGLES)
-        first = self._run(model, embedder, 0.9)
-        assert self._run(model, embedder, 0.9) == first
+        """The same call again samples and judges nothing."""
+        model, judge = self._model(), _Judge(_answers_shoes_off)
+        first = self._run(model, judge)
+        assert self._run(model, judge) == first
         assert model._call_count == 1
-        assert len(embedder.calls) == 1
+        assert len(judge.calls) == 1
 
-    def test_new_threshold_reuses_samples_and_embeddings(self):
-        """Another threshold changes the result without sampling or embedding again."""
-        model, embedder = self._model(), _AngleEmbedder(_ANGLES)
-        assert len(self._run(model, embedder, 0.9)) == 1
-        assert len(self._run(model, embedder, 0.3)) == 2
-        assert model._call_count == 1
-        assert len(embedder.calls) == 1
-
-    def test_new_backend_embeds_again_but_reuses_samples(self):
-        """Another embedder is another key: it embeds, and its cosines are used."""
+    def test_new_judge_reuses_samples(self):
+        """Another judge changes the result without sampling again."""
         model = self._model()
-        first, second = _AngleEmbedder(_ANGLES), _AngleEmbedder(
-            {**_ANGLES, "Keep your shoes on.": 0.1}, name="other"
-        )
-        assert len(self._run(model, first, 0.9)) == 1
-        assert len(self._run(model, second, 0.9)) == 2
-        assert len(first.calls) == 1 and len(second.calls) == 1
+        assert len(self._run(model, _Judge(_answers_shoes_off))) == 1
+        assert len(self._run(model, _Judge(lambda p: True, name="lenient"))) == 2
         assert model._call_count == 1
 
 
@@ -639,49 +581,38 @@ class _HintedResponses:
         return [list(self.hinted if "Hint:" in p else self.first)[:n] for p in prompts]
 
 
-class TestRationalizationWithAnswerSimilarity:
-    """Similarity decides which items are unsolved; hinted samples are cached too."""
+class TestRationalizationWithAnswerJudge:
+    """The judge decides which items are unsolved; it never sees the hint."""
 
     ITEM = {"q": "Shoes indoors?", "final_answer": _REFERENCE}
 
-    def _run(self, model, embedder, threshold):
-        return self_taught_reasoner(
-            [self.ITEM],
-            "{q}",
-            model,
-            n=2,
-            answer_similarity=threshold,
-            embed_fn=embedder,
-        )
+    def _run(self, model, judge):
+        return self_taught_reasoner([self.ITEM], "{q}", model, n=2, answer_judge=judge)
 
-    def test_unsolved_by_similarity_is_rationalized_and_cached(self):
-        """Below the threshold the item is hinted; a new threshold re-draws nothing."""
+    def test_unsolved_by_the_judge_is_rationalized_and_cached(self):
+        """Rejected answers are hinted; another judge re-draws nothing."""
         model = _HintedResponses(
-            first=["Keep your shoes on.", "Leave shoes outside."],  # 0.36, 0.88
+            first=["Keep your shoes on.", "Keep them on."],
             hinted=["Remove your shoes before going in.", "Keep your shoes on."],
         )
-        embedder = _AngleEmbedder(_ANGLES)
-        rows = self._run(model, embedder, 0.9)
+        judge = _Judge(_answers_shoes_off)
+        rows = self._run(model, judge)
         assert model.prompts == [
             "Shoes indoors?",
             f"Shoes indoors?\n\nHint: a correct answer is:\n{_REFERENCE}",
         ]
-        # The rationalized row records its own cosine and keeps the reference.
         assert [(r["answer"], r["rationalized"]) for r in rows] == [
             ("Remove your shoes before going in.", True)
         ]
-        assert rows[0]["answer_similarity"] == pytest.approx(0.9553)
         assert rows[0]["final_answer"] == _REFERENCE
-        assert len(embedder.calls) == 2  # one per pass
+        # One judge call per pass, each with the original question.
+        assert len(judge.calls) == 2
+        assert all("Hint:" not in p for call in judge.calls for p in call)
 
-        # The same item is still unsolved at 0.95: both passes come from cache.
-        rows = self._run(model, embedder, 0.95)
-        assert [r["rationalized"] for r in rows] == [True]
-        assert model.calls == 2 and len(embedder.calls) == 2
-
-        # At 0.85 the first pass solves it, so no hinted row is kept.
-        rows = self._run(model, embedder, 0.85)
+        # A lenient judge solves the item in the first pass, from cached samples.
+        rows = self._run(model, _Judge(lambda p: True, name="lenient"))
         assert [(r["answer"], r["rationalized"]) for r in rows] == [
-            ("Leave shoes outside.", False)
+            ("Keep your shoes on.", False),
+            ("Keep them on.", False),
         ]
-        assert model.calls == 2 and len(embedder.calls) == 2
+        assert model.calls == 2
