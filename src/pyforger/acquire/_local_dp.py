@@ -16,6 +16,7 @@ import multiprocessing
 import os
 import subprocess
 import sys
+import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
@@ -172,14 +173,42 @@ def serve(conn: Any) -> None:
         if request is None:
             return
         method, args, kwargs = request
+        if kwargs.pop("progress", False):
+            kwargs["use_tqdm"], flush = _progress_sender(conn)
+        else:
+            flush = lambda: None  # noqa: E731
         try:
             if method == "chat":
                 result: Any = [_plain(o) for o in llm.chat(*args, **kwargs)]
             else:
                 result = target_logprobs(llm, *args, **kwargs)
+            flush()
             conn.send(("ok", result))
         except BaseException:
             conn.send(("error", traceback.format_exc()))
+
+
+def _progress_sender(conn: Any) -> tuple[Any, Any]:
+    """A vLLM ``use_tqdm`` that sends counts to the parent at most twice a second.
+
+    Returns it and a flush for the counts not yet sent.
+    """
+    from pyforger._progress import vllm_tqdm
+
+    pending, last = [0], [time.monotonic()]
+
+    def flush() -> None:
+        if pending[0]:
+            conn.send(("progress", pending[0]))
+            pending[0] = 0
+        last[0] = time.monotonic()
+
+    def sink(n: int) -> None:
+        pending[0] += n
+        if time.monotonic() - last[0] >= 0.5:
+            flush()
+
+    return vllm_tqdm(sink), flush
 
 
 class EngineProcess:
@@ -212,15 +241,23 @@ class EngineProcess:
         child.close()
         self._conn.send(engine_kwargs)
 
-    def _receive(self) -> Any:
-        """The worker's next reply; a worker error or exit raises RuntimeError."""
-        try:
-            status, payload = self._conn.recv()
-        except EOFError:
-            raise RuntimeError(
-                f"LocalModel engine on GPU(s) {','.join(self.devices)} exited "
-                f"(exit code {self._process.poll()})"
-            ) from None
+    def _receive(self, on_progress: Any = None) -> Any:
+        """The worker's reply, after passing its progress counts to `on_progress`.
+
+        A worker error or exit raises RuntimeError.
+        """
+        while True:
+            try:
+                status, payload = self._conn.recv()
+            except EOFError:
+                raise RuntimeError(
+                    f"LocalModel engine on GPU(s) {','.join(self.devices)} exited "
+                    f"(exit code {self._process.poll()})"
+                ) from None
+            if status != "progress":
+                break
+            if on_progress is not None:
+                on_progress(payload)
         if status == "error":
             raise RuntimeError(
                 f"LocalModel engine on GPU(s) {','.join(self.devices)} failed:\n"
@@ -232,15 +269,25 @@ class EngineProcess:
         """Block until the engine has loaded its model."""
         self._receive()
 
-    def chat(self, messages: list, sampling_params: Any, **kwargs: Any) -> list:
-        """Run `vllm.LLM.chat` in the worker and return its outputs."""
+    def chat(
+        self,
+        messages: list,
+        sampling_params: Any,
+        on_progress: Any = None,
+        **kwargs: Any,
+    ) -> list:
+        """Run `vllm.LLM.chat` in the worker; `on_progress(n)` gets its counts."""
+        kwargs["progress"] = on_progress is not None
         self._conn.send(("chat", (messages, sampling_params), kwargs))
-        return self._receive()
+        return self._receive(on_progress)
 
-    def target_logprobs(self, pairs: list, **kwargs: Any) -> list:
-        """Run :func:`target_logprobs` in the worker and return its scores."""
+    def target_logprobs(
+        self, pairs: list, on_progress: Any = None, **kwargs: Any
+    ) -> list:
+        """Run :func:`target_logprobs` in the worker; `on_progress(n)` gets counts."""
+        kwargs["progress"] = on_progress is not None
         self._conn.send(("target_logprobs", (pairs,), kwargs))
-        return self._receive()
+        return self._receive(on_progress)
 
     def close(self) -> None:
         """Stop the worker and free its GPUs."""
@@ -286,26 +333,37 @@ class DataParallelEngine:
         atexit.register(dp.close)
         return dp
 
-    def chat(self, messages: list, sampling_params: Any, **kwargs: Any) -> list:
-        """Deal `messages` round-robin to the engines; outputs return in input order."""
-        return self._deal("chat", messages, sampling_params, **kwargs)
+    def chat(
+        self, messages: list, sampling_params: Any, progress: Any = None, **kwargs: Any
+    ) -> list:
+        """Deal `messages` round-robin to the engines; outputs return in input order.
 
-    def target_logprobs(self, pairs: list, **kwargs: Any) -> list:
+        `progress` (a `pyforger._progress.Progress`) counts every engine's work.
+        """
+        return self._deal(
+            "chat", messages, sampling_params, progress=progress, **kwargs
+        )
+
+    def target_logprobs(self, pairs: list, progress: Any = None, **kwargs: Any) -> list:
         """Deal `(conversation, target)` pairs round-robin; scores return in order."""
-        return self._deal("target_logprobs", pairs, **kwargs)
+        return self._deal("target_logprobs", pairs, progress=progress, **kwargs)
 
-    def _deal(self, method: str, items: list, *args: Any, **kwargs: Any) -> list:
+    def _deal(
+        self, method: str, items: list, *args: Any, progress: Any = None, **kwargs: Any
+    ) -> list:
         """Call `method` on each engine with its share of `items`, in input order."""
         shards = [
             list(range(i, len(items), len(self.engines)))
             for i in range(len(self.engines))
         ]
         jobs = []
-        for i, (engine, indices) in enumerate(zip(self.engines, shards)):
+        for engine, indices in zip(self.engines, shards):
             if not indices:
                 continue
-            # One progress bar is enough; the others would interleave with it.
-            shard_kwargs = kwargs if i == 0 else {**kwargs, "use_tqdm": False}
+            # Every engine reports to `progress`; vLLM's own bar would show one.
+            shard_kwargs = {**kwargs, "use_tqdm": False}
+            if progress is not None:
+                shard_kwargs["on_progress"] = progress.update
             shard = [items[j] for j in indices]
             jobs.append(
                 (

@@ -36,10 +36,11 @@ caps and the token-unit quota are checked before each request is sent, so reques
 (or, for `sample_from_LLM`, all `n` samples) in one `generate_batch` call. An int splits them into calls of that size,
 sent one after another.
 
-Progress is on by default for a `generate_batch` call that sends more than one request: a tqdm bar when stderr is a
-terminal, otherwise a log line at most every 30 seconds (`LLM calls (<model>): 120/500 done, 31s`). Turn it off with
-`Model(..., show_progress=False)` (or per call) or the environment variable `FORGER_PROGRESS=0`; an explicit
-`show_progress` wins over the variable. `LocalModel` keeps vLLM's own bar, off unless `show_progress=True`.
+Progress is on by default for every model call that does more than one thing: a tqdm bar when stderr is a terminal,
+otherwise a log line at most every 30 seconds (`LLM calls (<model>): 120/500 done, 31s, ~1m 38s left`). This covers
+`Model`, `TinkerModel`, `LocalModel` generation and `target_logprobs` (one count across every GPU engine), and
+embeddings. Turn it off with `show_progress=False` (on the model or per call) or the environment variable
+`FORGER_PROGRESS=0`; an explicit `show_progress` wins over the variable.
 The log line keeps coming every 30 seconds while requests are in flight, also when none finished since the last one.
 
 Each request attempt times out after `Model(timeout=...)` seconds. The default, `"auto"`, is 600 seconds (10 minutes),

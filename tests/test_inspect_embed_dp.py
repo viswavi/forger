@@ -77,10 +77,10 @@ class _FakeProcess:
         self.texts = texts
         self._worker_end.send(None)  # makes `connection` ready
 
-    def result(self):
+    def message(self):
         if self.gpu == type(self).fail_on_gpu:
             raise RuntimeError(f"embedding worker on GPU {self.gpu} failed")
-        return _vectors(self.texts)
+        return "ok", _vectors(self.texts)
 
     def close(self):
         self.closed = True

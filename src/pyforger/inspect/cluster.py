@@ -12,6 +12,7 @@ from typing import Any
 
 import tiktoken
 
+from pyforger._progress import Progress, progress_mode
 from pyforger.acquire import _local_dp
 from pyforger.acquire._model_utils import (
     _catch_kwargs,
@@ -441,7 +442,10 @@ def _default_embed(
             len(gpus),
             ",".join(gpus),
         )
-        return _embed_dp.encode(docs, embedding_model, gpus, encode_kwargs)
+        with _embed_progress(len(docs), embedding_model) as progress:
+            return _embed_dp.encode(
+                docs, embedding_model, gpus, encode_kwargs, progress=progress
+            )
     encoder = SentenceTransformer(embedding_model)
     if encoder.device.type == "cpu":
         logger.warning(
@@ -453,7 +457,15 @@ def _default_embed(
             embedding_model,
             _TFIDF_EMBEDDING,
         )
-    return _embed_dp.encode_in_token_batches(encoder, docs, **encode_kwargs)
+    with _embed_progress(len(docs), embedding_model) as progress:
+        return _embed_dp.encode_in_token_batches(
+            encoder, docs, on_batch=progress.update, **encode_kwargs
+        )
+
+
+def _embed_progress(n: int, embedding_model: str) -> Progress:
+    """Progress of embedding `n` texts (FORGER_PROGRESS=0 turns it off)."""
+    return Progress(f"{embedding_model}: texts embedded", n, progress_mode(None))
 
 
 def _embedding_gpus(num_docs: int) -> list[str]:
