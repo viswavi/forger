@@ -138,7 +138,7 @@ def default_generation_limit(task):
     if normalized in ("coding", "culture"):
         return DEFAULT_GENERATION_LIMIT
     if normalized == "algorithmic":
-        return 100_000_000
+        return 120_000_000
     raise ValueError("Unknown task for the generation token-unit quota")
 
 
