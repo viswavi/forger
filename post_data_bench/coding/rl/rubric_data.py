@@ -17,6 +17,18 @@ MAX_ROWS = 2000
 TASK_MAX_ROWS = {"algorithmic": 800}
 
 
+# SFT rows (prompt + target, in tokens). Algorithmic answers run ~15K tokens at the
+# median and RL allows 32,768, so that task allows Qwen3's whole 40,960 context.
+MAX_SFT_LENGTH = 18800
+TASK_MAX_SFT_LENGTH = {"algorithmic": 40960}
+
+
+def max_sft_length(task=None):
+    """The SFT row length cap for `task` (default: $PDB_TASK)."""
+    task = task if task is not None else os.environ.get("PDB_TASK", "")
+    return TASK_MAX_SFT_LENGTH.get(str(task).strip().lower(), MAX_SFT_LENGTH)
+
+
 def max_rows(task=None):
     """The row cap for `task` (default: $PDB_TASK), e.g. 800 for algorithmic."""
     task = task if task is not None else os.environ.get("PDB_TASK", "")
@@ -224,7 +236,7 @@ def validate_dataset(source):
     return rows
 
 
-def compile_data(source, out_dir, tokenizer=None, max_length=18800):
+def compile_data(source, out_dir, tokenizer=None, max_length=None):
     """Fixed seed, 90/10 split. Fail on overlength rows rather than truncate SFT.
 
     Rows that overlap the held-out test problems are removed first (see
@@ -232,6 +244,8 @@ def compile_data(source, out_dir, tokenizer=None, max_length=18800):
     """
     from .decontaminate import filter_rows  # noqa: ABS101
 
+    if max_length is None:
+        max_length = max_sft_length()
     rows, removed = filter_rows(validate_dataset(source))
     if removed:
         print(
@@ -320,7 +334,7 @@ def main():
         "--out-dir", required=True, help="New directory; refuses to overwrite"
     )
     parser.add_argument("--tokenizer-model", required=True)
-    parser.add_argument("--max-length", type=int, default=18800)
+    parser.add_argument("--max-length", type=int, default=None)
     args = parser.parse_args()
     from transformers import AutoTokenizer
 

@@ -86,6 +86,13 @@ class LineageTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "at most 19"):
                 data.validate_dataset(path)
 
+    def test_algorithmic_task_allows_40960_token_sft_rows(self):
+        """SFT rows may use Qwen3's whole context on the algorithmic task only."""
+        self.assertEqual(data.max_sft_length("algorithmic"), 40960)
+        self.assertEqual(data.max_sft_length("coding"), data.MAX_SFT_LENGTH)
+        with patch.dict("os.environ", {"PDB_TASK": "algorithmic"}):
+            self.assertEqual(data.max_sft_length(), 40960)
+
     def test_algorithmic_task_caps_rows_at_800(self):
         """$PDB_TASK picks the task's cap; other tasks keep MAX_ROWS."""
         self.assertEqual(data.max_rows("algorithmic"), 800)

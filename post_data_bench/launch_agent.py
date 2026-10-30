@@ -502,7 +502,9 @@ prompt_values = dict(
     STUDENT_MODEL=args.model,
     GENERATION_TOKEN_UNIT_LIMIT=os.environ["FORGER_TOKEN_UNIT_LIMIT"],
     GENERATION_USAGE_PATH=GENERATION_USAGE_PATH,
-    MAX_SFT_LENGTH="18800"
+    MAX_SFT_LENGTH="40960"
+    if args.task == "frontiercs"
+    else "18800"
     if args.task == "coding" or args.training_mode == "sft-rl"
     else "8192",
     JUDGE_TOKEN_UNIT_LIMIT=f"{float(os.environ['JUDGE_TOKEN_UNIT_LIMIT']):,.0f}",

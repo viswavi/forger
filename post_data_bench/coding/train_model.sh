@@ -29,8 +29,10 @@ DATA_FILE_NAME=""
 OUTPUT_DIR=""
 LR="1e-5"
 EPOCHS="4"
-# Match convert_to_trl.py’s length filter to avoid truncated targets.
+# Match convert_to_trl.py’s length filter to avoid truncated targets; the
+# algorithmic task allows Qwen3's whole 40,960-token context (rubric_data.py).
 MAX_LENGTH="18800"
+[[ "${PDB_TASK:-}" == algorithmic ]] && MAX_LENGTH="40960"
 FULL_FINETUNE=0
 EXTRA_TRAIN_ARGS=()
 
