@@ -21,6 +21,8 @@ Only the checker's or interactor's own output is parsed, never the solution's.
 ``judge_tests`` judges a program on tests given as strings, for RL criteria:
 grade() calls it as ``judge_cpp`` through ``JudgeChannel``, because the rubric
 worker's own limits (no fork, no file writes) cannot compile or run anything.
+With ``details=True`` it also returns each test's output and checker message;
+a test's ``args`` are the program's command-line arguments (e.g. a generator's).
 """
 from __future__ import annotations
 
@@ -63,6 +65,8 @@ class Case:
     output: str
     time_s: float
     memory: int
+    args: list[str] = dataclasses.field(default_factory=list)  # the solution's
+    run_only: bool = False  # a clean run passes: no checker, no comparison
 
 
 @dataclasses.dataclass
@@ -629,13 +633,26 @@ def judge_case(
 
     Without a checker the output must equal the answer word for word, as
     testlib's wcmp checks it (``judge_tests`` only; problems always have one).
+    A ``run_only`` case (``judge_tests`` only) passes on a clean run.
     """
+    return _judge_case(problem, case, binary, checker, launch, deadline)[0]
+
+
+def _judge_case(
+    problem: Problem,
+    case: Case,
+    binary: Path,
+    checker: Path | None,
+    launch: Path,
+    deadline: Deadline | None,
+) -> tuple[dict, Run]:
+    """judge_case's result and the solution's Run (for its output)."""
     inp = problem.pdir / "testdata" / case.input
     with tempfile.TemporaryDirectory(prefix="fcs-case-") as tmp:
         work = Path(tmp)
         with open(inp, "rb") as stdin:
             run = _Process(
-                [str(binary)],
+                [str(binary), *case.args],
                 launch=launch,
                 cwd=work,
                 stdin=stdin,
@@ -650,12 +667,14 @@ def judge_case(
             extra = f" (signal={-run.exit_status})" if run.status == "Signalled" else ""
             extra += f" ({run.note})" if run.note else ""
             msg = run.stderr.decode(errors="replace") + extra
-            return _case_result(False, run.status, run, msg, "")
+            return _case_result(False, run.status, run, msg, ""), run
+        if case.run_only:
+            return _case_result(True, "Accepted", run, "", ""), run
         if checker is None:
             answer = _answer_path(problem.pdir, case).read_bytes()
             ok = _words(run.stdout) == _words(answer)
             status = "Accepted" if ok else "Wrong Answer"
-            return _case_result(ok, status, run, "", "")
+            return _case_result(ok, status, run, "", ""), run
         (work / "out.txt").write_bytes(run.stdout)
         shutil.copy(inp, work / "in.txt")
         shutil.copy(_answer_path(problem.pdir, case), work / "ans.txt")
@@ -674,13 +693,14 @@ def judge_case(
         ).wait()
     ok = chk.status == "Accepted" and chk.exit_status == 0
     msg = (chk.stdout or chk.stderr).decode(errors="replace")
-    return _case_result(
+    result = _case_result(
         ok,
         "Accepted" if ok else "Wrong Answer",
         run,
         msg,
         msg if _is_scoring_verdict(chk) else "",
     )
+    return result, run
 
 
 def judge_interactive_case(
@@ -702,7 +722,7 @@ def judge_interactive_case(
         sol_dir.mkdir()
         try:
             solution = _Process(
-                [str(binary)],
+                [str(binary), *case.args],
                 launch=launch,
                 cwd=sol_dir,
                 stdin=to_solution_r,
@@ -820,6 +840,8 @@ MAX_SOURCE_CHARS = 256 * 1024  # each of code, checker, interactor
 MAX_TESTS = 50
 MAX_TEST_CHARS = 4 * MIB  # every input and answer together
 MAX_REQUEST_BYTES = 32 * MIB  # one JSON request line, escapes included
+MAX_ARGS = 64  # command-line arguments per test
+DETAIL_STDOUT_BYTES = 64 * 1024  # the start of each test's output, with details
 TESTLIB_DIR = Path(__file__).resolve().with_name("testlib")
 
 
@@ -847,11 +869,13 @@ def encode_request(
     time_limit=1.0,
     memory_mb=256,
     budget_s=None,
+    details=False,
 ) -> bytes | None:
     """judge_cpp's arguments as one JSON request line, as JudgeChannel reads it.
 
     None when they are not JSON data (e.g. a set or NaN) or the line is too
-    large. Tuples become lists, as for every judge_cpp call.
+    large. Tuples become lists, as for every judge_cpp call. ``details`` is
+    sent only when it is not False, so plain requests keep their old form.
     """
     request = {
         "code": code,
@@ -863,6 +887,8 @@ def encode_request(
     }
     if budget_s is not None:
         request["budget_s"] = budget_s
+    if details is not False:
+        request["details"] = details
     try:
         line = json.dumps(request, allow_nan=False).encode() + b"\n"
     except (TypeError, ValueError, RecursionError):
@@ -876,7 +902,26 @@ NOT_JSON = (
 )
 
 
-def request_error(code, tests, checker, interactor, time_limit, memory_mb):
+TEST_SHAPE = (
+    'each test must be {"input": str, "answer": str, "args": [str]}, '
+    'where "answer" and "args" may be left out'
+)
+
+
+def detail(status: str, ratio=0.0, time_s=0.0, stdout="", message="") -> dict:
+    """One test's entry in judge_cpp's details, e.g. for a call that failed."""
+    return {
+        "status": status,
+        "ratio": ratio,
+        "time": time_s,
+        "stdout": stdout,
+        "message": message,
+    }
+
+
+def request_error(
+    code, tests, checker, interactor, time_limit, memory_mb, details=False
+):
     """Why judge_cpp's arguments are invalid, or None when they are valid."""
     sources = (("code", code), ("checker", checker), ("interactor", interactor))
     for name, value in sources:
@@ -894,11 +939,19 @@ def request_error(code, tests, checker, interactor, time_limit, memory_mb):
     for test in tests:
         if (
             not isinstance(test, dict)
-            or set(test) != {"input", "answer"}
-            or not all(isinstance(v, str) for v in test.values())
+            or "input" not in test
+            or not set(test) <= {"input", "answer", "args"}
+            or not isinstance(test["input"], str)
+            or not isinstance(test.get("answer", ""), str)
+            or not isinstance(test.get("args", []), list)
+            or not all(isinstance(a, str) for a in test.get("args", []))
         ):
-            return 'each test must be {"input": str, "answer": str}'
-        total += len(test["input"]) + len(test["answer"])
+            return TEST_SHAPE
+        args = test.get("args", [])
+        if len(args) > MAX_ARGS or any("\0" in a for a in args):
+            return f"args must be at most {MAX_ARGS} strings without NUL characters"
+        total += len(test["input"]) + len(test.get("answer", ""))
+        total += sum(len(a) for a in args)
     if total > MAX_TEST_CHARS:
         return f"tests are longer than {MAX_TEST_CHARS} characters in total"
     for name, value, low, high in (
@@ -915,6 +968,8 @@ def request_error(code, tests, checker, interactor, time_limit, memory_mb):
         return "time_limit must be in (0, 10] seconds"
     if not 16 <= memory_mb <= 2048:
         return "memory_mb must be in [16, 2048]"
+    if not isinstance(details, bool):
+        return "details must be True or False"
     return None
 
 
@@ -940,11 +995,15 @@ def judge_tests(
     testlib_dir: str | Path | None = None,
     cache_dir: str | Path | None = None,
     workers: int = 4,
-) -> tuple[float, list[str]]:
+    details: bool = False,
+) -> tuple[float, list[str]] | tuple[float, list[dict]]:
     """Judge ``code`` on tests given as strings, as ``judge`` judges a problem.
 
-    ``tests`` is a list of {"input": stdin, "answer": answer file}, each run
-    with ``time_limit`` seconds and ``memory_mb`` MiB. ``checker`` (run as
+    ``tests`` is a list of {"input": stdin, "answer": answer file, "args":
+    [command-line arguments]}, each run with ``time_limit`` seconds and
+    ``memory_mb`` MiB; "args" may be left out (no arguments), and so may
+    "answer": then a clean run passes the test, with no checker or comparison
+    (an interactor still runs, with an empty answer file). ``checker`` (run as
     ``checker input output answer``) or ``interactor`` (run as ``interactor
     input transcript answer``) is the C++ source of a testlib program, compiled
     against ``testlib_dir``/testlib.h (the copy next to this file by default)
@@ -960,12 +1019,22 @@ def judge_tests(
     ``budget_s`` (or ``deadline``) score 0 with one status saying why, e.g.
     (0.0, ["Compile Error: main.cpp:1:11: error: ..."]). Only infrastructure
     failures (no compiler, an unusable cache) raise.
+
+    With ``details=True`` the second item has one dict per test instead of a
+    status: {"status": as above, "ratio": in [0, 1], "time": CPU seconds,
+    "stdout": the first 64 KiB of the program's output ("" for an interactive
+    program, whose output goes to the interactor), "message": the checker's or
+    interactor's message, or the program's stderr and why it was stopped when
+    the run failed (last 500 characters)}. A failed call gives one such dict
+    with ratio 0 and the status above.
     """
-    error = request_error(code, tests, checker, interactor, time_limit, memory_mb)
+    error = request_error(
+        code, tests, checker, interactor, time_limit, memory_mb, details
+    )
     if error:
-        return 0.0, [f"Invalid Argument: {error}"]
+        return _failed(f"Invalid Argument: {error}", details is True)
     deadline = deadline or Deadline(budget_s)
-    over = (0.0, ["Budget Exceeded: judging ran out of the criterion's time"])
+    over = _failed("Budget Exceeded: judging ran out of the criterion's time", details)
     testlib_dir = Path(testlib_dir) if testlib_dir else TESTLIB_DIR
     cache_dir = Path(cache_dir) if cache_dir else default_cache_dir()
     launch = launcher(cache_dir)
@@ -975,12 +1044,20 @@ def judge_tests(
         (pdir / "testdata").mkdir(parents=True)
         cases = []
         for i, test in enumerate(tests, 1):
-            for suffix, text in ((".in", test["input"]), (".ans", test["answer"])):
+            answer = test.get("answer", "")
+            for suffix, text in ((".in", test["input"]), (".ans", answer)):
                 (pdir / "testdata" / f"{i}{suffix}").write_bytes(
                     text.encode("utf-8", errors="replace")
                 )
             cases.append(
-                Case(f"{i}.in", f"{i}.ans", float(time_limit), int(memory_mb * MIB))
+                Case(
+                    f"{i}.in",
+                    f"{i}.ans",
+                    float(time_limit),
+                    int(memory_mb * MIB),
+                    args=list(test.get("args", [])),
+                    run_only="answer" not in test,
+                )
             )
         problem = Problem(
             pdir=pdir,
@@ -1003,7 +1080,7 @@ def judge_tests(
                         return over
                     kind = "Interactor" if interactor is not None else "Checker"
                     message = str(exc).split("\n", 1)[-1][-1000:]
-                    return 0.0, [f"{kind} Compile Error: {message}"]
+                    return _failed(f"{kind} Compile Error: {message}", details)
             work = pdir / "solution"
             work.mkdir()
             (work / "main.cpp").write_text(code, errors="replace")
@@ -1013,7 +1090,7 @@ def judge_tests(
             if deadline.remaining() <= 0:
                 return over
             if not ok:
-                return 0.0, [f"Compile Error: {message[-1000:]}"]
+                return _failed(f"Compile Error: {message[-1000:]}", details)
             binary = work / "main"
 
             def one(case: Case) -> dict:
@@ -1021,7 +1098,13 @@ def judge_tests(
                     return judge_interactive_case(
                         problem, case, binary, judge_bin, launch, deadline
                     )
-                return judge_case(problem, case, binary, judge_bin, launch, deadline)
+                result, run = _judge_case(
+                    problem, case, binary, judge_bin, launch, deadline
+                )
+                if details:
+                    stdout = run.stdout[:DETAIL_STDOUT_BYTES]
+                    result["stdout"] = stdout.decode(errors="replace")
+                return result
 
             workers = max(1, min(workers, len(cases)))
             with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -1031,7 +1114,18 @@ def judge_tests(
     if deadline.remaining() <= 0:
         return over  # tests killed at the deadline did not get their time
     ratios = [min(max(c["ratio"], 0.0), 1.0) for c in results]
-    return sum(ratios) / len(ratios), [_test_status(c) for c in results]
+    score = sum(ratios) / len(ratios)
+    if not details:
+        return score, [_test_status(c) for c in results]
+    return score, [
+        detail(_test_status(c), r, c["time"], c.get("stdout", ""), c["msg"])
+        for c, r in zip(results, ratios)
+    ]
+
+
+def _failed(status: str, details: bool) -> tuple[float, list]:
+    """A call that judged nothing: score 0 and one status (or detail) saying why."""
+    return 0.0, [detail(status) if details else status]
 
 
 class JudgeChannel:
@@ -1039,7 +1133,9 @@ class JudgeChannel:
 
     The worker writes one JSON line per call to ``requests_fd``, judge_tests'
     arguments plus ``budget_s`` (its criterion's remaining time), and reads one
-    line back from ``replies_fd``: {"score": x, "statuses": [...]}. Requests
+    line back from ``replies_fd``: {"score": x, "statuses": [...]}, where the
+    statuses are judge_tests' details when the request has "details": true
+    (except for a malformed request or a judge failure). Requests
     are untrusted and handled one at a time, each ending at the worker's
     budget or the channel's own ``budget_s``, whichever comes first. ``close``
     cancels the request in flight, so no judging outlives the worker. An
@@ -1079,13 +1175,13 @@ class JudgeChannel:
                 except OSError:
                     pass
 
-    def _reply(self, score: float, statuses: list[str]) -> None:
+    def _reply(self, score: float, statuses: list) -> None:
         self._replies.write(
             json.dumps({"score": score, "statuses": statuses}).encode() + b"\n"
         )
         self._replies.flush()
 
-    def _answer(self, line: bytes) -> tuple[float, list[str]]:
+    def _answer(self, line: bytes) -> tuple[float, list]:
         try:
             request = json.loads(line)
         except ValueError:
@@ -1093,7 +1189,7 @@ class JudgeChannel:
         fields = {"code", "tests", "checker", "interactor", "time_limit", "memory_mb"}
         if not isinstance(request, dict) or not {"code", "tests"} <= set(
             request
-        ) <= fields | {"budget_s"}:
+        ) <= fields | {"budget_s", "details"}:
             return 0.0, ["Invalid Argument: malformed judge_cpp request"]
         budget = self.ends_at - time.monotonic()
         asked = request.pop("budget_s", None)

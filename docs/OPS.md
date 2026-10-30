@@ -611,6 +611,8 @@ run_programs(
     suffix: str = ".py",
     max_workers: int | None = None,
     runner: Runner | None = None,
+    language: str = "python",
+    compile_command: list[str] | None = None,
 ) -> list[dict]
 ```
 
@@ -1070,6 +1072,8 @@ by_tests(
     suffix: str = ".py",
     max_workers: int | None = None,
     runner: Runner | None = None,
+    language: str = "python",
+    compile_command: list[str] | None = None,
 ) -> list[dict]
 ```
 
@@ -1113,13 +1117,16 @@ Not cached: a plain function.
 program_verifier(
     tests_field: str = "tests",
     *,
-    extract_code: Callable[[str], str | None] = last_code_block,
+    extract_code: Callable[[str], str | None] | None = None,
     checker: Checker = outputs_match,
     timeout_s: float = 10.0,
     memory_mb: int | None = 2048,
     command: list[str] | None = None,
     suffix: str = ".py",
     runner: Runner | None = None,
+    language: str = "python",
+    compile_command: list[str] | None = None,
+    min_score: float = 1.0,
 ) -> Callable[[str, dict], bool | None]
 ```
 

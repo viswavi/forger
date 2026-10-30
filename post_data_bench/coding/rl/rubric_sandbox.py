@@ -9,7 +9,8 @@ sys exposes only restricted I/O and utility functions.
 
 compile_function/call/execute reuse a compiled function; call_method creates
 a fresh instance per call; run_program re-executes a script with supplied stdin.
-judge_cpp judges a C++ program as grade()'s judge_cpp does (rl/cpp_judge.py).
+judge_cpp judges a C++ program as grade()'s judge_cpp does (rl/cpp_judge.py);
+judge_cpp(..., details=True) also returns each test's output and checker message.
 """
 from __future__ import annotations
 
@@ -616,13 +617,16 @@ class Sandbox:
         time_limit: Any = 1.0,
         memory_mb: Any = 256,
         *,
+        details: Any = False,
         timeout_s: float = 20.0,
-    ) -> tuple[float, list[str]]:
+    ) -> tuple[float, list[Any]]:
         """grade()'s ``judge_cpp``, in this process: (score in [0, 1], statuses).
 
         The same arguments, checks, judging and results as inside an RL
         criterion (cpp_judge.judge_tests), within ``timeout_s`` (a criterion's
         whole 20-second budget), e.g. to try a checker before writing a rubric.
+        ``details=True`` returns one dict per test instead of a status: status,
+        ratio, time, stdout (first 64 KiB) and message.
         """
         try:
             from . import cpp_judge  # noqa: ABS101
@@ -630,10 +634,11 @@ class Sandbox:
             import cpp_judge  # type: ignore[no-redef]
 
         line = cpp_judge.encode_request(
-            code, tests, checker, interactor, time_limit, memory_mb
+            code, tests, checker, interactor, time_limit, memory_mb, details=details
         )
         if line is None:
-            return 0.0, [cpp_judge.NOT_JSON]
+            status = cpp_judge.NOT_JSON
+            return 0.0, [cpp_judge.detail(status) if details is True else status]
         return cpp_judge.judge_tests(**json.loads(line), budget_s=timeout_s)
 
     def call(

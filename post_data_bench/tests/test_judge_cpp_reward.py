@@ -54,6 +54,12 @@ DOUBLE = (
     'printf("%ld\\n",2*x);fflush(stdout);}'
 )
 SPIN = "int main(){volatile long x=0;for(;;)x++;}"
+# A test generator: prints argv[1] numbers starting at argv[2].
+GENERATOR = (
+    "#include <cstdio>\n#include <cstdlib>\n"
+    "int main(int argc,char**argv){int n=atoi(argv[1]),s=atoi(argv[2]);"
+    'for(int i=0;i<n;i++)printf("%d ",s+i);printf("\\n");}'
+)
 TESTS = [{"input": "1 2\n", "answer": "3\n"}, {"input": "40 2\n", "answer": "42\n"}]
 
 
@@ -246,6 +252,81 @@ class JudgeCppRewardTests(unittest.TestCase):
         )
         self.assertEqual(json.loads(out.stdout), {"score": 1.0}, out.stderr)
 
+    def test_details_give_each_tests_output_ratio_and_checker_message(self):
+        """details=True: status, ratio, time, stdout and message per test."""
+        off_by_one = SUM.replace("a+b", "a+b+1")
+        score, details = Sandbox().judge_cpp(
+            off_by_one, TESTS, checker=POINTS_CHECKER, details=True
+        )
+        self.assertEqual(score, 0.5)
+        self.assertEqual([d["status"] for d in details], ["Partially Correct"] * 2)
+        self.assertEqual([d["ratio"] for d in details], [0.5, 0.5])
+        self.assertEqual([d["stdout"] for d in details], ["4\n", "43\n"])
+        self.assertIn("Ratio: 0.5", details[0]["message"])
+        self.assertEqual(
+            set(details[0]), {"status", "ratio", "time", "stdout", "message"}
+        )
+        # Without details the same call keeps its (score, statuses) shape.
+        self.assertEqual(
+            Sandbox().judge_cpp(off_by_one, TESTS, checker=POINTS_CHECKER),
+            (0.5, ["Partially Correct", "Partially Correct"]),
+        )
+        # Inside an RL criterion, through the channel.
+        crit = (
+            "def grade(prompt, response, ground_truth):\n"
+            "    code = response.split('```cpp\\n')[1].split('```')[0]\n"
+            f"    score, details = judge_cpp(code, {TESTS!r}, details=True)\n"
+            "    outs = [d['stdout'].split() for d in details]\n"
+            "    return 1.0 if outs == [['4'], ['43']] and score == 0.0 else 0.0\n"
+        )
+        self.assertEqual(self.score(off_by_one, crit), 1.0)
+
+    def test_details_of_failures(self):
+        """A failed call is one detail; a failed run says why in its message."""
+        score, details = Sandbox().judge_cpp("int main( {", TESTS, details=True)
+        self.assertEqual(score, 0.0)
+        self.assertEqual(len(details), 1)
+        self.assertTrue(details[0]["status"].startswith("Compile Error: "))
+        self.assertEqual(details[0]["ratio"], 0.0)
+        _, details = Sandbox().judge_cpp(SPIN, TESTS[:1], time_limit=0.2, details=True)
+        self.assertEqual(details[0]["status"], "Time Limit Exceeded")
+        self.assertIn("limit", details[0]["message"])
+        tests = [{"input": "3", "answer": ""}]
+        _, details = Sandbox().judge_cpp(
+            DOUBLE, tests, interactor=INTERACTOR, details=True
+        )
+        self.assertEqual(details[0]["status"], "Accepted")
+        self.assertEqual(details[0]["stdout"], "")  # it went to the interactor
+        self.assertIn("doubled", details[0]["message"])
+
+    def test_generator_args_and_tests_without_answers(self):
+        """A test's args reach the program; a test without an answer only runs it."""
+        tests = [
+            {"input": "", "args": ["3", "10"]},
+            {"input": "", "args": ["2", "5"], "answer": "5 6"},
+            {"input": "", "args": ["2", "5"], "answer": "5 7"},
+        ]
+        score, details = Sandbox().judge_cpp(GENERATOR, tests, details=True)
+        self.assertEqual(
+            [d["status"] for d in details], ["Accepted", "Accepted", "Wrong Answer"]
+        )
+        self.assertEqual(details[0]["stdout"].split(), ["10", "11", "12"])
+        self.assertAlmostEqual(score, 2 / 3)
+        # A crashing run still fails a test without an answer.
+        crash = "int main(){return 3;}"
+        self.assertEqual(
+            Sandbox().judge_cpp(crash, tests[:1]), (0.0, ["Nonzero Exit Status"])
+        )
+        crit = (
+            "def grade(prompt, response, ground_truth):\n"
+            "    code = response.split('```cpp\\n')[1].split('```')[0]\n"
+            "    tests = [{'input': '', 'args': ['4', '1']}]\n"
+            "    score, details = judge_cpp(code, tests, details=True)\n"
+            "    return 1.0 if details[0]['stdout'].split() == "
+            "['1', '2', '3', '4'] else 0.0\n"
+        )
+        self.assertEqual(self.score(GENERATOR, crit), 1.0)
+
     def test_broken_judge_stops_the_reward(self):
         """An unusable judge (no g++, no cache) raises instead of scoring 0."""
         with mock.patch.dict(os.environ, {"CPP_JUDGE_CACHE_DIR": "/proc/forbidden"}):
@@ -267,6 +348,33 @@ class JudgeCppWithoutChannelTests(unittest.TestCase):
             score, statuses = Sandbox().judge_cpp(*args)
             self.assertEqual(score, 0.0)
             self.assertTrue(statuses[0].startswith(prefix), statuses)
+
+    def test_invalid_args_and_details_in_process(self):
+        """Test args must be strings; details must be a bool; failures are details."""
+        bad_tests = [
+            [{"input": "", "args": "3"}],
+            [{"input": "", "args": [3]}],
+            [{"answer": "3"}],
+            [{"input": "", "args": ["a\0b"]}],
+            [{"input": "", "args": ["1"] * 65}],
+        ]
+        for tests in bad_tests:
+            score, statuses = Sandbox().judge_cpp(SUM, tests)
+            self.assertEqual(score, 0.0)
+            self.assertTrue(statuses[0].startswith("Invalid Argument: "), tests)
+        score, statuses = Sandbox().judge_cpp(SUM, TESTS, details="yes")
+        self.assertEqual(statuses, ["Invalid Argument: details must be True or False"])
+        score, details = Sandbox().judge_cpp(SUM, "tests", details=True)
+        self.assertEqual(score, 0.0)
+        self.assertTrue(details[0]["status"].startswith("Invalid Argument: tests"))
+        self.assertEqual(
+            {k: v for k, v in details[0].items() if k != "status"},
+            {"ratio": 0.0, "time": 0.0, "stdout": "", "message": ""},
+        )
+        _, details = Sandbox().judge_cpp(
+            SUM, TESTS, None, None, float("nan"), details=True
+        )
+        self.assertTrue(details[0]["status"].startswith("Invalid Argument: arguments"))
 
 
 if __name__ == "__main__":

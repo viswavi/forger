@@ -20,6 +20,16 @@ Runs use threads and no signals, so the ops work from any thread.
 This is NOT a security sandbox. The program runs as your user, with your
 files and network. Run untrusted code in a container or VM.
 
+``language="cpp"`` compiles each distinct program once (``g++ -O2 -pipe
+-std=gnu++17`` by default) and runs the binary on every test; a program that
+does not compile gets status ``"compile_error"`` on every test, with the
+compiler's message in ``stderr``.
+
+A checker grades a test from the program's stdout and the expected output. It
+returns a bool, or a score in [0, 1] for partial credit; a test passes when it
+scores 1. A checker with a third parameter also gets the test, e.g. to read
+its input. ``program_checker(source)`` runs a C++ or Python checker program.
+
 ``runner=`` replaces the subprocess with your own executor, e.g. the sandbox
 an RL reward will run the code in, so a solution that passes here also passes
 there. A runner takes ``(code, tests)`` and returns one result dict per test
@@ -28,6 +38,8 @@ there. A runner takes ``(code, tests)`` and returns one result dict per test
 from __future__ import annotations
 
 import contextvars
+import inspect
+import math
 import os
 import re
 import shutil
@@ -37,21 +49,36 @@ import sys
 import tempfile
 import threading
 import time
+import weakref
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any
+from typing import Any, Union
 
 from pyforger.op import op
 from pyforger.utils import get_field, get_formatted_logger
 
-# (actual stdout, expected output) -> passed
-Checker = Callable[[str, str], bool]
+# (actual stdout, expected output[, test]) -> passed, or a score in [0, 1]
+Checker = Callable[..., Union[bool, float]]
 # (code, tests) -> one result per test, in order. Each result is a dict with
 # "status" ("ok", "runtime_error", "timeout", ...) and "stdout"; others
 # ("stderr", "seconds", "exit_code", "timed_out") are filled in when missing. A
 # runner that grades a test itself (e.g. comparing a returned value) sets
-# "passed"; otherwise the checker compares "stdout" with the test's "output".
+# "passed" or "score"; otherwise the checker grades "stdout" against the
+# test's "output".
 Runner = Callable[[str, list[dict]], list[dict]]
+
+# Compiled languages: the compiler command, with {file} for the source and
+# {out} for the binary, and the source file's suffix.
+_COMPILERS: dict[str, tuple[list[str], str]] = {
+    "cpp": (["g++", "-O2", "-pipe", "-std=gnu++17", "{file}", "-o", "{out}"], ".cpp"),
+}
+_ALIASES = {"py": "python"}
+LANGUAGES = ("python", *_ALIASES, *_COMPILERS)
+# Fence tags of each language's code blocks ("" is an untagged block).
+_FENCE_TAGS = {
+    "python": ("", "python", "py", "python3"),
+    "cpp": ("", "cpp", "c++", "cc", "cxx"),
+}
 
 # The child sets its own limits and then execs the program, so no preexec_fn
 # (unsafe with threads) is needed. Limits survive exec. A limit of 0 is not
@@ -100,18 +127,77 @@ def outputs_match(actual: str, expected: str) -> bool:
 _FENCE = re.compile(r"```([^\n`]*)\n(.*?)```", re.S)
 
 
-def last_code_block(text: str) -> str | None:
-    r"""The last fenced code block tagged python, py, python3, or untagged.
+def last_code_block(text: str, language: str = "python") -> str | None:
+    r"""The last fenced code block in ``language``, or untagged.
 
-    E.g. ``"Idea...\n```python\nprint(1)\n```"`` gives ``"print(1)\n"``.
-    None when there is no such block.
+    Python blocks are tagged python, py, or python3; C++ blocks cpp, c++, cc,
+    or cxx. E.g. ``"Idea...\n```python\nprint(1)\n```"`` gives
+    ``"print(1)\n"``. None when there is no such block.
     """
+    tags = _FENCE_TAGS[_checked_language(language)]
     blocks = [
         code
         for info, code in _FENCE.findall(text or "")
-        if info.strip().lower() in ("", "python", "py", "python3")
+        if info.strip().lower() in tags
     ]
     return blocks[-1] if blocks else None
+
+
+def _checked_language(language: str) -> str:
+    """``language``, with aliases resolved ("py" is "python")."""
+    if language not in LANGUAGES:
+        raise ValueError(f"language must be one of {LANGUAGES}, got {language!r}")
+    return _ALIASES.get(language, language)
+
+
+def compile_program(
+    code: str,
+    workdir: str,
+    language: str = "cpp",
+    *,
+    compile_command: list[str] | None = None,
+    timeout_s: float = 60.0,
+) -> tuple[str | None, str]:
+    """Compile ``code`` into ``workdir``; return ``(binary, "")`` or ``(None, error)``.
+
+    ``compile_command`` replaces the default (``g++ -O2 -pipe -std=gnu++17
+    {file} -o {out}`` for C++), e.g. ``["clang++", "-std=c++20", "-O2",
+    "{file}", "-o", "{out}"]``. The compiler runs with the same bare
+    environment as programs. The error is the compiler's output, or a note
+    that it timed out. Not an op; safe to call from many threads at once.
+    """
+    language = _checked_language(language)
+    if language not in _COMPILERS:
+        raise ValueError(f"{language} is not compiled")
+    default, suffix = _COMPILERS[language]
+    command = compile_command or default
+    if not command:
+        raise ValueError("compile_command must not be empty")
+    source = "main" + suffix
+    binary = os.path.join(workdir, "main")
+    with open(os.path.join(workdir, source), "w", encoding="utf-8") as f:
+        f.write(code)
+    # Relative names, so errors read "main.cpp:1:11: error: ...".
+    argv = [part.replace("{file}", source).replace("{out}", "main") for part in command]
+    argv[0] = shutil.which(argv[0]) or argv[0]
+    try:
+        proc = subprocess.run(
+            argv,
+            cwd=workdir,
+            env=dict(_CHILD_ENV),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired:
+        return None, f"compilation timed out after {timeout_s:g} s"
+    except FileNotFoundError:
+        raise OSError(f"compiler not found: {command[0]!r}") from None
+    output = proc.stdout.decode("utf-8", errors="replace")
+    if proc.returncode != 0 or not os.path.exists(binary):
+        return None, output or f"compiler exited with status {proc.returncode}"
+    return binary, ""
 
 
 def run_program(
@@ -126,6 +212,8 @@ def run_program(
     suffix: str = ".py",
 ) -> dict[str, Any]:
     """Run ``code`` once as a script with ``stdin``; return what happened.
+
+    Runs in a subprocess, unlike ``execute_code``, which runs in this process.
 
     Not an op: no caching, and safe to call from many threads at once.
 
@@ -269,18 +357,22 @@ def run_tests(
     stop_on_failure: bool = False,
     max_chars: int | None = 10_000,
     runner: Runner | None = None,
+    language: str = "python",
+    compile_command: list[str] | None = None,
     **run_kwargs: Any,
 ) -> list[dict[str, Any]]:
     """Run ``code`` on each test in order; one result per test that ran.
 
-    Each result is ``run_program``'s dict plus ``"passed"``: True or False
-    when the test has an ``"output"``, else None. A run that exits 0 with the
-    wrong output gets status ``"wrong_answer"``. ``stop_on_failure`` stops
-    after the first test that does not pass. ``max_chars`` cuts each kept
-    stdout and stderr (None keeps them whole). ``run_kwargs`` go to
-    ``run_program``. ``runner`` runs every test in one call instead (see
-    ``Runner``); ``stop_on_failure`` then cuts the results after the first
-    failure.
+    Each result is ``run_program``'s dict plus ``"passed"`` and ``"score"``:
+    when the test has an ``"output"``, the checker's score in [0, 1] (a bool
+    counts as 1 or 0) and whether it is 1; else both None. A run that exits 0
+    and scores 0 gets status ``"wrong_answer"``, one that scores between 0 and
+    1 ``"partial"``. ``stop_on_failure`` stops after the first test that does
+    not pass. ``max_chars`` cuts each kept stdout and stderr (None keeps them
+    whole). ``run_kwargs`` go to ``run_program``. ``language="cpp"`` compiles
+    ``code`` once first (see ``compile_program``). ``runner`` runs every test
+    in one call instead (see ``Runner``); ``stop_on_failure`` then cuts the
+    results after the first failure.
     """
     if runner is not None:
         results = _run_with(runner, code, tests, checker, max_chars)
@@ -288,6 +380,29 @@ def run_tests(
             failed = [i for i, r in enumerate(results) if r["passed"] is not True]
             results = results[: failed[0] + 1] if failed else results
         return results
+    language = _checked_language(language)
+    if language == "python":
+        return _run_each(code, tests, checker, stop_on_failure, max_chars, run_kwargs)
+    _check_compiled_kwargs(run_kwargs)
+    with tempfile.TemporaryDirectory(prefix="forger_build_") as build:
+        binary, error = compile_program(
+            code, build, language, compile_command=compile_command
+        )
+        if binary is None:
+            failures = [_compile_failure(t, error, checker, max_chars) for t in tests]
+            return failures[:1] if stop_on_failure else failures
+        kwargs = {**run_kwargs, "command": [binary]}
+        return _run_each("", tests, checker, stop_on_failure, max_chars, kwargs)
+
+
+def _run_each(
+    code: str,
+    tests: list[dict],
+    checker: Checker,
+    stop_on_failure: bool,
+    max_chars: int | None,
+    run_kwargs: dict[str, Any],
+) -> list[dict[str, Any]]:
     results = []
     for test in tests:
         result = _run_test(code, test, checker, max_chars, run_kwargs)
@@ -295,6 +410,28 @@ def run_tests(
         if stop_on_failure and result["passed"] is not True:
             break
     return results
+
+
+def _check_compiled_kwargs(run_kwargs: dict[str, Any]) -> None:
+    """A compiled program runs as its binary: ``command`` and ``suffix`` are unused."""
+    if (
+        run_kwargs.get("command") is not None
+        or run_kwargs.get("suffix", ".py") != ".py"
+    ):
+        raise ValueError(
+            "command and suffix are for interpreted programs; with a compiled "
+            "language, use compile_command"
+        )
+
+
+def _compile_failure(
+    test: dict, error: str, checker: Checker, max_chars: int | None
+) -> dict[str, Any]:
+    """The result of a test whose program did not compile."""
+    _check_test(test)
+    return _graded(
+        {"status": "compile_error", "stderr": error}, test, checker, max_chars
+    )
 
 
 def _run_test(
@@ -358,20 +495,52 @@ def _graded(
     result["stderr"] = str(result["stderr"])
     expected = test.get("output")
     if expected is None:
-        result["passed"] = None
+        score = None
     elif result["status"] != "ok":
-        result["passed"] = False
+        score = 0.0
+    elif result.get("score") is not None:  # the runner scored it
+        score = _score(result["score"])
     elif result.get("passed") is not None:  # the runner graded it
-        result["passed"] = bool(result["passed"])
+        score = float(bool(result["passed"]))
     else:
-        result["passed"] = bool(checker(result["stdout"], str(expected)))
-    if result["passed"] is False and result["status"] == "ok":
-        result["status"] = "wrong_answer"
+        score = _score(_check(checker, result["stdout"], str(expected), test))
+    result["score"] = score
+    result["passed"] = None if score is None else score >= 1.0
+    if score is not None and score < 1.0 and result["status"] == "ok":
+        result["status"] = "partial" if score > 0.0 else "wrong_answer"
     if max_chars is not None:
         result["stdout"] = result["stdout"][:max_chars]
         # The end of stderr, where a traceback's error is.
         result["stderr"] = result["stderr"][-max_chars:] if max_chars else ""
     return result
+
+
+def _check(checker: Checker, stdout: str, expected: str, test: dict) -> Any:
+    """Call ``checker``, passing the test too when it takes a third argument."""
+    if _takes_test(checker):
+        return checker(stdout, expected, test)
+    return checker(stdout, expected)
+
+
+def _takes_test(checker: Checker) -> bool:
+    try:
+        params = inspect.signature(checker).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    positional = [
+        p for p in params if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+    ]
+    return len(positional) >= 3 or any(p.kind is p.VAR_POSITIONAL for p in params)
+
+
+def _score(value: Any) -> float:
+    """A checker's verdict as a score in [0, 1]: a bool is 1 or 0."""
+    if isinstance(value, bool) or value is None:
+        return float(bool(value))
+    score = float(value)
+    if math.isnan(score):
+        return 0.0
+    return min(1.0, max(0.0, score))
 
 
 def _stdin_text(value: Any) -> str:
@@ -412,15 +581,20 @@ def run_programs(
     suffix: str = ".py",
     max_workers: int | None = None,
     runner: Runner | None = None,
+    language: str = "python",
+    compile_command: list[str] | None = None,
 ) -> list[dict]:
     r"""Run each row's stdin/stdout program on each of its tests.
 
+    Runs each program in a subprocess, unlike ``execute_code`` (in this process).
+
     Every row gets ``result_field``: one result per test, in test order, e.g.
-    ``{"status": "wrong_answer", "passed": False, "exit_code": 0, "timed_out":
-    False, "stdout": "5\n", "stderr": "", "seconds": 0.03}``. ``status`` is
-    ``"ok"``, ``"wrong_answer"``, ``"runtime_error"``, ``"timeout"``, or
-    ``"output_limit"``; ``passed`` is None for a test without ``"output"``.
-    A row whose code is missing or empty gets ``None``.
+    ``{"status": "wrong_answer", "passed": False, "score": 0.0, "exit_code":
+    0, "timed_out": False, "stdout": "5\n", "stderr": "", "seconds": 0.03}``.
+    ``status`` is ``"ok"``, ``"wrong_answer"``, ``"partial"`` (a score
+    between 0 and 1), ``"runtime_error"``, ``"timeout"``, ``"output_limit"``,
+    or ``"compile_error"``; ``passed`` and ``score`` are None for a test
+    without ``"output"``. A row whose code is missing or empty gets ``None``.
 
     Args:
         items: Input rows.
@@ -431,8 +605,10 @@ def run_programs(
         extract_code: Optional ``str -> str | None`` applied to the field
             first, e.g. ``last_code_block`` to take the code out of a model's
             answer. None uses the field as is.
-        checker: ``(stdout, expected) -> bool``; default ``outputs_match``
-            (equal up to whitespace).
+        checker: ``(stdout, expected) -> bool | float``, or ``(stdout,
+            expected, test)``; a float is a partial score in [0, 1]. Default
+            ``outputs_match`` (equal up to whitespace); ``program_checker``
+            runs a checker program.
         timeout_s: Wall-clock limit per run, in seconds.
         memory_mb: Address-space limit per run (None for none). Not enforced
             on macOS, which has no working ``RLIMIT_AS``.
@@ -454,10 +630,15 @@ def run_programs(
             and ``command`` then do not apply. E.g. run solutions in the
             sandbox that will score them, so what passes here passes there.
             Part of the cache key: give it a ``cache_key()`` method.
+        language: ``"python"`` (default; or ``"py"``) or ``"cpp"``, which
+            compiles each distinct program once.
+        compile_command: The compiler command for ``language="cpp"``, with
+            ``{file}`` and ``{out}``; default ``g++ -O2 -pipe -std=gnu++17``.
 
     Returns:
         New rows (inputs are not mutated), in input order.
     """
+    language = _checked_language(language)
     workers = max_workers or _default_workers()
     if workers < 1:
         raise ValueError("max_workers must be at least 1")
@@ -487,14 +668,70 @@ def run_programs(
         else []
         for item, code in zip(items, codes)
     ]
+    if language == "python":
+        results = _run_jobs(codes, tests, checker, max_chars, run_kwargs, workers)
+    else:
+        _check_compiled_kwargs(run_kwargs)
+        with tempfile.TemporaryDirectory(prefix="forger_build_") as build:
+            built = _compile_all(codes, build, language, compile_command, workers)
+            results = _run_jobs(
+                codes, tests, checker, max_chars, run_kwargs, workers, built
+            )
+    return [{**item, result_field: res} for item, res in zip(items, results)]
+
+
+def _compile_all(
+    codes: list[str | None],
+    build: str,
+    language: str,
+    compile_command: list[str] | None,
+    workers: int,
+) -> dict[str, tuple[str | None, str]]:
+    """Compile each distinct program once, in its own directory under ``build``."""
+    distinct = list(dict.fromkeys(c for c in codes if c is not None))
+    dirs = [os.path.join(build, str(k)) for k in range(len(distinct))]
+    for path in dirs:
+        os.mkdir(path)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        compiled = list(
+            pool.map(
+                lambda job: compile_program(
+                    job[0], job[1], language, compile_command=compile_command
+                ),
+                zip(distinct, dirs),
+            )
+        )
+    return dict(zip(distinct, compiled))
+
+
+def _run_jobs(
+    codes: list[str | None],
+    tests: list[list[dict]],
+    checker: Checker,
+    max_chars: int | None,
+    run_kwargs: dict[str, Any],
+    workers: int,
+    built: dict[str, tuple[str | None, str]] | None = None,
+) -> list[list[dict] | None]:
+    """Every test of every row with code, ``workers`` runs at a time.
+
+    With ``built`` (compiled programs by source), each row runs its binary,
+    and a row whose program did not compile gets a compile error per test.
+    """
+
+    def run(i: int, j: int) -> dict[str, Any]:
+        code = codes[i] or ""
+        if built is None:
+            return _run_test(code, tests[i][j], checker, max_chars, run_kwargs)
+        binary, error = built[code]
+        if binary is None:
+            return _compile_failure(tests[i][j], error, checker, max_chars)
+        kwargs = {**run_kwargs, "command": [binary]}
+        return _run_test("", tests[i][j], checker, max_chars, kwargs)
+
     jobs = [(i, j) for i, row_tests in enumerate(tests) for j in range(len(row_tests))]
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [
-            pool.submit(
-                _run_test, codes[i] or "", tests[i][j], checker, max_chars, run_kwargs
-            )
-            for i, j in jobs
-        ]
+        futures = [pool.submit(run, i, j) for i, j in jobs]
         try:
             done = [f.result() for f in futures]
         except BaseException:
@@ -506,7 +743,123 @@ def run_programs(
     ]
     for (i, _), result in zip(jobs, done):
         results[i].append(result)  # type: ignore[union-attr]
-    return [{**item, result_field: res} for item, res in zip(items, results)]
+    return results
+
+
+# testlib's exit codes for a verdict that scores: _ok, and _points (quitp).
+_SCORING_EXITS = (0, 7)
+_RATIO_RE = re.compile(r"Ratio: ([\d.]+)")
+
+
+def program_checker(
+    source: str,
+    language: str = "cpp",
+    *,
+    include_dirs: list[str] | tuple[str, ...] = (),
+    compile_command: list[str] | None = None,
+    timeout_s: float = 10.0,
+    memory_mb: int | None = 256,
+) -> ProgramChecker:
+    """A checker program, run as ``checker input output answer`` on each test.
+
+    testlib's convention: exit 0 or 7 scores the printed ``Ratio: x`` (1 if
+    none); any other exit scores 0. C++ compiles once, on first use
+    (``include_dirs`` finds ``testlib.h``); a compile error raises.
+    """
+    return ProgramChecker(
+        source,
+        _checked_language(language),
+        tuple(include_dirs),
+        compile_command,
+        timeout_s,
+        memory_mb,
+    )
+
+
+class ProgramChecker:
+    """``(stdout, expected, test) -> score``; see ``program_checker``."""
+
+    def __init__(
+        self,
+        source: str,
+        language: str,
+        include_dirs: tuple[str, ...],
+        compile_command: list[str] | None,
+        timeout_s: float,
+        memory_mb: int | None,
+    ) -> None:
+        """Keep the settings; a C++ checker compiles on first use."""
+        self.source = source
+        self.language = language
+        self.include_dirs = include_dirs
+        self.compile_command = compile_command
+        self.timeout_s = timeout_s
+        self.memory_mb = memory_mb
+        self._lock = threading.Lock()
+        self._binary: str | None = None
+
+    def cache_key(self) -> tuple:
+        """Settings only, so equal checkers share cached results."""
+        return (
+            "program_checker",
+            self.source,
+            self.language,
+            self.include_dirs,
+            self.compile_command,
+            self.timeout_s,
+            self.memory_mb,
+        )
+
+    def __repr__(self) -> str:
+        """Short name for error messages and reports."""
+        return f"program_checker(..., {self.language!r})"
+
+    def _compiled(self) -> str:
+        with self._lock:
+            if self._binary is None:
+                build = tempfile.mkdtemp(prefix="forger_checker_")
+                includes = [f"-I{os.path.abspath(d)}" for d in self.include_dirs]
+                command = self.compile_command or [
+                    *_COMPILERS[self.language][0][:-3],
+                    *includes,
+                    "{file}",
+                    "-o",
+                    "{out}",
+                ]
+                binary, error = compile_program(
+                    self.source, build, self.language, compile_command=command
+                )
+                if binary is None:
+                    shutil.rmtree(build, ignore_errors=True)
+                    raise RuntimeError(f"checker does not compile:\n{error}")
+                weakref.finalize(self, shutil.rmtree, build, True)
+                self._binary = binary
+            return self._binary
+
+    def __call__(self, stdout: str, expected: str, test: dict) -> float:
+        """Score one test's output."""
+        compiled = self.language in _COMPILERS
+        with tempfile.TemporaryDirectory(prefix="forger_check_") as work:
+            paths = []
+            for name, text in (
+                ("input.txt", _stdin_text(test.get("input"))),
+                ("output.txt", stdout),
+                ("answer.txt", expected),
+            ):
+                paths.append(os.path.join(work, name))
+                with open(paths[-1], "w", encoding="utf-8") as f:
+                    f.write(text)
+            run = run_program(
+                "" if compiled else self.source,
+                args=paths,
+                command=[self._compiled()] if compiled else None,
+                timeout_s=self.timeout_s,
+                memory_mb=self.memory_mb,
+            )
+        if run["timed_out"] or run["exit_code"] not in _SCORING_EXITS:
+            return 0.0
+        match = _RATIO_RE.search(run["stdout"] or run["stderr"])
+        return float(match.group(1)) if match else 1.0
 
 
 def _context_run() -> Callable[..., Any]:

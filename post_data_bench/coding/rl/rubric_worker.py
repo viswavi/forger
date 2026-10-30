@@ -4,7 +4,8 @@ rubric_rm runs this with ``--judge-fds R,W``: grade()'s judge_cpp sends its
 requests to the parent over those pipes (cpp_judge.JudgeChannel), since these
 limits cannot compile or run C++ here. Run without arguments, as in
 ``python rl/rubric_worker.py < criterion.json``, it starts itself that way, as
-the RL reward does, and prints the result.
+the RL reward does, and prints the result. judge_cpp(..., details=True) returns
+each test's status, ratio, time, stdout and checker message instead of statuses.
 """
 import contextlib
 import importlib
@@ -19,7 +20,7 @@ from pathlib import Path
 
 # -I ignores PYTHONPATH and the current directory. Import only our sibling clone.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from cpp_judge import NOT_JSON, encode_request  # noqa: E402 - see above
+from cpp_judge import NOT_JSON, detail, encode_request  # noqa: E402 - see above
 from rubric_sandbox import (  # noqa: E402 - isolated worker/module bootstrap
     DEFAULT_ALLOWED_IMPORTS,
     Sandbox,
@@ -58,12 +59,28 @@ class JudgeClient:
         self.replies = os.fdopen(replies_fd, "rb")
         self.broken = False
 
-    def ask(self, line):
-        """Send one encoded request and return (score, statuses)."""
+    def ask(self, line, details=False):
+        """Send one encoded request and return (score, statuses or details)."""
         self.requests.write(line)
         self.requests.flush()
         reply = json.loads(self.replies.readline())
-        return float(reply["score"]), [str(s) for s in reply["statuses"]]
+        score = float(reply["score"])
+        if not details:
+            return score, [str(s) for s in reply["statuses"]]
+        return score, [_detail(s) for s in reply["statuses"]]
+
+
+def _detail(item):
+    """One test's details as plain types; a bare status (an error) gets zeros."""
+    if not isinstance(item, dict):
+        return detail(str(item))
+    return detail(
+        str(item["status"]),
+        float(item["ratio"]),
+        float(item["time"]),
+        str(item["stdout"]),
+        str(item["message"]),
+    )
 
 
 def solution_helpers(judge=None):
@@ -100,15 +117,28 @@ def solution_helpers(judge=None):
         return _budgeted(run, RUN_TIMEOUT_S)
 
     def judge_cpp(
-        code, tests, checker=None, interactor=None, time_limit=1.0, memory_mb=256
+        code,
+        tests,
+        checker=None,
+        interactor=None,
+        time_limit=1.0,
+        memory_mb=256,
+        *,
+        details=False,
     ):
         """Compile and judge a C++ program on tests: (score in [0, 1], statuses).
 
         Judged outside this worker (cpp_judge.judge_tests) within the
         criterion's remaining time. Errors score 0 with one status saying why.
+        With ``details=True``, one dict per test instead of a status: status,
+        ratio, time, stdout and message (cpp_judge.judge_tests).
         """
+
+        def failed(status):
+            return 0.0, [detail(status) if details is True else status]
+
         if judge is None or judge.broken:
-            return 0.0, ["Judge Unavailable: judge_cpp runs only in the RL grader"]
+            return failed("Judge Unavailable: judge_cpp runs only in the RL grader")
         remaining = signal.getitimer(signal.ITIMER_REAL)[0]
         line = encode_request(
             code,
@@ -118,14 +148,15 @@ def solution_helpers(judge=None):
             time_limit,
             memory_mb,
             budget_s=remaining or GRADE_TIMEOUT_S,
+            details=details,
         )
         if line is None:
-            return 0.0, [NOT_JSON]
-        ok, value = _budgeted(lambda: judge.ask(line), GRADE_TIMEOUT_S)
+            return failed(NOT_JSON)
+        ok, value = _budgeted(lambda: judge.ask(line, details is True), GRADE_TIMEOUT_S)
         if not ok:
             # A late reply must never be read as the answer to a later call.
             judge.broken = True
-            return 0.0, [f"Judge Unavailable: {value}"]
+            return failed(f"Judge Unavailable: {value}")
         return value
 
     return {
