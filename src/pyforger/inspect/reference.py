@@ -81,33 +81,40 @@ def compare_to_reference(
     max_length: int | None = None,
     **op_controls: Any,
 ) -> ReferenceReport:
-    """Print and return each feature's distribution in ``rows`` beside ``reference``.
+    """Print each feature of ``rows`` beside the same feature of ``reference``.
 
-    A feature is a field, a ``row -> value`` function, or a ``(rows_spec,
-    reference_spec)`` pair when the sets differ, e.g. ``{"prompt": ("prompt",
-    "task_text"), "abstains": (lambda r: r["answer"] == "IMPOSSIBLE", "impossible")}``.
-    Text (and chat messages) is measured as its length, in words or, with
-    ``tokenizer`` (a Hugging Face id or anything with ``encode``), tokens;
-    numbers as quantiles; up to 20 distinct short strings, bools, and other
-    values as label shares. ``max_length`` adds the share of each set above
-    it. A numeric feature is flagged when at least 25% of rows fall outside
-    the reference's 5th-95th percentiles, a label when the total variation
-    distance is at least 0.2. Default features: the fields both sets' first
-    rows share. Missing values (``None``, absent fields) are counted apart.
+    Text is compared by length, numbers by quantiles, labels by share; ``!``
+    marks a large gap. Cheap: no model calls.
+
+    Args:
+        rows: E.g. your training rows.
+        reference: E.g. the validation rows.
+        features: Name -> field, ``row -> value`` function, or a ``(rows_spec,
+            reference_spec)`` pair; default the fields both sets share.
+        tokenizer: Count text in tokens (a Hugging Face id or anything with
+            ``encode``) instead of words.
+        max_length: Also report each set's share of texts longer than this.
+        op_controls: Per-call ``@op`` controls (``_no_cache``, ``_cache_only``).
+
+    Returns:
+        A ``ReferenceReport``, also printed. A numeric feature is flagged when
+        at least 25% of rows fall outside the reference's 5th-95th
+        percentiles; a label when its shares differ by at least 0.2 in total
+        (total variation distance).
     """
     if not rows or not reference:
         raise ValueError(f"{_OP} needs rows and reference rows")
     specs = _feature_specs(rows, reference, features)
-    encode = _encoder(tokenizer)
-    names, values, ref_values = [], [], []
-    for name, (spec, ref_spec) in specs.items():
-        names.append(name)
-        values.append([_value(row, spec) for row in rows])
-        ref_values.append([_value(row, ref_spec) for row in reference])
+    names = list(specs)
+    raw = [
+        [[_value(row, spec) for row in rows] for spec, _ in specs.values()],
+        [[_value(row, ref) for row in reference] for _, ref in specs.values()],
+    ]
+    values, ref_values = _measure_all(raw, tokenizer)
     report = _compare(
         names,
-        [[_measure(v, encode) for v in vs] for vs in values],
-        [[_measure(v, encode) for v in vs] for vs in ref_values],
+        values,
+        ref_values,
         unit="words" if tokenizer is None else "tokens",
         max_length=max_length,
         **op_controls,
@@ -139,30 +146,48 @@ def _value(row: dict, spec: Spec) -> Any:
     return spec(row) if callable(spec) else row.get(spec)
 
 
-def _encoder(tokenizer: Any) -> Callable[[str], int] | None:
+def _measure_all(raw: list[list[list[Any]]], tokenizer: Any) -> list[list[list[Any]]]:
+    """Numbers stay numbers, long text becomes ``("length", n)``, the rest labels.
+
+    All texts are counted in one batch, which a fast tokenizer parallelizes.
+    """
+    flat = [_text(v) for side in raw for feature in side for v in feature]
+    long = list(
+        dict.fromkeys(t for t in flat if isinstance(t, str) and len(t) > _LABEL_CHARS)
+    )
+    counts = dict(zip(long, _count(long, tokenizer)))
+    out, it = [], iter(flat)
+    for side in raw:
+        out.append(
+            [
+                [
+                    ("length", counts[t]) if t in counts else t
+                    for t in (next(it) for _ in f)
+                ]
+                for f in side
+            ]
+        )
+    return out
+
+
+def _text(value: Any) -> Any:
+    """Chat messages as their joined contents; other values unchanged."""
+    if isinstance(value, list) and all(isinstance(m, dict) for m in value):
+        return "\n".join(str(m.get("content", "")) for m in value)
+    return value
+
+
+def _count(texts: list[str], tokenizer: Any) -> list[int]:
     if tokenizer is None:
-        return None
+        return [len(t.split()) for t in texts]
     if isinstance(tokenizer, str):
         from transformers import AutoTokenizer
 
         tokenizer = AutoTokenizer.from_pretrained(tokenizer)
-
-    def encode(text: str) -> int:
-        try:
-            return len(tokenizer.encode(text, add_special_tokens=False))
-        except TypeError:  # not a Hugging Face tokenizer
-            return len(tokenizer.encode(text))
-
-    return encode
-
-
-def _measure(value: Any, encode: Callable[[str], int] | None) -> Any:
-    """A number stays a number; long text becomes its length; the rest a label."""
-    if isinstance(value, list) and all(isinstance(m, dict) for m in value):
-        value = "\n".join(str(m.get("content", "")) for m in value)
-    if isinstance(value, str) and len(value) > _LABEL_CHARS:
-        return ("length", encode(value) if encode else len(value.split()))
-    return value
+    if callable(tokenizer):  # a Hugging Face tokenizer: one batched call
+        ids = tokenizer(texts, add_special_tokens=False)["input_ids"]
+        return [len(i) for i in ids]
+    return [len(tokenizer.encode(t)) for t in texts]
 
 
 @op(name="inspect.compare_to_reference")

@@ -91,8 +91,8 @@ Keywords left out of the signatures below:
 - [`pyforger.inspect`](#inspect)
   - [`embedding_dispersion`](#inspect-embedding_dispersion): Print and return how spread out one field's values are in
     embedding space.
-  - [`compare_to_reference`](#inspect-compare_to_reference): Print and return each feature's distribution in `rows`
-    beside `reference`.
+  - [`compare_to_reference`](#inspect-compare_to_reference): Print each feature of `rows` beside the same feature of
+    `reference`.
   - [`eval_tree`](#inspect-eval_tree): Build an EvalTree report from scored model outputs.
   - [`inspect_step`](#inspect-inspect_step): Print the full report of the latest run of step `name` and return it.
   - [`phrase_frequency`](#inspect-phrase_frequency): Print and return the phrases and names that the most rows share,
@@ -1188,7 +1188,10 @@ compare_to_reference(
 ) -> ReferenceReport
 ```
 
-Print and return each feature's distribution in `rows` beside `reference`.
+Print each feature of `rows` beside the same feature of `reference`.
+
+**Returns:** A `ReferenceReport`, also printed. A numeric feature is flagged when at least 25% of rows fall outside the
+reference's 5th-95th percentiles; a label when its shares differ by at least 0.2 in total (total variation distance).
 
 <a name="inspect-eval_tree"></a>
 
