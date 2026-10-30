@@ -38,3 +38,6 @@ def test_vllm_tqdm_forwards_counts():
     bar.refresh()
     bar.close()
     assert seen == [2] and bar.n == 2 and bar.format_dict["elapsed"] > 0
+    # vLLM 0.16 wraps its request loop: the items pass through, uncounted.
+    assert list(vllm_tqdm(seen.append)(range(3), desc="Adding requests")) == [0, 1, 2]
+    assert seen == [2]

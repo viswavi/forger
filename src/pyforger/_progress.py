@@ -106,9 +106,15 @@ class Progress:
 class _VllmBar:
     """The part of tqdm that vLLM's ``LLM.generate`` uses; counts go to ``sink``."""
 
-    def __init__(self, sink: Callable[[int], None], *args: Any, **kwargs: Any) -> None:
-        """Take tqdm's arguments from vLLM (total, desc, ...); only counts matter."""
+    def __init__(
+        self, sink: Callable[[int], None], iterable: Any = None, **kwargs: Any
+    ) -> None:
+        """Take tqdm's arguments from vLLM (total, desc, ...); only counts matter.
+
+        vLLM also wraps its "Adding requests" loop; that iterable passes through.
+        """
         self.sink = sink
+        self.iterable = iterable
         self.n = 0
         self.total = kwargs.get("total")
         self.postfix: Any = ""
@@ -118,6 +124,10 @@ class _VllmBar:
     def format_dict(self) -> dict[str, Any]:
         """Give vLLM the ``elapsed`` time it divides tokens by."""
         return {"elapsed": max(time.monotonic() - self._start, 1e-6), "n": self.n}
+
+    def __iter__(self) -> Any:
+        """Iterate the wrapped iterable, uncounted."""
+        return iter(() if self.iterable is None else self.iterable)
 
     def update(self, n: int = 1) -> None:
         """Forward ``n`` finished requests (or completions) to the sink."""
@@ -131,4 +141,4 @@ class _VllmBar:
 
 def vllm_tqdm(sink: Callable[[int], None]) -> Callable[..., _VllmBar]:
     """A ``use_tqdm=`` value for vLLM that sends its progress counts to ``sink``."""
-    return lambda *args, **kwargs: _VllmBar(sink, *args, **kwargs)
+    return lambda iterable=None, **kwargs: _VllmBar(sink, iterable, **kwargs)
