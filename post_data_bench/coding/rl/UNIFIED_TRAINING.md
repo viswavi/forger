@@ -26,6 +26,11 @@ and the final answer (including Python fences for coding solutions). The exact
 same prompt messages go into SFT and RL; rubrics and targets are never appended
 to the policy's prompt.
 
+A prompt criterion may add `"answer_only": true` (a JSON boolean; not allowed on
+code criteria). The judge then sees only the final answers: the text after the
+last `</think>` of the response and of the ground truth, or `""` when the
+response's thinking is never closed. The prompt is always sent whole.
+
 Submit at least 10 unique prompts. The harness sorts by prompt hash, shuffles
 with seed 0, and holds out `floor(N / 10)` rows for RL reward monitoring. The
 remaining rows form both the SFT and RL training set. No benchmark test data is

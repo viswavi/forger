@@ -105,16 +105,19 @@ def validate_rubric(rubric):
         if not isinstance(pair, list) or len(pair) != 2:
             raise ValueError("each rubric entry must be [criterion, weight]")
         criterion, weight = pair
+        if isinstance(criterion, dict) and {"code", "answer_only"} <= set(criterion):
+            raise ValueError('"answer_only" applies only to "prompt" criteria')
         if not isinstance(criterion, dict) or set(criterion) not in (
             {"code"},
             {"prompt"},
+            {"prompt", "answer_only"},
         ):
             raise ValueError('criterion must contain exactly one of "code" or "prompt"')
-        if (
-            not isinstance(next(iter(criterion.values())), str)
-            or not next(iter(criterion.values())).strip()
-        ):
+        source = criterion.get("code", criterion.get("prompt"))
+        if not isinstance(source, str) or not source.strip():
             raise ValueError("criterion source must be nonempty text")
+        if not isinstance(criterion.get("answer_only", False), bool):
+            raise ValueError('"answer_only" must be true or false')
         if (
             isinstance(weight, bool)
             or not isinstance(weight, (int, float))
