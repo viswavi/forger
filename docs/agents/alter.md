@@ -90,11 +90,11 @@ languages via `command=["node", "{file}"], suffix=".js"`.
 
 - `language="cpp"` (on `run_programs`, `by_tests`, `program_verifier`) compiles each distinct program once
   (`g++ -O2 -pipe -std=gnu++17`, or `compile_command=`); a program that does not compile gets `"compile_error"` on
-  every test, with the compiler's message in `stderr`.
+  every test, with the compiler's message in `stderr`. `language="py"` means `"python"`.
 - A checker may return a score in [0, 1] for partial credit, and may take the test as a third argument. Results carry
   `score`; `passed` means a score of 1, and a score between 0 and 1 gets status `"partial"`.
-- `testlib_checker(source, include_dirs=[...])` (`pyforger.alter.programs`) runs a testlib checker as `checker input
-  output answer`: the printed `Ratio: x` on exit 0 or 7, else 1 for those exits and 0 for any other.
+- `program_checker(source, language="cpp")` (`pyforger.alter.programs`) runs a C++ or Python checker as `checker
+  input output answer`: the printed `Ratio: x` on exit 0 or 7 (1 if none), else 0. `include_dirs=` finds `testlib.h`.
 
 ```python
 rows = alter.run_programs(rows, code_field="solution")              # adds rows[i]["test_results"]

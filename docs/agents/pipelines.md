@@ -242,7 +242,7 @@ Common patterns (not a complete list):
 - **Programming problems checked by execution:** pair each problem with a reference and a brute-force solution
   (Python or C++); generate inputs with generator programs (tests with `"args"` and no `"output"` record stdout),
   get expected outputs from the brute force, keep problems whose reference agrees (`filter.by_tests`), and score
-  problems without one right output with a checker program (`testlib_checker`, partial scores).
+  problems without one right output with a checker program (`program_checker`, partial scores).
 - **Back-translation:** retrieve or generate outputs (e.g. proofs), then generate an input that could have produced
   each one.
 - **Cheap iteration:** every op is cached on disk, so later stages can be rerun and tuned without paying again for

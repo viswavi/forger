@@ -17,6 +17,7 @@ from pyforger import _tracking
 from pyforger.alter.programs import (
     Checker,
     Runner,
+    _checked_language,
     last_code_block,
     outputs_match,
     run_programs,
@@ -78,8 +79,7 @@ def by_tests(
             of the cache key, since wall-clock timeouts depend on load.
         runner: Your own ``(code, tests) -> results`` executor, e.g. the
             sandbox an RL reward runs code in (see ``alter.run_programs``).
-        language: ``"python"`` (default) or ``"cpp"`` (compiled once per
-            distinct program).
+        language: ``"python"`` (default; or ``"py"``) or ``"cpp"``.
         compile_command: The compiler command for ``language="cpp"``.
 
     Returns:
@@ -212,7 +212,7 @@ def program_verifier(
         suffix: File name suffix for the program.
         runner: Your own ``(code, tests) -> results`` executor, e.g. the
             sandbox an RL reward runs code in (see ``alter.run_programs``).
-        language: ``"python"`` (default) or ``"cpp"``.
+        language: ``"python"`` (default; or ``"py"``) or ``"cpp"``.
         compile_command: The compiler command for ``language="cpp"``.
         min_score: Lowest mean test score graded True, in (0, 1]; default 1
             (every test passes).
@@ -223,6 +223,7 @@ def program_verifier(
     """
     if not 0.0 < min_score <= 1.0:
         raise ValueError(f"min_score must be in (0, 1], got {min_score}")
+    language = _checked_language(language)
     if extract_code is None:
         extract_code = last_code_block if language == "python" else _last_cpp_block
     run_kwargs: dict[str, Any] = dict(
