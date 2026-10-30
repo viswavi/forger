@@ -132,6 +132,7 @@ def test_task_quotas():
     assert DEFAULT_GENERATION_LIMIT == 180_000_000
     for task in ("coding", "culture", " Coding "):
         assert default_rl_limit(task) == 50_000_000
+    assert default_rl_limit("algorithmic") == 100_000_000
     with pytest.raises(ValueError):
         default_rl_limit("unknown")
 

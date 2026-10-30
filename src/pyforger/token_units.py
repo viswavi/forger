@@ -135,8 +135,11 @@ def default_rl_limit(task):
     which must never see benchmark names.
     """
     normalized = str(task).strip().lower()
-    if normalized in ("coding", "culture", "algorithmic"):
+    if normalized in ("coding", "culture"):
         return 50_000_000
+    if normalized == "algorithmic":
+        # Responses run ~15K tokens, so judging them costs more per rollout.
+        return 100_000_000
     raise ValueError("Unknown task for RL token-unit quota")
 
 
