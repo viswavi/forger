@@ -15,6 +15,7 @@ producing new rows in the pipeline.
 | `student_log_likelihood` | yes | How likely the student finds each row's target, in bits, beside its own responses. |
 | `rubric_scores` | grades | Print and return a reward's score histogram on responses, samples, and controls. |
 | `embedding_dispersion` | yes | Print and return how dispersed a field is in embedding space vs. a reference. No LLM. |
+| `compare_to_reference` | yes | Print and return feature distributions (lengths, numbers, labels) beside a reference. |
 
 `phrase_frequency(rows, fields=None, *, ngram_range=(2, 4), top_k=10, min_share=0.05, max_rows=2000,
 max_chars=2000)` counts document frequency: the share of rows whose value contains each word n-gram (lowercased) or
@@ -213,6 +214,35 @@ default embedding backend is the same as `topic_based_clustering` (`pyforger[clu
 provide another backend. `threshold`, `alpha`, `min_ci_size`, `min_child_size`, `max_children`, and `seed`
 control weakness extraction and tree construction. The result contains only ordinary Python dicts and lists
 and is JSON serializable.
+
+`compare_to_reference(rows, reference, *, features=None, tokenizer=None, max_length=None)` puts each feature's
+distribution in `rows` beside a `reference` set, e.g. your training rows beside the validation rows. A feature is a
+field, a `row -> value` function, or a `(rows_spec, reference_spec)` pair when the sets differ; the default is the
+fields both sets share. Text and chat messages are measured as lengths (words, or tokens with `tokenizer`: a Hugging
+Face id or anything with `encode`), numbers as quantiles, and up to 20 distinct short values as label shares.
+`max_length` adds each set's share above it. A length or number is flagged when at least 25% of rows fall outside the
+reference's 5th-95th percentiles (10% for equal distributions), a label when the total variation distance is at least
+0.2. It returns a `ReferenceReport` and prints it:
+
+```python
+inspect.compare_to_reference(rows, validation, features={
+    "prompt": ("prompt", "task_text"),
+    "abstains": (lambda r: r["ground_truth"].endswith(MARKER), "impossible"),
+    "target": ("ground_truth", lambda v: None),  # rows only
+}, max_length=4000)
+```
+
+```text
+inspect compare_to_reference ───────────────────────────────────────────────────────────────────────────────────────────
+  300 rows vs 137 reference rows
+
+  feature            rows p10 / p50 / p90   reference p10 / p50 / p90   outside ref 5-95%   over 4,000
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────
+  prompt (words)          117 / 249 / 365             131 / 257 / 439                 11%     0% vs 0%
+  target (words)    2,387 / 4,058 / 5,620                           -                   -     52% vs -
+
+  ! abstains: False 94% vs 63%, True 6% vs 37%  (distance 0.31)
+```
 
 ## Saved pipeline runs
 

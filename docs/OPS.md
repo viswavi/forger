@@ -91,6 +91,8 @@ Keywords left out of the signatures below:
 - [`pyforger.inspect`](#inspect)
   - [`embedding_dispersion`](#inspect-embedding_dispersion): Print and return how spread out one field's values are in
     embedding space.
+  - [`compare_to_reference`](#inspect-compare_to_reference): Print and return each feature's distribution in `rows`
+    beside `reference`.
   - [`eval_tree`](#inspect-eval_tree): Build an EvalTree report from scored model outputs.
   - [`inspect_step`](#inspect-inspect_step): Print the full report of the latest run of step `name` and return it.
   - [`phrase_frequency`](#inspect-phrase_frequency): Print and return the phrases and names that the most rows share,
@@ -1138,7 +1140,7 @@ A `metric` for the difficulty filters that runs programs on tests.
 Inspect operations: analyze existing data.
 
 Also exported, not documented here: `DispersionReport`, `LikelihoodReport`, `RowLikelihood`, `PhraseReport`,
-`RubricScoreReport`, `SpendReport`, `SpendTotal`.
+`ReferenceReport`, `RubricScoreReport`, `SpendReport`, `SpendTotal`.
 
 <a name="inspect-embedding_dispersion"></a>
 
@@ -1167,6 +1169,26 @@ embedding_dispersion(
 Print and return how spread out one field's values are in embedding space.
 
 **Returns:** A `DispersionReport`, also printed.
+
+<a name="inspect-compare_to_reference"></a>
+
+### `inspect.compare_to_reference`
+
+Disk-cached (`@op`).
+
+```python
+compare_to_reference(
+    rows: list[dict],
+    reference: list[dict],
+    *,
+    features: dict[str, Feature] | list[str] | None = None,
+    tokenizer: str | Any | None = None,
+    max_length: int | None = None,
+    **op_controls: Any,
+) -> ReferenceReport
+```
+
+Print and return each feature's distribution in `rows` beside `reference`.
 
 <a name="inspect-eval_tree"></a>
 
