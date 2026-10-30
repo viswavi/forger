@@ -53,7 +53,9 @@ ops. It is not part of the cache key.
 - `model.generate_batch(prompts, return_exceptions=True)` keeps finished results: a failed prompt's slot holds its
   exception. The default raises the first failure.
 
-Progress output is on by default; turn it off with `show_progress=False` or `FORGER_PROGRESS=0`.
+Progress output is on by default for every model call, `LocalModel` (one count across its GPU engines) and
+embeddings included: a bar in a terminal, else `<model>: 120/500 done, 1m 31s, ~4m 48s left` every 30 seconds.
+Turn it off with `show_progress=False` or `FORGER_PROGRESS=0`.
 
 ### Results and usage
 

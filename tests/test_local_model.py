@@ -197,7 +197,7 @@ class TestChatCall:
 
     def test_enable_thinking_default(self, engines):
         """By default the chat template enables thinking; nothing else is sent."""
-        LocalModel("Qwen/Qwen3-4B").generate("a")
+        LocalModel("Qwen/Qwen3-4B", show_progress=False).generate("a")
         assert engines[0].chat_calls[0].kwargs == {
             "chat_template_kwargs": {"enable_thinking": True},
             "use_tqdm": False,
@@ -218,11 +218,17 @@ class TestChatCall:
         kwargs = engines[0].chat_calls[0].kwargs
         assert kwargs["chat_template_kwargs"] == template_kwargs
 
-    @pytest.mark.parametrize("show_progress", [False, True])
-    def test_progress_bar_follows_show_progress(self, engines, show_progress):
-        """use_tqdm mirrors show_progress."""
-        LocalModel("Qwen/Qwen3-4B", show_progress=show_progress).generate("a")
-        assert engines[0].chat_calls[0].kwargs["use_tqdm"] is show_progress
+    def test_progress_bar_follows_show_progress(self, engines, monkeypatch):
+        """Off: no bar. In a terminal: vLLM's bar. Redirected: a counting factory."""
+        monkeypatch.delenv("FORGER_PROGRESS", raising=False)
+        LocalModel("Qwen/Qwen3-4B", show_progress=False).generate("a")
+        assert engines[-1].chat_calls[-1].kwargs["use_tqdm"] is False
+        monkeypatch.setattr(sys.stderr, "isatty", lambda: True, raising=False)
+        LocalModel("Qwen/Qwen3-4B").generate("a")
+        assert engines[-1].chat_calls[-1].kwargs["use_tqdm"] is True
+        monkeypatch.setattr(sys.stderr, "isatty", lambda: False, raising=False)
+        LocalModel("Qwen/Qwen3-4B").generate("a")
+        assert callable(engines[-1].chat_calls[-1].kwargs["use_tqdm"])
 
     def test_per_call_show_progress_overrides_instance(self, engines):
         """show_progress passed to generate_batch beats the instance setting."""
@@ -470,7 +476,28 @@ class TestDataParallel:
             ["p1", "p4"],
             ["p2", "p5"],
         ]
-        assert [e.calls[0][1]["use_tqdm"] for e in echoes] == [True, False, False]
+        assert [e.calls[0][1]["use_tqdm"] for e in echoes] == [False] * 3
+        engine.close()
+
+    def test_progress_counts_every_engine(self):
+        """Each engine's counts reach the one progress object."""
+
+        class Counting:
+            def chat(self, messages, sampling_params, on_progress=None, **kwargs):
+                for _ in messages:
+                    on_progress(1)
+                return messages
+
+        class Seen:
+            done = 0
+
+            def update(self, n=1):
+                self.done += n
+
+        seen = Seen()
+        engine = _local_dp.DataParallelEngine([Counting(), Counting()])
+        engine.chat(list("abcde"), "params", progress=seen)
+        assert seen.done == 5
         engine.close()
 
     def test_engines_with_no_prompts_are_not_called(self):
