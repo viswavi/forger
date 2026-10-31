@@ -8,6 +8,7 @@ from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from pyforger.artifacts import FileInput
     from pyforger.agent_backend import AgentSpec
 
 _SENSITIVE = re.compile(
@@ -38,20 +39,28 @@ class ArtifactSafetyError(ValueError):
 
 
 def validate_artifact_bytes(
-    files: Mapping[str, str | bytes], specs: Iterable[AgentSpec]
+    files: Mapping[str, str | bytes | FileInput], specs: Iterable[AgentSpec]
 ) -> None:
     """Check exact bytes only; assignment-like scientific source is not a leak."""
+    from pyforger.artifacts import FileInput
+
     secrets = {value.encode("utf-8") for value in credential_values(specs) if value}
+    overlap = max(map(len, secrets), default=1) - 1
     for content in files.values():
         if isinstance(content, str):
             content = content.encode("utf-8")
-        if not isinstance(content, bytes):
+        if not isinstance(content, (bytes, FileInput)):
             raise TypeError("Malformed output artifact")
-        if any(secret in content for secret in secrets):
-            raise ArtifactSafetyError(
-                "Credential detected in output artifact. Remove credential literals "
-                "from all declared outputs; do not echo credentials in feedback."
-            )
+        tail = b""
+        chunks = content.chunks() if isinstance(content, FileInput) else (content,)
+        for chunk in chunks:
+            block = tail + chunk
+            if any(secret in block for secret in secrets):
+                raise ArtifactSafetyError(
+                    "Credential detected in output artifact. Remove credential literals "
+                    "from all declared outputs; do not echo credentials in feedback."
+                )
+            tail = block[-overlap:] if overlap else b""
 
 
 def sanitizer(specs: Iterable[AgentSpec], *, secrets: Iterable[str] = ()):

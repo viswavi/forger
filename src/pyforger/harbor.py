@@ -9,15 +9,25 @@ import math
 import os
 import re
 import shlex
+import tempfile
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
+from pyforger._harbor_deadline import remaining, run_owned
+from pyforger._streaming_json import JSONReader
 from pyforger.acquire.model import Model
-from pyforger.artifacts import ArtifactRef, ArtifactStore
+from pyforger.agent_backend import validate_workspace_path
+from pyforger.artifacts import (
+    ArtifactRef,
+    ArtifactStore,
+    FileInput,
+    replace_file_secrets,
+)
 from pyforger.usage import combine_usage, usage_record
 
 
@@ -117,7 +127,7 @@ def harbor_agent_config(
     native SDK options may be supplied through agent_kwargs.
     """
     from pyforger._harbor_model import ForgerOpenHandsSDK, runner_source
-    from pyforger.local_agent import agent_llm
+    from pyforger.sdk_config import llm_options
 
     if model._kwargs.keys() - {"disable_prompt_cache_key"}:
         raise ValueError("Unsupported Harbor Model kwargs")
@@ -129,12 +139,14 @@ def harbor_agent_config(
         "config",
     }:
         raise ValueError("agent_kwargs must not override model settings")
-    llm = agent_llm(model)
-    key = (
-        llm.api_key.get_secret_value()
-        if isinstance(llm.api_key, SecretStr)
-        else llm.api_key
-    )
+    options = llm_options(model)
+    key = options.pop("api_key")
+    base_url = options["base_url"]
+    if options["model"].startswith("openai/") and base_url in {
+        "https://api.openai.com",
+        "https://api.openai.com/",
+    }:
+        base_url = options["base_url"] = None
     if api_key_env is not None:
         selected = os.environ.get(api_key_env)
         if not selected or (key is not None and selected != key):
@@ -152,6 +164,7 @@ def harbor_agent_config(
         raise ValueError("Harbor requires a credential in a host api_key_env variable")
     fields = (
         "model",
+        "custom_tokenizer",
         "base_url",
         "temperature",
         "max_output_tokens",
@@ -163,8 +176,8 @@ def harbor_agent_config(
         "capability_overrides",
     )
     hosts: list[str] = []
-    if llm.base_url:
-        parsed = urlsplit(llm.base_url)
+    if base_url:
+        parsed = urlsplit(base_url)
         if (
             parsed.scheme not in {"http", "https"}
             or not parsed.hostname
@@ -175,7 +188,7 @@ def harbor_agent_config(
         ):
             raise ValueError("Model endpoint must be a credential-free http/https URL")
         hosts = [parsed.hostname]
-    settings = llm.model_dump(mode="json", include=set(fields))
+    settings = {name: options[name] for name in fields}
     # Reject embedded secrets in otherwise public model configuration.
     if _secrets(settings) or (key and key in json.dumps(settings)):
         raise ValueError("Model settings must not contain embedded credentials")
@@ -196,10 +209,10 @@ def harbor_agent_config(
         env={
             "LLM_API_KEY": "${" + api_key_env + "}",
             "FORGER_LLM_CONFIG": json.dumps(settings),
-            **({"LLM_BASE_URL": llm.base_url} if llm.base_url else {}),
-            "FORGER_DISABLE_PROMPT_CACHE": "1"
-            if model._kwargs.get("disable_prompt_cache_key")
-            else "0",
+            **({"LLM_BASE_URL": base_url} if base_url else {}),
+            "FORGER_DISABLE_PROMPT_CACHE": (
+                "1" if model._kwargs.get("disable_prompt_cache_key") else "0"
+            ),
         },
     )
 
@@ -262,20 +275,32 @@ def _scrub(output: Path, secrets: set[str]) -> None:
         replacements.add(json.dumps(secret)[1:-1].encode())
     for entry in ref.files:
         path = output / entry.path
-        original = path.read_bytes()
-        content = original
-        for encoded_secret in sorted(replacements, key=len, reverse=True):
-            content = content.replace(encoded_secret, b"[REDACTED]")
-        if path.suffix == ".json":
-            try:
-                parsed = json.loads(content)
-                redacted = _redact(parsed, secrets)
-                if redacted != parsed:
-                    content = json.dumps(redacted, indent=2, allow_nan=False).encode()
-            except (ValueError, UnicodeDecodeError):
-                pass
-        if content != original:
-            path.write_bytes(content)
+        replace_file_secrets(path, replacements)
+        if path.suffix != ".json":
+            continue
+        fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".scrub-")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as target:
+                with path.open(encoding="utf-8") as source:
+                    reader = JSONReader(source)
+                    reader.rewrite(
+                        target,
+                        lambda value: _redact(value, secrets),
+                        lambda key: (
+                            bool(_SENSITIVE.search(key)) and not key.endswith("_env")
+                        ),
+                    )
+                    trailing, token = reader.token(target)
+                    if token:
+                        raise ValueError("Trailing JSON content")
+                    target.write(trailing)
+            os.replace(temporary, path)
+        except (ValueError, UnicodeDecodeError):
+            # Non-JSON native logs still receive exact-byte secret redaction.
+            pass
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
 
 
 def _output_path(output: Path, task: ArtifactRef) -> Path:
@@ -326,12 +351,14 @@ class HarborTaskRunner:
         environment: Any,
         max_iterations: int | None = None,
         timeout_s: float | None = None,
+        deadline: float | None = None,
     ) -> None:
         """Snapshot trusted AgentConfig/EnvironmentConfig objects or dictionaries."""
         self._agent = copy.deepcopy(agent)
         self._environment = copy.deepcopy(environment)
         self._max_iterations = _positive(max_iterations, "max_iterations", integer=True)
         self._timeout_s = _positive(timeout_s, "timeout_s")
+        self._deadline = _positive(deadline, "deadline")
 
     def _configuration(self, request: HarborRequest, task: Path, output: Path) -> Any:
         AgentConfig, EnvironmentConfig, TaskConfig, TrialConfig, _ = _sdk()
@@ -397,6 +424,13 @@ class HarborTaskRunner:
         """Retain the entire native trial tree before returning verified evidence."""
         if environment is not None:
             raise ValueError("HarborTaskRunner owns its native execution environment")
+        timeout = _positive(
+            request.configuration.get("timeout_s", self._timeout_s), "timeout_s"
+        )
+        deadline = self._deadline
+        if timeout is not None:
+            deadline = min(deadline or float("inf"), time.monotonic() + timeout)
+        remaining(deadline)
         identity = request.cache_key()
         output = _output_path(output, request.task)
         output.mkdir(mode=0o700)
@@ -415,20 +449,72 @@ class HarborTaskRunner:
         )
         _, _, _, _, Trial = _sdk()
         try:
-            result = None
             attempt_usage = []
-            for attempt in range(_STARTUP_MAX_ATTEMPTS):
-                trial = await Trial.create(config)
-                expected = output / config.trial_name
-                if trial.paths.trial_dir != expected:
-                    raise ValueError("Harbor returned an unexpected trial output path")
-                result = await trial.run()
-                attempt_usage.append(_trial_usage(result))
-                if not _transient_startup_failure(result):
-                    break
-                if attempt + 1 < _STARTUP_MAX_ATTEMPTS:
-                    await asyncio.sleep(_STARTUP_BACKOFF_S[attempt])
-            assert result is not None
+
+            async def execute() -> Any:
+                result = None
+                for attempt in range(_STARTUP_MAX_ATTEMPTS):
+                    left = remaining(deadline)
+                    if left is not None:
+                        config.agent.override_timeout_sec = min(
+                            config.agent.override_timeout_sec or left, left
+                        )
+                        config.verifier.override_timeout_sec = min(
+                            config.verifier.override_timeout_sec or left, left
+                        )
+                    trial = await Trial.create(config)
+                    expected = output / config.trial_name
+                    if trial.paths.trial_dir != expected:
+                        raise ValueError(
+                            "Harbor returned an unexpected trial output path"
+                        )
+                    if deadline is not None:
+                        from harbor.trial.hooks import TrialEvent
+
+                        async def cap(event: Any) -> None:
+                            left = remaining(deadline)
+                            assert left is not None
+                            for field in (
+                                "_agent_timeout_sec",
+                                "_verifier_timeout_sec",
+                                "_agent_setup_timeout_sec",
+                                "_environment_build_timeout_sec",
+                            ):
+                                value = getattr(trial, field, None)
+                                setattr(trial, field, min(value or left, left))
+                            trial.agent_environment.task_env_config.build_timeout_sec = min(
+                                trial.agent_environment.task_env_config.build_timeout_sec,
+                                left,
+                            )
+                            trial.task.config.environment.build_timeout_sec = min(
+                                trial.task.config.environment.build_timeout_sec, left
+                            )
+
+                        if hasattr(trial, "add_hook"):
+                            for event in (
+                                TrialEvent.START,
+                                TrialEvent.ENVIRONMENT_START,
+                                TrialEvent.AGENT_START,
+                                TrialEvent.VERIFICATION_START,
+                            ):
+                                trial.add_hook(event, cap)
+                    remaining(deadline)
+                    result = await trial.run()
+                    remaining(deadline)
+                    attempt_usage.append(_trial_usage(result))
+                    if not _transient_startup_failure(result):
+                        break
+                    if attempt + 1 < _STARTUP_MAX_ATTEMPTS:
+                        await asyncio.sleep(
+                            min(
+                                _STARTUP_BACKOFF_S[attempt],
+                                remaining(deadline) or float("inf"),
+                            )
+                        )
+                assert result is not None
+                return result
+
+            result = await run_owned(execute, deadline)
             payload = _redact(result.model_dump(mode="json"), secrets)
             usage = combine_usage(attempt_usage)
             status = _status(result)
@@ -459,8 +545,12 @@ def execute_script(
     destination: str = "/work/analysis.py",
     model: str = "oracle",
     timeout_s: float | None = None,
+    deadline: float | None = None,
 ) -> HarborResult:
     """Execute a retained program through Oracle on a fresh task copy."""
+    if timeout_s is not None:
+        deadline = min(deadline or float("inf"), time.monotonic() + timeout_s)
+    remaining(deadline)
     task.verify()
     script.verify()
     source = script.path(script_path)
@@ -487,7 +577,10 @@ def execute_script(
     )
     solve.chmod(0o755)
     return HarborTaskRunner(
-        agent={"name": "oracle"}, environment=environment, timeout_s=timeout_s
+        agent={"name": "oracle"},
+        environment=environment,
+        timeout_s=timeout_s,
+        deadline=deadline,
     ).run(
         HarborRequest(
             trial_id="script-" + uuid.uuid4().hex,
@@ -554,7 +647,49 @@ def trial_outcome(rollout: HarborResult) -> dict[str, Any]:
         "usage": usage_record(dict(rollout.usage)),
     }
     exception = native.get("exception_info")
+    execution_path = trial / "verifier/execution.json"
+    if execution_path.is_file():
+        try:
+            execution = json.loads(execution_path.read_text())
+            code = execution["exit_code"]
+            if code is not None and type(code) is not int:
+                raise ValueError("Invalid verifier exit code")
+        except (ValueError, KeyError, TypeError):
+            code = None
+        result["verifier_execution"] = {
+            "exit_code": code,
+            "stdout_path": "verifier/stdout.txt",
+            "stderr_path": "verifier/stderr.txt",
+        }
+        if code != 0:
+            return {
+                **result,
+                "status": "failed",
+                "exception": {
+                    "exception_type": "VerifierExecutionError",
+                    "exception_message": (
+                        f"Verifier did not complete successfully (exit_code={code})"
+                    ),
+                },
+                **({"native_exception": exception} if exception else {}),
+            }
     if exception:
+        if execution_path.is_file() and exception.get("exception_type") in {
+            "RewardFileNotFoundError",
+            "RewardFileEmptyError",
+            "VerifierOutputParseError",
+        }:
+            return {
+                **result,
+                "status": "failed",
+                "exception": {
+                    "exception_type": "VerifierRewardProtocolError",
+                    "exception_message": (
+                        "Verifier completed without a valid binary reward"
+                    ),
+                },
+                "native_exception": exception,
+            }
         return {**result, "exception": exception}
     if exit_code.exists() and exit_code.read_text().strip() != "0":
         return {**result, "exit_code": exit_code.read_text().strip()}
@@ -568,7 +703,13 @@ def trial_outcome(rollout: HarborResult) -> dict[str, Any]:
             or set(rewards) != {"reward"}
             or rewards["reward"] not in (0, 1)
         ):
-            result["status"] = "incomplete"
+            result["status"] = "failed"
+            result["exception"] = {
+                "exception_type": "VerifierRewardProtocolError",
+                "exception_message": (
+                    "Verifier completed without a valid binary reward"
+                ),
+            }
         else:
             result["passed"] = rewards["reward"] == 1
 
@@ -582,24 +723,43 @@ def collect_trial_files(
     *,
     max_bytes: int | None = None,
 ) -> None:
-    """Collect declared files from a verified native Harbor manifest."""
-    from pyforger.artifacts import read_text
-
+    """Collect verified files or directory descendants, preserving relative paths."""
     trial = trial_directory(rollout)
     manifest = json.loads((trial / "artifacts/manifest.json").read_text())
     output = Path(output)
+    ArtifactRef.capture(output)
     for source, name in sources.items():
-        target = output / name
-        if target.parent != output or target.is_symlink():
+        validate_workspace_path(name)
+        if len(Path(name).parts) != 1:
             raise ValueError("Output names must be plain basenames")
         entries = [
             row for row in manifest if row["source"] == source and row["status"] == "ok"
         ]
-        if entries:
-            relative = (
-                trial.relative_to(rollout.artifacts.root) / entries[0]["destination"]
-            )
-            target.write_text(
-                read_text(rollout.artifacts.path(relative.as_posix()), max_bytes)
-            )
+        if not entries:
+            continue
+        destination = entries[0]["destination"]
+        validate_workspace_path(destination)
+        if not destination.startswith("artifacts/"):
+            raise ValueError("Artifact destination must be under artifacts/")
+        relative = (trial.relative_to(rollout.artifacts.root) / destination).as_posix()
+        if entries[0].get("type") == "directory":
+            if not (rollout.artifacts.root / relative).is_dir():
+                raise ValueError("Missing declared artifact directory")
+            files = [
+                (entry.path, output / name / entry.path[len(relative) + 1 :])
+                for entry in rollout.artifacts.files
+                if entry.path.startswith(relative + "/")
+            ]
+        else:
+            files = [(relative, output / name)]
+        total = 0
+        for path, target in files:
+            source_file = FileInput.from_artifact(rollout.artifacts, path)
+            total += source_file.size
+            if max_bytes is not None and total > max_bytes:
+                raise ValueError("Artifact exceeds read limit")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists():
+                target.unlink()
+            source_file.copy_to(target)
     rollout.artifacts.verify()

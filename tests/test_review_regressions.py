@@ -195,7 +195,9 @@ def test_sail_verifier_outputs_and_accepted_snapshot(offline_sail, validated):
     else:
         result = offline_sail.run_agent(task, spec)
     assert result.passed is True
-    assert result.files == {"x": b"generated\n" if validated else b"verified\n"}
+    assert result.files == {"x": b"verified\n"}
+    if validated:
+        assert result.validation_attempts[-1].output == {"x": b"generated\n"}
 
 
 @pytest.fixture

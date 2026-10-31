@@ -512,3 +512,354 @@ def test_runner_bounds_transient_retries(task, tmp_path, monkeypatch):
     )
     assert result.status == "failed"
     assert len(calls) == 3
+
+
+def test_real_native_missing_reward_retains_trace_and_verifier_logs(task, tmp_path):
+    """Run Harbor's actual verifier failure locally, without model or provider calls."""
+    from pyforger.agent_backend import AgentRunResult, AgentSpec
+    from pyforger.agent_tasks import TaskSpec
+    from pyforger.artifacts import FileInput
+    from pyforger.evidence_journal import evidence_file_chunks
+    from pyforger.harbor import trial_directory, trial_outcome
+    from pyforger.task_runs import run_recorded_task
+
+    root = task.root
+    (root / "tests/test.sh").write_text(
+        '#!/bin/bash\necho "native stdout before crash"\n'
+        'echo "native stderr before crash" >&2\n'
+        "python3 -c \"raise RuntimeError('actual grader crash')\"\n"
+    )
+    rollout = HarborTaskRunner(
+        agent={"name": "nop"}, environment={"type": "docker"}
+    ).run(
+        HarborRequest(trial_id="missing-reward", task=ArtifactRef.capture(root)),
+        tmp_path / "native",
+    )
+    outcome = trial_outcome(rollout)
+    assert outcome["exception"]["exception_type"] == "RewardFileNotFoundError"
+    trial = trial_directory(rollout)
+    # The bridge below substitutes no execution: it feeds the real failed trial
+    # through the existing host persistence API after native files are removed.
+    evidence = {
+        entry.path: evidence_file_chunks(
+            FileInput.from_artifact(
+                rollout.artifacts,
+                (trial / entry.path).relative_to(rollout.artifacts.root).as_posix(),
+            ).chunks()
+        )[0]
+        for entry in ArtifactRef.capture(trial).files
+    }
+    import shutil
+
+    shutil.rmtree(tmp_path / "native")
+
+    class CompletedNativeBackend:
+        def run_agent(self, task, agent):
+            return AgentRunResult(
+                status="failed",
+                failure_kind="infrastructure",
+                diagnostics={**outcome, "native_evidence": evidence},
+            )
+
+    report = run_recorded_task(
+        TaskSpec(instruction="failed native trial"),
+        agent=AgentSpec(kind="nop"),
+        backend=CompletedNativeBackend(),
+        output=tmp_path / "retained",
+    )
+    retained = report["diagnostics"]["native_evidence"]
+
+    def text(name):
+        return (
+            tmp_path / "retained" / retained[name]["evidence_file"]["path"]
+        ).read_text()
+
+    assert "RewardFileNotFoundError" in text("result.json")
+    logs = "\n".join(text(name) for name in retained if name.startswith("verifier/"))
+    assert "native stdout before crash" in logs
+    assert "native stderr before crash" in logs
+    assert "actual grader crash" in logs
+    assert Path(report["diagnostics"]["harbor_result"]).is_file()
+
+
+@pytest.mark.parametrize(
+    "kind", ["file", "directory", "empty", "missing", "missing-ok"]
+)
+def test_declared_artifact_collection_preserves_nested_files(tmp_path, kind):
+    from pyforger.harbor import HarborResult, collect_trial_files
+
+    native = tmp_path / "native"
+    trial = native / "trial"
+    artifacts = trial / "artifacts/work/output"
+    artifacts.mkdir(parents=True)
+    source = artifacts / "submission"
+    if kind == "file":
+        source.write_bytes(b"\x00\xff")
+    elif kind in {"directory", "empty"}:
+        (source / "nested/empty").mkdir(parents=True)
+        if kind == "directory":
+            (source / "run.py").write_text("print('retained, not executed')")
+            (source / "nested/helper.py").write_bytes(b"\x00\xff")
+    (artifacts / "submission-private").write_text("not declared")
+    (trial / "result.json").write_text("{}")
+    (trial / "artifacts/manifest.json").write_text(
+        json.dumps(
+            [
+                {
+                    "source": "/work/output/submission",
+                    "destination": "artifacts/work/output/submission",
+                    "status": "failed" if kind == "missing" else "ok",
+                    "type": "file" if kind == "file" else "directory",
+                }
+            ]
+        )
+    )
+    rollout = HarborResult(
+        status="completed",
+        artifacts=ArtifactRef.capture(native),
+        metadata={"harbor_result_path": "trial/result.json"},
+    )
+    output = tmp_path / "collected"
+    output.mkdir()
+    if kind == "missing-ok":
+        with pytest.raises(ValueError, match="Missing declared artifact directory"):
+            collect_trial_files(
+                rollout, {"/work/output/submission": "submission"}, output
+            )
+        return
+    collect_trial_files(rollout, {"/work/output/submission": "submission"}, output)
+    if kind == "file":
+        assert (output / "submission").read_bytes() == b"\x00\xff"
+    elif kind == "directory":
+        assert (
+            output / "submission/run.py"
+        ).read_text() == "print('retained, not executed')"
+        assert (output / "submission/nested/helper.py").read_bytes() == b"\x00\xff"
+        assert not (output / "submission/nested/empty").exists()
+        with pytest.raises(ValueError, match="read limit"):
+            collect_trial_files(
+                rollout, {"/work/output/submission": "limited"}, output, max_bytes=1
+            )
+    else:
+        assert not (output / "submission").exists()
+    assert not (output / "submission-private").exists()
+
+
+@pytest.mark.parametrize(
+    "destination",
+    [
+        "../escape",
+        "/tmp/escape",
+        "artifacts/../result.json",
+        "result.json",
+        "artifacts\\escape",
+    ],
+)
+def test_collection_rejects_manifest_destination_escape(tmp_path, destination):
+    from pyforger.harbor import HarborResult, collect_trial_files
+
+    trial = tmp_path / "native/trial"
+    (trial / "artifacts").mkdir(parents=True)
+    (trial / "result.json").write_text("{}")
+    (trial / "artifacts/manifest.json").write_text(
+        json.dumps(
+            [
+                {
+                    "source": "/work/submission",
+                    "destination": destination,
+                    "status": "ok",
+                    "type": "directory",
+                }
+            ]
+        )
+    )
+    rollout = HarborResult(
+        status="completed",
+        artifacts=ArtifactRef.capture(trial.parent),
+        metadata={"harbor_result_path": "trial/result.json"},
+    )
+    output = tmp_path / "collected"
+    output.mkdir()
+    with pytest.raises(ValueError):
+        collect_trial_files(rollout, {"/work/submission": "submission"}, output)
+    assert list(output.iterdir()) == []
+
+
+@pytest.mark.parametrize("symlink", ["source", "target", "tampered"])
+def test_directory_collection_rejects_symlinks_and_tampering(tmp_path, symlink):
+    from pyforger.harbor import HarborResult, collect_trial_files
+
+    trial = tmp_path / "native/trial"
+    submission = trial / "artifacts/work/submission"
+    submission.mkdir(parents=True)
+    (submission / "run.py").write_text("original")
+    (trial / "result.json").write_text("{}")
+    (trial / "artifacts/manifest.json").write_text(
+        json.dumps(
+            [
+                {
+                    "source": "/work/submission",
+                    "destination": "artifacts/work/submission",
+                    "status": "ok",
+                    "type": "directory",
+                }
+            ]
+        )
+    )
+    rollout = HarborResult(
+        status="completed",
+        artifacts=ArtifactRef.capture(trial.parent),
+        metadata={"harbor_result_path": "trial/result.json"},
+    )
+    output = tmp_path / "collected"
+    output.mkdir()
+    private = tmp_path / "private"
+    private.mkdir()
+    (private / "hidden").write_text("must stay private")
+    if symlink == "source":
+        (submission / "link").symlink_to(private, target_is_directory=True)
+    elif symlink == "target":
+        (output / "submission").symlink_to(private, target_is_directory=True)
+    else:
+        (submission / "run.py").write_text("changed")
+    with pytest.raises(ValueError):
+        collect_trial_files(rollout, {"/work/submission": "submission"}, output)
+    assert (private / "hidden").read_text() == "must stay private"
+    assert not (private / "run.py").exists()
+
+
+@pytest.mark.parametrize("kind", ["directory", "empty", "missing"])
+def test_directory_outputs_survive_cleanup_and_recording(tmp_path, kind):
+    import shutil
+
+    from pyforger.agent_backend import AgentRunResult, AgentSpec
+    from pyforger.agent_tasks import TaskSpec
+    from pyforger.harbor import HarborResult
+    from pyforger.harbor_backend import _collect_outputs
+    from pyforger.task_runs import run_recorded_task
+
+    trial = tmp_path / "native/trial"
+    submission = trial / "artifacts/work/output/submission"
+    submission.mkdir(parents=True)
+    if kind == "directory":
+        (submission / "nested").mkdir()
+        (submission / "run.py").write_text(
+            "raise RuntimeError('never execute on host')"
+        )
+        (submission / "nested/helper.bin").write_bytes(b"\x00\xff")
+    (trial / "artifacts/work/output/default.json").write_text("[1]")
+    (trial / "result.json").write_text("{}")
+    (trial / "artifacts/manifest.json").write_text(
+        json.dumps(
+            [
+                {
+                    "source": "/work/output/submission",
+                    "destination": "artifacts/work/output/submission",
+                    "status": "failed" if kind == "missing" else "ok",
+                    "type": "directory",
+                },
+                {
+                    "source": "/work/output/default.json",
+                    "destination": "artifacts/work/output/default.json",
+                    "status": "ok",
+                    "type": "file",
+                },
+            ]
+        )
+    )
+    rollout = HarborResult(
+        status="completed",
+        artifacts=ArtifactRef.capture(trial.parent),
+        metadata={"harbor_result_path": "trial/result.json"},
+    )
+    outputs = ("output/submission", "output/default.json")
+    collected = _collect_outputs(rollout, outputs, tmp_path / "collected")
+    shutil.rmtree(trial.parent)
+    shutil.rmtree(tmp_path / "collected")
+
+    class RecordedArtifactsBackend:
+        def run_agent(self, task, agent):
+            return AgentRunResult(status="completed", passed=True, files=collected)
+
+    retained = tmp_path / "retained"
+    report = run_recorded_task(
+        TaskSpec("retain", outputs=outputs),
+        agent=AgentSpec(kind="nop"),
+        backend=RecordedArtifactsBackend(),
+        output=retained,
+    )
+    if kind == "directory":
+        assert report["passed"] is True
+        assert (
+            retained / "output/submission/nested/helper.bin"
+        ).read_bytes() == b"\x00\xff"
+        assert (
+            (retained / "output/submission/run.py")
+            .read_text()
+            .startswith("raise RuntimeError")
+        )
+    else:
+        assert report["passed"] is None
+        assert "Missing declared outputs" in report["error"]
+    assert (retained / "output/default.json").read_text() == "[1]"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "output/submission/../escape",
+        "output/submission//run.py",
+        "output/submission/./run.py",
+    ],
+)
+def test_recorded_directory_rejects_noncanonical_descendants(tmp_path, name):
+    from pyforger.agent_backend import AgentRunResult, AgentSpec
+    from pyforger.agent_tasks import TaskSpec
+    from pyforger.task_runs import run_recorded_task
+
+    class InvalidArtifactsBackend:
+        def run_agent(self, task, agent):
+            return AgentRunResult(status="completed", passed=True, files={name: b"bad"})
+
+    output = tmp_path / "retained"
+    report = run_recorded_task(
+        TaskSpec("retain", outputs=("output/submission",)),
+        agent=AgentSpec(kind="nop"),
+        backend=InvalidArtifactsBackend(),
+        output=output,
+    )
+    assert report["passed"] is None
+    assert report["status"] == "infrastructure_error"
+    assert not (output / "output").exists()
+
+
+def test_recorded_directory_scans_nested_credentials_before_writing(
+    tmp_path, monkeypatch
+):
+    from pyforger.agent_backend import AgentRunResult, AgentSpec
+    from pyforger.agent_tasks import TaskSpec
+    from pyforger.task_runs import run_recorded_task
+
+    monkeypatch.setenv("FORGER_TEST_API_KEY", "nested-sensitive-value")
+
+    class UnsafeArtifactsBackend:
+        def run_agent(self, task, agent):
+            return AgentRunResult(
+                status="completed",
+                passed=True,
+                files={
+                    "output/submission/run.py": b"safe",
+                    "output/submission/nested/helper.py": b"nested-sensitive-value",
+                },
+            )
+
+    output = tmp_path / "retained"
+    report = run_recorded_task(
+        TaskSpec("retain", outputs=("output/submission",)),
+        agent=AgentSpec(kind="nop"),
+        backend=UnsafeArtifactsBackend(),
+        output=output,
+    )
+    assert report["status"] == "artifact_safety_error"
+    assert report["passed"] is None
+    assert not (output / "output").exists()

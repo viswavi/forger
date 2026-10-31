@@ -183,7 +183,7 @@ class AgentRunResult:
     """Normalized outcome of a backend agent run."""
 
     status: str
-    files: dict[str, bytes] = field(default_factory=dict)
+    files: dict[str, bytes | FileInput] = field(default_factory=dict)
     passed: bool | None = None
     diagnostics: dict[str, Any] = field(default_factory=dict)
     validation_attempts: tuple[GenerationAttempt[str, dict[str, bytes]], ...] = ()

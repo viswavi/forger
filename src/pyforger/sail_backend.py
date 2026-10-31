@@ -13,6 +13,7 @@ import uuid
 from collections.abc import Callable
 from typing import Any
 
+from pyforger._sdk_install import SDK_COMMIT
 from pyforger.agent_backend import (
     AgentRunResult,
     AgentSpec,
@@ -25,7 +26,6 @@ from pyforger.agent_backends import require_learner_runtime
 from pyforger.agent_diagnostics import trajectory
 from pyforger.measurements import Measurement
 from pyforger.sail_provision import create_sailbox
-from pyforger.sail_sdk import SDK_VERSION
 from pyforger.usage import usage_record
 
 
@@ -60,7 +60,7 @@ class SailBackend:
     def cache_key(self) -> object:
         """Identify functional execution configuration, excluding credentials."""
         return (
-            "sail-backend-v4-native-terminal-sdk-" + SDK_VERSION,
+            "sail-backend-v4-native-terminal-sdk-" + SDK_COMMIT,
             self.app,
             self.image,
         )

@@ -26,6 +26,13 @@ from pyforger._sail_sdk_transport import (
     TRANSPORT_LOG_PATH,
     diagnostic_text,
 )
+from pyforger._sdk_install import (
+    SDK_COMMIT,
+    SDK_REQUIREMENT,
+    SDK_VERSION,
+    TOOLS_REQUIREMENT,
+    sdk_provenance_command,
+)
 from pyforger.agent_diagnostics import credential_values, sanitizer
 from pyforger.evidence_journal import (
     EvidenceJournal,
@@ -38,16 +45,6 @@ from pyforger.sdk_config import llm_options
 from pyforger.structured import generate_validated
 from pyforger.usage import combine_usage, usage_record
 from pyforger.utils import redact
-
-SDK_VERSION = "1.58.0"
-# Pin the OpenRouter affinity fix and safe retry diagnostics while awaiting
-# released SDK versions containing both changes.
-SDK_REQUIREMENT = (
-    "openhands-sdk @ git+https://github.com/neubig/software-agent-sdk.git"
-    "@a8e34dd0f4475553855a78c69369a4a37d24e125#subdirectory=openhands-sdk"
-)
-TOOLS_REQUIREMENT = SDK_REQUIREMENT.replace("openhands-sdk", "openhands-tools")
-
 
 MAX_FRAME_BYTES = 1024 * 1024
 # Keep write health independent of model latency and the overall session budget.
@@ -656,13 +653,18 @@ def remote_sdk_session(
         or not urlsplit(endpoint).hostname
     ):
         raise ValueError("Remote Sail SDK requires an explicit HTTPS model endpoint")
-    image = sail.Image.from_registry(backend.image).pip_install(
-        SDK_REQUIREMENT,
-        TOOLS_REQUIREMENT,
-        "transformers==5.20.2",
-        "mcp==1.30.0",
-        "fastmcp==3.4.8",
-        "litellm==1.103.4",
+    image = (
+        sail.Image.from_registry(backend.image)
+        .apt_install("git")
+        .pip_install(
+            SDK_REQUIREMENT,
+            TOOLS_REQUIREMENT,
+            "transformers==5.20.2",
+            "mcp==1.30.0",
+            "fastmcp==3.4.8",
+            "litellm==1.103.4",
+        )
+        .run_commands(sdk_provenance_command("python3"))
     )
     tokenizer = request["llm"]["custom_tokenizer"]
     if tokenizer:
@@ -697,6 +699,7 @@ def remote_sdk_session(
             sdk_sailbox_id=instance.sailbox_id,
             execution_mode="remote-sdk",
             sdk_version=SDK_VERSION,
+            sdk_commit=SDK_COMMIT,
             sdk_cleanup="pending",
         )
         diagnostics["sdk_worker_sailbox_ids"] = diagnostics.get(

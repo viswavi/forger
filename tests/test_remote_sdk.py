@@ -1,7 +1,9 @@
 """Exercise the real remote worker against a local OpenAI HTTP server."""
 
+import ast
 import json
 import os
+import shlex
 import socket
 import struct
 import subprocess
@@ -13,7 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
-
+from pyforger._sdk_install import sdk_provenance_command
 from pyforger.acquire.model import Model
 from pyforger.agent_backend import AgentSpec
 from pyforger.sail_sdk import frames, worker_request
@@ -413,3 +415,62 @@ finally:
         len(stack["frames"]) <= 32 for record in records for stack in record["threads"]
     )
     assert "credential-sentinel-not-for-logs" not in path.read_text()
+
+
+def test_sail_sdk_image_installs_git_before_exact_sources():
+    import ast
+
+    import sail
+    from google.protobuf.json_format import MessageToDict
+    from pyforger import sail_sdk
+    from pyforger.sail_sdk import SDK_REQUIREMENT, TOOLS_REQUIREMENT
+
+    tree = ast.parse(Path(sail_sdk.__file__).read_text())
+    assignment = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "image"
+            for target in node.targets
+        )
+    )
+    # Evaluate the production build expression, never provisioning the image.
+    from types import SimpleNamespace
+
+    expression = ast.Expression(assignment.value)
+    image = eval(
+        compile(expression, sail_sdk.__file__, "eval"),
+        {
+            "sail": sail,
+            "backend": SimpleNamespace(image="python:3.12-slim"),
+            "SDK_REQUIREMENT": SDK_REQUIREMENT,
+            "TOOLS_REQUIREMENT": TOOLS_REQUIREMENT,
+            "sdk_provenance_command": sail_sdk.sdk_provenance_command,
+        },
+    )
+    steps = MessageToDict(image._spec)["buildSteps"]
+    assert steps[0] == {"aptInstall": {"packages": ["git"]}}
+    assert steps[1]["pipInstall"]["packages"][:2] == [
+        SDK_REQUIREMENT,
+        TOOLS_REQUIREMENT,
+    ]
+
+    for step in steps:
+        if "runCommand" in step:
+            command = step["runCommand"]["command"]
+            assert not any(ord(char) < 32 or ord(char) == 127 for char in command)
+
+
+def test_sdk_provenance_command_preserves_script_and_shell_quoting(tmp_path):
+    python = str(tmp_path / "python 'quoted' ; executable")
+    command = sdk_provenance_command(python)
+    argv = shlex.split(command)
+    assert argv[:2] == [python, "-c"]
+    expression = ast.parse(argv[2]).body[0].value
+    assert isinstance(expression, ast.Call)
+    assert expression.func.id == "exec"
+    script = ast.literal_eval(expression.args[0])
+    assert "\nfor requirement" in script
+    assert "unexpected SDK commit" in script
+    compile(script, "provenance", "exec")

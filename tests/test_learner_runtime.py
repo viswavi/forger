@@ -106,12 +106,15 @@ def test_sdk_backends_accept_condensation(backend):
     require_learner_runtime(backend, spec(condenser_max_tokens=104857))
 
 
-def test_harbor_rejects_condensation():
-    """Reject condensation when the Harbor adapter cannot honor it."""
-    with pytest.raises(NotImplementedError, match="condensation"):
-        HarborBackend().run_agent(
-            WorkspaceTask(instruction="test"), spec(condenser_max_tokens=104857)
-        )
+def test_harbor_accepts_and_serializes_condensation(monkeypatch):
+    """Validate native configuration without invoking remote model transport."""
+    monkeypatch.setenv("LITELLM_API_KEY", "fixture-local-only")
+    backend = HarborBackend()
+    agent = spec(condenser_max_tokens=104857)
+    require_learner_runtime(backend, agent)
+    config = backend._agent_config(agent)
+    assert config.env["FORGER_CONDENSER_MAX_TOKENS"] == "104857"
+    assert config.env["LLM_API_KEY"] == "${LITELLM_API_KEY}"
 
 
 def test_local_condenser_uses_agent_model(tmp_path):
@@ -329,3 +332,343 @@ def test_conflicting_runtime_rejected_before_setup(
     with pytest.raises(ValueError, match="conflict"):
         getattr(SetupGuard(), entry)(task, agent, **options)
     assert list(tmp_path.iterdir()) == []
+
+
+def test_full_prompt_budget_counts_real_tool_schemas(tmp_path):
+    """Count the serialized system, task, tool schemas and security fields."""
+    from openhands.sdk.llm import Message, TextContent
+    from openhands.sdk.llm.exceptions import LLMContextWindowExceedError
+
+    from pyforger._sdk_runtime import PromptBudgetLLM
+
+    session = LocalBackend()._sdk_session(
+        tmp_path, WorkspaceTask(instruction="test"), spec()
+    )
+    try:
+        session.agent._initialize(session.state)
+        tools = list(session.agent.tools_map.values())
+        llm = PromptBudgetLLM(
+            model="openai/gpt-4o",
+            api_key="test",
+            prompt_token_limit=1000,
+            max_input_tokens=131066,
+            max_output_tokens=49152,
+        )
+        messages = [
+            Message(role="system", content=[TextContent(text="system")]),
+            Message(role="user", content=[TextContent(text="original task")]),
+        ]
+        assert llm.get_token_count(messages) < 1000
+        assert (
+            llm.get_token_count(
+                messages, tools=tools, add_security_risk_prediction=True
+            )
+            > 1000
+        )
+        with pytest.raises(LLMContextWindowExceedError, match="Serialized prompt"):
+            llm.generate(messages, tools=tools, add_security_risk_prediction=True)
+        assert llm.max_output_tokens == 49152
+        assert llm.max_input_tokens == 131066
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_exact_provider_overflow_is_sdk_recoverable(monkeypatch, asynchronous):
+    """Only replace the paid transport; retain SDK exception and condenser policy."""
+    import asyncio
+
+    from litellm.exceptions import BadRequestError
+    from openhands.sdk import LLM
+    from openhands.sdk.llm import Message, TextContent
+    from openhands.sdk.llm.exceptions import LLMContextWindowExceedError
+
+    from pyforger._sdk_runtime import PromptBudgetLLM
+
+    error = BadRequestError(
+        "Requested token count exceeds the model's maximum context length of 131072 tokens. You requested a total of 131906 tokens",
+        model="test",
+        llm_provider="openai",
+    )
+
+    def fail(*args, **kwargs):
+        raise error
+
+    async def afail(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(LLM, "generate", fail)
+    monkeypatch.setattr(LLM, "agenerate", afail)
+    llm = PromptBudgetLLM(model="openai/gpt-4o", api_key="test")
+    messages = [Message(role="user", content=[TextContent(text="task")])]
+    with pytest.raises(LLMContextWindowExceedError):
+        if asynchronous:
+            asyncio.run(llm.agenerate(messages))
+        else:
+            llm.generate(messages)
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_hard_reset_retries_smaller_summaries_preserving_prefix(
+    monkeypatch, asynchronous
+):
+    import asyncio
+
+    from completion import completion_server
+    from openhands.sdk import LLM
+    from openhands.sdk.context.view import View
+    from openhands.sdk.event import MessageEvent, SystemPromptEvent
+    from openhands.sdk.llm import Message, TextContent
+
+    from pyforger._sdk_runtime import TaskPreservingCondenser
+
+    events = [SystemPromptEvent(system_prompt=TextContent(text="system"), tools=[])]
+    events += [
+        MessageEvent(
+            source="user",
+            llm_message=Message(role="user", content=[TextContent(text=text)]),
+        )
+        for text in ["ORIGINAL_TASK", "large diagnostic " * 1000]
+    ]
+    calls = []
+    original = TaskPreservingCondenser._build_summary_messages
+
+    def reject_first(self, strings):
+        calls.append(strings)
+        if len(calls) == 1:
+            raise ValueError("summary context overflow")
+        return original(self, strings)
+
+    monkeypatch.setattr(
+        TaskPreservingCondenser, "_build_summary_messages", reject_first
+    )
+    with completion_server({"role": "assistant", "content": "summary"}) as (url, _):
+        llm = LLM(model="openai/gpt-4o", base_url=url, api_key="test")
+        condenser = TaskPreservingCondenser(llm=llm, max_tokens=80000, keep_first=2)
+        result = (
+            asyncio.run(condenser.ahard_context_reset(View.from_events(events), llm))
+            if asynchronous
+            else condenser.hard_context_reset(View.from_events(events), llm)
+        )
+        assert result.forgotten_event_ids == {events[2].id}
+        assert result.summary_offset == 2
+        assert len(calls) == 2
+        assert len(calls[1][0]) < len(calls[0][0])
+        assert condenser.max_tokens == 80000
+
+
+def test_muse_tokenizer_counts_full_prompt_with_tools(tmp_path):
+    from pathlib import Path
+
+    from openhands.sdk.llm import Message, TextContent
+    from openhands.sdk.llm.exceptions import LLMContextWindowExceedError
+
+    from pyforger._sdk_runtime import PromptBudgetLLM
+
+    cached = (
+        Path.home()
+        / ".cache/huggingface/hub/models--meta-models--Muse-Glimmer-30B/snapshots"
+    )
+    paths = sorted(cached.glob("*/tokenizer_config.json"))
+    if not paths:
+        pytest.skip("Muse tokenizer not cached")
+    session = LocalBackend()._sdk_session(
+        tmp_path, WorkspaceTask(instruction="test"), spec()
+    )
+    try:
+        session.agent._initialize(session.state)
+        tools = list(session.agent.tools_map.values())
+        llm = PromptBudgetLLM(
+            model="openai/test",
+            api_key="test",
+            custom_tokenizer=str(paths[0].parent),
+            prompt_token_limit=80000,
+            max_input_tokens=131066,
+            max_output_tokens=49152,
+        )
+        messages = [
+            Message(
+                role="system", content=[TextContent(text="scientific task system")]
+            ),
+            Message(
+                role="user",
+                content=[TextContent(text="ORIGINAL_TASK " + "measurement " * 78000)],
+            ),
+        ]
+        assert llm._chat_template_tokenizer is not None
+        count = llm.get_token_count(
+            messages, tools=tools, add_security_risk_prediction=True
+        )
+        without = llm.get_token_count(messages)
+        assert count > without
+        if count <= 80000:
+            messages.append(
+                Message(role="user", content=[TextContent(text="measurement " * 3000)])
+            )
+        with pytest.raises(LLMContextWindowExceedError, match="Serialized prompt"):
+            llm.generate(messages, tools=tools, add_security_risk_prediction=True)
+        assert llm.prompt_token_limit == 80000
+        assert llm.max_output_tokens == 49152
+        assert llm.max_input_tokens == 131066
+    finally:
+        session.close()
+
+
+def test_provider_overflow_condenses_and_retries_real_sdk_loop(tmp_path, monkeypatch):
+    """Inject only the unavailable provider rejection; run real SDK/tools/summary."""
+    import json
+
+    from completion import completion_server
+    from litellm.exceptions import BadRequestError
+    from openhands.sdk import LLM
+    from openhands.sdk.event.condenser import Condensation
+
+    from pyforger._sdk_runtime import PromptBudgetLLM
+
+    responses = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_terminal",
+                    "type": "function",
+                    "function": {
+                        "name": "terminal",
+                        "arguments": json.dumps(
+                            {"command": "true # diagnostic history"}
+                        ),
+                    },
+                }
+            ],
+        },
+        {"role": "assistant", "content": "The diagnostic command completed."},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_finish",
+                    "type": "function",
+                    "function": {
+                        "name": "finish",
+                        "arguments": json.dumps({"message": "done"}),
+                    },
+                }
+            ],
+        },
+    ]
+    original = LLM.generate
+    tool_calls = []
+
+    def provider(self, *args, **kwargs):
+        if kwargs.get("tools"):
+            tool_calls.append(kwargs)
+            if len(tool_calls) == 2:
+                raise BadRequestError(
+                    "Requested token count exceeds the model's maximum context length of 131072 tokens",
+                    model="test",
+                    llm_provider="openai",
+                )
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(LLM, "generate", provider)
+    with completion_server(responses) as (url, requests):
+        from pyforger import local_backend
+
+        llm = PromptBudgetLLM(
+            model="openai/gpt-4o",
+            base_url=url,
+            api_key="test",
+            prompt_token_limit=80000,
+        )
+        monkeypatch.setattr(local_backend, "agent_llm", lambda model: llm)
+        session = LocalBackend()._sdk_session(
+            tmp_path,
+            WorkspaceTask(instruction="test"),
+            AgentSpec(
+                model=Model("openai/gpt-4o", api_base=url, api_key="test"),
+                max_iterations=8,
+                runtime=LearnerRuntime(condenser_max_tokens=80000),
+            ),
+        )
+        try:
+            session.send_message("ORIGINAL_TASK: run a diagnostic then finish")
+            session.run()
+            events = list(session.state.events)
+            condensations = [e for e in events if isinstance(e, Condensation)]
+            assert condensations
+            assert all(e.summary_offset == 2 for e in condensations)
+            assert all(events[1].id not in e.forgotten_event_ids for e in condensations)
+            assert len(tool_calls) == 3
+            assert "ORIGINAL_TASK" in json.dumps(requests[-1]["messages"])
+            assert "The diagnostic command completed." in json.dumps(
+                requests[-1]["messages"]
+            )
+        finally:
+            session.close()
+
+
+def test_non_context_provider_error_not_reclassified(monkeypatch):
+    from litellm.exceptions import BadRequestError
+    from openhands.sdk import LLM
+    from openhands.sdk.llm import Message, TextContent
+
+    from pyforger._sdk_runtime import PromptBudgetLLM
+
+    error = BadRequestError("invalid tool schema", model="test", llm_provider="openai")
+
+    def fail(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(LLM, "generate", fail)
+    with pytest.raises(BadRequestError) as caught:
+        PromptBudgetLLM(model="openai/gpt-4o", api_key="test").generate(
+            [Message(role="user", content=[TextContent(text="task")])]
+        )
+    assert caught.value is error
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize(
+    ("message", "context_error"),
+    [
+        (
+            (
+                "Requested token count exceeds the model's maximum context length "
+                "of 131066 tokens. You requested a total of 140000 tokens."
+            ),
+            True,
+        ),
+        ("Requested token count is invalid", False),
+        ("invalid tool schema", False),
+    ],
+)
+def test_installed_sdk_sglang_error_mapping(asynchronous, message, context_error):
+    import asyncio
+
+    from litellm.exceptions import BadRequestError
+    from openhands.sdk import LLM
+    from openhands.sdk.llm.exceptions import (
+        LLMBadRequestError,
+        LLMContextWindowExceedError,
+    )
+
+    expected = LLMContextWindowExceedError if context_error else LLMBadRequestError
+    error = BadRequestError(message, model="test", llm_provider="openai")
+    llm = LLM(model="openai/test", api_key="offline-test", num_retries=0)
+
+    def no_fallback(_llm):
+        pytest.fail("No fallback configured")
+
+    with pytest.raises(expected) as caught:
+        try:
+            raise error
+        except BadRequestError as original:
+            if asynchronous:
+                asyncio.run(llm._ahandle_error(original, no_fallback))
+            else:
+                llm._handle_error(original, no_fallback)
+    assert type(caught.value) is expected
+    assert caught.value.__cause__ is error
+    assert str(caught.value) == str(error)
