@@ -343,6 +343,13 @@ def run_pipeline(seeds, model, rounds=5):
 
 Module import time should not execute work. LLM calls, file I/O, and any `@op`-decorated call belong inside a function body.
 
+Rows flowing through `alter.sample`, `inspect.success_rates`, and `filter.by_success_rate` may be dicts or data
+models (pydantic models or dataclasses): fields are read as keys or attributes, and `alter.sample` attaches
+generated values on a copied row. `pyforger.evaluation.evaluate_panel` accepts mapping or model callback results
+and returns a typed `PanelReport`. `pyforger.structured.generate_result` is the non-raising form of
+`generate_validated`: it returns a `GenerationResult` whose `status` is `accepted`, `exhausted`, or
+`inconclusive`, for pipelines that branch on the outcome instead of catching exceptions.
+
 ### Data Generation Patterns
 
 We often see some common patterns in data generation pipelines. Here is an incomplete list of examples:

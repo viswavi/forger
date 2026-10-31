@@ -13,20 +13,20 @@ _OUTCOMES = TypeAdapter(dict[str, list[StrictBool | None]])
 
 @op(name="inspect.success_rates")
 def success_rates(
-    items: list[dict[str, Any]], *, outcomes_field: str = "evaluations"
+    items: list[Any], *, outcomes_field: str = "evaluations"
 ) -> list[dict[str, Any]]:
     """Return per-group counts and rates for every row, including rejected rows.
 
-    Each row contains a mapping from caller-chosen group labels to a list of
-    boolean or missing grades. Missing grades are excluded, not failures.
-    Groups may identify models, generators, versions, or any other population.
+    Rows may be dicts or data models; ``outcomes_field`` is read as a key or
+    attribute. Each row contains a mapping from caller-chosen group labels to
+    a list of boolean or missing grades. Missing grades are excluded, not
+    failures. Groups may identify models, generators, versions, or any other
+    population.
     """
     return _success_rates(items, outcomes_field)
 
 
-def _success_rates(
-    items: list[dict[str, Any]], outcomes_field: str
-) -> list[dict[str, Any]]:
+def _success_rates(items: list[Any], outcomes_field: str) -> list[dict[str, Any]]:
     reports = []
     for item in items:
         outcomes = _OUTCOMES.validate_python(

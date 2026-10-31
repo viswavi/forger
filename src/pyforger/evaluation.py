@@ -1,15 +1,54 @@
 """Fresh independent panel trials composed from generic Forger operations."""
 
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import asdict, is_dataclass
 from functools import partial
 from threading import Lock
-from typing import Any
+from typing import Any, Protocol, TypeVar
+
+from pydantic import BaseModel, ConfigDict
 
 from pyforger.alter.sample import sample
 from pyforger.filter.success_rate import by_success_rate
 from pyforger.inspect.success_rate import success_rates
-from pyforger.utils import run_concurrently
+from pyforger.measurements import Measurement
+from pyforger.utils import get_field, run_concurrently
+
+
+class PanelTrial(BaseModel):
+    """One executed panel trial, independent of the caller's result shape."""
+
+    model_config = ConfigDict(frozen=True)
+
+    model: str
+    trial_id: str
+    result: dict[str, Any]
+
+
+class PanelReport(BaseModel):
+    """Typed panel summary: admission verdict, per-model counts, and trials."""
+
+    model_config = ConfigDict(frozen=True)
+
+    accepted: bool
+    models: dict[str, dict[str, Any]]
+    trials: tuple[PanelTrial, ...]
+
+
+class ReplacementPanelReport(PanelReport):
+    """Opt-in execution history, separate from canonical scientific trials."""
+
+    execution_history: tuple[dict[str, Any], ...]
+
+
+class TrialResult(Protocol):
+    """A panel callback result: a mapping or model with a ``passed`` grade."""
+
+    passed: bool | None
+
+
+ResultT = TypeVar("ResultT")
 
 
 def validate_panel(
@@ -42,7 +81,7 @@ def validate_panel(
 
 def evaluate_panel(
     models: Sequence[str],
-    evaluate: Callable[[str, str], dict[str, Any]],
+    evaluate: Callable[[str, str], ResultT],
     *,
     attempts: int = 5,
     concurrency: int | None = None,
@@ -51,14 +90,19 @@ def evaluate_panel(
     min_valid: int | None = None,
     replacement_predicate: Callable[[dict[str, Any]], bool] | None = None,
     max_replacements: int = 0,
-) -> dict[str, Any]:
+) -> PanelReport:
     """Evaluate fresh uniquely identified trials and summarize each model.
 
-    Callback results contain a boolean or null ``passed`` field. Null grades
-    are excluded from rates; false grades count as failures. By default every
-    requested trial must have a valid grade. Set min_valid explicitly to allow
-    exclusions. Each model must meet that minimum and the inclusive rate bounds.
-    With concurrency=None all model-by-attempt trials may run simultaneously.
+    Callback results are mappings or data models with a boolean or null
+    ``passed`` field. Null grades are excluded from rates; false grades count
+    as failures. By default every requested trial must have a valid grade. Set
+    min_valid explicitly to allow exclusions. Each model must meet that
+    minimum and the inclusive rate bounds. With concurrency=None all
+    model-by-attempt trials may run simultaneously. Trial results are
+    normalized to JSON-compatible dicts in the returned report. Opt-in replacements
+    consume at most max_replacements extra executions per model, in deterministic
+    waves. Callback IDs are execution IDs; report trial IDs remain canonical.
+    Execution history retains originals separately; exceptions propagate unchanged.
     """
     validate_panel(
         models,
@@ -83,30 +127,32 @@ def evaluate_panel(
 
     def invoke(item: dict[str, Any], identity: str) -> dict[str, Any]:
         result = evaluate(by_identity[identity], identity)
-        if not isinstance(result, dict) or "passed" not in result:
-            raise ValueError("Panel callback must return a result with passed")
-        if result["passed"] is not None and type(result["passed"]) is not bool:
+        try:
+            passed = get_field(result, "passed", "evaluate_panel")
+        except KeyError as exc:
+            raise ValueError("Panel callback must return a result with passed") from exc
+        if passed is not None and not isinstance(passed, bool):
             raise ValueError("Panel callback passed must be a boolean or null")
-        return json.loads(json.dumps(result, allow_nan=False))
+        return _as_result_dict(result)
 
     # no_cache still hashes callables; partial keeps opaque callback state out.
-    sampled = sample.no_cache(
+    sampled: list[dict[str, Any]] = sample.no_cache(
         [{}], partial(invoke), sample_ids=list(by_identity), concurrency=workers
     )
     trials = [
-        {
-            "model": by_identity[entry["sample_id"]],
-            "trial_id": entry["sample_id"],
-            "result": entry["value"],
-        }
+        PanelTrial(
+            model=by_identity[entry["sample_id"]],
+            trial_id=entry["sample_id"],
+            result=entry["value"],
+        )
         for entry in sampled[0]["samples"]
     ]
     history = [
         {
-            "model": trial["model"],
-            "trial_id": trial["trial_id"],
-            "execution_id": trial["trial_id"],
-            "result": trial["result"],
+            "model": trial.model,
+            "trial_id": trial.trial_id,
+            "execution_id": trial.trial_id,
+            "result": trial.result,
         }
         for trial in trials
     ]
@@ -115,15 +161,15 @@ def evaluate_panel(
     while max_replacements:
         selected = []
         for index, trial in enumerate(trials):
-            if used[trial["model"]] >= max_replacements:
+            if used[trial.model] >= max_replacements:
                 continue
-            retry = replacement_predicate(trial["result"])
+            retry = replacement_predicate(trial.result)
             if type(retry) is not bool:
                 raise ValueError("Replacement predicate must return bool")
             if retry:
-                used[trial["model"]] += 1
-                identity = f"{trial["trial_id"]}-replacement-{used[trial["model"]]}"
-                by_identity[identity] = trial["model"]
+                used[trial.model] += 1
+                identity = f"{trial.trial_id}-replacement-{used[trial.model]}"
+                by_identity[identity] = trial.model
                 selected.append((index, identity))
         if not selected:
             break
@@ -146,8 +192,8 @@ def evaluate_panel(
             with completion_lock:
                 diagnostics["panel_execution_history"] = history + [
                     {
-                        "model": trials[index]["model"],
-                        "trial_id": trials[index]["trial_id"],
+                        "model": trials[index].model,
+                        "trial_id": trials[index].trial_id,
                         "execution_id": identity,
                         "result": completed[identity],
                     }
@@ -160,24 +206,54 @@ def evaluate_panel(
             previous = trials[index]
             history.append(
                 {
-                    "model": previous["model"],
-                    "trial_id": previous["trial_id"],
+                    "model": previous.model,
+                    "trial_id": previous.trial_id,
                     "execution_id": identity,
                     "result": result,
                 }
             )
-            trials[index] = {**previous, "result": result}
+            trials[index] = previous.model_copy(update={"result": result})
     rows: list[dict[str, Any]] = [{"evaluations": {model: [] for model in models}}]
     for trial in trials:
-        rows[0]["evaluations"][trial["model"]].append(trial["result"]["passed"])
+        rows[0]["evaluations"][trial.model].append(trial.result["passed"])
     counts = success_rates.no_cache(rows)[0]
     accepted = bool(
         by_success_rate.no_cache(
             rows, min_rate=min_rate, max_rate=max_rate, min_valid=min_valid
         )
     )
-    report = {"accepted": accepted, "models": counts, "trials": trials}
     if max_replacements:
-        report["execution_history"] = history
-    normalized: dict[str, Any] = json.loads(json.dumps(report, allow_nan=False))
+        return ReplacementPanelReport(
+            accepted=accepted,
+            models=counts,
+            trials=tuple(trials),
+            execution_history=tuple(history),
+        )
+    return PanelReport(accepted=accepted, models=counts, trials=tuple(trials))
+
+
+def _as_result_dict(result: Any) -> dict[str, Any]:
+    """Normalize a mapping or data-model panel result to a JSON-safe dict."""
+    from pyforger.evidence_journal import has_private_evidence
+
+    if isinstance(result, BaseModel) and has_private_evidence(result.__dict__):
+        raise ValueError("Publish private evidence before returning a panel result")
+    if isinstance(result, Measurement):
+        payload: Any = result.model_dump(mode="json")
+    elif isinstance(result, BaseModel):
+        payload = result.model_dump(mode="json")
+    elif isinstance(result, Mapping):
+        payload = dict(result)
+    elif is_dataclass(result) and not isinstance(result, type):
+        payload = asdict(result)
+    else:
+        payload = {"passed": get_field(result, "passed", "evaluate_panel")}
+        for name in ("status", "reason", "model", "trial_id"):
+            try:
+                payload[name] = get_field(result, name, "evaluate_panel")
+            except KeyError:
+                pass
+    if has_private_evidence(payload):
+        raise ValueError("Publish private evidence before returning a panel result")
+    normalized: dict[str, Any] = json.loads(json.dumps(payload, allow_nan=False))
     return normalized

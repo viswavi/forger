@@ -1,14 +1,16 @@
 """Independent panels execute real TaskSpecs with caller-owned storage."""
 
-import json
 import threading
 import time
+from collections import UserDict
+from dataclasses import dataclass
 
 import pytest
+from pydantic import BaseModel
 
 from pyforger.agent_backend import AgentSpec
 from pyforger.agent_tasks import TaskSpec
-from pyforger.evaluation import evaluate_panel, validate_panel
+from pyforger.evaluation import PanelReport, evaluate_panel, validate_panel
 from pyforger.local_backend import LocalBackend
 from pyforger.task_runs import run_recorded_task
 
@@ -31,11 +33,11 @@ def test_panel_actual_tasks_and_unique_identities(tmp_path):
     report = evaluate_panel(
         ["provider/model-a", "model-b"], evaluate, attempts=2, concurrency=2
     )
-    assert report["accepted"] is True
+    assert report.accepted is True
     assert len(seen) == len({identity for _, identity in seen}) == 4
-    assert {(row["model"], row["trial_id"]) for row in report["trials"]} == set(seen)
-    assert report["models"]["provider/model-a"]["success_rate"] == 0.5
-    assert json.loads(json.dumps(report)) == report
+    assert {(row.model, row.trial_id) for row in report.trials} == set(seen)
+    assert report.models["provider/model-a"]["success_rate"] == 0.5
+    assert PanelReport.model_validate_json(report.model_dump_json()) == report
 
 
 def test_null_excluded_false_counted_and_no_cache():
@@ -48,16 +50,16 @@ def test_null_excluded_false_counted_and_no_cache():
 
     for _ in range(2):
         report = evaluate_panel(["a"], evaluate, attempts=3)
-        assert report["accepted"] is False
-        assert report["models"]["a"] == dict(
+        assert report.accepted is False
+        assert report.models["a"] == dict(
             attempted=3, valid=2, passed=1, excluded=1, success_rate=0.5
         )
     assert len(calls) == 6
     explicit = evaluate_panel(["a"], evaluate, attempts=3, min_valid=2)
-    assert explicit["accepted"] is True
-    assert explicit["models"]["a"]["success_rate"] == 0.5
-    assert evaluate_panel(["a"], lambda *_: {"passed": None})["accepted"] is False
-    assert evaluate_panel(["a"], lambda *_: {"passed": False})["accepted"] is False
+    assert explicit.accepted is True
+    assert explicit.models["a"]["success_rate"] == 0.5
+    assert evaluate_panel(["a"], lambda *_: {"passed": None}).accepted is False
+    assert evaluate_panel(["a"], lambda *_: {"passed": False}).accepted is False
 
 
 @pytest.mark.parametrize(
@@ -134,4 +136,57 @@ def test_default_panel_concurrency_and_standalone_validation():
         return {"passed": False}
 
     report = evaluate_panel(["a", "b"], evaluate, attempts=2)
-    assert len(report["trials"]) == 4
+    assert len(report.trials) == 4
+
+
+class _TypedTrial(BaseModel):
+    """A typed panel callback result carrying its own grade."""
+
+    passed: bool | None
+    note: str = ""
+
+
+def test_panel_accepts_model_results():
+    """Model-typed callback results normalize into the typed report."""
+    report = evaluate_panel(
+        ["a"],
+        lambda model, identity: _TypedTrial(passed=True, note=identity),
+        attempts=2,
+    )
+    assert report.accepted is False  # rate 1.0 is outside the default window
+    assert report.models["a"]["success_rate"] == 1.0
+    assert [t.result["passed"] for t in report.trials] == [True, True]
+    assert all(t.result["note"].startswith("model-0-") for t in report.trials)
+
+
+@dataclass
+class _DataclassTrial:
+    passed: bool
+    note: str
+    score: float
+    evidence: dict[str, str]
+
+
+@pytest.mark.parametrize("result_type", [UserDict, _DataclassTrial])
+def test_panel_preserves_mapping_and_dataclass_diagnostics(result_type):
+    """All supported result containers preserve arbitrary diagnostic fields."""
+    payload = dict(passed=True, note="verified", score=0.75, evidence={"file": "out"})
+    result = (
+        result_type(**payload) if result_type is _DataclassTrial else UserDict(payload)
+    )
+    report = evaluate_panel(["a"], lambda *_: result, attempts=1, max_rate=1)
+    assert report.accepted
+    assert report.trials[0].result == payload
+
+
+def test_panel_refuses_unpublished_private_evidence():
+    from pyforger.evidence_journal import EvidenceJournal
+
+    journal = EvidenceJournal()
+    journal.append({"text": "evidence"})
+    with pytest.raises(ValueError, match="Publish private evidence"):
+        evaluate_panel(
+            ["model"],
+            lambda *_: {"passed": True, "trajectory": journal.trajectory()},
+            attempts=1,
+        )
