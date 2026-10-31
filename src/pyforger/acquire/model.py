@@ -441,11 +441,6 @@ class Model:
         return sum(r.usage.cost_usd or 0.0 for r in self.history)
 
     @property
-    def known_cost_usd(self) -> float:
-        """Priced lower bound, including priced siblings of failed batches."""
-        return self.total_cost
-
-    @property
     def total_usage(self) -> Usage:
         """Sum token counts and cost across every call in this Model's history."""
         return Usage(
