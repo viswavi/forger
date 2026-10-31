@@ -14,7 +14,13 @@ from typing import Any, TypeVar
 
 from pyforger.agent_backend import AgentBackend, AgentSpec, Network, WorkspaceTask
 from pyforger.agent_backends import require_inner_loop_validation
+from pyforger.agent_diagnostics import (
+    ArtifactSafetyError,
+    sanitizer,
+    validate_artifact_bytes,
+)
 from pyforger.alter._dynamic_resources import prepare_input
+from pyforger.artifacts import FileInput
 from pyforger.local_backend import LocalBackend
 from pyforger.measurements import Measurement
 from pyforger.structured import (
@@ -44,7 +50,7 @@ def execute_source(
 
 def generate_files(
     instruction: str,
-    files: Mapping[str, str | bytes],
+    files: Mapping[str, str | bytes | FileInput],
     outputs: tuple[str, ...],
     *,
     agent: AgentSpec,
@@ -93,7 +99,7 @@ def generate_files(
 
 def generate_object(
     instruction: str,
-    files: Mapping[str, str | bytes],
+    files: Mapping[str, str | bytes | FileInput],
     output_name: str,
     *,
     parse: Callable[[dict[str, bytes]], T],
@@ -137,9 +143,18 @@ def generate_object(
             )
             return verdict
         try:
+            validate_artifact_bytes(produced, [agent])
+        except ArtifactSafetyError as exc:
+            verdict = Measurement(
+                passed=False,
+                reason=str(exc),
+                evidence={"failure_kind": "artifact_safety"},
+            )
+            return verdict
+        try:
             value = parse(produced)
         except (ValueError, TypeError) as exc:
-            verdict = Measurement(passed=False, reason=str(exc))
+            verdict = Measurement(passed=False, reason=sanitizer([agent])(str(exc)))
         else:
             parsed.append(value)
             verdict = Measurement(passed=True)
@@ -187,6 +202,8 @@ def generate_object(
         nonlocal rejected
         rejected += 1
         for name, content in attempt.output.items():
+            if attempt.measurement.evidence.get("failure_kind") == "artifact_safety":
+                continue
             previous = f"previous-{rejected}/{name}"
             if any(
                 key == previous
@@ -241,7 +258,7 @@ def generate_source(
         + "\nGoal: "
         + goal
     )
-    files: dict[str, str | bytes] = {
+    files: dict[str, str | bytes | FileInput] = {
         "request.json": json.dumps({"item": prepared}, ensure_ascii=False)
     }
 

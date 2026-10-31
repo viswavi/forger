@@ -26,6 +26,7 @@ from pathlib import PurePosixPath
 from typing import Any, Protocol, runtime_checkable
 
 from pyforger.acquire.model import Model
+from pyforger.artifacts import FileInput
 from pyforger.structured import GenerationAttempt
 
 AGENT_KINDS = ("openhands-sdk", "oracle", "nop")
@@ -139,12 +140,12 @@ class WorkspaceTask:
     """
 
     instruction: str
-    files: Mapping[str, str | bytes] = field(default_factory=dict)
+    files: Mapping[str, str | bytes | FileInput] = field(default_factory=dict)
     outputs: tuple[str, ...] = ()
     packages: tuple[str, ...] = ()
     verifier: str | None = None
-    verifier_files: Mapping[str, str | bytes] = field(default_factory=dict)
-    solution_files: Mapping[str, str | bytes] = field(default_factory=dict)
+    verifier_files: Mapping[str, str | bytes | FileInput] = field(default_factory=dict)
+    solution_files: Mapping[str, str | bytes | FileInput] = field(default_factory=dict)
     network: Network = Network.MODEL
     timeout_s: float = 600.0
 

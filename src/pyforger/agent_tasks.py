@@ -16,7 +16,11 @@ from pathlib import Path
 from typing import Any
 
 from pyforger.agent_backend import AgentBackend, AgentSpec, Network, WorkspaceTask
+from pyforger.agent_diagnostics import ArtifactSafetyError, validate_artifact_bytes
 from pyforger.agents import _default
+from pyforger.artifacts import FileInput, write_input
+from pyforger.measurements import Measurement
+from pyforger.structured import ValidationExhausted
 
 
 @dataclass(frozen=True)
@@ -24,11 +28,11 @@ class TaskSpec:
     """Packaged work for an agent: instruction, files, verifier, outputs."""
 
     instruction: str
-    files: Mapping[str, str | bytes] = field(default_factory=dict)
+    files: Mapping[str, str | bytes | FileInput] = field(default_factory=dict)
     outputs: tuple[str, ...] = ()
     verifier: str | None = None
-    verifier_files: Mapping[str, str | bytes] = field(default_factory=dict)
-    solution_files: Mapping[str, str | bytes] = field(default_factory=dict)
+    verifier_files: Mapping[str, str | bytes | FileInput] = field(default_factory=dict)
+    solution_files: Mapping[str, str | bytes | FileInput] = field(default_factory=dict)
     packages: tuple[str, ...] = ()
     network: Network = Network.OFFLINE
 
@@ -62,9 +66,7 @@ class TaskSpec:
             for name, content in payload.items():
                 entry = root / directory / name
                 entry.parent.mkdir(parents=True, exist_ok=True)
-                entry.write_bytes(
-                    content.encode() if isinstance(content, str) else content
-                )
+                write_input(entry, content)
         (root / "task.json").write_text(
             json.dumps(manifest, indent=2), encoding="utf-8"
         )
@@ -154,7 +156,42 @@ def run_task(
         network=task.network,
         timeout_s=timeout_s,
     )
-    result = _default(backend).run_agent(workspace, agent)
+    executor = _default(backend)
+    validated = getattr(executor, "run_agent_validated", None)
+    if (
+        agent.kind == "openhands-sdk"
+        and getattr(executor, "supports_inner_loop_validation", False)
+        and callable(validated)
+    ):
+        safety_rejected = False
+
+        def check(files: dict[str, bytes]) -> Measurement:
+            nonlocal safety_rejected
+            try:
+                validate_artifact_bytes(files, [agent])
+            except ArtifactSafetyError as error:
+                safety_rejected = True
+                return Measurement(
+                    passed=False,
+                    reason=str(error),
+                    evidence={"failure_kind": "artifact_safety"},
+                )
+            return Measurement(passed=True)
+
+        try:
+            result = validated(
+                workspace, agent, validate=check, max_repairs=2, require_outputs=False
+            )
+        except ValidationExhausted as error:
+            if safety_rejected:
+                failure = ArtifactSafetyError(
+                    "Artifact safety repair exhausted after bounded validation"
+                )
+                failure.diagnostics = getattr(error, "diagnostics", {})
+                raise failure from None
+            raise
+    else:
+        result = executor.run_agent(workspace, agent)
     retained_trajectory = result.trajectory
     if retained_trajectory is None and agent.kind in {"oracle", "nop"}:
         retained_trajectory = {"steps": [{"kind": agent.kind, "status": result.status}]}
