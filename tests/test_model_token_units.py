@@ -534,3 +534,31 @@ def test_timed_out_attempts_stay_charged(monkeypatch, tmp_path, complete):
     assert state["unreturned_calls"] == 1
     assert state["token_units"] == 302 + 70
     assert state["held_token_units"] == 0
+
+
+def _cut_off(**kwargs):
+    """A response whose single completion stopped at max_tokens."""
+    cut = response()
+    cut.choices[0].finish_reason = "length"
+    return cut
+
+
+def test_batch_stops_when_most_completions_are_cut_off(monkeypatch, complete):
+    """After 20 finished completions, 80% of them truncated stops the batch."""
+    from pyforger.acquire.model import TruncationStopError
+
+    complete.side_effect = _cut_off
+    model = Model(DEEPSEEK, max_concurrency=1, max_tokens=50)
+    with pytest.raises(TruncationStopError, match="20 of 20 finished completions"):
+        model.generate_batch([f"p{i}" for i in range(25)])
+    assert complete.call_count == 20
+
+
+def test_truncation_stop_can_be_turned_off(monkeypatch, complete):
+    """FORGER_ALLOW_TRUNCATION=1 sends the whole batch."""
+    monkeypatch.setenv("FORGER_ALLOW_TRUNCATION", "1")
+    complete.side_effect = _cut_off
+    results = Model(DEEPSEEK, max_concurrency=1).generate_batch(
+        [f"p{i}" for i in range(25)]
+    )
+    assert complete.call_count == 25 and sum(r.truncated for r in results) == 25

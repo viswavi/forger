@@ -219,3 +219,14 @@ class RubricScoreTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SwappedArgumentTests(unittest.TestCase):
+    """The graders take (response, row); swapped arguments raise, not score 0."""
+
+    def test_swapped_arguments_raise(self):
+        """A row passed as the response is a TypeError naming the order."""
+        row = {"prompt": "p", "ground_truth": "g", "rubric": []}
+        for grade in (rubric_score(), rubric_verifier()):
+            with self.assertRaisesRegex(TypeError, r"grade\(response, row\)"):
+                grade(row, "text")
