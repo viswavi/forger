@@ -616,3 +616,65 @@ class TestRationalizationWithAnswerJudge:
             ("Keep them on.", False),
         ]
         assert model.calls == 2
+
+
+class _Scored:
+    """Returns ``n`` responses "ANSWER: 1", "ANSWER: 2", ... per prompt."""
+
+    def cache_key(self) -> tuple:
+        """Stable identity for @op caching."""
+        return ("scored",)
+
+    def generate_batch(self, prompts, *, n=1, temperature=None, max_tokens=None):
+        """Numbered answers, so a verifier can score each one differently."""
+        return [[f"ANSWER: {k + 1}" for k in range(n)] for _ in prompts]
+
+
+def _score(answer, row):
+    """The answer's number over 4: 0.25, 0.5, 0.75, 1.0."""
+    return int(answer.split()[-1]) / 4
+
+
+class TestScoredVerifier:
+    """A verifier may return a score; ``keep="best"`` keeps each item's best."""
+
+    ITEMS = [{"prompt": "a"}, {"prompt": "b"}]
+
+    def test_min_score_keeps_responses_at_or_above_it(self):
+        """Scores below ``min_score`` are dropped; kept rows carry their score."""
+        rows = self_taught_reasoner(
+            self.ITEMS[:1],
+            "{prompt}",
+            _Scored(),
+            n=4,
+            verifier=_score,
+            min_score=0.5,
+            rationalize=False,
+            _no_cache=True,
+        )
+        assert [r["verifier_score"] for r in rows] == [0.5, 0.75, 1.0]
+
+    def test_keep_best_keeps_one_response_per_item(self):
+        """The highest-scoring accepted response of each item."""
+        rows = self_taught_reasoner(
+            self.ITEMS,
+            "{prompt}",
+            _Scored(),
+            n=4,
+            verifier=_score,
+            min_score=0.25,
+            keep="best",
+            rationalize=False,
+            _no_cache=True,
+        )
+        assert [(r["prompt"], r["verifier_score"]) for r in rows] == [
+            ("a", 1.0),
+            ("b", 1.0),
+        ]
+
+    def test_keep_must_be_all_or_best(self):
+        """Any other ``keep`` is an error."""
+        with pytest.raises(ValueError, match="keep"):
+            self_taught_reasoner(
+                self.ITEMS, "{prompt}", _Scored(), keep="top", _no_cache=True
+            )
