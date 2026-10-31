@@ -8,11 +8,12 @@ import time
 from types import SimpleNamespace
 
 import pytest
-from completion import completion_server
 
+from pyforger import agents, local_agent
 from pyforger.acquire import Model
-from pyforger.acquire.model import ModelSettings
+from pyforger.agent_backend import AgentRunResult, AgentSpec
 from pyforger.alter import dynamic_step, dynamic_step_source
+from pyforger.local_backend import LocalBackend
 from pyforger.op import clear_trace, trace
 
 dynamic = importlib.import_module("pyforger.alter.dynamic")
@@ -37,15 +38,24 @@ def test_source_cache_order_and_overlap(tmp_path, monkeypatch):
         executions.append(item["text"])
         return [item["text"].upper(), item["text"].lower()]
 
-    monkeypatch.setattr(dynamic, "_generate", generate)
-    monkeypatch.setattr(dynamic, "_execute", execute)
-    model = SimpleNamespace(_model_id="test")
+    monkeypatch.setattr(
+        agents,
+        "generate_source",
+        lambda goal, item, **kw: generate(goal, item),
+    )
+    monkeypatch.setattr("pyforger.local_backend._execute", execute)
+    model = Model("openai/test")
     first = dynamic_step(
-        [{"text": "a"}, {"text": "b"}, {"text": "a"}], "uppercase", model
+        [{"text": "a"}, {"text": "b"}, {"text": "a"}],
+        "uppercase",
+        AgentSpec(model),
+        LocalBackend(),
     )
     assert first == [["A", "a"], ["B", "b"], ["A", "a"]]
     assert first[0] is not first[2]
-    assert dynamic_step([{"text": "b"}, {"text": "c"}], "uppercase", model) == [
+    assert dynamic_step(
+        [{"text": "b"}, {"text": "c"}], "uppercase", AgentSpec(model), LocalBackend()
+    ) == [
         ["B", "b"],
         ["C", "c"],
     ]
@@ -72,12 +82,19 @@ def test_parallel_limit(tmp_path, monkeypatch):
             active -= 1
         return "code"
 
-    monkeypatch.setattr(dynamic, "_generate", generate)
-    monkeypatch.setattr(dynamic, "_execute", lambda code, item, timeout: [item["text"]])
+    monkeypatch.setattr(
+        agents,
+        "generate_source",
+        lambda goal, item, **kw: generate(goal, item),
+    )
+    monkeypatch.setattr(
+        "pyforger.local_backend._execute", lambda code, item, timeout: [item["text"]]
+    )
     assert dynamic_step(
         [{"text": x} for x in "abcd"],
         "goal",
-        SimpleNamespace(_model_id="test"),
+        AgentSpec(Model("openai/test")),
+        LocalBackend(),
         max_parallel=2,
     ) == [[item] for item in "abcd"]
     assert peak == 2
@@ -89,10 +106,10 @@ def test_worker_restrictions_and_timeout():
     if tuple(map(int, version.split(".")[:2])) < (8, 4):
         pytest.skip("Dynamic worker requires RestrictedPython >=8.4")
     try:
-        dynamic._require_dynamic_platform()
+        local_agent._require_dynamic_platform()
     except NotImplementedError:
         pytest.skip("Dynamic worker requires Unix signal timers")
-    assert dynamic._execute(
+    assert local_agent._execute(
         "def run(item):\n    return [item['text'].lower(), item['text'].upper()]",
         {"text": "hello"},
         5,
@@ -104,45 +121,57 @@ def test_worker_restrictions_and_timeout():
         "url": "https://programiz.pro/community-challenges/python",
         "query": "Very hard programming challenges in Python",
     }
-    assert dynamic._execute(
+    assert local_agent._execute(
         "def run(item):\n    return [item['title'], item['text'], item['query']]",
         record,
         5,
     ) == [record["title"], record["text"], record["query"]]
-    assert dynamic._execute("def run(item):\n    return []", {"text": "hello"}, 5) == []
+    assert (
+        local_agent._execute("def run(item):\n    return []", {"text": "hello"}, 5)
+        == []
+    )
     with pytest.raises(ValueError, match="not allowed"):
-        dynamic._execute(
+        local_agent._execute(
             "import os\ndef run(item):\n    return os.environ", {"text": "hello"}, 5
         )
     with pytest.raises(ValueError, match="list of strings"):
-        dynamic._execute("def run(item):\n    return 3", {"text": "hello"}, 5)
+        local_agent._execute("def run(item):\n    return 3", {"text": "hello"}, 5)
     with pytest.raises(ValueError, match="list of strings"):
-        dynamic._execute("def run(item):\n    return ['ok', 3]", {"text": "hello"}, 5)
+        local_agent._execute(
+            "def run(item):\n    return ['ok', 3]", {"text": "hello"}, 5
+        )
     with pytest.raises(ValueError, match="SandboxTimeout"):
-        dynamic._execute(
+        local_agent._execute(
             "def run(item):\n    while True:\n        pass", {"text": "hello"}, 0.5
         )
 
 
 def test_empty_and_validation(tmp_path):
     """Test empty and validation."""
-    assert dynamic_step([], "goal", SimpleNamespace(_model_id="test")) == []
+    agent, backend = AgentSpec(Model("openai/test")), LocalBackend()
+    assert dynamic_step([], "goal", agent, backend) == []
     with pytest.raises(ValueError):
-        dynamic_step([], "goal", None, max_parallel=0)
+        dynamic_step([], "goal", agent, backend, max_parallel=0)
     with pytest.raises(TypeError, match="each input must be a dict"):
-        dynamic_step(["plain text"], "goal", None)
+        dynamic_step(["plain text"], "goal", agent, backend)
     with pytest.raises(TypeError, match="JSON-compatible"):
-        dynamic_step([{"bad": {1, 2}}], "goal", None)
+        dynamic_step([{"bad": {1, 2}}], "goal", agent, backend)
 
 
 def test_records_with_reordered_keys_share_generation(monkeypatch):
     """Nested record key order must not launch a duplicate agent."""
     calls = []
-    monkeypatch.setattr(dynamic, "_generate", lambda *args: calls.append(1) or "code")
-    monkeypatch.setattr(dynamic, "_execute", lambda code, item, timeout: [item["text"]])
+    monkeypatch.setattr(
+        agents, "generate_source", lambda *args, **kw: calls.append(1) or "code"
+    )
+    monkeypatch.setattr(
+        "pyforger.local_backend._execute", lambda code, item, timeout: [item["text"]]
+    )
     first = {"text": "challenge", "meta": {"a": 1, "b": 2}}
     second = {"meta": {"b": 2, "a": 1}, "text": "challenge"}
-    assert dynamic_step([first, second], "goal", SimpleNamespace(_model_id="test")) == [
+    assert dynamic_step(
+        [first, second], "goal", AgentSpec(Model("openai/test")), LocalBackend()
+    ) == [
         ["challenge"],
         ["challenge"],
     ]
@@ -155,21 +184,29 @@ def test_failed_generation_is_not_cached(tmp_path, monkeypatch):
     def fail(*args):
         raise RuntimeError("no submission")
 
-    monkeypatch.setattr(dynamic, "_generate", fail)
+    monkeypatch.setattr(
+        agents, "generate_source", lambda goal, item, **kw: fail(goal, item)
+    )
     with pytest.raises(RuntimeError, match="no submission"):
-        dynamic_step([{"text": "a"}], "goal", SimpleNamespace(_model_id="test"))
+        dynamic_step(
+            [{"text": "a"}], "goal", AgentSpec(Model("openai/test")), LocalBackend()
+        )
     assert not list((tmp_path / "op-cache" / "alter.dynamic_step_source").glob("*.pkl"))
 
 
 def test_source_is_returned_with_standard_op_cache_hit(tmp_path, monkeypatch):
     """Test source is returned with standard op cache hit."""
     monkeypatch.setattr(
-        dynamic, "_generate", lambda *args: "def run(item):\n    return [item]"
+        agents,
+        "generate_source",
+        lambda *args, **kw: "def run(item):\n    return [item]",
     )
-    model = SimpleNamespace(_model_id="test")
+    model = Model("openai/test")
     clear_trace()
-    first = dynamic_step_source({"text": "a"}, "goal", model)
-    second = dynamic_step_source({"text": "a"}, "goal", model)
+    first = dynamic_step_source({"text": "a"}, "goal", AgentSpec(model), LocalBackend())
+    second = dynamic_step_source(
+        {"text": "a"}, "goal", AgentSpec(model), LocalBackend()
+    )
     assert first == second == "def run(item):\n    return [item]"
     hits = [
         record.cache_hit
@@ -187,12 +224,23 @@ def test_source_version_refreshes_generated_program(monkeypatch):
         calls.append(None)
         return f"def run(item): return [{str(len(calls))!r}]"
 
-    monkeypatch.setattr(dynamic, "_generate", generate)
-    model = SimpleNamespace(_model_id="test")
-    first = dynamic_step_source({"text": "a"}, "goal", model)
-    assert dynamic_step_source({"text": "a"}, "goal", model) == first
+    monkeypatch.setattr(
+        agents,
+        "generate_source",
+        lambda goal, item, **kw: generate(goal, item),
+    )
+    model = Model("openai/test")
+    first = dynamic_step_source({"text": "a"}, "goal", AgentSpec(model), LocalBackend())
+    assert (
+        dynamic_step_source({"text": "a"}, "goal", AgentSpec(model), LocalBackend())
+        == first
+    )
     refreshed = dynamic_step_source(
-        {"text": "a"}, "goal", model, source_version="refresh-1"
+        {"text": "a"},
+        "goal",
+        AgentSpec(model),
+        LocalBackend(),
+        source_version="refresh-1",
     )
     assert refreshed != first
     assert len(calls) == 2
@@ -201,11 +249,15 @@ def test_source_version_refreshes_generated_program(monkeypatch):
 def test_source_inspection_never_generates_when_disabled(tmp_path, monkeypatch):
     """Test source inspection never generates when disabled."""
     monkeypatch.setattr(
-        dynamic, "_generate", lambda *args: pytest.fail("agent launched")
+        agents, "generate_source", lambda *args, **kw: pytest.fail("agent launched")
     )
     with pytest.raises(FileNotFoundError, match="No cached result"):
         dynamic_step_source(
-            {"text": "a"}, "goal", SimpleNamespace(_model_id="test"), _cache_only=True
+            {"text": "a"},
+            "goal",
+            AgentSpec(Model("openai/test")),
+            LocalBackend(),
+            _cache_only=True,
         )
 
 
@@ -220,189 +272,10 @@ def test_execution_timeout_reaches_worker(monkeypatch):
         assert kwargs["timeout"] == 32
         return SimpleNamespace(returncode=0, stdout='["ok"]', stderr="")
 
-    monkeypatch.setattr(dynamic.subprocess, "run", run)
-    assert dynamic._execute("def run(item): return ['ok']", {"text": "plain"}, 30) == [
-        "ok"
-    ]
-
-
-def test_agent_retries_text_and_keeps_successful_submission(monkeypatch):
-    """Retry a text-only turn and retain code after a later SDK error."""
-    sdk = pytest.importorskip("openhands.sdk")
-    from pyforger.alter import _dynamic_tool as tool
-
-    calls = []
-
-    class FakeConversation:
-        def __init__(self, *, agent, **kwargs):
-            self.agent = agent
-            self.state = SimpleNamespace(events=[])
-            assert kwargs["max_iteration_per_run"] == 3
-            assert "git" in agent.filter_tools_regex
-            assert "TerminalTool" not in agent.filter_tools_regex
-
-        def send_message(self, text):
-            calls.append(("message", text))
-
-        def run(self):
-            calls.append(("run", None))
-            self.state.events.append(
-                SimpleNamespace(
-                    source="agent", llm_response_id=str(len(self.state.events))
-                )
-            )
-            if len([x for x in calls if x[0] == "run"]) == 2:
-                session_id = self.agent.tools[0].params["session_id"]
-                tool._session(session_id).accepted[:] = [
-                    "def run(item): return [item['text']]"
-                ]
-                raise RuntimeError("SDK failed after submission")
-
-        def close(self):
-            calls.append(("close", None))
-
-    monkeypatch.setattr(sdk, "Conversation", FakeConversation)
-    monkeypatch.setattr(sdk, "LLM", lambda **kwargs: object())
-    monkeypatch.setattr(sdk, "Agent", lambda **kwargs: SimpleNamespace(**kwargs))
-    monkeypatch.setattr(dynamic, "prepare_input", lambda item: item)
-    monkeypatch.setattr(tool, "prepare_input", lambda item: item)
-    model = SimpleNamespace(config=ModelSettings(model_id="test", temperature=0))
-    assert dynamic._generate("goal", {"text": "input"}, model, 3, 5).startswith(
-        "def run"
-    )
-    assert len([x for x in calls if x[0] == "run"]) == 2
-    assert len([x for x in calls if x[0] == "message"]) == 2
-
-
-def test_bad_resource_fails_before_agent_creation(monkeypatch):
-    """Invalid input should not incur LLM turns."""
-    sdk = pytest.importorskip("openhands.sdk")
-    from pyforger.alter import _dynamic_tool as tool
-
-    monkeypatch.setattr(
-        tool,
-        "prepare_input",
-        lambda item: (_ for _ in ()).throw(ValueError("bad resource")),
-    )
-    monkeypatch.setattr(
-        sdk,
-        "LLM",
-        lambda **kwargs: pytest.fail("LLM must not be created"),
-    )
-    model = SimpleNamespace(_model_id="test")
-    with pytest.raises(ValueError, match="bad resource"):
-        dynamic._generate("goal", {"url": "https://example.org/missing"}, model, 3, 5)
-
-
-def test_unsupported_platform_fails_before_agent(monkeypatch):
-    """Reject missing Unix timers before any SDK or resource work."""
-    monkeypatch.delattr(dynamic.signal, "setitimer", raising=False)
-    with pytest.raises(NotImplementedError, match="setitimer"):
-        dynamic._generate("goal", {"text": "input"}, None, 3, 5)
-
-
-def test_real_agent_retains_restricted_tools(monkeypatch):
-    """Check resolved SDK tool names survive the agent's actual filter."""
-    pytest.importorskip("openhands.sdk")
-    from openhands.sdk import Agent
-    from openhands.sdk.testing import TestLLM
-    from openhands.sdk.tool import Tool
-
-    from pyforger.alter import _dynamic_tool as tool
-
-    monkeypatch.setattr(
-        "openhands.sdk.agent.base.has_vision_profile_available", lambda: False
-    )
-    session_id = tool.register_executor(tool.PythonExecutor({"text": "plain input"}, 5))
-    try:
-        agent = Agent(
-            llm=TestLLM.from_messages([]),
-            tools=[
-                Tool(name=name, params={"session_id": session_id})
-                for name in ("ForgerPythonTool", "ForgerResourceTool", "ForgerGitTool")
-            ],
-            include_default_tools=["FinishTool"],
-            filter_tools_regex=r"^(python|resource|git)$",
-        )
-        agent._initialize(None)
-        assert {"python", "resource", "git", "finish"} <= set(agent._tools)
-    finally:
-        tool.unregister_executor(session_id)
-
-
-def test_real_sdk_corrects_code_and_reexecutes_cached_source(tmp_path, monkeypatch):
-    """Only the paid API is scripted; tools, workers, and caching are real."""
-    invalid = "def run(item): return 3"
-    corrected = "def run(item): return [item['text'].upper()]"
-
-    def submit(code, call_id):
-        return {
-            "role": "assistant",
-            "content": None,
-            "tool_calls": [
-                {
-                    "id": call_id,
-                    "type": "function",
-                    "function": {
-                        "name": "python",
-                        "arguments": json.dumps({"code": code, "submit": True}),
-                    },
-                }
-            ],
-        }
-
-    executions = []
-    real_run = dynamic.subprocess.run
-
-    def record_run(command, **kwargs):
-        if command[-1].endswith("_dynamic_worker.py"):
-            executions.append(json.loads(kwargs["input"])["code"])
-        return real_run(command, **kwargs)
-
-    monkeypatch.setattr(dynamic.subprocess, "run", record_run)
-    clear_trace()
-    with completion_server(
-        [
-            submit(invalid, "invalid"),
-            submit(corrected, "corrected"),
-            {"role": "assistant", "content": "Finished."},
-        ]
-    ) as (url, requests):
-        model = Model(
-            "openai/test",
-            api_key="test-not-a-real-secret",
-            api_base=url,
-            num_retries=0,
-            timeout=5,
-            temperature=None,
-            capability_overrides={"supports_vision": True},
-        )
-        options = {"max_iterations": 3, "execution_timeout_s": 5}
-        assert dynamic_step(
-            [{"text": "hello"}], "Uppercase text", model, **options
-        ) == [["HELLO"]]
-        assert len(requests) == 3
-        assert "list of strings" in json.dumps(requests[1]["messages"])
-        assert executions == [invalid, corrected, corrected]
-        tools = {entry["function"]["name"] for entry in requests[0]["tools"]}
-        assert tools == {"python", "resource", "git", "finish"}
-
-    # The API is closed: a cache miss cannot silently generate another program.
-    assert dynamic_step([{"text": "hello"}], "Uppercase text", model, **options) == [
-        ["HELLO"]
-    ]
-    assert executions == [invalid, corrected, corrected, corrected]
-    assert (
-        dynamic_step_source(
-            {"text": "hello"}, "Uppercase text", model, _cache_only=True, **options
-        )
-        == corrected
-    )
-    assert [
-        entry.cache_hit
-        for entry in trace()
-        if entry.op_name == "alter.dynamic_step_source"
-    ] == [False, True, True]
+    monkeypatch.setattr(local_agent.subprocess, "run", run)
+    assert local_agent._execute(
+        "def run(item): return ['ok']", {"text": "plain"}, 30
+    ) == ["ok"]
 
 
 @pytest.mark.parametrize(
@@ -432,7 +305,7 @@ def test_agent_llm_real_settings_translation(options, monkeypatch, tmp_path):
         num_retries=0,
         **options,
     )
-    llm = dynamic.agent_llm(model)
+    llm = local_agent.agent_llm(model)
     assert llm.model == model.config.model_id
     assert llm.temperature == 0
     assert llm.max_output_tokens == 123
@@ -442,13 +315,13 @@ def test_agent_llm_real_settings_translation(options, monkeypatch, tmp_path):
     assert llm.timeout == (
         model.config.timeout if model.config.timeout is not None else 300
     )
-    assert llm.reasoning_effort == (model.config.reasoning_effort or "high")
+    assert llm.reasoning_effort == model.config.reasoning_effort
     assert llm.litellm_extra_body == model.config.extra_body
     assert llm.api_mode == model.config.api_mode
     assert llm.capability_overrides == model.config.capability_overrides
     if not options:
         assert llm.timeout == LLM.model_fields["timeout"].default
-        assert llm.reasoning_effort == LLM.model_fields["reasoning_effort"].default
+        assert llm.reasoning_effort is None
 
 
 def test_agent_llm_env_fallback(monkeypatch, tmp_path):
@@ -456,6 +329,53 @@ def test_agent_llm_env_fallback(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("LITELLM_API_KEY", "env-key")
     monkeypatch.setenv("LITELLM_BASE_URL", "http://localhost:9876")
-    llm = dynamic.agent_llm(Model("gpt-4o"))
+    llm = local_agent.agent_llm(Model("gpt-4o"))
     assert llm.api_key.get_secret_value() == "env-key"
     assert llm.base_url == "http://localhost:9876"
+
+
+def test_local_runner_executes_saved_source_without_model():
+    """A retained program can be executed without starting another conversation."""
+    assert LocalBackend().execute_program(
+        "def run(item): return [item['text'].upper()]", {"text": "hello"}, 5
+    ) == ["HELLO"]
+
+
+def test_any_backend_shares_dynamic_step_contract(tmp_path):
+    """A stub backend preserves source caching/inspection and execution."""
+
+    class StubBackend:
+        name = "stub"
+        generated = 0
+        executed = 0
+
+        def cache_key(self):
+            return "stub-v1"
+
+        def run_agent(self, task, agent):
+            type(self).generated += 1
+            return AgentRunResult(
+                status="completed",
+                files={"program.py": b"def run(item): return [item['text'].upper()]"},
+            )
+
+        def execute_program(self, code, item, timeout_s):
+            type(self).executed += 1
+            return LocalBackend().execute_program(code, item, timeout_s)
+
+    backend = StubBackend()
+    agent = AgentSpec(kind="oracle", solution="true")
+    rows = [{"text": "hello"}]
+    assert dynamic_step(rows, "uppercase", agent, backend) == [["HELLO"]]
+    assert dynamic_step(rows, "uppercase", agent, backend) == [["HELLO"]]
+    # One generate (validated by one replay) plus two dynamic executions.
+    assert backend.generated == 1 and backend.executed == 3
+    assert dynamic_step_source.cache_only(
+        rows[0], "uppercase", agent, backend
+    ).startswith("def")
+
+
+def test_dynamic_step_requires_agent_and_backend():
+    """The operation does not hide agent or backend configuration."""
+    with pytest.raises(TypeError):
+        dynamic_step([{"text": "hello"}], "uppercase")

@@ -11,6 +11,7 @@ import os
 from dotenv import load_dotenv
 
 from pyforger.acquire import Model
+from pyforger.agent_backend import AgentSpec
 from pyforger.alter import dynamic_step_source
 from pyforger.op import clear_trace, trace
 
@@ -40,8 +41,7 @@ def main() -> None:
             code = dynamic_step_source(
                 item,
                 args.goal,
-                model,
-                max_iterations=args.max_iterations,
+                AgentSpec(model, max_iterations=args.max_iterations),
                 _cache_only=True,
             )
         except FileNotFoundError:
