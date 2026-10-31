@@ -568,6 +568,68 @@ _PROJECTION: contextvars.ContextVar[_SpendProjection | None] = contextvars.Conte
     "forger_spend_projection", default=None
 )
 
+# A batch stops once this many completions finished and at least this share of
+# them hit max_tokens: the rest would mostly be paid-for, cut-off text.
+_TRUNCATION_MIN_FINISHED = 20
+_TRUNCATION_STOP_SHARE = 0.8
+
+
+class TruncationStopError(RuntimeError):
+    """Most of a batch's finished completions hit max_tokens; the rest were not sent."""
+
+
+class _TruncationStop:
+    """Counts a batch's finished completions and stops it when most are cut off.
+
+    Off with ``FORGER_ALLOW_TRUNCATION=1``.
+    """
+
+    def __init__(self, model_id: str, max_tokens: int | None) -> None:
+        self.model_id, self.max_tokens = model_id, max_tokens
+        self.finished = self.truncated = 0
+        self.units = 0.0
+        self._lock = threading.Lock()
+
+    def add(self, response: Any, units: float) -> None:
+        """Count a response's completions and the units of the cut-off ones."""
+        choices = getattr(response, "choices", None) or []
+        cut = sum(_finish_reason(choice) == "length" for choice in choices)
+        with self._lock:
+            self.finished += len(choices)
+            self.truncated += cut
+            if cut and math.isfinite(units):
+                self.units += units * cut / len(choices)
+
+    def check(self) -> None:
+        """Raise before a request once most finished completions were cut off."""
+        with self._lock:
+            finished, truncated, units = self.finished, self.truncated, self.units
+        if (
+            finished < _TRUNCATION_MIN_FINISHED
+            or truncated < _TRUNCATION_STOP_SHARE * finished
+        ):
+            return
+        raise TruncationStopError(
+            f"{truncated} of {finished} finished completions from {self.model_id} hit "
+            f"max_tokens={self.max_tokens} ({units:,.0f} token units on cut-off text), "
+            "so the rest of the batch was not sent. Raise max_tokens or lower "
+            "reasoning_effort, and try a few prompts first; FORGER_ALLOW_TRUNCATION=1 "
+            "turns this stop off."
+        )
+
+
+def _truncation_stopping() -> bool:
+    return os.environ.get("FORGER_ALLOW_TRUNCATION", "").strip().lower() not in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+_TRUNCATION: contextvars.ContextVar[_TruncationStop | None] = contextvars.ContextVar(
+    "forger_truncation_stop", default=None
+)
+
 
 def _make_semaphore(max_concurrency: int | None) -> threading.BoundedSemaphore | None:
     """The per-Model request cap, or None for no cap."""
@@ -1564,6 +1626,9 @@ class Model:
         projection = _PROJECTION.get()
         if projection is not None:
             projection.check()
+        truncation = _TRUNCATION.get()
+        if truncation is not None:
+            truncation.check()
 
     def _add_totals(self, usage: dict[str, Any], cost_usd: float, units: float) -> None:
         """Add one response's usage to the instance totals; log every 1M units."""
@@ -1642,6 +1707,9 @@ class Model:
                 projection.add(
                     len(getattr(response, "choices", None) or [1]), cost_usd, units
                 )
+            truncation = _TRUNCATION.get()
+            if truncation is not None:
+                truncation.add(response, units)
             _tracking.add_usage(
                 usage["prompt_tokens"],
                 usage["completion_tokens"],
@@ -1924,11 +1992,17 @@ class Model:
             else None
         )
         projection_token = _PROJECTION.set(projection)
+        truncation_token = _TRUNCATION.set(
+            _TruncationStop(self._model_id, call_kwargs.get("max_tokens"))
+            if _truncation_stopping()
+            else None
+        )
         try:
             responses = self._send(
                 requests, call_kwargs, progress, return_exceptions, store
             )
         finally:
+            _TRUNCATION.reset(truncation_token)
             _PROJECTION.reset(projection_token)
 
         # A model that should support n but returned fewer completions (e.g. a

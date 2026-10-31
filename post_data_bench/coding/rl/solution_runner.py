@@ -217,6 +217,16 @@ def _grader_sources() -> tuple[str, ...]:
     )
 
 
+def _check_call(response: object, row: object) -> None:
+    """Raise on a call with the arguments swapped or of the wrong types."""
+    if not isinstance(response, str) or not isinstance(row, dict):
+        raise TypeError(
+            "call as grade(response, row): the response text first, then its dataset "
+            f"row (a dict with a rubric); got ({type(response).__name__}, "
+            f"{type(row).__name__})"
+        )
+
+
 def _response_score(response: str, row: dict) -> float | None:
     """The weighted code score of ``response`` on the row's rubric; may raise."""
     jobs = _code_jobs(row, response)
@@ -239,6 +249,7 @@ class RubricScore:
 
     def __call__(self, response: str, row: dict) -> float | None:
         """Score ``response`` with the row's code criteria in the RL sandbox."""
+        _check_call(response, row)
         return _response_score(response, row)
 
 
@@ -273,6 +284,7 @@ class RubricVerifier:
 
     def __call__(self, response: str, row: dict) -> bool | None:
         """Score ``response`` with the row's code criteria in the RL sandbox."""
+        _check_call(response, row)
         try:
             score = _response_score(response, row)
         except Exception:

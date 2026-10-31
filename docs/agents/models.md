@@ -21,7 +21,8 @@ model = Model(
 - **Temperature:** the default is 1.0, which reasoning models such as DeepSeek-V4 need; at temperature 0 they can
   loop until the request times out.
 - **Truncation:** check `max_tokens`. A completion that hits it has finish reason `"length"`; step reports warn about
-  these rows.
+  these rows. A batch stops once 20 completions finished and 80% hit `max_tokens`
+  (`TruncationStopError`, with the units spent on cut-off text); `FORGER_ALLOW_TRUNCATION=1` turns that off.
 
 ### Reasoning effort
 
