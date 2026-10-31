@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from functools import partial
 from typing import Generic, TypeVar
 
 from pyforger.measurements import Measurement
+from pyforger.utils import run_concurrently
 
 Request = TypeVar("Request")
 Output = TypeVar("Output")
@@ -93,8 +95,9 @@ def generate_result(
     *,
     generate: Callable[[Request], Output],
     validate: Callable[[Output], Measurement],
-    revise: Callable[[Request, GenerationAttempt[Request, Output]], Request]
-    | None = None,
+    revise: (
+        Callable[[Request, GenerationAttempt[Request, Output]], Request] | None
+    ) = None,
     max_attempts: int = 3,
 ) -> GenerationResult[Request, Output]:
     """Run bounded validated generation and return the outcome.
@@ -128,13 +131,54 @@ def generate_result(
     raise AssertionError("unreachable")
 
 
+def generate_batch(
+    requests: Sequence[Request],
+    *,
+    generate: Callable[[Request], Output],
+    validate: Callable[[Output], Measurement],
+    revise: (
+        Callable[[Request, GenerationAttempt[Request, Output]], Request] | None
+    ) = None,
+    max_attempts: int = 3,
+    concurrency: int | None = 1,
+) -> list[GenerationResult[Request, Output]]:
+    """Run bounded validated generation independently for every request.
+
+    Each request reaches its own terminal ``accepted``, ``exhausted`` or
+    ``inconclusive`` state exactly as :func:`generate_result` would produce
+    alone; the returned results align with ``requests`` by position.  No
+    request is filtered out, and callback exceptions propagate from the
+    failing request instead of being scored as rejection.  ``concurrency``
+    bounds simultaneous per-request generations (``None`` runs one worker
+    per request); every request still performs its own bounded serial
+    generate-validate-revise sequence.
+    """
+    if concurrency is not None and (type(concurrency) is not int or concurrency < 1):
+        raise ValueError("concurrency must be a positive integer or None")
+
+    def run(request: Request) -> GenerationResult[Request, Output]:
+        return generate_result(
+            request,
+            generate=generate,
+            validate=validate,
+            revise=revise,
+            max_attempts=max_attempts,
+        )
+
+    return run_concurrently(
+        [partial(run, request) for request in requests],
+        concurrency=concurrency,
+    )
+
+
 def generate_validated(
     request: Request,
     *,
     generate: Callable[[Request], Output],
     validate: Callable[[Output], Measurement],
-    revise: Callable[[Request, GenerationAttempt[Request, Output]], Request]
-    | None = None,
+    revise: (
+        Callable[[Request, GenerationAttempt[Request, Output]], Request] | None
+    ) = None,
     max_attempts: int = 3,
 ) -> ValidatedGeneration[Request, Output]:
     """Accept True, retry False, and stop on None; callback errors propagate.
