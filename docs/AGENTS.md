@@ -31,7 +31,8 @@ costs 4 and 12.5.
   processes; `reset_history()` never resets it. Each request holds its worst case (prompt plus `max_tokens` per
   completion, 65,536 without it) until its response replaces it with actual usage; new calls stop once used plus
   held units reach the quota. A request that times out, loses its connection, or whose process is killed stays
-  charged at its hold, since the gateway may still bill it.
+  charged at its hold, since the gateway may still bill it (`unreturned_calls`; a killed process's holds move there
+  after two hours).
 - The benchmark launcher sets a generation quota and a separate judge quota, both given in the task instructions.
 - Direct API calls must use the launcher's `rl.token_budget` helpers to be counted; they make one attempt per call
   (no `num_retries`), so retry in your own code.

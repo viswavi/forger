@@ -7,6 +7,7 @@ import json
 import math
 import os
 import tempfile
+import time
 import uuid
 from pathlib import Path
 
@@ -16,6 +17,10 @@ DEFAULT_REASONING_EFFORT = "low"
 _WEIGHTS = {"deepseek-v4-flash": (1, 3), "glm-5.3": (4, 12.5)}
 # Completion tokens held for a request sent without max_tokens.
 _DEFAULT_HELD_COMPLETION = 65_536
+# Prompt characters per held token: below the 3-4 real tokenizers give.
+_HELD_CHARS_PER_TOKEN = 3
+# A hold this old belongs to a killed process: no attempt runs this long.
+_STALE_HOLD_S = 2 * 60 * 60
 # Statuses the gateway returns without running the model, so nothing is billed:
 # bad request, auth, forbidden, not found, payload too large, unprocessable, 429.
 _UNBILLED_STATUS = frozenset({400, 401, 403, 404, 413, 422, 429})
@@ -166,7 +171,7 @@ def default_rl_limit(task):
 def held_units(model_id, messages, n=1, max_tokens=None):
     """Worst-case units of one request: its prompt and ``n`` full completions.
 
-    The prompt counts 1 token per 2 characters (more than real tokenizers
+    The prompt counts 1 token per 3 characters (more than real tokenizers
     give); completions count ``max_tokens`` each, or 65,536 without one.
     """
     chars = sum(
@@ -174,7 +179,7 @@ def held_units(model_id, messages, n=1, max_tokens=None):
         for m in messages
     )
     completion = max_tokens or _DEFAULT_HELD_COMPLETION
-    return token_units(model_id, -(-chars // 2), n * completion)
+    return token_units(model_id, -(-chars // _HELD_CHARS_PER_TOKEN), n * completion)
 
 
 def billed_on_error(exc):
@@ -191,7 +196,8 @@ class TokenUnitBudget:
 
     Each request holds its worst case (`held_units`) while in flight, and the
     hold counts as used: a response replaces it with actual usage, a failure
-    that may be billed (timeout, lost connection, killed process) keeps it.
+    that may be billed (timeout, lost connection) keeps it, and so does a
+    killed process: its holds count as spent once two hours old.
     A separate lock file protects atomic ledger replacement. Use a shared
     filesystem with POSIX file locks.
     """
@@ -266,7 +272,15 @@ class TokenUnitBudget:
         state.setdefault("unreturned_token_units", 0.0)
         if not isinstance(state["held"], dict):
             raise ValueError("Invalid token usage ledger")
-        changed = _normalize_cost_metadata(state)
+        stale = [
+            hold
+            for hold, entry in state["held"].items()
+            if time.time() - entry.get("since", 0) > _STALE_HOLD_S
+        ]
+        for hold in stale:
+            self._charge_hold(state, hold)
+        changed = bool(stale)
+        changed = _normalize_cost_metadata(state) or changed
         for model in state["models"].values():
             changed = _normalize_cost_metadata(model) or changed
         if changed:
@@ -325,7 +339,11 @@ class TokenUnitBudget:
         hold = f"{os.getpid()}-{uuid.uuid4().hex}"
         with self._locked():
             state = self._read()
-            state["held"][hold] = {"model": model_id, "token_units": float(units)}
+            state["held"][hold] = {
+                "model": model_id,
+                "token_units": float(units),
+                "since": time.time(),
+            }
             state["held_token_units"] += units
             self._write(state)
         try:

@@ -438,7 +438,29 @@ def test_killed_process_leaves_its_hold_charged(tmp_path):
 
 
 def test_held_units_assume_long_prompts_and_full_completions():
-    """2 characters per prompt token and max_tokens per completion."""
+    """3 characters per prompt token and max_tokens per completion."""
     messages = [{"role": "user", "content": "x" * 101}]
-    assert held_units(DEEPSEEK, messages, n=2, max_tokens=10) == 51 + 3 * 20
+    assert held_units(DEEPSEEK, messages, n=2, max_tokens=10) == 34 + 3 * 20
     assert held_units(DEEPSEEK, [], max_tokens=None) == 3 * 65_536
+
+
+def test_stale_holds_of_killed_processes_count_as_unreturned(tmp_path, monkeypatch):
+    """After two hours a hold can only belong to a dead process: it is spent."""
+    path = tmp_path / "usage.json"
+    code = (
+        "import os; from pyforger.token_units import TokenUnitBudget\n"
+        f"ledger = TokenUnitBudget({str(path)!r}, 1000)\n"
+        f"with ledger.hold({DEEPSEEK!r}, 400):\n"
+        "    os._exit(1)\n"
+    )
+    import pyforger
+
+    env = {**os.environ, "PYTHONPATH": str(Path(pyforger.__file__).parents[1])}
+    subprocess.run([sys.executable, "-c", code], check=False, env=env)
+    ledger = TokenUnitBudget(path, 1000)
+    assert ledger.snapshot()["held_token_units"] == 400
+    now = __import__("time").time()
+    monkeypatch.setattr("pyforger.token_units.time.time", lambda: now + 3 * 3600)
+    state = ledger.snapshot()
+    assert (state["held_token_units"], state["token_units"]) == (0, 400)
+    assert state["unreturned_calls"] == 1
