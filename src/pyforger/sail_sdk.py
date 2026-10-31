@@ -691,7 +691,8 @@ def remote_sdk_session(
             app=sail.App.find(backend.app, mint_if_missing=True),
             image=image,
             name="forger-sdk-" + uuid.uuid4().hex,
-            memory_limit_gib=8,
+            # No explicit size: Sail picks its default (8 vCPUs) and a
+            # memory_limit_gib below that size's 16 GiB floor is rejected.
             egress_policy={"allowlist": [urlsplit(endpoint).hostname]},
             max_lifetime_seconds=max(60, math.ceil(budget.remaining_s()) + 60),
         )
