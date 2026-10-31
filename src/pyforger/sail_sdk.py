@@ -122,9 +122,9 @@ class _FrameWriter:
     def __init__(self, stdin: Any, timeout_s: float = STDIN_WRITE_TIMEOUT_S) -> None:
         self._stdin = stdin
         self._timeout_s = timeout_s
-        self._queue: queue.Queue[tuple[str, threading.Event, dict[str, Any]] | None] = (
-            queue.Queue(maxsize=OUTBOUND_QUEUE_FRAMES)
-        )
+        self._queue: queue.Queue[
+            tuple[str, threading.Event, dict[str, Any]] | None
+        ] = queue.Queue(maxsize=OUTBOUND_QUEUE_FRAMES)
         self._error: BaseException | None = None
         self._pending: deque[tuple[threading.Event, float, dict[str, Any]]] = deque()
         self._lock = threading.Lock()
@@ -618,6 +618,8 @@ def remote_sdk_session(
     validate: Any,
     max_repairs: int,
     diagnostics: dict[str, Any],
+    *,
+    require_outputs: bool = True,
 ) -> Any:
     """Own one real remote conversation across multiple host generation calls."""
     import sail
@@ -936,7 +938,7 @@ def remote_sdk_session(
             missing = [name for name in task.outputs if name not in files]
             value = (
                 Measurement(passed=False, reason=f"Missing declared outputs: {missing}")
-                if missing
+                if missing and require_outputs
                 else validate(files)
             )
             budget.remaining_s()
@@ -962,8 +964,11 @@ def remote_sdk_session(
             next_validate: Any,
             next_max_repairs: int,
             next_spec: Any = None,
+            *,
+            next_require_outputs: bool = True,
         ) -> Any:
             nonlocal task, validate, max_repairs, spec, call_id, current
+            nonlocal require_outputs
             call_id = uuid.uuid4().hex
             current = {
                 "call_id": call_id,
@@ -978,6 +983,7 @@ def remote_sdk_session(
             diagnostics["current_trajectory"] = current
             diagnostics["trajectory"] = current
             task, validate, max_repairs = next_task, next_validate, next_max_repairs
+            require_outputs = next_require_outputs
             if next_spec is not None:
                 credentials.update(credential_values([next_spec]))
                 redaction_specs.append(next_spec)
@@ -1159,11 +1165,20 @@ def _run_remote_sdk_once(
     validate: Any,
     max_repairs: int,
     diagnostics: dict[str, Any],
+    *,
+    require_outputs: bool = True,
 ) -> tuple[Any, Any]:
     with remote_sdk_session(
-        backend, transport, task, spec, validate, max_repairs, diagnostics
+        backend,
+        transport,
+        task,
+        spec,
+        validate,
+        max_repairs,
+        diagnostics,
+        require_outputs=require_outputs,
     ) as run:
-        return run(task, validate, max_repairs)
+        return run(task, validate, max_repairs, next_require_outputs=require_outputs)
 
 
 def run_remote_sdk(
@@ -1174,8 +1189,17 @@ def run_remote_sdk(
     validate: Any,
     max_repairs: int,
     diagnostics: dict[str, Any],
+    *,
+    require_outputs: bool = True,
 ) -> tuple[Any, Any]:
     """Run one conversation; transport retries reconnect only to its daemon."""
     return _run_remote_sdk_once(
-        backend, transport, task, spec, validate, max_repairs, diagnostics
+        backend,
+        transport,
+        task,
+        spec,
+        validate,
+        max_repairs,
+        diagnostics,
+        require_outputs=require_outputs,
     )
