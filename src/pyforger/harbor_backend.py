@@ -25,6 +25,7 @@ from pyforger.agent_backend import (
     ProgramValidationError,
     WorkspaceTask,
 )
+from pyforger.agent_backends import require_learner_runtime
 from pyforger.artifacts import ArtifactRef, read_text
 from pyforger.local_agent import _record_key
 
@@ -61,7 +62,7 @@ def _package(
         "&& rm -rf /var/lib/apt/lists/*\n"
         "RUN python -m venv /opt/openhands-sdk-venv "
         "&& /opt/openhands-sdk-venv/bin/pip install --no-cache-dir "
-        "openhands-sdk==1.54.0 openhands-tools==1.54.0 fastapi==0.135.2\n"
+        "openhands-sdk==1.58.0 openhands-tools==1.58.0 fastapi==0.135.2\n"
         "RUN mkdir /work && chown 65534:65534 /work\n"
         "ENV HOME=/tmp\nWORKDIR /work\nCOPY files /work\nUSER 65534:65534\n"
     )
@@ -179,6 +180,7 @@ class HarborBackend:
         )
 
     def _agent_config(self, agent: AgentSpec) -> Any:
+        require_learner_runtime(self, agent)
         if agent.kind == "oracle":
             return {"name": "oracle"}
         if agent.kind == "nop":
@@ -195,6 +197,7 @@ class HarborBackend:
 
     def run_agent(self, task: WorkspaceTask, agent: AgentSpec) -> AgentRunResult:
         """Package the task natively and run the agent in Harbor."""
+        require_learner_runtime(self, agent)
         from pyforger.harbor import (
             HarborRequest,
             HarborTaskRunner,
@@ -307,7 +310,7 @@ class HarborBackend:
             if outcome["status"] != "completed" or outcome["passed"] is not True:
                 raise RuntimeError(f"Harbor program replay failed: {outcome}")
             collect_trial_files(rollout, {"/work/result.json": "result.txt"}, root)
-            result: object = json.loads(read_text(root / "result.txt", 2 * 1024 * 1024))
+            result: object = json.loads(read_text(root / "result.txt"))
             if isinstance(result, dict) and isinstance(
                 result.get("validation_error"), str
             ):
