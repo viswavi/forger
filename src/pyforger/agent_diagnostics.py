@@ -13,9 +13,9 @@ if TYPE_CHECKING:
 _SENSITIVE = re.compile(
     r"api.?key|token|secret|password|authorization|credential", re.IGNORECASE
 )
+_SENSITIVE_WORD = r"(?:api[_-]?key|token|secret|password|authorization|credential)"
 _ASSIGNMENT = re.compile(
-    r"(?i)(?<![\w-])((?:[\w-]*(?:api[_-]?key|token|secret|password|authorization|credential)"
-    r"[\w-]*)"
+    r"(?i)(?<![\w-])((?:[\w-]*" + _SENSITIVE_WORD + r"[\w-]*)"
     r"[\"']?\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;}]+)"
 )
 
