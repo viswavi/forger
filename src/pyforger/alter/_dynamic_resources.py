@@ -15,10 +15,8 @@ from urllib.parse import urlsplit
 
 from pyforger.acquire import resources
 from pyforger.alter._dynamic_git_proxy import git_proxy
+from pyforger.artifacts import _open_file
 
-_MAX_TEXT = 1024 * 1024
-_MAX_FILES = 200
-_MAX_FILE = 64 * 1024
 _MAX_GIT_DISK = 64 * 1024 * 1024
 
 
@@ -139,28 +137,18 @@ def _clone_files(url: str) -> dict[str, str]:
         if not (root / "repo").is_dir():
             raise RuntimeError("Git clone failed")
         files: dict[str, str] = {}
-        total = 0
         for directory, names, filenames in os.walk(root / "repo"):
             names[:] = sorted(name for name in names if name != ".git")
             for filename in sorted(filenames):
-                if len(files) >= _MAX_FILES or total >= _MAX_TEXT:
-                    break
                 path = Path(directory) / filename
-                if (
-                    path.is_symlink()
-                    or not path.is_file()
-                    or path.stat().st_size > _MAX_FILE
-                ):
+                if path.is_symlink() or not path.is_file():
                     continue
-                raw = path.read_bytes()
+                with _open_file(path) as stream:
+                    raw = stream.read()
                 if b"\0" in raw:
                     continue
                 content = raw.decode("utf-8", errors="replace")
-                content = content[: _MAX_TEXT - total]
                 files[path.relative_to(root / "repo").as_posix()] = content
-                total += len(content)
-            if len(files) >= _MAX_FILES or total >= _MAX_TEXT:
-                break
         return files
 
 
@@ -181,7 +169,7 @@ def prepare_input(item: dict[str, Any]) -> dict[str, Any]:
         except ImportError as exc:
             raise ImportError("pypdf is required; reinstall pyforger") from exc
         reader = PdfReader(io.BytesIO(data))
-        text = "\n".join((page.extract_text() or "") for page in reader.pages[:100])
+        text = "\n".join((page.extract_text() or "") for page in reader.pages)
         kind = "pdf"
     elif "text/html" in content_type or "application/xhtml+xml" in content_type:
         extractor = _TextExtractor()
@@ -193,4 +181,4 @@ def prepare_input(item: dict[str, Any]) -> dict[str, Any]:
         charset = content_type.partition("charset=")[2].split(";")[0].strip()
         text = data.decode(charset or "utf-8", errors="replace")
         kind = "text"
-    return {"kind": kind, "url": url, "content": text[:_MAX_TEXT]}
+    return {"kind": kind, "url": url, "content": text}
