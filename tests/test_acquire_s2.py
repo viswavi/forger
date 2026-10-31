@@ -225,3 +225,54 @@ class TestS2RetrievalSourceFetch:
             assert "summary" in item
             assert item["title"] in item["text"]
             assert item["summary"] in item["text"]
+
+
+class TestS2CitationsMode:
+    """CITATIONS mode via get_paper_citations with rich bibliographic items."""
+
+    @staticmethod
+    def _edge(paper: MagicMock) -> MagicMock:
+        edge = MagicMock()
+        edge.paper = paper
+        return edge
+
+    @patch("pyforger.acquire.sources.SemanticScholar")
+    def test_citations_returns_rich_items(self, mock_scholar_cls: MagicMock) -> None:
+        """CITATIONS mode maps rich bibliographic fields onto items."""
+        paper = _make_mock_paper("c1", "Citing Paper", "It builds on the seed.")
+        paper.year = 2024
+        paper.venue = "NeurIPS"
+        paper.authors = [{"name": "Ann Author"}, {"name": "Bob Writer"}]
+        paper.citationCount = 7
+        paper.externalIds = {"DOI": "10.1/abc"}
+        paper.url = "https://example.org/c1"
+        mock_results = _make_paginated_results([self._edge(paper)])
+        mock_results.next = None
+        mock_client = MagicMock()
+        mock_client.get_paper_citations.return_value = mock_results
+        mock_scholar_cls.return_value = mock_client
+
+        source = S2RetrievalSource()
+        items = source.fetch(RetrieveMode.CITATIONS, query="DOI:10.0/seed", n=5)
+
+        assert len(items) == 1
+        item = items[0]
+        assert item["id"] == "c1"
+        assert item["title"] == "Citing Paper"
+        assert item["summary"] == "It builds on the seed."
+        assert item["year"] == 2024
+        assert item["venue"] == "NeurIPS"
+        assert item["authors"] == ["Ann Author", "Bob Writer"]
+        assert item["citation_count"] == 7
+        assert item["external_ids"] == {"DOI": "10.1/abc"}
+        assert item["url"] == "https://example.org/c1"
+        args, kwargs = mock_client.get_paper_citations.call_args
+        assert args[0] == "DOI:10.0/seed"
+        assert "externalIds" in kwargs["fields"]
+        assert kwargs["limit"] == 100
+
+    def test_citations_requires_seed(self) -> None:
+        """CITATIONS mode without a seed query is rejected."""
+        source = S2RetrievalSource()
+        with pytest.raises(ValueError, match="CITATIONS mode requires"):
+            source.fetch(RetrieveMode.CITATIONS, query=None, n=5)
