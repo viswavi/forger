@@ -538,11 +538,29 @@ class TestPassAtK:
         # Verifiers run concurrently, so only the set of calls is fixed.
         assert sorted(seen) == [("no", "t"), ("skip", "t"), ("yes", "t")]
 
-    def test_verifier_must_return_bool(self):
-        """A non-boolean grade is rejected."""
+    def test_verifier_must_return_bool_or_score(self):
+        """A grade that is neither a bool nor a score in [0, 1] is rejected."""
         model = ScriptedModel("m", {"t": ["1"]})
-        with pytest.raises(TypeError):
-            _pass_at_k([{"task": "t", "answer": "1"}], model, metric=lambda p, r: 1)
+        for bad in ("yes", 2):
+            with pytest.raises(TypeError):
+                _pass_at_k(
+                    [{"task": "t", "answer": "1"}], model, metric=lambda p, r: bad
+                )
+
+    def test_scored_verifier_rate_is_the_mean_score(self):
+        """Partial-credit scores average: [1, 0.5, 0, 0.5] is a rate of 0.5."""
+        scores = {"a": 1.0, "b": 0.5, "c": 0.0, "d": 0.5}
+        model = ScriptedModel("m", {"t": ["a", "b", "c", "d"]})
+        kept = _pass_at_k(
+            [{"task": "t", "answer": "x"}],
+            model,
+            k=4,
+            min_rate=0.5,
+            max_rate=0.5,
+            metric=lambda p, r: scores[p],
+            outcomes_field="grades",
+        )
+        assert [r["grades"]["model"] for r in kept] == [[1.0, 0.5, 0.0, 0.5]]
 
     def test_outcomes_field_matches_success_rate(self):
         """Kept rows' outcomes give the same rate and decision when re-selected."""
@@ -1075,3 +1093,9 @@ class TestCompletionsAndVerifiers:
         )
         assert kept[0]["ev"] == {"model": [True, False, False]}
         assert kept[0]["samples"]["model"][0].endswith(right)
+
+
+def test_comparative_difficulty_rejects_scored_metrics():
+    """One pass/fail sample per model: a score has no weak-vs-strong meaning."""
+    with pytest.raises(TypeError, match="pass/fail metric"):
+        _comparative(metric=lambda prediction, row: 0.5)

@@ -190,8 +190,9 @@ of their feedback. Without these fields rows are unchanged.
 each answer against `ground_truth_field` or with a verifier. `by_comparative_difficulty` is the medium-cost filter in
 both cost and reliability: one prediction per row from `weak_model` and from `strong_model`, keeping rows only the
 strong model gets right. `by_pass_at_k` is the most expensive but most reliable difficulty filter: `k` samples per
-row in one `n=k` call, keeping rows whose pass rate (passed / valid grades) is in `[min_rate, max_rate]` (default
-`[0.1, 0.9]`, inclusive).
+row in one `n=k` call, keeping rows whose pass rate (the mean valid grade) is in `[min_rate, max_rate]` (default
+`[0.1, 0.9]`, inclusive). A verifier may return a score in [0, 1] instead of a bool (e.g. a partial-credit grader);
+the rate is then the row's mean score. `by_comparative_difficulty` needs pass/fail grades.
 `by_judged_difficulty` (least expensive, least reliable) only asks a judge how hard a task looks.
 
 No answer format is imposed. The prompt is the task itself (`prompt_template` replaces it, e.g. to ask for a final
