@@ -121,6 +121,8 @@ Each takes the task in `input_field` (text or chat messages). From cheapest and 
   `[0.1, 0.9]`). It is the only one that measures difficulty for the model you will train. With the student on your
   own GPUs (`LocalModel`, see [acquire.md](acquire.md)) it costs only GPU time. For code, pass
   `metric=filter.program_verifier("tests")` (`language="cpp"` for C++, `min_score=` for partial credit).
+  A metric may return a score in [0, 1] instead of a bool (e.g. a partial-credit grader); the rate is then the
+  row's mean score. `by_comparative_difficulty` needs pass/fail grades.
 
 Grading guardrails for `by_comparative_difficulty` and `by_pass_at_k`:
 
