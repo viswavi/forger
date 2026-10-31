@@ -12,7 +12,7 @@ from typing import Any
 
 import arxiv
 import requests
-from semanticscholar import SemanticScholar  # type: ignore[import-untyped]
+from semanticscholar import SemanticScholar
 
 from pyforger.utils import get_formatted_logger
 

@@ -6,6 +6,7 @@ Each item is rated by N independent judge calls; kept iff at least
 from __future__ import annotations
 
 import json
+from typing import Any
 
 from pyforger.acquire.model import Model
 from pyforger.op import op
@@ -16,7 +17,7 @@ logger = get_formatted_logger("Judge")
 
 @op(name="filter.by_llm_score")
 def by_llm_score(
-    items: list[dict],
+    items: list[dict[str, Any]],
     *,
     model: Model,
     input_field: str,
@@ -27,7 +28,7 @@ def by_llm_score(
     agreement_threshold: float = 1.0,
     criteria: str = "overall quality, relevance, and correctness",
     temperature: float = 0.0,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Keep items where ``num_judges`` LLM judges sufficiently agree on quality."""
     if num_judges < 1:
         raise ValueError("num_judges must be at least 1")
@@ -44,7 +45,7 @@ def by_llm_score(
             "deterministic sampling defeats multi-judge consensus"
         )
 
-    kept: list[dict] = []
+    kept: list[dict[str, Any]] = []
     parse_failures = 0
     for item in items:
         prompt = _build_judge_prompt(
@@ -83,7 +84,7 @@ def _parse_judge_response(raw: str, max_score: int) -> int | None:
 
 
 def _build_judge_prompt(
-    item: dict,
+    item: dict[str, Any],
     input_field: str,
     output_field: str,
     criteria: str,
