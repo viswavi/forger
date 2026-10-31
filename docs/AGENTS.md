@@ -28,9 +28,13 @@ costs 4 and 12.5.
 - Other models report `NaN` units, and budgeted calls to them stop. Local GPU inference is free and exempt.
 - Check spend with `model.total_token_units`. Cached `@op` results cost nothing.
 - `FORGER_TOKEN_USAGE_FILE` (a JSON ledger) and `FORGER_TOKEN_UNIT_LIMIT` share one quota across models and
-  processes. In-flight calls can overshoot it; `reset_history()` never resets it.
+  processes; `reset_history()` never resets it. Each request holds its worst case (prompt plus `max_tokens` per
+  completion, 65,536 without it) until its response replaces it with actual usage; new calls stop once used plus
+  held units reach the quota. A request that times out, loses its connection, or whose process is killed stays
+  charged at its hold, since the gateway may still bill it.
 - The benchmark launcher sets a generation quota and a separate judge quota, both given in the task instructions.
-- Direct API calls must use the launcher's `rl.token_budget` helpers to be counted.
+- Direct API calls must use the launcher's `rl.token_budget` helpers to be counted; they make one attempt per call
+  (no `num_retries`), so retry in your own code.
 - `TinkerModel` is charged in dollars to a separate ledger (see [`acquire.md`](agents/acquire.md)).
 - Cap a run in units with `@pipeline(max_token_units=...)` or `FORGER_MAX_TOKEN_UNITS`.
 
