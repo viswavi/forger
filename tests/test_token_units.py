@@ -17,12 +17,15 @@ from pyforger.token_units import (
     TokenUnitBudget,
     TokenUnitQuotaExceeded,
     default_rl_limit,
+    held_units,
     response_cost_usd,
     response_token_counts,
     token_units,
     validate_judge_model,
     validate_reasoning_effort,
 )
+
+DEEPSEEK = "litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731"
 
 
 @pytest.mark.parametrize(
@@ -366,3 +369,69 @@ assert pyforger.token_units.TokenUnitQuotaExceeded is helper.TokenUnitQuotaExcee
     subprocess.run(
         [sys.executable, "-c", program], cwd=root, env=env, check=True, timeout=60
     )
+
+
+class _Status(Exception):
+    def __init__(self, status_code):
+        super().__init__(f"HTTP {status_code}")
+        self.status_code = status_code
+
+
+def test_hold_counts_as_used_until_recorded(tmp_path):
+    """An in-flight request's worst case blocks the quota; its response replaces it."""
+    ledger = TokenUnitBudget(tmp_path / "usage.json", 1000)
+    with ledger.hold(DEEPSEEK, 1000) as hold:
+        assert ledger.snapshot()["remaining_token_units"] == 0
+        with pytest.raises(TokenUnitQuotaExceeded):
+            ledger.check()
+    state = ledger.record(DEEPSEEK, 10, 20, hold=hold)
+    assert (state["token_units"], state["held_token_units"], state["held"]) == (
+        70,
+        0,
+        {},
+    )
+
+
+@pytest.mark.parametrize(
+    "error,charged",
+    [
+        (TimeoutError("read timed out"), True),
+        (_Status(502), True),
+        (_Status(429), False),
+    ],
+)
+def test_failed_request_keeps_hold_when_it_may_be_billed(tmp_path, error, charged):
+    """Timeouts and 5xx stay charged at the hold; refused (4xx) requests are free."""
+    ledger = TokenUnitBudget(tmp_path / "usage.json", 1000)
+    with pytest.raises(type(error)):
+        with ledger.hold(DEEPSEEK, 300):
+            raise error
+    state = ledger.snapshot()
+    assert state["held_token_units"] == 0
+    assert state["token_units"] == (300 if charged else 0)
+    assert state["unreturned_calls"] == int(charged)
+
+
+def test_killed_process_leaves_its_hold_charged(tmp_path):
+    """A process killed mid-request cannot report back, so its hold stays used."""
+    path = tmp_path / "usage.json"
+    code = (
+        "import os, sys; from pyforger.token_units import TokenUnitBudget\n"
+        f"ledger = TokenUnitBudget({str(path)!r}, 1000)\n"
+        f"with ledger.hold({DEEPSEEK!r}, 1000):\n"
+        "    os._exit(1)\n"
+    )
+    import pyforger
+
+    src = str(Path(pyforger.__file__).parents[1])
+    env = {**os.environ, "PYTHONPATH": src}
+    subprocess.run([sys.executable, "-c", code], check=False, env=env)
+    with pytest.raises(TokenUnitQuotaExceeded):
+        TokenUnitBudget(path, 1000).check()
+
+
+def test_held_units_assume_long_prompts_and_full_completions():
+    """2 characters per prompt token and max_tokens per completion."""
+    messages = [{"role": "user", "content": "x" * 101}]
+    assert held_units(DEEPSEEK, messages, n=2, max_tokens=10) == 51 + 3 * 20
+    assert held_units(DEEPSEEK, [], max_tokens=None) == 3 * 65_536

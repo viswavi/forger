@@ -516,3 +516,21 @@ def test_dynamic_step_agents_use_the_token_unit_quota(monkeypatch, tmp_path):
         usage.check()
     with pytest.raises(ValueError):
         dynamic._AgentUsage("gpt-5.6-luna", model._token_budget).check()
+
+
+def test_timed_out_attempts_stay_charged(monkeypatch, tmp_path, complete):
+    """Each attempt that times out (and may still be billed) keeps its hold."""
+    enable_budget(monkeypatch, tmp_path, limit=10_000)
+
+    class Timeout(Exception):
+        status_code = 408
+
+    complete.side_effect = [Timeout("timed out"), response()]
+    monkeypatch.setattr("pyforger.acquire.model._sleep", lambda delay: None)
+    model = Model(DEEPSEEK, num_retries=1, max_tokens=100)
+    model.generate("Hello")
+    state = model._token_budget.snapshot()
+    # The timed-out attempt: 3 prompt tokens (5 characters / 2) + 100 x 3.
+    assert state["unreturned_calls"] == 1
+    assert state["token_units"] == 303 + 70
+    assert state["held_token_units"] == 0

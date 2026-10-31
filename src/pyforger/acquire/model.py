@@ -37,6 +37,7 @@ from pyforger.acquire import _local_dp, _request_cache
 from pyforger.op import _NO_CACHE_SCOPE, _REQUEST_SCOPE, _hash
 from pyforger.token_units import (
     TokenUnitBudget,
+    held_units,
     response_cost_usd,
     response_token_counts,
     token_units,
@@ -636,7 +637,9 @@ def _complete(
     cap; a cap or the token-unit quota is never retried. The response's usage
     is recorded here, in the worker, before the caller sees it: a batch that
     later raises or is interrupted keeps every finished request in the step
-    report, the instance totals, and the token-unit ledger. `on_start` runs
+    report, the instance totals, and the token-unit ledger. Each attempt holds
+    its worst case in that ledger while in flight (`Model._hold`), so a timed-out
+    or killed attempt the gateway still bills stays charged. `on_start` runs
     each time the request holds its slot, just before it is sent.
     """
     limit = _in_flight_limit(call_kwargs)
@@ -644,6 +647,7 @@ def _complete(
     retry = 0
     while True:
         sent = -math.inf
+        hold = None
         try:
             with contextlib.ExitStack() as slot:
                 if semaphore is not None:
@@ -653,6 +657,9 @@ def _complete(
                 sent = slot.enter_context(limit.slot())
                 if on_start is not None:
                     on_start()
+                if model is not None:
+                    # Each attempt holds its worst case in the shared ledger.
+                    hold = slot.enter_context(model._hold(messages, n, call_kwargs))
                 response = litellm.completion(messages=messages, n=n, **call_kwargs)
             limit.succeeded()
             break
@@ -674,7 +681,7 @@ def _complete(
             )
             _sleep(delay)
     if model is not None:
-        model._account_response(response)
+        model._account_response(response, hold)
     else:
         _add_response_usage(response, call_kwargs.get("model", "?"))
     return response
@@ -1590,7 +1597,19 @@ class Model:
                     int(self._usage_log_progress // 1_000_000) + 1
                 ) * 1_000_000
 
-    def _account_response(self, response: Any) -> None:
+    def _hold(
+        self, messages: list[Message], n: int, call_kwargs: dict[str, Any]
+    ) -> contextlib.AbstractContextManager[str | None]:
+        """Hold one request's worst case in the shared ledger while it is in flight.
+
+        A no-op without a token-unit quota. See `TokenUnitBudget.hold`.
+        """
+        if self._token_budget is None:
+            return contextlib.nullcontext()
+        units = held_units(self._model_id, messages, n, call_kwargs.get("max_tokens"))
+        return self._token_budget.hold(self._model_id, units)
+
+    def _account_response(self, response: Any, hold: str | None = None) -> None:
         """Charge one LiteLLM response as it arrives, before it is parsed.
 
         It goes to the instance totals, the step report and spend ledger
@@ -1598,7 +1617,8 @@ class Model:
         token-unit quota when one is configured. Charges are kept even when
         pricing or parsing fails. With a quota, a response without valid
         usage marks the ledger unmetered and raises ValueError: the quota
-        cannot be enforced past it.
+        cannot be enforced past it. The request's ``hold`` (see `_hold`) is
+        replaced by its actual usage, or charged when usage is missing.
         """
         usage: dict[str, Any] = dict(_extract_usage(response))
         try:
@@ -1631,7 +1651,7 @@ class Model:
             )
             if self._token_budget is not None:
                 if not complete_usage:
-                    self._token_budget.mark_unmetered()
+                    self._token_budget.mark_unmetered(hold)
                     raise ValueError(
                         f"Missing or invalid token usage for {self._model_id}; "
                         "cannot account for the shared budget."
@@ -1641,6 +1661,7 @@ class Model:
                     prompt_tokens,
                     completion_tokens,
                     cost_usd=cost,
+                    hold=hold,
                 )
 
     def generate(

@@ -7,12 +7,18 @@ import json
 import math
 import os
 import tempfile
+import uuid
 from pathlib import Path
 
 DEFAULT_GENERATION_LIMIT = 230_000_000
 DEFAULT_JUDGE_MODEL = "litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731"
 DEFAULT_REASONING_EFFORT = "low"
 _WEIGHTS = {"deepseek-v4-flash": (1, 3), "glm-5.3": (4, 12.5)}
+# Completion tokens held for a request sent without max_tokens.
+_DEFAULT_HELD_COMPLETION = 65_536
+# Statuses the gateway returns without running the model, so nothing is billed:
+# bad request, auth, forbidden, not found, payload too large, unprocessable, 429.
+_UNBILLED_STATUS = frozenset({400, 401, 403, 404, 413, 422, 429})
 
 
 class TokenUnitQuotaExceeded(RuntimeError):
@@ -140,11 +146,37 @@ def default_rl_limit(task):
     raise ValueError("Unknown task for RL token-unit quota")
 
 
+def held_units(model_id, messages, n=1, max_tokens=None):
+    """Worst-case units of one request: its prompt and ``n`` full completions.
+
+    The prompt counts 1 token per 2 characters (more than real tokenizers
+    give); completions count ``max_tokens`` each, or 65,536 without one.
+    """
+    chars = sum(
+        len(str(m.get("content", ""))) if isinstance(m, dict) else len(str(m))
+        for m in messages
+    )
+    completion = max_tokens or _DEFAULT_HELD_COMPLETION
+    return token_units(model_id, -(-chars // 2), n * completion)
+
+
+def billed_on_error(exc):
+    """Whether a failed request may still be billed, e.g. after a timeout.
+
+    The gateway finishes (and bills) a request whose client timed out, lost
+    the connection, or was interrupted; it bills nothing it refused (4xx).
+    """
+    return getattr(exc, "status_code", None) not in _UNBILLED_STATUS
+
+
 class TokenUnitBudget:
     """Share actual usage across processes; gate new calls once the quota is used.
 
-    Calls already in flight can exceed the limit. A separate lock file protects
-    atomic ledger replacement. Use a shared filesystem with POSIX file locks.
+    Each request holds its worst case (`held_units`) while in flight, and the
+    hold counts as used: a response replaces it with actual usage, a failure
+    that may be billed (timeout, lost connection, killed process) keeps it.
+    A separate lock file protects atomic ledger replacement. Use a shared
+    filesystem with POSIX file locks.
     """
 
     def __init__(self, path, limit):
@@ -189,6 +221,10 @@ class TokenUnitBudget:
                 "calls": 0,
                 "models": {},
                 "unmetered_calls": 0,
+                "held": {},
+                "held_token_units": 0.0,
+                "unreturned_calls": 0,
+                "unreturned_token_units": 0.0,
             }
         with os.fdopen(descriptor) as stream:
             state = json.load(stream)
@@ -205,6 +241,13 @@ class TokenUnitBudget:
         _count(state.get("calls"))
         _count(state.get("unmetered_calls"))
         if not isinstance(state.get("models"), dict):
+            raise ValueError("Invalid token usage ledger")
+        # Ledgers written before holds existed have none.
+        state.setdefault("held", {})
+        state.setdefault("held_token_units", 0.0)
+        state.setdefault("unreturned_calls", 0)
+        state.setdefault("unreturned_token_units", 0.0)
+        if not isinstance(state["held"], dict):
             raise ValueError("Invalid token usage ledger")
         changed = _normalize_cost_metadata(state)
         for model in state["models"].values():
@@ -232,7 +275,9 @@ class TokenUnitBudget:
     def _snapshot(self, state):
         return {
             **state,
-            "remaining_token_units": max(0.0, self.limit - state["token_units"]),
+            "remaining_token_units": max(
+                0.0, self.limit - state["token_units"] - state["held_token_units"]
+            ),
         }
 
     def snapshot(self):
@@ -248,34 +293,95 @@ class TokenUnitBudget:
         state = self.snapshot()
         if state["unmetered_calls"]:
             raise ValueError("Token accounting is incomplete: a response omitted usage")
-        if state["token_units"] >= self.limit:
+        if state["token_units"] + state["held_token_units"] >= self.limit:
             raise TokenUnitQuotaExceeded("Token-unit quota exhausted")
         return state
 
-    def mark_unmetered(self):
-        """Fail closed after a paid response without usable token counts."""
+    @contextlib.contextmanager
+    def hold(self, model_id, units):
+        """Hold ``units`` for one request sent inside the block; yield the hold's id.
+
+        Pass the id to `record` (or `mark_unmetered`) once the response
+        arrives. If the block raises, the hold is charged when the request
+        may have been billed (`billed_on_error`) and dropped otherwise.
+        """
+        hold = f"{os.getpid()}-{uuid.uuid4().hex}"
         with self._locked():
             state = self._read()
+            state["held"][hold] = {"model": model_id, "token_units": float(units)}
+            state["held_token_units"] += units
+            self._write(state)
+        try:
+            yield hold
+        except BaseException as exc:
+            with self._locked():
+                state = self._read()
+                if billed_on_error(exc):
+                    self._charge_hold(state, hold)
+                else:
+                    self._drop_hold(state, hold)
+                self._write(state)
+            raise
+
+    def _drop_hold(self, state, hold):
+        entry = state["held"].pop(hold, None)
+        if entry is None:
+            return None
+        state["held_token_units"] = max(
+            0.0, state["held_token_units"] - entry["token_units"]
+        )
+        return entry
+
+    def _charge_hold(self, state, hold):
+        """Count a hold as spent: its request may be billed but never reported."""
+        entry = self._drop_hold(state, hold)
+        if entry is None:
+            return
+        units = entry["token_units"]
+        model = self._model_entry(state, entry["model"])
+        model["token_units"] += units
+        model["unreturned_calls"] = model.get("unreturned_calls", 0) + 1
+        state["token_units"] += units
+        state["unreturned_calls"] += 1
+        state["unreturned_token_units"] += units
+
+    @staticmethod
+    def _model_entry(state, model_id):
+        return state["models"].setdefault(
+            model_id,
+            {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "token_units": 0.0,
+                "calls": 0,
+                "cost_usd": 0.0,
+                "unpriced_calls": 0,
+            },
+        )
+
+    def mark_unmetered(self, hold=None):
+        """Fail closed after a paid response without usable token counts.
+
+        Its ``hold``, if any, is charged.
+        """
+        with self._locked():
+            state = self._read()
+            if hold is not None:
+                self._charge_hold(state, hold)
             state["unmetered_calls"] += 1
             self._write(state)
 
-    def record(self, model_id, prompt_tokens, completion_tokens, *, cost_usd=None):
-        """Charge tokens and available dollars, including calls already in flight."""
+    def record(
+        self, model_id, prompt_tokens, completion_tokens, *, cost_usd=None, hold=None
+    ):
+        """Charge tokens and available dollars, replacing the request's ``hold``."""
         units = token_units(model_id, prompt_tokens, completion_tokens)
         cost = _valid_cost(cost_usd)
         with self._locked():
             state = self._read()
-            model = state["models"].setdefault(
-                model_id,
-                {
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "token_units": 0.0,
-                    "calls": 0,
-                    "cost_usd": 0.0,
-                    "unpriced_calls": 0,
-                },
-            )
+            if hold is not None:
+                self._drop_hold(state, hold)
+            model = self._model_entry(state, model_id)
             model["prompt_tokens"] += prompt_tokens
             model["completion_tokens"] += completion_tokens
             model["token_units"] += units

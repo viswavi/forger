@@ -80,11 +80,15 @@ Cached `@op` results do not make API calls and do not consume the quota again.
 Set `FORGER_TOKEN_USAGE_FILE` to a persistent JSON ledger and
 `FORGER_TOKEN_UNIT_LIMIT` to share a quota across model instances and processes.
 Ledgers retain `cost_usd` and count missing prices in `unpriced_calls`.
-New calls stop once the recorded total reaches the quota; in-flight calls can overshoot it.
+Each request holds its worst case (prompt plus `max_tokens` per completion, 65,536 without it) while in flight,
+and new calls stop once used plus held units reach the quota. A response replaces its hold with actual usage;
+a request that times out, loses its connection, or whose process is killed keeps its hold as spent, because
+the gateway may still bill it (`unreturned_calls` in the ledger).
 Unknown model weights or missing token counts stop budgeted calls instead of counting as free.
 The benchmark launcher sets a generation quota and a separate judge quota, both
 given in the task instructions.
-Direct API calls must use the launcher's `rl.token_budget` helpers to participate in accounting.
+Direct API calls must use the launcher's `rl.token_budget` helpers to participate in accounting; they make one
+attempt per call (no `num_retries`), so retry in your own code.
 
 ### Execution model
 
