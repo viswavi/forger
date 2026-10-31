@@ -482,10 +482,10 @@ while distinct IDs or `no_cache` request fresh work.
 
 Agent functionality and execution backends are separate layers.
 `pyforger.agents` provides backend-agnostic functions (`generate_source`,
-`generate_files`, `execute_source`). Generation functions take an `AgentSpec`
+`generate_files`). Generation functions take an `AgentSpec`
 (what the agent is) and an optional `AgentBackend` (where it runs; defaults to
-`LocalBackend`). `execute_source` replays retained code with a backend and does
-not take an agent or call a model. Additional backends implement the same protocol.
+`LocalBackend`). Backends replay retained code through `execute_program`,
+which does not take an agent or call a model. Additional backends implement the same protocol.
 Backends implement only `run_agent(task, agent)` and
 `execute_program(code, item, timeout_s)`; they never receive agent functionality and
 agent functions never know which backend executes them. There is no fallback
