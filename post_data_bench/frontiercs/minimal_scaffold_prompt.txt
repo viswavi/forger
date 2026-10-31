@@ -10,6 +10,14 @@ Public validation examples are shown in {TASK_DIR}/validation_tasks.jsonl -- use
 
 "task_text" (and the "question" field in model_outputs/{BASELINE_MODEL}/val/predictions.jsonl) is the exact user-turn prompt text shown to a candidate model at evaluation time: "Problem:", a blank line, the statement, a blank line, a "Judging limits ..." line giving the problem's enforced time and memory limits and the compiler, a blank line, and "Generate solution code:". A system message, separate from task_text (`SYSTEM_PROMPT` in {TASK_DIR}/prompt_building.py), asks for a C++ solution that respects the stated limits, wrapped in a ```cpp fence, with no other text. The evaluator takes the longest ```cpp block in the text after the final </think>; a response with no code scores 0. Your submitted prompts are used verbatim for training, so build them the same way: `prompt_building.build_user_content(statement, time_limit_s, memory_mb)` gives the task_text, and `prompt_building.build_candidate_prompt(task_text)` the system message followed by the user turn. Training on any other prompt format will not transfer to evaluation.
 
+# Scaffold
+
+You are allowed to use any publicly available tools and libraries, including LLM libraries, Brave Search API, Semantic Scholar API, or any other library/API that does not require a paid subscription.
+
+The right approach is usually hard-to-easy generalization: find or create problems harder than the ones in the benchmark, and train on those. Beyond that, how you build, check and select your data is up to you.
+
+There are two open-source libraries which you are NOT allowed to use. You are not allowed to use the Forger data generation framework (pyforger in pypi) or the Bespoke Curator library (bespokelabs.curator in pypi). If you try to download or use either of these libraries, you will instantly be terminated and fail the task. Otherwise, you are free to use any other libraries or tools that you wish.
+
 # Data Format
 
 Write ONE dataset to {RAW_DATA_PATH} (write a temporary file, then rename it). Each JSONL row has exactly three fields, "prompt", "ground_truth", and "rubric":
@@ -100,13 +108,5 @@ Get a small end-to-end loop working early. After that, test out different decisi
 Check data quality directly at every stage, before training on it: read samples, and look at the distributions of rubric scores, lengths, difficulty, and diversity. A training run plus evaluation takes hours and folds many causes into one number, so use it as the final check of data you have already validated, not as the way to find out whether data is good.
 
 When you run your large-scale run, save your final dataset to {RAW_DATA_PATH}.
-
-# Scaffold
-
-You are allowed to use any publicly available tools and libraries, including LLM libraries, Brave Search API, Semantic Scholar API, or any other library/API that does not require a paid subscription.
-
-The right approach is usually hard-to-easy generalization: find or create problems harder than the ones in the benchmark, and train on those. Beyond that, how you build, check and select your data is up to you.
-
-There are two open-source libraries which you are NOT allowed to use. You are not allowed to use the Forger data generation framework (pyforger in pypi) or the Bespoke Curator library (bespokelabs.curator in pypi). If you try to download or use either of these libraries, you will instantly be terminated and fail the task. Otherwise, you are free to use any other libraries or tools that you wish.
 
 You have {TIMEOUT_HOURS} hours to do your work. After this, we will evaluate your selected final RL checkpoint. While you get no points for finishing early, if your training and checkpoint selection are complete, then you are free to end the session early with the finish tool (see Final Submission). Now let's get started!

@@ -52,7 +52,7 @@ INSPECT_NEW = (
     "invalid answers, time and memory limits, partial credit)."
 )
 
-GUIDELINES = """When `generate_custom_rubric` or `convert_rubric_criteria` writes code criteria, pass the sandbox rules above and the `judge_cpp` helper as `code_guidelines=` (a string), so the criteria it writes compile in the RL grader and judge responses through that helper."""
+GUIDELINES = """When `generate_custom_rubric` or `convert_rubric_criteria` writes code criteria, pass the sandbox rules (see Data Format) and the `judge_cpp` helper as `code_guidelines=` (a string), so the criteria it writes compile in the RL grader and judge responses through that helper."""
 
 
 # The task recommends a smaller dataset than coding (rubric_data.TASK_MAX_ROWS).
@@ -82,7 +82,9 @@ def build(source: Path) -> str:
         ("When `generate_custom_rubric`", GUIDELINES),
     ]
     used = set()
-    for line in lines[lines.index("# Data Format") :]:
+    # Everything after the task section: the Scaffold (now first) and the rest.
+    start = min(lines.index(h) for h in ("# Scaffold", "# Data Format"))
+    for line in lines[start:]:
         for prefix, replacement in rules:
             if line.startswith(prefix):
                 assert prefix not in used, prefix
