@@ -37,15 +37,6 @@ def _default(backend: AgentBackend | None) -> AgentBackend:
     return backend if backend is not None else LocalBackend()
 
 
-def execute_source(
-    code: str,
-    item: dict[str, Any],
-    *,
-    backend: AgentBackend | None = None,
-    timeout_s: float = 10.0,
-) -> list[str]:
-    """Replay retained source on a backend without any agent or model call."""
-    return _default(backend).execute_program(code, item, timeout_s)
 
 
 def generate_files(

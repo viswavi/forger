@@ -5,7 +5,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, is_dataclass
 from functools import partial
 from threading import Lock
-from typing import Any, Protocol, TypeVar
+from typing import Any, TypeVar
 
 from pydantic import BaseModel, ConfigDict
 
@@ -40,12 +40,6 @@ class ReplacementPanelReport(PanelReport):
     """Opt-in execution history, separate from canonical scientific trials."""
 
     execution_history: tuple[dict[str, Any], ...]
-
-
-class TrialResult(Protocol):
-    """A panel callback result: a mapping or model with a ``passed`` grade."""
-
-    passed: bool | None
 
 
 ResultT = TypeVar("ResultT")

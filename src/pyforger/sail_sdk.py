@@ -710,8 +710,6 @@ def remote_sdk_session(
     try:
         worker = create_worker()
     except BaseException as exc:
-        if evidence := getattr(exc, "sail_image_provenance", None):
-            diagnostics["sail_image_provenance"] = evidence
         current["captured_at"] = time.time()
         exc.diagnostics = dict(diagnostics)
         raise

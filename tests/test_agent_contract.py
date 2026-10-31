@@ -54,7 +54,7 @@ def test_functions_accept_any_backend_statically(tmp_path):
         "for backend in backends:\n"
         "    agents.generate_source('g', {}, agent=agent, backend=backend)\n"
         "    agents.generate_files('i', {}, ('o',), agent=agent, backend=backend)\n"
-        "    agents.execute_source('c', {}, backend=backend)\n"
+        "    backend.execute_program('c', {}, 10.0)\n"
         "    run_task(TaskSpec('i'), agent=agent, backend=backend)\n"
         "    run_command(TaskSpec('i'), 'sh solve.sh', backend=backend)\n",
         encoding="utf-8",

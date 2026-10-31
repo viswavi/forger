@@ -52,7 +52,7 @@ def test_generate_source_with_oracle_agent(backend):
     code = agents.generate_source(
         "uppercase the text", {"text": "abc"}, agent=ORACLE_PROGRAM, backend=backend
     )
-    assert agents.execute_source(code, {"text": "xy"}, backend=backend) == ["XY"]
+    assert backend.execute_program(code, {"text": "xy"}, 10.0) == ["XY"]
 
 
 def test_generate_files_with_oracle_agent(backend):

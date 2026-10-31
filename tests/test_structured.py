@@ -10,7 +10,6 @@ from pyforger.structured import (
     GenerationInconclusive,
     GenerationResult,
     ValidationExhausted,
-    generate_batch,
     generate_result,
     generate_validated,
 )
@@ -152,60 +151,8 @@ def test_model_rows_flow_through_sample_inspect_and_filter():
         assert by_success_rate.no_cache([graded]) == []
 
 
-def test_generate_batch_independent_outcomes_in_order():
-    """Every request reaches its own terminal state and stays in position."""
-
-    def generate(request: int) -> int:
-        return request
-
-    def validate(output: int) -> Measurement:
-        return Measurement(passed=output % 2 == 0, reason="want even")
-
-    def revise(request: int, attempt) -> int:
-        return request + 1
-
-    results = generate_batch(
-        [3, 6, 8],
-        generate=generate,
-        validate=validate,
-        revise=revise,
-        max_attempts=2,
-        concurrency=None,
-    )
-    assert [(result.status, result.output) for result in results] == [
-        ("accepted", 4),
-        ("accepted", 6),
-        ("accepted", 8),
-    ]
-    assert all(isinstance(result, GenerationResult) for result in results)
-    assert results[0].attempts[0].output == 3
-
-
-def test_generate_batch_exhaustion_and_inconclusive_are_row_data():
-    """Budget exhaustion and ungraded outcomes return rows, never filter."""
-    results = generate_batch(
-        ["reject", "stop"],
-        generate=lambda request: request,
-        validate=lambda output: (
-            Measurement(passed=False, reason="no")
-            if output == "reject"
-            else Measurement(passed=None, reason="ungraded")
-        ),
-        max_attempts=2,
-    )
-    assert [result.status for result in results] == ["exhausted", "inconclusive"]
-    assert len(results) == 2
-    assert results[1].attempts[-1].measurement.passed is None
-
-
-def test_generate_batch_rejects_invalid_concurrency():
-    """Concurrent fan-out validates its worker bound before executing."""
-    for bad in (0, -1, True, 2.5):
-        with pytest.raises(ValueError):
-            generate_batch(
-                [], generate=str, validate=lambda _: Measurement(), concurrency=bad
-            )
-    assert generate_batch([], generate=str, validate=lambda _: Measurement()) == []
+def test_evaluate_panels_rejects_non_report_results():
+    """Panel fan-out rejects callbacks that do not return typed reports."""
     with pytest.raises(TypeError):
         import pyforger.evaluation as ev
 

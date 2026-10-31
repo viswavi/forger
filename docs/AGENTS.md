@@ -350,16 +350,14 @@ and returns a typed `PanelReport`. `pyforger.structured.generate_result` is the 
 `generate_validated`: it returns a `GenerationResult` whose `status` is `accepted`, `exhausted`, or
 `inconclusive`, for pipelines that branch on the outcome instead of catching exceptions.
 
-`pyforger.structured.generate_batch(requests, ...)` runs that same bounded
-validated generation independently for a sequence of requests and returns one
-`GenerationResult` per request, in input order: no request is filtered out
-when it is rejected, exhausted, or inconclusive.  `concurrency` bounds
-simultaneous per-request generations.  `pyforger.evaluation.evaluate_panels(
-panels, evaluate_panel, concurrency=...)` fans out over a mapping of panel
-names to model lists and returns one typed `PanelReport` per panel; the
-callback composes the existing single-panel `evaluate_panel` for one name.
-Both operations are the set-level forms of their single-item counterparts and
-are the primitives a sequence-in/sequence-out pipeline step should call.
+Callers that need several independent generations can map
+`generate_result` over their requests with their own bounded executor.
+`pyforger.evaluation.evaluate_panels(panels, evaluate_panel,
+concurrency=...)` fans out over a mapping of panel names to model lists and
+returns one typed `PanelReport` per panel; the callback composes the existing
+single-panel `evaluate_panel` for one name. It is the set-level form of its
+single-panel counterpart and the primitive a sequence-in/sequence-out pipeline
+step should call.
 
 ### Data Generation Patterns
 
@@ -500,10 +498,10 @@ while distinct IDs or `no_cache` request fresh work.
 
 Agent functionality and execution backends are separate layers.
 `pyforger.agents` provides backend-agnostic functions (`generate_source`,
-`generate_files`, `execute_source`). Generation functions take an `AgentSpec`
+`generate_files`). Generation functions take an `AgentSpec`
 (what the agent is) and an optional `AgentBackend` (where it runs; defaults to
-`LocalBackend`). `execute_source` replays retained code with a backend and does
-not take an agent or call a model. Additional backends implement the same protocol.
+`LocalBackend`). Backends replay retained code through `execute_program`,
+which does not take an agent or call a model. Additional backends implement the same protocol.
 Backends implement only `run_agent(task, agent)` and
 `execute_program(code, item, timeout_s)`; they never receive agent functionality and
 agent functions never know which backend executes them. There is no fallback
