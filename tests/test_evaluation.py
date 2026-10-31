@@ -10,7 +10,12 @@ from pydantic import BaseModel
 
 from pyforger.agent_backend import AgentSpec
 from pyforger.agent_tasks import TaskSpec
-from pyforger.evaluation import PanelReport, evaluate_panel, validate_panel
+from pyforger.evaluation import (
+    PanelReport,
+    evaluate_panel,
+    evaluate_panels,
+    validate_panel,
+)
 from pyforger.local_backend import LocalBackend
 from pyforger.task_runs import run_recorded_task
 
@@ -157,6 +162,37 @@ def test_panel_accepts_model_results():
     assert report.models["a"]["success_rate"] == 1.0
     assert [t.result["passed"] for t in report.trials] == [True, True]
     assert all(t.result["note"].startswith("model-0-") for t in report.trials)
+
+
+def test_evaluate_panels_runs_every_panel_in_order():
+    """Panel fan-out returns one report per panel name without filtering."""
+    evaluated = []
+
+    def run(name: str) -> PanelReport:
+        evaluated.append(name)
+        return evaluate_panel(
+            ["m"],
+            lambda *_: {"passed": name == "pass"},
+            attempts=1,
+            **(
+                dict(min_rate=0.0, max_rate=1.0)
+                if name == "pass"
+                else dict(min_rate=0.2, max_rate=0.8)
+            ),
+        )
+
+    reports = evaluate_panels({"pass": ["m"], "fail": ["m"]}, run, concurrency=None)
+    assert list(reports) == ["pass", "fail"]
+    assert reports["pass"].accepted is True
+    assert reports["fail"].accepted is False
+    assert sorted(evaluated) == ["fail", "pass"]
+
+    with pytest.raises(TypeError):
+        evaluate_panels({"bad": ["m"]}, lambda name: {"accepted": True})
+    with pytest.raises(ValueError):
+        evaluate_panels({"empty": []}, run)
+    with pytest.raises(ValueError):
+        evaluate_panels({"dup": ["m", "m"]}, run)
 
 
 @dataclass

@@ -232,6 +232,51 @@ def evaluate_panel(
     return PanelReport(accepted=accepted, models=counts, trials=tuple(trials))
 
 
+def evaluate_panels(
+    panels: Mapping[str, Sequence[str]],
+    evaluate_panel: Callable[[str], PanelReport],
+    *,
+    concurrency: int | None = 1,
+) -> dict[str, PanelReport]:
+    """Run several independent task panels, one typed report per panel name.
+
+    ``panels`` maps an opaque caller-owned panel identifier to that panel's
+    model names; identifying names are not interpreted and never have to be
+    path-safe.  ``evaluate_panel`` receives the identifier and returns the
+    already-composed panel report for that panel (normally a closure over
+    ``pyforger.evaluation.evaluate_panel``), so this operation only owns the
+    set-level fan-out: order of reports follows ``panels``, every panel is
+    evaluated even when others are rejected, and callback exceptions
+    propagate rather than becoming difficulty evidence.  A model listed by
+    more than one panel is validated by that panel's own evaluation.  The
+    same model may legitimately be evaluated in several panels.
+    """
+    if concurrency is not None and (type(concurrency) is not int or concurrency < 1):
+        raise ValueError("concurrency must be a positive integer or None")
+    names = list(panels)
+    for name in names:
+        models = panels[name]
+        if (
+            isinstance(models, (str, bytes))
+            or not models
+            or any(not isinstance(model, str) or not model.strip() for model in models)
+        ):
+            raise ValueError(f"Panel {name!r} requires nonempty model names")
+        if len(set(models)) != len(models):
+            raise ValueError(f"Panel {name!r} model names must be unique")
+
+    def run(name: str) -> PanelReport:
+        report = evaluate_panel(name)
+        if not isinstance(report, PanelReport):
+            raise TypeError("evaluate_panel callback must return a PanelReport")
+        return report
+
+    reports = run_concurrently(
+        [partial(run, name) for name in names], concurrency=concurrency
+    )
+    return dict(zip(names, reports, strict=True))
+
+
 def _as_result_dict(result: Any) -> dict[str, Any]:
     """Normalize a mapping or data-model panel result to a JSON-safe dict."""
     from pyforger.evidence_journal import has_private_evidence
