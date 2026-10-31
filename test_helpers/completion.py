@@ -33,9 +33,11 @@ def completion_server(message, host="127.0.0.1"):
                         {
                             "index": 0,
                             "message": response_message,
-                            "finish_reason": "tool_calls"
-                            if response_message.get("tool_calls")
-                            else "stop",
+                            "finish_reason": (
+                                "tool_calls"
+                                if response_message.get("tool_calls")
+                                else "stop"
+                            ),
                         }
                     ],
                     "usage": {
@@ -56,7 +58,9 @@ def completion_server(message, host="127.0.0.1"):
             pass
 
     server = ThreadingHTTPServer((host, 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(
+        target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+    )
     previous = os.environ.get("LLM_API_KEY")
     os.environ["LLM_API_KEY"] = "test-not-a-real-secret"
     thread.start()

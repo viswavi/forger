@@ -11,6 +11,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import cast
 
+from pyforger.acquire import resources
+
 _MAX_TRANSFER = 32 * 1024 * 1024
 _ALLOWED_HOSTS = {"github.com", "gitlab.com"}
 
@@ -18,9 +20,6 @@ _ALLOWED_HOSTS = {"github.com", "gitlab.com"}
 @contextmanager
 def git_proxy() -> Iterator[str]:
     """Yield a local proxy URL that pins validated Git hosts to public IPs."""
-    # Import lazily to avoid a module cycle with resource preparation.
-    from pyforger.alter._dynamic_resources import _public_https_address
-
     total = 0
     lock = threading.Lock()
 
@@ -43,7 +42,7 @@ def git_proxy() -> Iterator[str]:
                 ):
                     self.connection.sendall(b"HTTP/1.1 403 Forbidden\r\n\r\n")
                     return
-                _, address = _public_https_address(f"https://{host.lower()}")
+                _, address = resources._public_https_address(f"https://{host.lower()}")
                 with socket.create_connection((address, 443), timeout=5) as remote:
                     self.connection.sendall(
                         b"HTTP/1.1 200 Connection Established\r\n\r\n"

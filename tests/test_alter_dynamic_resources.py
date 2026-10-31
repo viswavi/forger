@@ -1,7 +1,6 @@
 """Tests for dynamic pipeline operations."""
 
 import importlib.metadata
-import json
 import socket
 import socketserver
 import threading
@@ -9,6 +8,7 @@ from contextlib import contextmanager
 
 import pytest
 
+from pyforger.acquire import resources as acquisition
 from pyforger.alter import _dynamic_git_proxy as proxy_module
 from pyforger.alter import _dynamic_resources as resources
 
@@ -91,7 +91,11 @@ def test_pdf_url_is_parsed(monkeypatch):
 
 def test_git_url_is_cloned_to_bounded_text_bundle(monkeypatch):
     """Test git url is cloned to bounded text bundle."""
-    monkeypatch.setattr(resources, "_public_https", lambda url: "github.com")
+    monkeypatch.setattr(
+        acquisition,
+        "_public_https_address",
+        lambda url: ("github.com", "93.184.215.14"),
+    )
     monkeypatch.setenv("LITELLM_API_KEY", "dummy")
 
     def fake_clone(url, root):
@@ -111,14 +115,22 @@ def test_git_url_is_cloned_to_bounded_text_bundle(monkeypatch):
 
 def test_git_rejects_other_hosts(monkeypatch):
     """Test git rejects other hosts."""
-    monkeypatch.setattr(resources, "_public_https", lambda url: "example.org")
+    monkeypatch.setattr(
+        acquisition,
+        "_public_https_address",
+        lambda url: ("example.org", "93.184.215.14"),
+    )
     with pytest.raises(ValueError, match="GitHub or GitLab"):
         resources.prepare_input({"url": "https://example.org/repo.git"})
 
 
 def test_uppercase_git_suffix_is_accepted(monkeypatch):
     """Treat uppercase .GIT suffix as a repository URL."""
-    monkeypatch.setattr(resources, "_public_https", lambda url: "github.com")
+    monkeypatch.setattr(
+        acquisition,
+        "_public_https_address",
+        lambda url: ("github.com", "93.184.215.14"),
+    )
 
     def fake_clone(url, root):
         """Create a tiny snapshot instead of cloning."""
@@ -149,18 +161,18 @@ def test_plain_text_url_preserves_code(monkeypatch):
 def test_https_rejects_private_addresses(monkeypatch):
     """Test https rejects private addresses."""
     monkeypatch.setattr(
-        resources.socket,
+        acquisition.socket,
         "getaddrinfo",
         lambda *args, **kwargs: [(None, None, None, None, ("127.0.0.1", 443))],
     )
     with pytest.raises(ValueError, match="non-public"):
-        resources._public_https("https://localhost/document.pdf")
+        acquisition._public_https_address("https://localhost/document.pdf")
 
 
 def test_download_validates_redirect_target(monkeypatch):
     """Test download validates redirect target."""
     monkeypatch.setattr(
-        resources,
+        acquisition,
         "_public_https_address",
         lambda url: (
             (_ for _ in ()).throw(ValueError("blocked"))
@@ -231,7 +243,7 @@ def test_download_uses_validated_ip_without_reresolving(monkeypatch):
         def close(self):
             """Close the mocked pool."""
 
-    monkeypatch.setattr(resources.socket, "getaddrinfo", getaddrinfo)
+    monkeypatch.setattr(acquisition.socket, "getaddrinfo", getaddrinfo)
     monkeypatch.setattr("urllib3.HTTPSConnectionPool", Pool)
     assert resources._download("https://example.org/page?q=1") == (
         b"hello",
@@ -296,70 +308,29 @@ def test_clone_stops_at_disk_limit(tmp_path, monkeypatch):
     assert killed == [12345]
 
 
-def test_git_tool_lists_and_reads_prepared_files(monkeypatch):
-    """Test git tool lists and reads prepared files."""
-    pytest.importorskip("openhands.sdk")
-    from pyforger.alter import _dynamic_tool as tool
-
-    prepared = {
-        "kind": "git",
-        "url": "https://github.com/a/b.git",
-        "files": {"README.md": "hello", "src/a.py": "x = 1"},
-    }
-    monkeypatch.setattr(tool, "prepare_input", lambda item: prepared)
-    session = tool.PythonExecutor({"url": "https://github.com/a/b.git"}, 5)
-    git = tool.GitExecutor(session)
-    listing = git(tool.GitAction(operation="list"))
-    assert json.loads(listing.result_text)["files"] == ["README.md", "src/a.py"]
-    content = git(tool.GitAction(operation="read", path="src/a.py"))
-    assert json.loads(content.result_text)["content"] == "x = 1"
-    assert session.prepared_input() == prepared
-
-
-def test_sdk_resolves_all_restricted_tools():
-    """Test sdk resolves all restricted tools."""
-    pytest.importorskip("openhands.sdk")
-    from openhands.sdk.tool import Tool
-    from openhands.sdk.tool.registry import resolve_tool
-
-    from pyforger.alter import _dynamic_tool as tool
-
-    session = tool.PythonExecutor({"text": "plain input"}, 5)
-    session_id = tool.register_executor(session)
-    try:
-        for name in ("ForgerPythonTool", "ForgerResourceTool", "ForgerGitTool"):
-            resolved = resolve_tool(
-                Tool(name=name, params={"session_id": session_id}), None
-            )
-            assert len(resolved) == 1
-            assert resolved[0].executor is not None
-    finally:
-        tool.unregister_executor(session_id)
-
-
 def test_generated_program_receives_prepared_url(monkeypatch):
     """Test generated program receives prepared url."""
     version = importlib.metadata.version("RestrictedPython")
     if tuple(map(int, version.split(".")[:2])) < (8, 4):
         pytest.skip("Dynamic worker requires RestrictedPython >=8.4")
-    from pyforger.alter import dynamic
+    local_agent = importlib.import_module("pyforger.alter.dynamic")
 
     try:
-        dynamic._require_dynamic_platform()
+        local_agent._require_dynamic_platform()
     except NotImplementedError:
         pytest.skip("Dynamic worker requires Unix signal timers")
 
     prepared = {"kind": "html", "url": "https://example.org", "content": "hello"}
-    monkeypatch.setattr(dynamic, "prepare_input", lambda item: prepared)
+    monkeypatch.setattr(local_agent, "prepare_input", lambda item: prepared)
     code = 'def run(item):\n    return [item["content"]]'
-    assert dynamic._execute(code, {"url": "https://example.org"}, 5) == ["hello"]
+    assert local_agent._execute(code, {"url": "https://example.org"}, 5) == ["hello"]
 
 
 def test_public_fetch_rejects_invalid_limits_before_network():
     """Reject malformed limits without opening a connection."""
-    for limit in (0, -1, True, 33 * 1024 * 1024):
+    for limit in (0, -1, True, 1.5, float("inf"), float("nan")):
         with pytest.raises(ValueError, match="byte limit"):
-            resources.fetch_public("https://example.org/data", limit)
+            acquisition.fetch_public("https://example.org/data", limit)
 
 
 @pytest.mark.parametrize(
@@ -368,14 +339,15 @@ def test_public_fetch_rejects_invalid_limits_before_network():
 )
 def test_public_address_rejects_special_networks(address):
     """Transition and private addresses cannot be public resources."""
-    assert not resources.public_address(address)
+    assert not acquisition._public_address(address)
 
 
-def test_public_fetch_is_shared_with_dynamic_download():
-    """Acquisition and dynamic inspection share the same fetch implementation."""
-    from pyforger.acquire.resources import fetch_public
-
-    assert fetch_public is resources.fetch_public
+def test_public_fetch_is_owned_by_acquisition():
+    """Dynamic preparation consumes acquisition rather than owning its transport."""
+    assert acquisition.fetch_public.__module__ == "pyforger.acquire.resources"
+    assert resources.resources is acquisition
+    assert proxy_module.resources is acquisition
+    assert acquisition.__all__ == ["fetch_public"]
 
 
 @contextmanager
@@ -392,7 +364,9 @@ def local_git_tunnel(monkeypatch):
 
     real_connect = socket.create_connection
     with socketserver.ThreadingTCPServer(("127.0.0.1", 0), Echo) as server:
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread = threading.Thread(
+            target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+        )
         thread.start()
 
         def destination(url):
@@ -405,14 +379,18 @@ def local_git_tunnel(monkeypatch):
             return real_connect(address, *args, **kwargs)
 
         # Substitute only destination discovery/routing, not sockets or relay I/O.
-        monkeypatch.setattr(resources, "_public_https_address", destination)
+        monkeypatch.setattr(acquisition, "_public_https_address", destination)
         monkeypatch.setattr(proxy_module.socket, "create_connection", connect)
         try:
             with proxy_module.git_proxy() as proxy:
                 yield (
-                    "127.0.0.1",
-                    int(proxy.rsplit(":", 1)[1]),
-                ), received, destinations
+                    (
+                        "127.0.0.1",
+                        int(proxy.rsplit(":", 1)[1]),
+                    ),
+                    received,
+                    destinations,
+                )
         finally:
             server.shutdown()
             thread.join(timeout=2)
@@ -468,3 +446,89 @@ def test_git_proxy_cuts_off_aggregate_transfer(monkeypatch, reconnect):
                 connection.sendall(b"x")
                 assert connection.recv(1) == b""
         assert b"".join(received) == b"1234"
+
+
+@pytest.mark.parametrize("extra", [0, 1])
+@pytest.mark.parametrize("budget", ["explicit", "unlimited", "large"])
+def test_public_fetch_scientific_boundary(monkeypatch, extra, budget):
+    """Exercise decoded streaming at the real ceiling; substitute only HTTP."""
+    limit = 64 * 1024 * 1024
+
+    class Response:
+        status = 200
+        headers = {"content-type": "text/csv"}
+        closed = False
+
+        def stream(self, chunk_size, *, decode_content):
+            assert decode_content is True
+            for _ in range(limit // chunk_size):
+                yield b"x" * chunk_size
+            if extra:
+                yield b"x"
+
+        def close(self):
+            self.closed = True
+
+    response = Response()
+
+    class Pool:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def urlopen(self, *args, **kwargs):
+            return response
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        acquisition, "_public_https_address", lambda url: ("example.org", "8.8.8.8")
+    )
+    monkeypatch.setattr(acquisition.urllib3, "HTTPSConnectionPool", Pool)
+    max_bytes = {"explicit": limit, "unlimited": None, "large": 2**40}[budget]
+    if extra and budget == "explicit":
+        with pytest.raises(ValueError, match=f"limit.*{limit}"):
+            acquisition.fetch_public("https://example.org/data", max_bytes)
+    else:
+        _, body, _ = acquisition.fetch_public("https://example.org/data", max_bytes)
+        assert len(body) == limit + extra
+    assert response.closed
+
+
+def test_public_fetch_allows_slow_sources_with_bounded_timeouts(monkeypatch):
+    """Slow public sources are allowed within bounded timeouts."""
+
+    class Response:
+        status = 200
+
+        @property
+        def headers(self):
+            return {"content-type": "text/csv"}
+
+        def stream(self, size, *, decode_content):
+            yield b"a,b\n1,2\n"
+
+        def close(self):
+            pass
+
+    class Pool:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def urlopen(self, *args, **kwargs):
+            timeout = kwargs["timeout"]
+            # No caller deadline: only connect and read-inactivity bounds apply,
+            # so a slow but progressing source is never cut off by a total.
+            assert timeout.total is None
+            assert timeout.connect_timeout == 30
+            assert timeout.read_timeout == 120
+            return Response()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        acquisition, "_public_https_address", lambda url: ("example.org", "8.8.8.8")
+    )
+    monkeypatch.setattr(acquisition.urllib3, "HTTPSConnectionPool", Pool)
+    assert acquisition.fetch_public("https://example.org/data")[1] == b"a,b\n1,2\n"

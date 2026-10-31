@@ -21,7 +21,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install ".[test]"
       - name: test
-        run: pytest
+        env:
+          LITELLM_LOCAL_MODEL_COST_MAP: "True"
+        run: pytest --durations=30
   format:
     runs-on: ubuntu-latest
     steps:
