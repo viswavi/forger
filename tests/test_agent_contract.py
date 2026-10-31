@@ -41,6 +41,7 @@ def test_backend_constructors_reject_embedded_env():
 
 def test_functions_accept_any_backend_statically(tmp_path):
     """Mypy proves agent functions compose with every backend type."""
+    pytest.importorskip("mypy", reason="static backend checks need the test extra")
     source = tmp_path / "agent_contract.py"
     source.write_text(
         "from pyforger import agents\n"

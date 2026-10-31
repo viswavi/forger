@@ -124,4 +124,3 @@ def redact(text: str) -> str:
         ):
             text = text.replace(value, "[REDACTED]")
     return text
-
