@@ -27,16 +27,16 @@ def test_bounded_per_model_replacements_and_concurrency():
         replacement_predicate=lambda row: row["passed"] is None,
     )
     assert peak <= 2
-    assert len(result["trials"]) == 10
-    assert len(result["execution_history"]) == 14
-    assert len({r["execution_id"] for r in result["execution_history"]}) == 14
-    assert [r["execution_id"] for r in result["execution_history"][10:]] == [
+    assert len(result.trials) == 10
+    assert len(result.execution_history) == 14
+    assert len({r["execution_id"] for r in result.execution_history}) == 14
+    assert [r["execution_id"] for r in result.execution_history[10:]] == [
         "model-0-trial-0-replacement-1",
         "model-0-trial-1-replacement-2",
         "model-1-trial-0-replacement-1",
         "model-1-trial-1-replacement-2",
     ]
-    assert not result["accepted"]
+    assert not result.accepted
 
 
 def test_single_replacement_keeps_logical_id_and_original_evidence():
@@ -57,11 +57,11 @@ def test_single_replacement_keeps_logical_id_and_original_evidence():
         max_replacements=2,
         replacement_predicate=lambda r: r["status"] == "infra",
     )
-    assert result["accepted"] and len(result["trials"]) == 5
-    assert result["trials"][0]["trial_id"] == "model-0-trial-0"
-    assert result["trials"][0]["result"]["partial"] == "model-0-trial-0-replacement-1"
-    assert result["execution_history"][0]["result"]["partial"] == "model-0-trial-0"
-    assert len(result["execution_history"]) == 6
+    assert result.accepted and len(result.trials) == 5
+    assert result.trials[0].trial_id == "model-0-trial-0"
+    assert result.trials[0].result["partial"] == "model-0-trial-0-replacement-1"
+    assert result.execution_history[0]["result"]["partial"] == "model-0-trial-0"
+    assert len(result.execution_history) == 6
 
 
 def test_default_shape_and_no_predicate_calls():
@@ -71,7 +71,7 @@ def test_default_shape_and_no_predicate_calls():
         min_rate=0,
         replacement_predicate=lambda _: pytest.fail("disabled"),
     )
-    assert set(result) == {"accepted", "models", "trials"}
+    assert set(result.model_dump()) == {"accepted", "models", "trials"}
 
 
 @pytest.mark.parametrize("value", [{}, {"passed": "false"}])

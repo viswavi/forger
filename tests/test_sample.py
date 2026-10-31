@@ -1,6 +1,8 @@
 """Generic callable sampling with explicit identities and standard op semantics."""
 from __future__ import annotations
 
+from collections import UserDict
+
 import pytest
 
 from pyforger import alter
@@ -38,3 +40,11 @@ def test_invalid_sample_identity(sample_ids):
     """Reject ambiguous identities before calling any generator."""
     with pytest.raises(ValueError):
         alter.sample([], deterministic_generate, sample_ids=sample_ids)
+
+
+def test_sampling_mapping_preserves_entries():
+    """Mapping rows receive samples by key without mutating the source."""
+    row = UserDict({"value": 5})
+    result = alter.sample.no_cache([row], deterministic_generate, sample_ids=["0"])
+    assert result == [{"value": 5, "samples": [{"sample_id": "0", "value": 5}]}]
+    assert "samples" not in row
