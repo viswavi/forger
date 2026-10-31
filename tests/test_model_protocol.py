@@ -217,7 +217,7 @@ def test_real_native_cost_and_cache_metadata(endpoint, mode):
     result = model.generate("hello")
     assert result.usage.prompt_tokens == 7
     assert result.usage.cost_usd > 0
-    assert model.known_cost_usd == result.usage.cost_usd
+    assert model.total_cost == result.usage.cost_usd
     model.reset_history()
     assert model.total_cost == 0
     assert model.total_usage.cost_usd == 0
