@@ -394,7 +394,7 @@ class TestErrorHandling:
         with pytest.raises(ValueError) as excinfo:
             model.generate_batch(["Q1", "Q2"])
         assert excinfo.value is error
-        assert model.history == []
+        assert len(model.history) == 1
 
 
 class TestShowProgress:
@@ -901,7 +901,7 @@ class TestExtractCost:
         response._hidden_params = {}
         mock_litellm.completion_cost.side_effect = RuntimeError("nope")
         with pytest.warns(UserWarning, match="pricing registry"):
-            assert _extract_cost(response, "unknown/model") == 0.0
+            assert _extract_cost(response, "unknown/model") is None
 
     @patch("pyforger.acquire.model.litellm")
     def test_warning_emitted_once_per_model_id(self, mock_litellm):
@@ -1358,6 +1358,8 @@ class TestTypedMetadataAndSettings:
         assert result.usage == Usage(prompt_tokens=3)
         assert result.usage.model_dump() == {
             "prompt_tokens": 3,
+            "cached_tokens": 0,
+            "cache_write_tokens": 0,
             "completion_tokens": 0,
             "reasoning_tokens": 0,
             "cost_usd": 0.0,
@@ -1431,8 +1433,8 @@ class TestTypedMetadataAndSettings:
         assert "timeout" not in kwargs
         assert "reasoning_effort" not in kwargs
         assert kwargs["extra_body"] == {"custom": 1}
-        assert kwargs["api_mode"] == "chat"
-        assert kwargs["capability_overrides"] == {"vision": False}
+        assert "api_mode" not in kwargs
+        assert "capability_overrides" not in kwargs
         assert kwargs["organization"] == "test-org"
 
     @patch("pyforger.acquire.model.litellm")
