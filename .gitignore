@@ -65,3 +65,6 @@ env/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local agent scratch space and bulky execution traces
+.agent_tmp/

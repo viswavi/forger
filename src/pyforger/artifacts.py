@@ -294,3 +294,82 @@ def read_text(path: Path, max_bytes: int | None = None) -> str:
     if max_bytes is not None and len(data) > max_bytes:
         raise ValueError("Artifact exceeds read limit")
     return data.decode("utf-8")
+
+
+class FileInput(BaseModel):
+    """Integrity-checked file-backed workspace input; does not sanitize content."""
+
+    model_config = ConfigDict(frozen=True)
+    source: Path
+    size: StrictInt
+    sha256: str
+
+    @model_validator(mode="after")
+    def validate_input(self) -> FileInput:
+        object.__setattr__(self, "source", _normalize_root(self.source))
+        if self.size < 0:
+            raise ValueError("File size must be nonnegative")
+        _sha256(self.sha256)
+        return self
+
+    @classmethod
+    def capture(cls, path: Path) -> FileInput:
+        """Capture a regular file without loading its contents into memory."""
+        path = _normalize_root(Path(path))
+        _directory(path.parent)
+        with _open_file(path) as stream:
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+            size = os.fstat(stream.fileno()).st_size
+        return cls(source=path, size=size, sha256=digest)
+
+    @classmethod
+    def from_artifact(cls, ref: ArtifactRef, relative: str) -> FileInput:
+        """Select a manifested file; integrity is checked again during staging."""
+        path = ref.path(relative)
+        entry = next(f for f in ref.files if f.path == relative)
+        return cls(source=path, size=entry.size, sha256=entry.sha256)
+
+    def chunks(self):
+        """Verify before yielding, then detect concurrent source mutation."""
+        _directory(self.source.parent)
+        with _open_file(self.source) as stream:
+            before = os.fstat(stream.fileno())
+            if (
+                before.st_size != self.size
+                or hashlib.file_digest(stream, "sha256").hexdigest() != self.sha256
+            ):
+                raise ValueError("File input integrity mismatch")
+            stream.seek(0)
+            digest = hashlib.sha256()
+            size = 0
+            while chunk := stream.read(_CHUNK_SIZE):
+                digest.update(chunk)
+                size += len(chunk)
+                yield chunk
+            after = os.fstat(stream.fileno())
+            if (
+                size != self.size
+                or digest.hexdigest() != self.sha256
+                or (before.st_mtime_ns, before.st_ctime_ns)
+                != (after.st_mtime_ns, after.st_ctime_ns)
+            ):
+                raise ValueError("File input changed during staging")
+
+    def copy_to(self, path: Path) -> None:
+        """Stream into a newly created destination."""
+        with Path(path).open("xb") as target:
+            for chunk in self.chunks():
+                target.write(chunk)
+
+    def cache_key(self) -> object:
+        for _ in self.chunks():
+            pass
+        return (self.size, self.sha256)
+
+
+def write_input(path: Path, content: str | bytes | FileInput) -> None:
+    """Materialize a workspace value without buffering file-backed inputs."""
+    if isinstance(content, FileInput):
+        content.copy_to(path)
+    else:
+        path.write_bytes(content.encode() if isinstance(content, str) else content)

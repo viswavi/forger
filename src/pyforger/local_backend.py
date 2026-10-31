@@ -9,6 +9,7 @@ Deterministic agent kinds (``oracle``, ``nop``) run without any model.
 from __future__ import annotations
 
 import asyncio
+import codecs
 import os
 import re
 import signal
@@ -16,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -28,6 +30,7 @@ from pyforger.agent_backend import (
     reward_passed,
 )
 from pyforger.agent_backends import require_learner_runtime
+from pyforger.artifacts import FileInput
 from pyforger.local_agent import _execute, agent_llm
 from pyforger.measurements import Measurement
 
@@ -44,10 +47,16 @@ def _script_env(root: Path) -> dict[str, str]:
 
 
 def _materialize(
-    root: Path, files: dict[str, str | bytes], *, workspace: Path | None = None
+    root: Path,
+    files: dict[str, str | bytes | FileInput],
+    *,
+    workspace: Path | None = None,
 ) -> None:
     for name, content in files.items():
         path = root / name
+        if isinstance(content, FileInput):
+            _materialize_file(root, name, content, workspace or root)
+            continue
         path.parent.mkdir(parents=True, exist_ok=True)
         data = content.encode() if isinstance(content, str) else content
         if path.suffix in {".py", ".sh"}:
@@ -56,6 +65,94 @@ def _materialize(
             except UnicodeDecodeError:
                 pass
         path.write_bytes(data)
+
+
+def _script_chunks(content: FileInput, workspace: Path):
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    pending = ""
+    previous = ""
+    pattern = re.compile(r"(?<![\w/.:@-])/work(?=/|$|[\s\"'])")
+
+    def consume(text: str, end: int):
+        start = len(previous)
+        pieces = []
+        for match in pattern.finditer(text):
+            if match.start() < start:
+                continue
+            if match.start() >= end:
+                break
+            if match.end() > end:
+                end = match.start()
+                break
+            pieces.extend((text[start : match.start()], str(workspace)))
+            start = match.end()
+        pieces.append(text[start:end])
+        return "".join(pieces).encode(), end
+
+    for chunk in content.chunks():
+        pending += decoder.decode(chunk)
+        text = previous + pending
+        end = max(len(previous), len(text) - 6)
+        rendered, end = consume(text, end)
+        yield rendered
+        if end > len(previous):
+            previous = text[end - 1 : end]
+        pending = text[end:]
+    pending += decoder.decode(b"", final=True)
+    yield consume(previous + pending, len(previous + pending))[0]
+
+
+def _materialize_file(
+    root: Path, name: str, content: FileInput, workspace: Path
+) -> None:
+    """Replace through no-follow directory handles, never agent-controlled aliases."""
+    descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    temporary = ".forger-input-" + uuid.uuid4().hex
+    try:
+        parts = name.split("/")
+        for part in parts[:-1]:
+            try:
+                os.mkdir(part, dir_fd=descriptor)
+            except FileExistsError:
+                pass
+            child = os.open(
+                part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor
+            )
+            os.close(descriptor)
+            descriptor = child
+        fd = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=descriptor,
+        )
+        try:
+            with os.fdopen(fd, "wb") as target:
+                chunks = (
+                    _script_chunks(content, workspace)
+                    if Path(name).suffix in {".py", ".sh"}
+                    else content.chunks()
+                )
+                try:
+                    for chunk in chunks:
+                        target.write(chunk)
+                except UnicodeDecodeError:
+                    target.seek(0)
+                    target.truncate()
+                    for chunk in content.chunks():
+                        target.write(chunk)
+                target.flush()
+                os.fsync(target.fileno())
+            os.replace(
+                temporary, parts[-1], src_dir_fd=descriptor, dst_dir_fd=descriptor
+            )
+        finally:
+            try:
+                os.unlink(temporary, dir_fd=descriptor)
+            except FileNotFoundError:
+                pass
+    finally:
+        os.close(descriptor)
 
 
 def _collect(root: Path, outputs: tuple[str, ...]) -> dict[str, bytes]:
@@ -173,14 +270,13 @@ class LocalBackend:
         *,
         validate: Callable[[dict[str, bytes]], Measurement],
         max_repairs: int = 2,
+        require_outputs: bool = True,
     ) -> AgentRunResult:
         """Repair files in one SDK conversation and workspace with host validation."""
         from pyforger.agent_session import SessionBudget, run_validated_session
 
         if type(max_repairs) is not int or max_repairs < 0:
             raise ValueError("max_repairs must be a nonnegative integer")
-        if task.verifier is not None:
-            raise ValueError("Validated generation uses validate, not a task verifier")
         require_learner_runtime(self, agent)
         budget = SessionBudget(agent.max_iterations, task.timeout_s)
         with tempfile.TemporaryDirectory(prefix="forger-local-agent-") as directory:
@@ -201,7 +297,7 @@ class LocalBackend:
                         session,
                         instruction=self._instruction(root, task),
                         collect=lambda: _collect(root, task.outputs),
-                        outputs=task.outputs,
+                        outputs=task.outputs if require_outputs else (),
                         validate=validate,
                         max_repairs=max_repairs,
                         budget=budget,
@@ -212,12 +308,34 @@ class LocalBackend:
                     if agent.kind == "openhands-sdk"
                     else None
                 )
+                passed = None
+                status = "completed"
+                diagnostics = {}
+                failure_kind = None
+                if task.verifier is not None:
+                    _materialize(
+                        root / "verifier", dict(task.verifier_files), workspace=root
+                    )
+                    reward = root / "reward.txt"
+                    reward.unlink(missing_ok=True)
+                    verified = _run_script(root, task.verifier, budget.remaining_s())
+                    diagnostics = {
+                        "verifier_exit_code": verified.returncode,
+                        "verifier_stderr": verified.stderr[-4000:],
+                    }
+                    if verified.returncode:
+                        status, failure_kind = "failed", "infrastructure"
+                    else:
+                        passed = reward.is_file() and reward_passed(reward.read_bytes())
                 return AgentRunResult(
-                    status="completed",
-                    files=result.output,
+                    status=status,
+                    passed=passed,
+                    failure_kind=failure_kind,
+                    files=_collect(root, task.outputs),
                     validation_attempts=result.attempts,
                     trajectory=retained_trajectory,
                     diagnostics={
+                        **diagnostics,
                         "iterations": budget.iterations,
                         "session_id": str(getattr(session, "id", "script")),
                         **(
@@ -227,14 +345,30 @@ class LocalBackend:
                         ),
                     },
                 )
+            except BaseException as exc:
+                if agent.kind == "openhands-sdk":
+                    try:
+                        retained = self._trajectory(session, agent)
+                    except (AttributeError, ValueError, TypeError, OSError):
+                        retained = None
+                    exc.diagnostics = {
+                        "trajectory": retained,
+                        "iterations": budget.iterations,
+                    }
+                raise
             finally:
                 session.close()
 
     @staticmethod
     def _trajectory(session: Any, agent: AgentSpec) -> dict[str, Any]:
-        from pyforger.agent_diagnostics import trajectory
+        from pyforger.evidence_journal import journal_events
 
-        return trajectory(session.state.events, agent)
+        journal = getattr(session, "_forger_journal", None)
+        return (
+            journal.trajectory()
+            if journal is not None
+            else journal_events(session.state.events, [agent])
+        )
 
     def _install(self, root: Path, task: WorkspaceTask) -> None:
         deadline = time.monotonic() + task.timeout_s
@@ -303,12 +437,18 @@ class LocalBackend:
         )
         if budget is not None:
             sdk_agent.attach_budget(budget)
-        return Conversation(
+        from pyforger.evidence_journal import EvidenceJournal
+
+        journal = EvidenceJournal([agent])
+        session = Conversation(
+            callbacks=[journal.append],
             agent=sdk_agent,
             workspace=root,
             visualizer=None,
             max_iteration_per_run=sdk_iteration_limit(agent.max_iterations),
         )
+        object.__setattr__(session, "_forger_journal", journal)
+        return session
 
     def _run_sdk(
         self, root: Path, task: WorkspaceTask, agent: AgentSpec, budget: Any
@@ -320,9 +460,13 @@ class LocalBackend:
             status = session.state.execution_status
             if getattr(status, "value", status) != "finished":
                 raise RuntimeError(f"Agent execution did not finish: {status}")
-            from pyforger.agent_diagnostics import trajectory
-
-            return {"trajectory": trajectory(session.state.events, agent)}
+            return {"trajectory": self._trajectory(session, agent)}
+        except BaseException as exc:
+            try:
+                exc.diagnostics = {"trajectory": self._trajectory(session, agent)}
+            except Exception:
+                pass
+            raise
         finally:
             session.close()
 

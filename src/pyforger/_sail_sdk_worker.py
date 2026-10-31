@@ -1,0 +1,495 @@
+"""Private persistent SDK worker. Credentials arrive only through the in-memory wire."""
+
+from __future__ import annotations
+
+import faulthandler
+import json
+import os
+import re
+import sys
+import tempfile
+import threading
+import time
+import traceback
+import uuid
+from contextlib import contextmanager
+from dataclasses import replace
+from types import SimpleNamespace
+from typing import Any, cast
+
+COMMAND_GUIDANCE = (
+    "Make sure to run time consuming commands in the background and monitor them "
+    "so that you can work efficiently. Redirect output to a log and record the PID, "
+    "for example: nohup bash -c 'your command' >job.log 2>&1 < /dev/null & echo $! >job.pid. "
+    "Monitor the saved PID with ps and bounded tail in separate terminal calls. "
+    "A native timeout returns control but does not prove completion or kill the job. "
+    "Use is_input to poll or send C-c to interrupt the foreground command. "
+    "Check outputs and completion; never treat a background launch as success. "
+    "Stop only the verified job PID, never broad pkill patterns. "
+    "All work must stay within the session budget."
+)
+
+
+def thread_snapshot(sink: Any) -> None:
+    """Capture bounded Python frame metadata, without source lines or locals."""
+    threads = []
+    for ident, frame in list(sys._current_frames().items())[:32]:
+        frames = []
+        for _ in range(32):
+            if frame is None:
+                break
+            frames.append(
+                {
+                    "file": frame.f_code.co_filename,
+                    "function": frame.f_code.co_name,
+                    "line": frame.f_lineno,
+                }
+            )
+            frame = frame.f_back
+        threads.append({"thread_id": ident, "frames": frames})
+    try:
+        sink.write(
+            json.dumps(
+                {
+                    "event": "worker_stack_snapshot",
+                    "at": time.monotonic(),
+                    "threads": threads,
+                }
+            )
+            + "\n"
+        )
+        sink.flush()
+    except OSError:
+        pass
+
+
+def main(wire: Any) -> None:
+    """Run the persistent SDK worker loop until the controller closes it."""
+    # SDK/provider logs must not become protocol frames or leak credentials.
+    # Redact before writing to disk, including provider and native fd output.
+    log_path = os.environ.get("FORGER_WORKER_LOG", "/tmp/forger-worker.log")
+    try:
+        sink = os.fdopen(
+            os.open(
+                log_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600
+            ),
+            "w",
+            buffering=1,
+        )
+    except OSError:
+        sink = open(os.devnull, "w")
+
+    class RedactedLog:
+        encoding = "utf-8"
+
+        def __init__(self) -> None:
+            self.lock = threading.Lock()
+            self.pending = ""
+
+        def write(self, text: str) -> int:
+            with self.lock:
+                self.pending += text
+                while "\n" in self.pending:
+                    line, self.pending = self.pending.split("\n", 1)
+                    for secret in sorted(set(wire.secrets), key=len, reverse=True):
+                        line = line.replace(secret, "[REDACTED]")
+                    line = re.sub(
+                        r"(?i)(Bearer|Basic)\s+[^\s\"']+", r"\1 [REDACTED]", line
+                    )
+                    sink.write(line + "\n")
+                # Avoid unbounded memory on a provider's unterminated log line;
+                # never spill a potentially partial credential to disk.
+                if len(self.pending) > 1024 * 1024:
+                    self.pending = "[oversize log line omitted]"
+            return len(text)
+
+        def flush(self) -> None:
+            sink.flush()
+
+        def isatty(self) -> bool:
+            return False
+
+    safe_log = RedactedLog()
+    reader, output = os.pipe()
+    os.dup2(output, 1)
+    os.dup2(output, 2)
+    os.close(output)
+
+    def capture() -> None:
+        with os.fdopen(reader, "r", errors="replace") as stream:
+            for line in stream:
+                safe_log.write(line)
+                safe_log.flush()
+
+    threading.Thread(target=capture, name="sdk-logs", daemon=True).start()
+    sys.stderr = safe_log
+    sys.stdout = safe_log
+
+    # CPython's asynchronous watchdog can SIGSEGV while walking changing C/Python
+    # callback frames. Python frame objects keep this scheduled snapshot safe.
+    faulthandler.enable(file=sink)
+    watchdog = threading.Timer(45, thread_snapshot, args=(sink,))
+    watchdog.daemon = True
+    watchdog.start()
+
+    @contextmanager
+    def phase(name: str) -> Any:
+        started = time.monotonic()
+        print(
+            json.dumps({"phase": name, "state": "started", "at": started}),
+            file=sink,
+            flush=True,
+        )
+        try:
+            yield
+        finally:
+            ended = time.monotonic()
+            print(
+                json.dumps(
+                    {
+                        "phase": name,
+                        "state": "finished",
+                        "at": ended,
+                        "duration_s": ended - started,
+                    }
+                ),
+                file=sink,
+                flush=True,
+            )
+
+    def send(value: dict[str, Any]) -> None:
+        wire.send(value)
+
+    def receive() -> dict[str, Any]:
+        with phase("receive"):
+            value = cast(dict[str, Any], wire.receive())
+            kind = value.get("kind", "request")
+            kind = (
+                kind
+                if kind in {"request", "turn", "configure", "close", "observation"}
+                else "unknown"
+            )
+            print(
+                json.dumps(
+                    {
+                        "received_kind": kind,
+                        "encoded_bytes": len(json.dumps(value).encode()),
+                        "at": time.monotonic(),
+                    }
+                ),
+                file=sink,
+                flush=True,
+            )
+            return value
+
+    request = receive()
+    deadline = time.monotonic() + request["timeout_s"]
+    from _sdk_runtime import sdk_history_kwargs, sdk_iteration_limit
+    from agent_diagnostics import sanitizer
+    from openhands.sdk import LLM, Agent, AgentContext
+    from openhands.sdk.conversation.impl.local_conversation import LocalConversation
+    from openhands.sdk.llm import LLMCallContext
+    from openhands.sdk.tool import (
+        FinishTool,
+        Tool,
+        ToolExecutor,
+    )
+    from openhands.tools.terminal import TerminalTool
+    from openhands.tools.terminal.definition import TerminalAction, TerminalObservation
+
+    class TerminalRelay(ToolExecutor[TerminalAction, TerminalObservation]):
+        def __call__(self, action: Any, conversation: Any = None) -> Any:
+            emit_events()
+            send({"kind": "terminal", "action": action.model_dump(mode="json")})
+            reply = receive()
+            if reply.get("kind") != "terminal_observation":
+                raise RuntimeError("Invalid terminal controller response")
+            return TerminalObservation.model_validate(reply["observation"])
+
+    redaction_spec = SimpleNamespace(
+        model=SimpleNamespace(
+            config=SimpleNamespace(api_key=request["llm"]["api_key"])
+        ),
+        api_key_env=None,
+        secrets=request.get("redaction_secrets", ()),
+    )
+    redaction_specs = [redaction_spec]
+    iterations = 0
+
+    class WorkerLLM(LLM):
+        def generate(self, *args: Any, **kwargs: Any) -> Any:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("SDK deadline exhausted")
+            kwargs["timeout"] = min(self.timeout or remaining, remaining)
+            kwargs["max_retries"] = 0
+            if request["disable_prompt_cache_key"]:
+                kwargs["call_context"] = replace(
+                    kwargs.get("call_context") or LLMCallContext(),
+                    prompt_cache_key=None,
+                )
+            emit_events()
+            with phase("model.generate"):
+                return super().generate(*args, **kwargs)
+
+    class WorkerAgent(Agent):
+        def _initialize(self, state: Any) -> None:
+            if self._initialized:
+                return
+            tools = list(TerminalTool.create(state, executor=TerminalRelay()))
+            tools.extend(FinishTool.create(state))
+            self._tools = {tool.name: tool for tool in tools}
+            self._initialized = True
+
+        @property
+        def prompt_dir(self) -> str:
+            import inspect
+            from pathlib import Path
+
+            return str(Path(inspect.getfile(Agent)).parent / "prompts")
+
+        def step(self, *args: Any, **kwargs: Any) -> None:  # type: ignore[override]
+            nonlocal iterations
+            if time.monotonic() >= deadline:
+                raise TimeoutError("SDK deadline exhausted")
+            if (
+                request["max_iterations"] is not None
+                and iterations >= request["max_iterations"]
+            ):
+                raise RuntimeError("Shared iteration budget exhausted")
+            iterations += 1
+            native: Any = super()
+            native.step(*args, **kwargs)
+
+    with phase("model.initialize"):
+        llm = WorkerLLM(**request["llm"], stream=False)
+    if llm.custom_tokenizer and llm._chat_template_tokenizer is None:
+        send({"kind": "error", "error_type": "TokenizerUnavailable", "iterations": 0})
+        return
+    spec = SimpleNamespace(
+        runtime=SimpleNamespace(**request["runtime"]) if request["runtime"] else None,
+        kwargs={},
+    )
+    agent = WorkerAgent(
+        llm=llm,
+        tools=[Tool(name=TerminalTool.name)],
+        include_default_tools=["FinishTool"],
+        agent_context=AgentContext(
+            load_user_skills=False, load_public_skills=False, load_project_skills=False
+        ),
+        **sdk_history_kwargs(spec, llm),
+    )
+
+    class SealedConversation(LocalConversation):
+        def _ensure_plugins_loaded(self) -> None:
+            self._plugins_loaded = True
+
+    conversation_id = uuid.uuid4()
+    event_path = (
+        os.environ.get("FORGER_WORKER_LOG", "/tmp/forger-worker.log") + ".events"
+    )
+    event_sink: Any = None
+    event_bytes = 0
+    event_omitted = False
+    current_turn: dict[str, Any] = {}
+
+    def journal(record: dict[str, Any], *, clean: bool = True) -> None:
+        nonlocal event_bytes, event_omitted
+        if event_sink is None:
+            return
+        if clean:
+            record = sanitizer(redaction_specs)(record)
+        encoded = (json.dumps(record) + "\n").encode()
+        try:
+            if event_bytes + len(encoded) > 16 * 1024 * 1024:
+                if not event_omitted:
+                    event_sink.write(
+                        b'{"kind":"omitted","reason":"event journal byte limit"}\n'
+                    )
+                    event_sink.flush()
+                    event_omitted = True
+                return
+            event_sink.write(encoded)
+            event_sink.flush()
+            event_bytes += len(encoded)
+        except OSError:
+            pass
+
+    event_sequence = [0]
+    stream_events = [False]
+
+    pending_events = tempfile.TemporaryFile(mode="w+b")
+
+    def persist_event(clean: Any) -> None:
+        sequence = event_sequence[0]
+        event_sequence[0] += 1
+        journal(
+            {
+                "kind": "event",
+                "conversation_id": str(conversation_id),
+                **current_turn,
+                "at": time.time(),
+                "sequence": sequence,
+                "event": clean,
+            },
+            clean=False,
+        )
+        encoded = json.dumps(clean)
+        for offset in range(0, len(encoded), 8000):
+            send({"kind": "event_chunk", "text": encoded[offset : offset + 8000]})
+        send({"kind": "event_end", "sequence": sequence})
+
+    def retain_event(event: Any) -> None:
+        clean = sanitizer(redaction_specs)(event.model_dump(mode="json"))
+        if not stream_events[0]:
+            pending_events.write((json.dumps(clean) + "\n").encode())
+            pending_events.flush()
+            return
+        persist_event(clean)
+
+    def drain_pending_events() -> None:
+        pending_events.seek(0)
+        for line in pending_events:
+            persist_event(json.loads(line))
+        pending_events.seek(0)
+        pending_events.truncate()
+
+    session: Any = SealedConversation(
+        agent=agent,
+        workspace="/tmp",
+        visualizer=None,
+        conversation_id=conversation_id,
+        callbacks=[retain_event],
+        max_iteration_per_run=sdk_iteration_limit(request["max_iterations"]),
+    )
+
+    def report_error(exc: Exception, **details: Any) -> None:
+        error = {
+            "kind": "error",
+            "error_type": type(exc).__name__,
+            "error_message": str(exc),
+            "traceback": traceback.format_exc(),
+            "iterations": iterations,
+            **details,
+        }
+        error = sanitizer(redaction_specs)(error)
+        print(error["traceback"], file=sink, flush=True)
+        try:
+            emit_events()
+        except Exception:
+            safe_log.write(traceback.format_exc())
+            safe_log.flush()
+        send(error)
+
+    def emit_events() -> None:
+        # The callback persists and streams the same sanitized event exactly once.
+        pass
+
+    try:
+        send({"kind": "ready", "conversation_id": str(session.id)})
+        while True:
+            turn = receive()
+            if turn["kind"] == "close":
+                return
+            if turn["kind"] == "configure":
+                redaction_spec = SimpleNamespace(
+                    model=SimpleNamespace(
+                        config=SimpleNamespace(api_key=turn["llm"]["api_key"])
+                    ),
+                    api_key_env=None,
+                    secrets=turn.get("redaction_secrets", ()),
+                )
+                redaction_specs.append(redaction_spec)
+                try:
+                    with phase("configure.model.initialize"):
+                        replacement = WorkerLLM(**turn["llm"], stream=False)
+                    if (
+                        replacement.custom_tokenizer
+                        and replacement._chat_template_tokenizer is None
+                    ):
+                        raise RuntimeError("TokenizerUnavailable")
+                    with phase("configure.switch_llm"):
+                        session.switch_llm(replacement)
+                    request["disable_prompt_cache_key"] = turn[
+                        "disable_prompt_cache_key"
+                    ]
+                    send({"kind": "configured"})
+                except Exception as exc:
+                    report_error(exc)
+                    return
+                continue
+            if turn["kind"] != "turn":
+                raise RuntimeError("Invalid controller request")
+            try:
+                if "timeout_s" in turn:
+                    deadline = time.monotonic() + turn["timeout_s"]
+                current_turn = {
+                    "call_id": turn.get("call_id"),
+                    "turn_id": turn.get("turn_id"),
+                }
+                event_sequence[0] = 0
+                event_bytes = 0
+                event_omitted = False
+                if event_sink is not None:
+                    event_sink.close()
+                try:
+                    event_sink = os.fdopen(
+                        os.open(
+                            event_path,
+                            os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
+                            0o600,
+                        ),
+                        "wb",
+                    )
+                except OSError:
+                    event_sink = None
+                journal(
+                    {
+                        "kind": "turn",
+                        "conversation_id": str(session.id),
+                        **current_turn,
+                        "at": time.time(),
+                    }
+                )
+                stream_events[0] = True
+                drain_pending_events()
+                with phase("turn.send_message"):
+                    session.send_message(
+                        turn["instruction"] + "\n\n" + COMMAND_GUIDANCE
+                    )
+                with phase("run"):
+                    session.run()
+                status = session.state.execution_status
+                status = getattr(status, "value", status)
+                emit_events()
+                stream_events[0] = False
+                send(
+                    {
+                        "kind": "result",
+                        "status": status,
+                        "iterations": iterations,
+                        "conversation_id": str(session.id),
+                        "events": len(session.state.events),
+                    }
+                )
+            except Exception as exc:
+                report_error(
+                    exc,
+                    budget_exhausted=(
+                        time.monotonic() >= deadline
+                        or (
+                            request["max_iterations"] is not None
+                            and iterations >= request["max_iterations"]
+                        )
+                    ),
+                )
+                return
+    finally:
+        watchdog.cancel()
+        if event_sink is not None:
+            event_sink.close()
+        try:
+            session.close()
+        except Exception:
+            safe_log.write(traceback.format_exc())
+            safe_log.flush()
