@@ -98,6 +98,10 @@ or iterate over it. `result.texts` gives a plain `list[str]`. Per-call metadata 
 entry per completion), `.finish_reasons` (one per completion, `"length"` when it hit `max_tokens`), `.truncated` (how
 many hit it), `.model_id`, and `.raw`. `generate_batch` returns one `GenerateResult` per prompt.
 
+A batch stops sending requests once at least 20 completions have finished and 80% of them hit `max_tokens`:
+it raises `TruncationStopError` with the count and the token units spent on cut-off text. Raise `max_tokens` or lower
+`reasoning_effort`; `FORGER_ALLOW_TRUNCATION=1` turns the stop off.
+
 `model.generate_batch(prompts, n=k)` returns exactly `k` completions per prompt. Claude, Grok, Gemini, o1/o3/o4, and
 gpt-5 models (also behind `litellm_proxy/`, `openrouter/`, or provider prefixes), and models whose LiteLLM supported
 params lack `n`, get `k` concurrent `n=1` requests per prompt, merged into one `GenerateResult` with summed usage and
