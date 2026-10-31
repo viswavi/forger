@@ -98,4 +98,4 @@ Check data quality directly at every stage, before training on it: read samples,
 
 When you run your large-scale run, save your final dataset to {RAW_DATA_PATH}.
 
-You have {TIMEOUT_HOURS} hours to do your work. After this, we will evaluate your selected final RL checkpoint. While you get no points for finishing early, if your training and checkpoint selection are complete, then you are free to end the session early with the finish tool (see Final Submission). Now let’s get started!
+You have {TIMEOUT_HOURS} hours to do your work. After this, we will evaluate your selected final RL checkpoint. While you get no points for finishing early, if your training and checkpoint selection are complete, then you are free to end the session early with the finish tool (see Final Submission). Now let's get started!
