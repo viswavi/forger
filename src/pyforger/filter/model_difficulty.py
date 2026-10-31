@@ -43,8 +43,9 @@ from pyforger.utils import get_field, get_formatted_logger
 
 # A verifier gets the prediction (what extract_answer takes from the
 # completion) and the full row, e.g. to run tests against generated code.
-# None means "could not grade" (excluded, not failed).
-Verifier = Callable[[str, dict], Union[bool, None]]
+# None means "could not grade" (excluded, not failed). by_pass_at_k also takes a
+# score in [0, 1], e.g. a partial-credit grader.
+Verifier = Callable[[str, dict], Union[bool, float, None]]
 Metric = Union[Literal["exact_match", "rouge_l"], Verifier]
 
 
@@ -188,7 +189,7 @@ def by_comparative_difficulty(
         truncated,
     )
     prompts = _prompts(items, input_field, prompt_template)
-    grades: dict[str, list[list[bool | None]]] = {}
+    grades: dict[str, list[list[bool | float | None]]] = {}
     completions: dict[str, list[list[str | None]]] = {}
     for group, model in (("weak", weak_model), ("strong", strong_model)):
         completions[group] = _predictions(
@@ -217,11 +218,16 @@ def by_comparative_difficulty(
         zip(items, grades["weak"], grades["strong"])
     ):
         weak, strong = weak_row[0], strong_row[0]
+        if any(g is not None and not isinstance(g, bool) for g in (weak, strong)):
+            raise TypeError(
+                "by_comparative_difficulty needs a pass/fail metric; a scored "
+                "metric works with by_pass_at_k"
+            )
         if weak is None or strong is None:
             gaps.append(None)
             continue
         gaps.append(int(strong) - int(weak))
-        both_right += weak and strong
+        both_right += bool(weak and strong)
         if strong and not weak:
             kept.append(
                 _annotate(
@@ -282,8 +288,10 @@ def by_pass_at_k(
 ) -> list[dict]:
     """Keep rows whose pass rate over ``k`` samples is within the bounds.
 
-    Each prompt is sent once with ``n=k``. The pass rate is passed / valid
-    grades, and a row is kept when ``min_rate <= rate <= max_rate``. All
+    Each prompt is sent once with ``n=k``. The pass rate is the mean of the
+    valid grades (``True`` counts 1, ``False`` 0; a verifier may also return a
+    score in [0, 1], e.g. a partial-credit grader, making the rate its mean
+    score), and a row is kept when ``min_rate <= rate <= max_rate``. All
     ``k`` grades must be valid unless ``min_valid`` allows exclusions, and a
     row with no valid grade never passes.
     E.g. with ``k=4``, grades ``[True, False, None, False]`` are dropped by
@@ -335,9 +343,10 @@ def by_pass_at_k(
         max_tokens: Max tokens per completion (the model's default when None).
         batch_size: Prompts per ``model.generate_batch()`` call; None (default)
             sends all of them in one call, up to the model's concurrency cap.
-        outcomes_field: When set, kept rows carry ``{"model": [bool | None] * k}``
-            under this key, replacing any value already there, so a later
-            filter can re-select them without new model calls.
+        outcomes_field: When set, kept rows carry
+            ``{"model": [bool | float | None] * k}`` under this key, replacing
+            any value already there, so a later filter can re-select them
+            without new model calls.
         completions_field: When set, kept rows carry the ``k`` raw completions
             as ``{"model": [str | None] * k}`` under this key, in the same
             order as the grades (``None`` for an empty completion).
@@ -510,7 +519,7 @@ def _grades(
     extract_answer: Callable[[str], str | None],
     verifier_workers: int = 1,
     truncated: Literal["fail", "exclude"] = "exclude",
-) -> list[list[bool | None]]:
+) -> list[list[bool | float | None]]:
     """Grade each row's completions against its ground truth or a verifier.
 
     A completion grades ``None`` when ``extract_answer`` returns ``None`` for
@@ -549,15 +558,15 @@ def _grade_predictions(
     metric: Metric,
     rouge_l_threshold: float,
     verifier_workers: int,
-) -> list[list[bool | None]]:
+) -> list[list[bool | float | None]]:
     """Grade extracted predictions; a ``None`` prediction grades ``None``."""
     if callable(metric):
         return _verify(items, predictions, metric, verifier_workers)
     assert ground_truth_field is not None  # checked by _check_common
-    out: list[list[bool | None]] = []
+    out: list[list[bool | float | None]] = []
     for item, row in zip(items, predictions):
         reference = get_field(item, ground_truth_field, "filter.model_difficulty")
-        row_grades: list[bool | None] = []
+        row_grades: list[bool | float | None] = []
         for prediction in row:
             if prediction is None:
                 row_grades.append(None)
@@ -575,14 +584,14 @@ def _verify(
     predictions: list[list[str | None]],
     verifier: Verifier,
     workers: int,
-) -> list[list[bool | None]]:
+) -> list[list[bool | float | None]]:
     """Run ``verifier`` on every prediction, ``workers`` calls at a time.
 
     E.g. 111 rows x 4 samples of a verifier that runs tests take minutes one by
     one. Each call runs in a copy of the caller's context, so ops it calls are
     cached and reported as they would be without threads.
     """
-    out: list[list[bool | None]] = [[None] * len(row) for row in predictions]
+    out: list[list[bool | float | None]] = [[None] * len(row) for row in predictions]
     jobs = [
         (i, j)
         for i, row in enumerate(predictions)
@@ -590,13 +599,18 @@ def _verify(
         if prediction is not None
     ]
 
-    def grade(i: int, j: int) -> bool | None:
+    def grade(i: int, j: int) -> bool | float | None:
         result = verifier(predictions[i][j], items[i])  # type: ignore[arg-type]
         if result is not None and not isinstance(result, bool):
-            raise TypeError(f"metric must return bool or None, got {result!r}")
+            if not isinstance(result, (int, float)) or not 0 <= result <= 1:
+                raise TypeError(
+                    "metric must return bool, a score in [0, 1], or None, "
+                    f"got {result!r}"
+                )
+            result = float(result)
         return result
 
-    def grade_in(context: contextvars.Context, i: int, j: int) -> bool | None:
+    def grade_in(context: contextvars.Context, i: int, j: int) -> bool | float | None:
         return context.run(grade, i, j)
 
     if workers <= 1 or len(jobs) <= 1:
@@ -617,21 +631,28 @@ def _verify(
     return out
 
 
-def _pass_rate(grades: list[bool | None], min_valid: int | None) -> float | None:
-    """Pass rate (passed / valid grades), or None if the row fails ``min_valid``.
+def _pass_rate(
+    grades: list[bool | float | None], min_valid: int | None
+) -> float | None:
+    """Mean valid grade (True 1, False 0, scores as given), or None per ``min_valid``.
 
     None when no grade is valid or fewer than ``min_valid`` (default: all) are.
     """
-    valid = sum(g is not None for g in grades)
-    if not valid or valid < (min_valid or len(grades)):
+    valid = [g for g in grades if g is not None]
+    if not valid or len(valid) < (min_valid or len(grades)):
         return None
-    return sum(g is True for g in grades) / valid
+    for g in valid:
+        if not isinstance(g, bool) and not 0 <= g <= 1:
+            raise ValueError(
+                f"a by_pass_at_k grade must be a bool or in [0, 1], not {g!r}"
+            )
+    return sum(float(g) for g in valid) / len(valid)
 
 
 def _annotate(
     item: dict,
     outcomes_field: str | None,
-    grades: dict[str, list[bool | None]],
+    grades: dict[str, list[bool | float | None]],
     completions_field: str | None,
     completions: dict[str, list[str | None]],
 ) -> dict:
