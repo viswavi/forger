@@ -530,7 +530,7 @@ def test_timed_out_attempts_stay_charged(monkeypatch, tmp_path, complete):
     model = Model(DEEPSEEK, num_retries=1, max_tokens=100)
     model.generate("Hello")
     state = model._token_budget.snapshot()
-    # The timed-out attempt: 3 prompt tokens (5 characters / 2) + 100 x 3.
+    # The timed-out attempt: 2 prompt tokens (5 characters / 3) + 100 x 3.
     assert state["unreturned_calls"] == 1
-    assert state["token_units"] == 303 + 70
+    assert state["token_units"] == 302 + 70
     assert state["held_token_units"] == 0
