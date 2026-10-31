@@ -33,8 +33,10 @@ from pyforger.evidence_journal import (
     iter_trajectory_events,
 )
 from pyforger.measurements import Measurement
+from pyforger.sail_provision import create_sailbox
 from pyforger.sdk_config import llm_options
 from pyforger.structured import generate_validated
+from pyforger.usage import combine_usage, usage_record
 from pyforger.utils import redact
 
 SDK_VERSION = "1.58.0"
@@ -42,7 +44,7 @@ SDK_VERSION = "1.58.0"
 # released SDK versions containing both changes.
 SDK_REQUIREMENT = (
     "openhands-sdk @ git+https://github.com/neubig/software-agent-sdk.git"
-    "@3e83b0734add43f40b45f89f16cdfb75356ff01e#subdirectory=openhands-sdk"
+    "@a8e34dd0f4475553855a78c69369a4a37d24e125#subdirectory=openhands-sdk"
 )
 TOOLS_REQUIREMENT = SDK_REQUIREMENT.replace("openhands-sdk", "openhands-tools")
 
@@ -122,9 +124,9 @@ class _FrameWriter:
     def __init__(self, stdin: Any, timeout_s: float = STDIN_WRITE_TIMEOUT_S) -> None:
         self._stdin = stdin
         self._timeout_s = timeout_s
-        self._queue: queue.Queue[tuple[str, threading.Event, dict[str, Any]] | None] = (
-            queue.Queue(maxsize=OUTBOUND_QUEUE_FRAMES)
-        )
+        self._queue: queue.Queue[
+            tuple[str, threading.Event, dict[str, Any]] | None
+        ] = queue.Queue(maxsize=OUTBOUND_QUEUE_FRAMES)
         self._error: BaseException | None = None
         self._pending: deque[tuple[threading.Event, float, dict[str, Any]]] = deque()
         self._lock = threading.Lock()
@@ -618,6 +620,8 @@ def remote_sdk_session(
     validate: Any,
     max_repairs: int,
     diagnostics: dict[str, Any],
+    *,
+    require_outputs: bool = True,
 ) -> Any:
     """Own one real remote conversation across multiple host generation calls."""
     import sail
@@ -678,15 +682,15 @@ def remote_sdk_session(
     def create_worker() -> Any:
         attempt = diagnostics.get("sdk_worker_attempts", 0) + 1
         diagnostics["sdk_worker_attempts"] = attempt
-        started = time.monotonic()
-        instance = sail.Sailbox.create(
+        instance = create_sailbox(
+            sail.Sailbox.create,
+            budget=budget,
+            setup_times=diagnostics.setdefault("sdk_worker_setup_s", []),
             app=sail.App.find(backend.app, mint_if_missing=True),
             image=image,
-            image_build_timeout=max(1, math.ceil(budget.remaining_s())),
             name="forger-sdk-" + uuid.uuid4().hex,
             memory_limit_gib=8,
             egress_policy={"allowlist": [urlsplit(endpoint).hostname]},
-            timeout=budget.remaining_s(),
             max_lifetime_seconds=max(60, math.ceil(budget.remaining_s()) + 60),
         )
         diagnostics.update(
@@ -694,11 +698,6 @@ def remote_sdk_session(
             execution_mode="remote-sdk",
             sdk_version=SDK_VERSION,
             sdk_cleanup="pending",
-        )
-        # Provisioning is infrastructure, not agent work: credit it back so a
-        # slow image build cannot eat the time the agent needs to do the task.
-        diagnostics.setdefault("sdk_worker_setup_s", []).append(
-            round(budget.exempt_elapsed_s(started), 3)
         )
         diagnostics["sdk_worker_sailbox_ids"] = diagnostics.get(
             "sdk_worker_sailbox_ids", []
@@ -752,6 +751,7 @@ def remote_sdk_session(
             "_sail_sdk_worker.py",
             "_sail_sdk_transport.py",
             "_sdk_runtime.py",
+            "usage.py",
             "agent_diagnostics.py",
         ):
             worker.fs.write(
@@ -796,12 +796,18 @@ def remote_sdk_session(
         writer = _FrameWriter(connection.stdin)
         incoming = _incoming_frames(connection.stdout, writer, budget)
         event_parts: list[str] = []
+        usage_parts: list[dict[str, Any]] = []
 
         def send(value: dict[str, Any]) -> None:
             budget.remaining_s()
             writer.send(value)
 
         def handle_error(frame: dict[str, Any]) -> None:
+            if "usage" in frame:
+                usage_parts.append(frame["usage"])
+                diagnostics["usage"] = combine_usage(
+                    usage_parts, call_id=current["call_id"]
+                )
             budget.iterations = frame["iterations"]
             diagnostics["budget_exhausted"] = frame.get("budget_exhausted", False)
             diagnostics["execution_status"] = "error"
@@ -850,6 +856,9 @@ def remote_sdk_session(
             diagnostics["current_trajectory"] = current
             diagnostics["trajectory"] = current
             attempt_record["turns"].append(current)
+            diagnostics["usage"] = combine_usage(
+                [*usage_parts, usage_record()], call_id=call_id
+            )
             send(
                 {
                     "kind": "turn",
@@ -896,6 +905,11 @@ def remote_sdk_session(
                 elif kind == "error":
                     handle_error(frame)
                 elif kind == "result":
+                    if "usage" in frame:
+                        usage_parts.append(frame["usage"])
+                        diagnostics["usage"] = combine_usage(
+                            usage_parts, call_id=current["call_id"]
+                        )
                     budget.iterations = frame["iterations"]
                     diagnostics["budget_exhausted"] = (
                         frame["status"] != "finished"
@@ -936,7 +950,7 @@ def remote_sdk_session(
             missing = [name for name in task.outputs if name not in files]
             value = (
                 Measurement(passed=False, reason=f"Missing declared outputs: {missing}")
-                if missing
+                if missing and require_outputs
                 else validate(files)
             )
             budget.remaining_s()
@@ -964,7 +978,9 @@ def remote_sdk_session(
             next_spec: Any = None,
         ) -> Any:
             nonlocal task, validate, max_repairs, spec, call_id, current
+            usage_parts.clear()
             call_id = uuid.uuid4().hex
+            diagnostics["usage"] = usage_record({"call_id": call_id})
             current = {
                 "call_id": call_id,
                 "turn_id": None,
@@ -1159,9 +1175,18 @@ def _run_remote_sdk_once(
     validate: Any,
     max_repairs: int,
     diagnostics: dict[str, Any],
+    *,
+    require_outputs: bool = True,
 ) -> tuple[Any, Any]:
     with remote_sdk_session(
-        backend, transport, task, spec, validate, max_repairs, diagnostics
+        backend,
+        transport,
+        task,
+        spec,
+        validate,
+        max_repairs,
+        diagnostics,
+        require_outputs=require_outputs,
     ) as run:
         return run(task, validate, max_repairs)
 
@@ -1174,8 +1199,17 @@ def run_remote_sdk(
     validate: Any,
     max_repairs: int,
     diagnostics: dict[str, Any],
+    *,
+    require_outputs: bool = True,
 ) -> tuple[Any, Any]:
     """Run one conversation; transport retries reconnect only to its daemon."""
     return _run_remote_sdk_once(
-        backend, transport, task, spec, validate, max_repairs, diagnostics
+        backend,
+        transport,
+        task,
+        spec,
+        validate,
+        max_repairs,
+        diagnostics,
+        require_outputs=require_outputs,
     )

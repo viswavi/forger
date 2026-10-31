@@ -33,6 +33,7 @@ from pyforger.agent_backends import require_learner_runtime
 from pyforger.artifacts import FileInput
 from pyforger.local_agent import _execute, agent_llm
 from pyforger.measurements import Measurement
+from pyforger.usage import sdk_usage, usage_record
 
 
 def _workspace_text(root: Path, text: str) -> str:
@@ -199,6 +200,16 @@ class LocalBackend:
     supports_inner_loop_validation = True
     supports_sdk_condensation = True
 
+    def open_session(self, *, deadline: float | None = None) -> Any:
+        """Retain a generation conversation until close, with cumulative budgets.
+
+        ``deadline`` is an optional absolute ``time.monotonic()`` deadline.
+        Fresh run_agent calls on this backend remain independent.
+        """
+        from pyforger.reusable_session import LocalSession
+
+        return LocalSession(self, deadline=deadline)
+
     def cache_key(self) -> object:
         """Return the local executor identity for cache keys."""
         return ("local-backend-v1", sys.version_info[:2])
@@ -236,7 +247,8 @@ class LocalBackend:
                         diagnostics["stderr"] = result.stderr[-4000:]
                 elif agent.kind == "openhands-sdk":
                     diagnostics.update(self._run_sdk(root, task, agent, budget))
-            except subprocess.TimeoutExpired:
+            except subprocess.TimeoutExpired as error:
+                diagnostics.update(getattr(error, "diagnostics", {}))
                 status = "timed_out"
             passed = None
             failure_kind = None
@@ -261,6 +273,9 @@ class LocalBackend:
                 diagnostics=diagnostics,
                 failure_kind=failure_kind,
                 trajectory=diagnostics.get("trajectory"),
+                usage=diagnostics.get(
+                    "usage", usage_record(zero=agent.kind in {"oracle", "nop"})
+                ),
             )
 
     def run_agent_validated(
@@ -334,6 +349,9 @@ class LocalBackend:
                     files=_collect(root, task.outputs),
                     validation_attempts=result.attempts,
                     trajectory=retained_trajectory,
+                    usage=sdk_usage(session)
+                    if agent.kind == "openhands-sdk"
+                    else usage_record(zero=True),
                     diagnostics={
                         **diagnostics,
                         "iterations": budget.iterations,
@@ -353,6 +371,7 @@ class LocalBackend:
                         retained = None
                     exc.diagnostics = {
                         "trajectory": retained,
+                        "usage": sdk_usage(session, incomplete=True),
                         "iterations": budget.iterations,
                     }
                 raise
@@ -460,10 +479,16 @@ class LocalBackend:
             status = session.state.execution_status
             if getattr(status, "value", status) != "finished":
                 raise RuntimeError(f"Agent execution did not finish: {status}")
-            return {"trajectory": self._trajectory(session, agent)}
+            return {
+                "trajectory": self._trajectory(session, agent),
+                "usage": sdk_usage(session),
+            }
         except BaseException as exc:
             try:
-                exc.diagnostics = {"trajectory": self._trajectory(session, agent)}
+                exc.diagnostics = {
+                    "trajectory": self._trajectory(session, agent),
+                    "usage": sdk_usage(session, incomplete=True),
+                }
             except Exception:
                 pass
             raise

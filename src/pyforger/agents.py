@@ -59,7 +59,7 @@ def generate_files(
     network: Network = Network.MODEL,
     timeout_s: float = 600.0,
     validate: Callable[[dict[str, bytes]], Measurement] | None = None,
-    max_repairs: int = 2,
+    max_repairs: int | None = None,
 ) -> dict[str, bytes]:
     """Produce declared files, optionally repairing them in the same session.
 
@@ -77,6 +77,8 @@ def generate_files(
         timeout_s=timeout_s,
     )
     executor = _default(backend)
+    if max_repairs is None:
+        max_repairs = getattr(executor, "retry_limit", 2)
     if type(max_repairs) is not int or max_repairs < 0:
         raise ValueError("max_repairs must be a nonnegative integer")
     if validate is None:
@@ -106,8 +108,8 @@ def generate_object(
     agent: AgentSpec,
     backend: AgentBackend | None = None,
     inner_loop_validation: bool = True,
-    max_repairs: int = 2,
-    max_attempts: int = 3,
+    max_repairs: int | None = None,
+    max_attempts: int | None = None,
     packages: tuple[str, ...] = (),
     network: Network = Network.MODEL,
     timeout_s: float = 600.0,
@@ -122,6 +124,16 @@ def generate_object(
     Exhaustion raises ValidationExhausted retaining raw files, never partial
     parsed values. Parsing should be deterministic and must not mutate files.
     """
+    executor = _default(backend)
+    retries = getattr(executor, "retry_limit", None)
+    if max_repairs is None:
+        max_repairs = retries if retries is not None else 2
+    if max_attempts is None:
+        max_attempts = (
+            1
+            if retries is not None and inner_loop_validation
+            else (retries + 1 if retries is not None else 3)
+        )
     if type(max_attempts) is not int or max_attempts < 1:
         raise ValueError("max_attempts must be a positive integer")
     if type(max_repairs) is not int or max_repairs < 0:
