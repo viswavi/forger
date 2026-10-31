@@ -25,6 +25,7 @@ DEFAULT_REASONING_EFFORT = _units.DEFAULT_REASONING_EFFORT
 TokenUnitBudget = _units.TokenUnitBudget
 TokenUnitQuotaExceeded = _units.TokenUnitQuotaExceeded
 default_rl_limit = _units.default_rl_limit
+held_units = _units.held_units
 model_weights = _units.model_weights
 response_token_counts = _units.response_token_counts
 response_cost_usd = _units.response_cost_usd
@@ -76,18 +77,40 @@ def _prepare(budget, kwargs):
     model_weights(kwargs.get("model"))
     if kwargs.get("stream"):
         raise ValueError("Token-budget helpers require non-streaming responses")
+    if kwargs.get("num_retries"):
+        # A retried attempt the gateway still bills would never be recorded.
+        raise ValueError(
+            "Token-budget helpers count one attempt per call; retry yourself"
+        )
     kwargs.setdefault("max_tokens", 4096)
     ledger.check()
     return ledger
 
 
-def _record(ledger, model, result):
+def _hold(ledger, kwargs):
+    """Hold the call's worst case while it is in flight (`TokenUnitBudget.hold`)."""
+    units = held_units(
+        kwargs["model"],
+        kwargs.get("messages") or [],
+        kwargs.get("n") or 1,
+        kwargs.get("max_tokens"),
+    )
+    return ledger.hold(kwargs["model"], units)
+
+
+def _record(ledger, model, result, hold):
     try:
         prompt, completion = response_token_counts(result)
     except ValueError:
-        ledger.mark_unmetered()
+        ledger.mark_unmetered(hold)
         raise
-    ledger.record(model, prompt, completion, cost_usd=response_cost_usd(result, model))
+    ledger.record(
+        model,
+        prompt,
+        completion,
+        cost_usd=response_cost_usd(result, model),
+        hold=hold,
+    )
     return result
 
 
@@ -96,8 +119,9 @@ def completion(*, budget="generation", **kwargs):
     import litellm
 
     ledger = _prepare(budget, kwargs)
-    result = litellm.completion(**kwargs)
-    return _record(ledger, kwargs["model"], result)
+    with _hold(ledger, kwargs) as hold:
+        result = litellm.completion(**kwargs)
+    return _record(ledger, kwargs["model"], result, hold)
 
 
 async def acompletion(*, budget="generation", **kwargs):
@@ -105,5 +129,6 @@ async def acompletion(*, budget="generation", **kwargs):
     import litellm
 
     ledger = _prepare(budget, kwargs)
-    result = await litellm.acompletion(**kwargs)
-    return _record(ledger, kwargs["model"], result)
+    with _hold(ledger, kwargs) as hold:
+        result = await litellm.acompletion(**kwargs)
+    return _record(ledger, kwargs["model"], result, hold)
