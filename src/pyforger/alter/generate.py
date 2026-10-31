@@ -471,7 +471,9 @@ def self_taught_reasoner(
     extract_answer: Callable[[str], Any] | None = None,
     match_fn: Callable[[Any, Any], bool] | None = None,
     filter_fn: Callable[[list[dict]], list[dict]] | None = None,
-    verifier: Callable[[str, dict], bool | None] | None = None,
+    verifier: Callable[[str, dict], bool | float | None] | None = None,
+    min_score: float = 1.0,
+    keep: str = "all",
     max_workers: int | None = None,
     rationalize: bool = True,
     hint_fn: PromptTemplate | None = None,
@@ -559,10 +561,15 @@ def self_taught_reasoner(
             Ignored when ``filter_fn`` is given.
         filter_fn: Optional ``list[dict] -> list[dict]`` acceptance filter over
             candidate rows. Overrides the default answer-matching path.
-        verifier: Optional ``(answer, row) -> bool | None`` acceptance check,
-            given ``answer_field`` (the response after its reasoning) and the
-            candidate row (the item's fields plus the response fields). With
-            it, ``reference_field`` is not needed and is left unchanged.
+        verifier: Optional ``(answer, row) -> bool | float | None`` acceptance
+            check, given ``answer_field`` (the response after its reasoning) and
+            the candidate row (the item's fields plus the response fields). With
+            it, ``reference_field`` is not needed and is left unchanged. A float
+            is a score: the response is kept at ``min_score`` or above, and
+            ``verifier_score`` holds it.
+        min_score: The lowest kept score when ``verifier`` returns floats.
+        keep: ``"all"`` keeps every accepted response; ``"best"`` keeps one per
+            item, its highest-scoring accepted response (the first on a tie).
         max_workers: Verifier calls at a time (default 8).
         rationalize: Re-sample unsolved items with a hint (default True).
         hint_fn: Format string or ``(dict) -> Prompt`` for the hinted prompt;
@@ -607,6 +614,8 @@ def self_taught_reasoner(
     log = _get_logger()
     if filter_fn is not None and verifier is not None:
         raise ValueError("pass filter_fn or verifier, not both")
+    if keep not in ("all", "best"):
+        raise ValueError(f'keep must be "all" or "best", not {keep!r}')
     if answer_judge is not None:
         others = {"match_fn": match_fn, "verifier": verifier, "filter_fn": filter_fn}
         given = [name for name, value in others.items() if value is not None]
@@ -685,7 +694,9 @@ def self_taught_reasoner(
         if filter_fn is not None:
             return filter_fn(candidates)
         if verifier is not None:
-            return _verified(candidates, verifier, answer_field, max_workers or 8)
+            return _verified(
+                candidates, verifier, answer_field, max_workers or 8, min_score
+            )
         if answer_judge is not None:
             return _judged(
                 candidates,
@@ -707,12 +718,15 @@ def self_taught_reasoner(
     def accept_per_item(per_item: list[list[dict]]) -> list[list[dict]]:
         """`accept` over all candidates at once, regrouped by item."""
         kept_ids = {id(c) for c in accept([c for cs in per_item for c in cs])}
-        return [[c for c in cs if id(c) in kept_ids] for cs in per_item]
+        regrouped = [[c for c in cs if id(c) in kept_ids] for cs in per_item]
+        if keep == "best":
+            return [[_best(cs)] if cs else [] for cs in regrouped]
+        return regrouped
 
     first = sample(items, prompt_fn, None)
     n_candidates = sum(len(cs) for cs in first)
     if not rationalizing:
-        kept = accept([c for cs in first for c in cs])
+        kept = [c for cs in accept_per_item(first) for c in cs]
     else:
         # "Solved" is whatever accept() uses: matching, verifier, or the judge.
         kept_per_item = accept_per_item(first)
@@ -961,13 +975,23 @@ def _context_run() -> Callable[..., Any]:
     return run
 
 
+def _best(candidates: list[dict]) -> dict:
+    """The highest ``verifier_score`` (1 when absent), the first on a tie."""
+    return max(candidates, key=lambda c: c.get("verifier_score", 1.0))
+
+
 def _verified(
     candidates: list[dict],
-    verifier: Callable[[str, dict], bool | None],
+    verifier: Callable[[str, dict], bool | float | None],
     answer_field: str,
     workers: int,
+    min_score: float = 1.0,
 ) -> list[dict]:
-    """The candidates ``verifier`` accepts, in order; ``workers`` calls at a time."""
+    """The candidates ``verifier`` accepts, in order; ``workers`` calls at a time.
+
+    ``True`` accepts; a float score accepts at ``min_score`` or above and is
+    stored as ``verifier_score``.
+    """
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [
             pool.submit(
@@ -984,4 +1008,12 @@ def _verified(
             for f in futures:
                 f.cancel()
             raise
-    return [c for c, ok in zip(candidates, verdicts) if ok is True]
+    kept = []
+    for candidate, verdict in zip(candidates, verdicts):
+        if isinstance(verdict, bool) or verdict is None:
+            if verdict is True:
+                kept.append(candidate)
+        elif verdict >= min_score:
+            candidate["verifier_score"] = float(verdict)
+            kept.append(candidate)
+    return kept

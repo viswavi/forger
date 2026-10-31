@@ -49,7 +49,9 @@ correct means the final answer matches `reference_field` (default `"final_answer
 
 Pass `verifier=` for any other check: a `(answer, row) -> bool | None` that keeps a response when it returns `True`
 (`reference_field` is then not needed). Examples: `filter.program_verifier("tests")` for code, or your own rubric
-grader that returns `True` only for full-mark samples.
+grader that returns `True` only for full-mark samples. A verifier may instead return a score (e.g. a partial-credit
+grader): responses at `min_score` or above are kept, with the score in `verifier_score`. `keep="best"` keeps only each
+item's highest-scoring accepted response (default `"all"`).
 
 ```python
 from pyforger.alter import self_taught_reasoner
