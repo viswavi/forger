@@ -313,7 +313,7 @@ def test_generated_program_receives_prepared_url(monkeypatch):
     version = importlib.metadata.version("RestrictedPython")
     if tuple(map(int, version.split(".")[:2])) < (8, 4):
         pytest.skip("Dynamic worker requires RestrictedPython >=8.4")
-    local_agent = importlib.import_module("pyforger.alter.dynamic")
+    from pyforger import local_agent
 
     try:
         local_agent._require_dynamic_platform()

@@ -81,6 +81,7 @@ class ModelSettings(BaseModel):
     extra_body: dict[str, Any] = Field(default_factory=dict)
     api_mode: Literal["auto", "chat", "responses"] = "auto"
     capability_overrides: dict[str, bool | str] = Field(default_factory=dict)
+    custom_tokenizer: str | None = None
 
 
 class GenerateResult(list[str]):
@@ -308,6 +309,7 @@ class Model:
         extra_body: dict[str, Any] | None = None,
         api_mode: Literal["auto", "chat", "responses"] | None = None,
         capability_overrides: dict[str, bool | str] | None = None,
+        custom_tokenizer: str | None = None,
         **kwargs: Any,
     ) -> None:
         """Create a Model instance.
@@ -331,9 +333,12 @@ class Model:
             extra_body: Extra provider request body fields.
             api_mode: SDK endpoint mode (auto, chat, or responses).
             capability_overrides: SDK model capability overrides.
+            custom_tokenizer: Optional tokenizer repo or path forwarded
+                to SDK agents.
         """
         self.config = ModelSettings(
             model_id=model_id,
+            custom_tokenizer=custom_tokenizer,
             api_key=api_key,
             temperature=temperature,
             max_tokens=max_tokens,
