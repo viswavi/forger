@@ -19,6 +19,7 @@ import threading
 import time
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import cast
 
 import pytest
 import urllib3
@@ -58,7 +59,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         """Serve the next queued route for this path and record the request."""
-        server = self.server
+        server = cast(_Server, self.server)
         server.requests.append((self.path, self.headers.get("Host")))
         route = server.next_route(self.path.partition("?")[0])
         if route.reset:
@@ -93,11 +94,15 @@ class _Server(ThreadingHTTPServer):
 
     def __init__(
         self,
-        *args: object,
+        server_address: tuple[str, int],
+        RequestHandlerClass: type[BaseHTTPRequestHandler],
+        *,
         routes: dict[str, list[_Route]],
-        **kwargs: object,
+        bind_and_activate: bool = True,
     ) -> None:
-        super().__init__(*args, **kwargs)
+        super().__init__(
+            server_address, RequestHandlerClass, bind_and_activate=bind_and_activate
+        )
         self.routes = routes
         self.requests: list[tuple[str, str | None]] = []
 
