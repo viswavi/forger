@@ -236,3 +236,49 @@ def test_execution_errors_are_not_retried(inner):
             inner_loop_validation=inner,
         )
     assert len(backend.tasks) == 1
+
+
+@pytest.mark.parametrize("inner", [False, True])
+def test_additional_outputs_are_collected(inner):
+    """Declared extra outputs are collected; the named output stays required."""
+    backend = RecordingBackend()
+
+    def parse_both(files):
+        assert json.loads(files["staged.json"]) == {"value": 2}
+        return parse(files)
+
+    result = agents.generate_object(
+        "Produce answer.json",
+        {"staged.json": '{"value": 1}', "seed.txt": "seed"},
+        "answer.json",
+        parse=parse_both,
+        agent=AgentSpec(
+            kind="oracle",
+            solution=(
+                "printf '{\"value\": 2}' > staged.json; "
+                "printf '{\"accepted\":true}' > answer.json"
+            ),
+        ),
+        backend=backend,
+        inner_loop_validation=inner,
+        max_repairs=0,
+        outputs=("answer.json", "staged.json"),
+    )
+    assert result == {"accepted": True}
+    assert backend.tasks[0].outputs == ("answer.json", "staged.json")
+
+    # The named output is still the only required one: extras may be absent.
+    with pytest.raises(ValidationExhausted, match="Missing declared outputs"):
+        agents.generate_object(
+            "Produce answer.json",
+            {},
+            "answer.json",
+            parse=parse,
+            agent=AgentSpec(kind="nop"),
+            backend=RecordingBackend(),
+            inner_loop_validation=inner,
+            max_attempts=1,
+            max_repairs=0,
+            outputs=("answer.json", "staged.json"),
+        )
+
