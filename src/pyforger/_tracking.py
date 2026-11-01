@@ -139,6 +139,7 @@ PIPELINE_SUPPRESS_FLAGS = {
     "suppress_no_diversity_filter_warning": "no_diversity_filter",
     "suppress_no_inspect_warning": "no_inspect",
     "suppress_retrieval_warning": "retrieval_unused",
+    "suppress_low_yield_warning": "low_yield",
 }
 # What happened instead, for a flag whose problem never fired.
 _INSTEAD = {
@@ -148,9 +149,10 @@ _INSTEAD = {
     "no_diversity_filter": "a diversity filter ran",
     "no_inspect": "an inspect op ran",
     "retrieval_unused": "retrieved text reached a prompt or the output",
+    "low_yield": "at least 10% of the first step's rows reached the output",
 }
 # Data problems: suppressing one hides rows lost, so a stale flag is a warning.
-_DATA_KINDS = frozenset({"truncation", "retrieval_unused"})
+_DATA_KINDS = frozenset({"truncation", "retrieval_unused", "low_yield"})
 STALE_SUPPRESSION = "stale_suppression"
 
 
