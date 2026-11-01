@@ -1384,13 +1384,20 @@ _NOTE_YIELD = 0.3
 def _yield_check(rec: PipelineRecord, real: list[StepRecord]) -> None:
     """Warn when few of the first step's rows reach the output, naming the worst step.
 
+    In a limited run only ``limit`` rows go on from the first step, so the
+    yield is out of those, not the first step's full output.
+
     e.g. "3 of 536 rows (0.6%) from step briefs reached the output; validate
     dropped the most (533 -> 3)". A limited run also says what 100 rows give.
     """
     first = next((s for s in real if s.n_out), None)
     if first is None or first.n_out is None or rec.n_out is None or len(real) < 2:
         return
-    kept = rec.n_out / first.n_out
+    # A limited run passes at most `limit` rows from the first step to the next.
+    base = first.n_out
+    if rec.smoke_rows is not None:
+        base = min(base, rec.smoke_rows)
+    kept = rec.n_out / base
     if kept >= _NOTE_YIELD:
         return
     drops = [
@@ -1399,7 +1406,7 @@ def _yield_check(rec: PipelineRecord, real: list[StepRecord]) -> None:
         if s.n_in is not None and s.n_out is not None and s.n_in > s.n_out
     ]
     message = (
-        f"{rec.n_out} of {first.n_out} rows ({kept:.1%}) from step {first.name} "
+        f"{rec.n_out} of {base} rows ({kept:.1%}) from step {first.name} "
         "reached the output"
     )
     if drops:
