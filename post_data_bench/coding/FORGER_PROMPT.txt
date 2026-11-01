@@ -20,6 +20,13 @@ Finally, each @step should include a filter step that serves as a contract to ve
 
 Record your decisions as you make them: before your first full-scale pipeline run, write {AGENT_DATA_DIR}/DECISIONS.md listing, for each stage (task sources, refinement, ground truth, filters), the alternatives you tried, the evidence for each (e.g. limited runs compared with `pyforger.inspect.runs()`, inspect reports, step reports), and what you chose and why. Keep it updated whenever you change course.
 
+Forger ops for common needs:
+- The student's difficulty on your rows: `filter.by_pass_at_k(rows, model=student, metric=...)`; a metric may return a score, e.g. `rubric_score()`.
+- The student's own correct traces: `alter.self_taught_reasoner(..., verifier=..., keep="best")`.
+- Comparing pipeline variants: limited runs (`FORGER_LIMIT=3`), then `pyforger.inspect.runs()`.
+- Your rows against a reference set such as validation: `pyforger.inspect.compare_to_reference`.
+- A step's cached rows: `pyforger.inspect.inspect_step("name", rows=True)`.
+
 When `generate_custom_rubric` or `convert_rubric_criteria` writes code criteria, pass the sandbox rules (see Data Format) and the `run_program` and `call_method` helpers as `code_guidelines=` (a string), so the criteria it writes compile in the RL grader and test responses through those helpers.
 
 Before RL, `pyforger.inspect.rubric_scores(rows, rubric_score(), response_fields="ground_truth")` (with `from rl.solution_runner import rubric_score`) helps you understand your rubric's behavior on sampled responses.
