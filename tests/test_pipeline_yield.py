@@ -63,3 +63,9 @@ def test_limited_run_projects_rows_per_hundred():
     assert any(
         "every 100 rows from make give about" in m for m in rec.warnings + rec.notes
     )
+
+
+def test_limited_run_counts_only_the_rows_passed_on():
+    """limit=5 passes 5 of make's 100 rows on; keeping all 5 is no low yield."""
+    rec = _run(100, limit=5)
+    assert not any("reached the output" in m for m in rec.warnings + rec.notes)
