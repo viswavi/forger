@@ -24,6 +24,15 @@ Public validation examples are shown in {TASK_DIR}/validation_tasks.jsonl -- use
 
 "task_text" (and the "question" field in model_outputs/{BASELINE_MODEL}/val/predictions.jsonl) is the exact user-turn prompt text shown to a candidate model at evaluation time: "Problem:", a blank line, the statement, a blank line, a "Judging limits ..." line giving the problem's enforced time and memory limits and the compiler, a blank line, and "Generate solution code:". A system message, separate from task_text (`SYSTEM_PROMPT` in {TASK_DIR}/prompt_building.py), asks for a C++ solution that respects the stated limits, wrapped in a ```cpp fence, with no other text. The evaluator takes the longest ```cpp block in the text after the final </think>; a response with no code scores 0. Your submitted prompts are used verbatim for training, so build them the same way: `prompt_building.build_user_content(statement, time_limit_s, memory_mb)` gives the task_text, and `prompt_building.build_candidate_prompt(task_text)` the system message followed by the user turn. Training on any other prompt format will not transfer to evaluation."""
 
+# The Forger arm's task opens by framing the run as a Forger demonstration.
+TASK_OPENING = "You must generate a training dataset to help"
+FORGER_OPENING = (
+    "You must produce a demonstration of how to effectively and extensively use a new data "
+    "generation library called Forger. You will show that your demonstration is effective by "
+    "generating a training dataset to help"
+)
+assert TASK_OPENING in TASK
+
 GROUND_TRUTH = """- "ground_truth" is the complete SFT target: a nonempty thinking trace inside <think>...</think>, then the final answer: one complete C++17 program in a ```cpp fence. Targets need long-form thinking traces well-suited to the student model ({STUDENT_MODEL}), which is trained and evaluated in thinking mode; only the text after the final </think> is graded."""
 
 # TODO(harness): judge_cpp / Sandbox().judge_cpp and solution_runner support for
@@ -74,8 +83,11 @@ def build(source: Path) -> str:
     lines = source.read_text().split("\n")
     # An opening before the task section (the Forger arm's) is kept as is.
     task = next(i for i, line in enumerate(lines) if line.startswith("# Task"))
-    out = lines[:task] + [TASK, ""]
     native = "minimal_scaffold" in source.name
+    out = lines[:task] + [
+        TASK if native else TASK.replace(TASK_OPENING, FORGER_OPENING, 1),
+        "",
+    ]
     rules = [
         ('- "ground_truth" is the complete SFT target', GROUND_TRUTH),
         ('  - {{"code": ...}}', CODE),
