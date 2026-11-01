@@ -76,6 +76,8 @@ gave 1.0 to any response without a python code block, the targets looked fine; `
   coverage 0.41  12/29 reference rows have a row within their 5-NN radius (29 random rows of each)
       not covered: "Find the remainder when 8^9 is divided by 7."  nearest 0.06
   off-distribution 0.07  2/29 rows are outside every reference row's 5-NN radius
+  ! near reference 0.93  27/29 rows, on 24 reference rows (about 0.10 for rows drawn like the reference)
+      3 rows near "A fair die is rolled 2 times. What is…"  closest 1.00: "A fair die is rolled 2 times. What is…"
   near-duplicates 0.17  5/29 rows in 4 pairs with cosine ≥ 0.95 (3 rows repeat an earlier row exactly)
   Vendi 11.4  effective number of distinct rows among 29 (reference 17.5)
 ```
@@ -83,6 +85,9 @@ gave 1.0 to any response without a python code block, the targets looked fine; `
 - *Coverage* ([Naeem et al. 2020](https://arxiv.org/abs/2002.09797)): share of reference rows with a row inside their
   k-NN ball; computed on equal-size samples (two samples of one distribution score about 0.97 at `k=5`).
 - *Off-distribution*: share of rows outside every reference row's ball. *Vendi*: effective number of distinct rows.
+- *Near reference*: share of rows more similar to their nearest reference row than 90% of reference rows are to
+  theirs; about 0.10 for rows drawn like the reference, higher for rows that restate or vary individual reference
+  rows (`!` at 0.25). Lists the reference rows they cluster on, each beside its closest row.
 - *Near-duplicates*: 0.95 counts edited copies of long problems. With Qwen3-Embedding-0.6B, 220-word coding problems
   with whitespace, case, a few numbers, or one sentence changed score 0.95-1.00, and 1 pair among 1,131 distinct
   LiveCodeBench problems reaches 0.95 (5% of rows at 0.9). Use 0.9 for one-line rows: one changed number scores 0.93
