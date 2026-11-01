@@ -22,8 +22,10 @@ _HELD_CHARS_PER_TOKEN = 3
 # A hold this old belongs to a killed process: no attempt runs this long.
 _STALE_HOLD_S = 2 * 60 * 60
 # Statuses the gateway returns without running the model, so nothing is billed:
-# bad request, auth, forbidden, not found, payload too large, unprocessable, 429.
-_UNBILLED_STATUS = frozenset({400, 401, 403, 404, 413, 422, 429})
+# bad request, auth, forbidden, not found, payload too large, unprocessable, 429,
+# and 502/503, which a proxy in front of the gateway returns in ~0.1 s while the
+# gateway is down (2026-11-01). 500 and 504 stay billed: the model may have run.
+_UNBILLED_STATUS = frozenset({400, 401, 403, 404, 413, 422, 429, 502, 503})
 
 
 class TokenUnitQuotaExceeded(RuntimeError):

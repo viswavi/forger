@@ -403,12 +403,15 @@ def test_hold_counts_as_used_until_recorded(tmp_path):
     "error,charged",
     [
         (TimeoutError("read timed out"), True),
-        (_Status(502), True),
+        (_Status(500), True),
+        (_Status(504), True),
+        (_Status(502), False),
+        (_Status(503), False),
         (_Status(429), False),
     ],
 )
 def test_failed_request_keeps_hold_when_it_may_be_billed(tmp_path, error, charged):
-    """Timeouts and 5xx stay charged at the hold; refused (4xx) requests are free."""
+    """Timeouts, 500 and 504 stay charged; refusals and a down gateway are free."""
     ledger = TokenUnitBudget(tmp_path / "usage.json", 1000)
     with pytest.raises(type(error)):
         with ledger.hold(DEEPSEEK, 300):
