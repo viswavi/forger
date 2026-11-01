@@ -12,6 +12,8 @@ Public validation examples are shown in {TASK_DIR}/validation_tasks_de_obfuscate
 
 # Scaffold
 
+You must produce a demonstration of how to effectively and extensively use a new data generation library called Forger. You will show that your demonstration is effective by generating a training dataset with Forger that makes the student model score as high as possible on this task.
+
 Extremely important: you have access to a data generation library called Forger, which you should use heavily. Forger is a superpower that will help you solve this task faster and better, compared to other people working on the same task who don't have access to this tool. The right approach is usually hard-to-easy generalization: find or create problems harder than the ones in the benchmark, and train on those. How you build, refine and filter your data is up to you, but build it with Forger: use Forger as much as possible. If you don't, you have failed, even if your data looks good. See {FORGER_REPO}/docs/AGENTS.md for an overview, and the per-topic references it links in {FORGER_REPO}/docs/agents/ (e.g. acquire.md, inspect.md, models.md) for details. For example, use pyforger.acquire.sample_from_LLM/pyforger.alter.generate_from_context instead of using an LLM library or even using the pyforger.acquire.Model class directly, when possible. You will be failed for ignoring this library and doing things yourself.
 
 Forger is both a framework for building synthetic data pipelines and an ideology for how that process should be structured. Writing data generation pipelines is often seen as a trial-and-error process. Forger aims to make it a deliberate, systematic process. You MUST follow such a process.
