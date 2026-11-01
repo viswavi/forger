@@ -877,9 +877,11 @@ AGENT_RL_CACHE_DIR = os.environ.get("AGENT_RL_CACHE_DIR", f"{RUN_SCRATCH_DIR}/rl
 # of steps plus an eval -- so this is deliberately not sized for real runs. Fine
 # on GCS FUSE if you point it there, since checkpoints are few and huge.
 AGENT_RL_OUTPUT_DIR = os.environ.get("AGENT_RL_OUTPUT_DIR", f"{RUN_SCRATCH_DIR}/rl_out")
-# Model weights. HF_HUB_OFFLINE=1 is forced downstream, so this must ALREADY be
-# populated: an empty cache fails offline with a confusing "does not appear to
-# have a file named ..." from every rank rather than attempting a download.
+# Model weights. SFT and RL set HF_HUB_OFFLINE=1 themselves, so this must
+# ALREADY be populated: an empty cache fails offline with a confusing "does not
+# appear to have a file named ..." from every rank rather than attempting a
+# download. The agent's own shell stays online, so Forger can retrieve
+# datasets and download embedding models into the sandbox's HF cache.
 AGENT_HF_HOME = os.environ.get("AGENT_HF_HOME", os.environ.get("HF_HOME", ""))
 
 RUNTIME_BINDS = []
@@ -919,7 +921,6 @@ _HOST_RL_CACHE_ENV = {
     for name in (
         "TVM_FFI_CACHE_DIR",
         "FLASHINFER_WORKSPACE_BASE",
-        "HF_HUB_OFFLINE",
         "HF_HOME",
         "HF_HUB_DISABLE_IMPLICIT_TOKEN",
         "TINKER_EVAL_BUDGET",
@@ -933,7 +934,6 @@ _HOST_RL_CACHE_ENV = {
 if AGENT_ENABLE_SLIME:
     os.environ["TVM_FFI_CACHE_DIR"] = "/tmp/rl_cache/tvm_ffi"
     os.environ["FLASHINFER_WORKSPACE_BASE"] = "/tmp/rl_cache/flashinfer"
-    os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ["HF_HOME"] = SANDBOX_HF_HOME
     os.environ["HF_HUB_DISABLE_IMPLICIT_TOKEN"] = "1"
 else:
@@ -1141,7 +1141,6 @@ try:
                 # slime/sglang runtime: without these the agent's RL probes rebuild
                 # the flashinfer JIT cache into the small RAM-backed --compat layer.
                 "HF_HOME",
-                "HF_HUB_OFFLINE",
                 "TVM_FFI_CACHE_DIR",
                 "FLASHINFER_WORKSPACE_BASE",
             ]
