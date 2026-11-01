@@ -72,7 +72,9 @@ ROW_EDITS = [
 def build(source: Path) -> str:
     """The FrontierCS prompt for one coding prompt file."""
     lines = source.read_text().split("\n")
-    out = [TASK, ""]
+    # An opening before the task section (the Forger arm's) is kept as is.
+    task = next(i for i, line in enumerate(lines) if line.startswith("# Task"))
+    out = lines[:task] + [TASK, ""]
     native = "minimal_scaffold" in source.name
     rules = [
         ('- "ground_truth" is the complete SFT target', GROUND_TRUTH),
