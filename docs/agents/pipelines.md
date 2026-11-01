@@ -81,8 +81,10 @@ them, and score lists of over 100,000 rows, have none: rerun with `_no_cache=Tru
 
   Step flags: `suppress_truncation_warning` (completions cut off at `max_tokens`) and `suppress_no_ops_warning` (the
   step called no Forger ops). Pipeline flags: `suppress_no_quality_filter_warning`,
-  `suppress_no_diversity_filter_warning`, `suppress_no_inspect_warning`, and `suppress_retrieval_warning` (retrieved
-  text reached no prompt). Nothing else can be suppressed: parse failures, provider errors, and judge calls with no
+  `suppress_no_diversity_filter_warning`, `suppress_no_inspect_warning`, `suppress_retrieval_warning` (retrieved
+  text reached no prompt), and `suppress_low_yield_warning` (under 10% of the first step's rows reached the output;
+  10-30% is a note, and a limited run adds what every 100 rows give). Nothing else can be suppressed: parse
+  failures, provider errors, and judge calls with no
   score lose rows a fix gets back, and a yield miss means `min_yield` / `max_yield` should say the yield you expect.
   A step's problem is suppressed on that step, never pipeline-wide: truncation in a draft step that is regenerated
   later may not matter, while truncation in the answer step does. A suppressed problem is not printed; the step's or
