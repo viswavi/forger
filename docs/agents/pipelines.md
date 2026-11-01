@@ -60,7 +60,8 @@ at the end, followed by every `WARNING:` line. **Read these reports after every 
   A line that can be suppressed ends with its flag in brackets, e.g.
   `INFO: no inspect op ran [@pipeline(suppress_no_inspect_warning=...)]`. Step flags: `suppress_truncation_warning`,
   `suppress_no_ops_warning`. Pipeline flags: `suppress_no_quality_filter_warning`,
-  `suppress_no_diversity_filter_warning`, `suppress_no_inspect_warning`, `suppress_retrieval_warning`.
+  `suppress_no_diversity_filter_warning`, `suppress_no_inspect_warning`, `suppress_retrieval_warning`,
+  `suppress_low_yield_warning` (under 10% of the first step's rows reached the output; 10-30% is a note).
 - Nothing else can be suppressed: parse failures, provider errors, and missing judge scores lose rows a fix gets back;
   for a yield miss, set `min_yield` / `max_yield` to the yield you expect.
 - Suppress on the step, not pipeline-wide: truncation in a draft step that is regenerated later may not matter;

@@ -1099,6 +1099,7 @@ def pipeline(
     suppress_no_diversity_filter_warning: str | None = None,
     suppress_no_inspect_warning: str | None = None,
     suppress_retrieval_warning: str | None = None,
+    suppress_low_yield_warning: str | None = None,
     **unknown: Any,
 ) -> Any:
     """Decorate a function that calls ``@step`` functions; print a summary at the end.
@@ -1111,9 +1112,10 @@ def pipeline(
 
     Errors (``PipelineContractError``): no step ran, or the pipeline was called
     inside another pipeline. Warnings are data problems: those its steps
-    reported (e.g. completions cut off at max_tokens), and retrieval ops that
+    reported (e.g. completions cut off at max_tokens), retrieval ops that
     returned documents whose text reached no model prompt and not the returned
-    rows; the summary lists them last, under "data problems". Suggestions are
+    rows, and under 10% of the first step's rows reaching the output (10-30% is
+    a note); the summary lists them last, under "data problems". Suggestions are
     about how the pipeline is written: only one step ran; no quality filter,
     no diversity filter, or no inspect op ran anywhere; ops ran outside a
     step. Notes, which never raise: steps that ran no filter, filters that
@@ -1153,6 +1155,7 @@ def pipeline(
         suppress_no_diversity_filter_warning: Why the rows need no diversity
             filter.
         suppress_no_inspect_warning: Why no inspect op is needed.
+        suppress_low_yield_warning: Why keeping under 10% of the rows is intended.
         suppress_retrieval_warning: Why retrieved text that reached no prompt
             is fine (a data problem: its size stays in the last block).
         **unknown: Any other keyword raises TypeError with the closest flag (a
@@ -1170,6 +1173,7 @@ def pipeline(
                 suppress_no_diversity_filter_warning
             ),
             "suppress_no_inspect_warning": suppress_no_inspect_warning,
+            "suppress_low_yield_warning": suppress_low_yield_warning,
             "suppress_retrieval_warning": suppress_retrieval_warning,
         },
         unknown,
@@ -1334,6 +1338,7 @@ def _check_pipeline(rec: PipelineRecord) -> None:
                 suggestion=True,
             )
     _filter_notes(rec)
+    _yield_check(rec, real)
     bare = [s.ops[0].op_name for s in rec.steps if s.kind == "bare"]
     if bare:
         listed = ", ".join(dict.fromkeys(bare))
@@ -1368,6 +1373,47 @@ def _suppress_pipeline(rec: PipelineRecord, suppress: dict[str, str]) -> None:
         hidden = [x for s in recs for x in s.suppressed]
         for kind in _tracking.stale_suppressions(recs[-1].suppress, hidden):
             _tracking.add_stale(rec, kind, name)
+
+
+# The pipeline's yield (rows returned / rows out of its first step): a warning
+# below the first, a note below the second.
+_LOW_YIELD = 0.1
+_NOTE_YIELD = 0.3
+
+
+def _yield_check(rec: PipelineRecord, real: list[StepRecord]) -> None:
+    """Warn when few of the first step's rows reach the output, naming the worst step.
+
+    e.g. "3 of 536 rows (0.6%) from step briefs reached the output; validate
+    dropped the most (533 -> 3)". A limited run also says what 100 rows give.
+    """
+    first = next((s for s in real if s.n_out), None)
+    if first is None or first.n_out is None or rec.n_out is None or len(real) < 2:
+        return
+    kept = rec.n_out / first.n_out
+    if kept >= _NOTE_YIELD:
+        return
+    drops = [
+        (s.n_in - s.n_out, s)
+        for s in real
+        if s.n_in is not None and s.n_out is not None and s.n_in > s.n_out
+    ]
+    message = (
+        f"{rec.n_out} of {first.n_out} rows ({kept:.1%}) from step {first.name} "
+        "reached the output"
+    )
+    if drops:
+        _, worst = max(drops, key=lambda d: d[0])
+        message += f"; {worst.name} dropped the most ({worst.n_in} -> {worst.n_out})"
+    if rec.smoke_rows is not None:
+        message += (
+            f"; at this yield every 100 rows from {first.name} give about "
+            f"{100 * kept:.0f}"
+        )
+    if kept < _LOW_YIELD:
+        _tracking.add_problem(rec, "low_yield", message, size=f"{kept:.1%} kept")
+    else:
+        rec.notes.append(message)
 
 
 def _filter_notes(rec: PipelineRecord) -> None:
