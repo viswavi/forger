@@ -25,6 +25,7 @@ Forger ops for common needs:
 - The student's own correct traces: `alter.self_taught_reasoner(..., verifier=..., keep="best")`.
 - Comparing pipeline variants: limited runs (`FORGER_LIMIT=3`), then `pyforger.inspect.runs()`.
 - Your rows against a reference set such as validation: `pyforger.inspect.compare_to_reference`.
+- Measuring the embedding dispersion of a set of texts: `pyforger.inspect.embedding_dispersion(rows, "prompt")`; `reference=` compares with another set.
 - A step's cached rows: `pyforger.inspect.inspect_step("name", rows=True)`.
 
 When `generate_custom_rubric` or `convert_rubric_criteria` writes code criteria, pass the sandbox rules (see Data Format) and the `run_program` and `call_method` helpers as `code_guidelines=` (a string), so the criteria it writes compile in the RL grader and test responses through those helpers.
