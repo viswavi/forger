@@ -27,6 +27,7 @@ Forger ops for common needs:
 - Your rows against a reference set such as validation: `pyforger.inspect.compare_to_reference`.
 - Measuring the embedding dispersion of a set of texts: `pyforger.inspect.embedding_dispersion(rows, "prompt")`; `reference=` compares with another set.
 - A step's cached rows: `pyforger.inspect.inspect_step("name", rows=True)`.
+- Deciding where to source tasks: compare `pyforger.acquire.retrieve_from_[source]` with generation via LLM.
 
 When `generate_custom_rubric` or `convert_rubric_criteria` writes code criteria, pass the sandbox rules (see Data Format) and the `run_program` and `call_method` helpers as `code_guidelines=` (a string), so the criteria it writes compile in the RL grader and test responses through those helpers.
 
