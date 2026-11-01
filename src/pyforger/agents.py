@@ -113,6 +113,7 @@ def generate_object(
     packages: tuple[str, ...] = (),
     network: Network = Network.MODEL,
     timeout_s: float = 600.0,
+    outputs: tuple[str, ...] | None = None,
 ) -> T:
     """Generate files and return a caller-parsed, validated object.
 
@@ -123,7 +124,12 @@ def generate_object(
     Rejected snapshots become ``previous-N/<path>`` inputs on the next attempt.
     Exhaustion raises ValidationExhausted retaining raw files, never partial
     parsed values. Parsing should be deterministic and must not mutate files.
+
+    ``outputs`` declares additional workspace files the agent may create or
+    edit and have collected alongside ``output_name`` (which stays required);
+    it defaults to just ``output_name`` for backward compatibility.
     """
+    declared_outputs = tuple(outputs) if outputs is not None else (output_name,)
     executor = _default(backend)
     retries = getattr(executor, "retry_limit", None)
     if max_repairs is None:
@@ -179,7 +185,7 @@ def generate_object(
                 return generate_files(
                     request,
                     workspace,
-                    (output_name,),
+                    declared_outputs,
                     agent=agent,
                     backend=executor,
                     packages=packages,
@@ -196,7 +202,7 @@ def generate_object(
             WorkspaceTask(
                 instruction=request,
                 files=dict(workspace),
-                outputs=(output_name,),
+                outputs=declared_outputs,
                 packages=packages,
                 network=network,
                 timeout_s=timeout_s,
