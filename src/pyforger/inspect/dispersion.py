@@ -32,6 +32,12 @@ _TOL = 1e-6  # float slack when a row sits exactly on a k-NN radius
 # An example at least this similar to one already listed is skipped, so the
 # examples show different gaps rather than three rows of one template.
 _EXAMPLE_OVERLAP = 0.5
+# A row is "near the reference" when it is more similar to its nearest
+# reference row than this share of reference rows are to their nearest other
+# one: about 10% of rows drawn like the reference are. Flagged at 25%, as
+# compare_to_reference flags 25% outside the reference's 5th-95th percentiles.
+_NEAR_QUANTILE = 0.9
+_NEAR_FLAG = 0.25
 
 
 class DispersionExample(BaseModel):
@@ -60,6 +66,23 @@ class NearDuplicatePair(BaseModel):
     second_text: str
 
 
+class NearestReference(BaseModel):
+    """A reference row and the rows near it.
+
+    ``rows`` rows are nearer to reference row ``index`` than 90% of reference
+    rows are to their nearest other one, and it is their nearest reference row.
+    ``example_index`` (in ``rows``) is the most similar of them, at
+    ``similarity``. Texts are cut to 300 characters.
+    """
+
+    index: int
+    text: str
+    rows: int
+    similarity: float
+    example_index: int
+    example_text: str
+
+
 class DispersionReport(BaseModel):
     """What ``embedding_dispersion`` measured; ``model_dump()`` gives a dict.
 
@@ -67,9 +90,18 @@ class DispersionReport(BaseModel):
     were embedded, a random sample when there were more than ``max_rows``.
     ``compared`` is the number of rows of each set used for coverage and both
     Vendi scores: equal-size random samples, since both grow with the number
-    of rows. Off-distribution share and near-duplicates use every embedded
-    row. Without a reference, ``compared`` is ``embedded`` and the reference
-    fields are None.
+    of rows. Off-distribution share, near-reference share, and near-duplicates
+    use every embedded row. Without a reference, ``compared`` is ``embedded``
+    and the reference fields are None.
+
+    ``nearest_p50``/``nearest_p90`` are percentiles of each row's similarity
+    to its nearest reference row; ``reference_nearest_p50``/``_p90`` the same
+    for each reference row's nearest other reference row. ``near_reference``
+    is the share of rows above ``reference_nearest_p90`` (about 0.10 for rows
+    drawn like the reference), ``near_reference_targets`` how many reference
+    rows those rows are nearest to, ``nearest_references`` the reference rows
+    with the most of them, and ``reference_copies`` the rows at or above
+    ``duplicate_threshold`` to some reference row.
     """
 
     field: str
@@ -84,6 +116,15 @@ class DispersionReport(BaseModel):
     uncovered: list[DispersionExample] = Field(default_factory=list)
     off_distribution: float | None = None
     off_distribution_rows: list[DispersionExample] = Field(default_factory=list)
+    nearest_p50: float | None = None
+    nearest_p90: float | None = None
+    reference_nearest_p50: float | None = None
+    reference_nearest_p90: float | None = None
+    near_reference: float | None = None
+    near_reference_rows: int = 0
+    near_reference_targets: int = 0
+    nearest_references: list[NearestReference] = Field(default_factory=list)
+    reference_copies: int = 0
     duplicate_threshold: float
     near_duplicate_pairs: int = 0
     near_duplicate_rows: int = 0
@@ -115,7 +156,13 @@ def embedding_dispersion(
     want), reports *coverage*: the share of reference rows that have a row of
     ``rows`` within their k-NN radius (the distance to their ``k``-th nearest
     reference row), and *off-distribution share*: the share of ``rows`` outside
-    every reference row's radius, each with the farthest examples. Always
+    every reference row's radius, each with the farthest examples. It also
+    reports the *near-reference share*: the share of ``rows`` more similar to
+    their nearest reference row than 90% of reference rows are to their
+    nearest other one. Rows drawn like the reference score about 0.10; rows
+    that restate or vary individual reference rows score higher, and the
+    report lists the reference rows they cluster on, each beside its closest
+    row. Always
     reports near-duplicate pairs (cosine similarity at least
     ``duplicate_threshold``) and the Vendi score, the effective number of
     distinct rows (from 1 when all are the same up to the number of rows),
@@ -139,13 +186,13 @@ def embedding_dispersion(
         embed_fn: A custom embedder; overrides ``embedding_model``.
         embedding_model: A sentence-transformers model id, or ``"tfidf"``.
         k: Neighbors that set a reference row's radius (Naeem et al. use 5).
-        duplicate_threshold: Cosine similarity at or above which two rows are
-            near-duplicates. 0.95 counts near-verbatim copies: with
-            Qwen3-Embedding-0.6B, a 220-word coding problem with a few numbers
-            or one sentence changed scores 0.95 to 1.00, and distinct problems
-            rarely reach 0.95. Short rows score lower: a one-line math problem
-            with one number changed scores 0.93 (median; 0.83 under TF-IDF),
-            so lower it (e.g. 0.9) for short rows.
+        duplicate_threshold: Cosine similarity at or above which two rows (or
+            a row and a reference row) are near-duplicates. 0.95 counts
+            near-verbatim copies: with Qwen3-Embedding-0.6B, a 220-word coding
+            problem with a few numbers or one sentence changed scores 0.95 to
+            1.00, and distinct problems rarely reach 0.95. Short rows score
+            lower: a one-line math problem with one number changed scores 0.93
+            (median; 0.83 under TF-IDF), so lower it (e.g. 0.9) for short rows.
         max_rows: Embed at most this many rows of each set (a random sample).
         examples: Example rows (or pairs) listed per metric.
         seed: Seed for the samples and for TF-IDF's SVD.
@@ -263,7 +310,64 @@ def _embedding_dispersion(
         report.off_distribution_rows = _examples(
             inside, best, gen, ref, gen_idx, texts, examples
         )
+    _near_reference(report, gen, ref, gen_idx, ref_idx, texts, refs, examples)
     return report
+
+
+def _near_reference(
+    report: DispersionReport,
+    gen: Any,
+    ref: Any,
+    gen_idx: Any,
+    ref_idx: Any,
+    texts: list[str],
+    refs: list[str],
+    examples: int,
+) -> None:
+    """How many rows sit closer to one reference row than reference rows do.
+
+    A reference row's nearest other reference row is the baseline: a row
+    drawn like the reference is as similar to its nearest reference row as a
+    reference row is to its nearest other one (one candidate fewer), so about
+    10% of such rows exceed the reference's 90th percentile.
+    """
+    import numpy as np
+
+    ref_sims = ref @ ref.T
+    np.fill_diagonal(ref_sims, -np.inf)
+    ref_best = ref_sims.max(axis=1)
+    best = np.empty(len(gen), dtype=np.float32)
+    nearest = np.empty(len(gen), dtype=np.int64)
+    for start in range(0, len(gen), _CHUNK):
+        sims = gen[start : start + _CHUNK] @ ref.T
+        nearest[start : start + _CHUNK] = sims.argmax(axis=1)
+        best[start : start + _CHUNK] = sims.max(axis=1)
+    line = float(np.quantile(ref_best, _NEAR_QUANTILE))
+    near = best > line + _TOL
+    report.nearest_p50 = round(float(np.quantile(best, 0.5)), 4)
+    report.nearest_p90 = round(float(np.quantile(best, 0.9)), 4)
+    report.reference_nearest_p50 = round(float(np.quantile(ref_best, 0.5)), 4)
+    report.reference_nearest_p90 = round(line, 4)
+    report.near_reference = round(float(near.mean()), 4)
+    report.near_reference_rows = int(near.sum())
+    report.reference_copies = int((best >= report.duplicate_threshold - _TOL).sum())
+    counts = np.bincount(nearest[near], minlength=len(ref))
+    report.near_reference_targets = int((counts > 0).sum())
+    for j in np.argsort(-counts, kind="stable")[:examples]:
+        if counts[j] == 0:
+            break
+        members = np.flatnonzero(near & (nearest == j))
+        top = int(members[np.argmax(best[members])])
+        report.nearest_references.append(
+            NearestReference(
+                index=int(ref_idx[j]),
+                text=_snippet(refs[int(ref_idx[j])]),
+                rows=int(counts[j]),
+                similarity=round(min(float(best[top]), 1.0), 4),
+                example_index=int(gen_idx[top]),
+                example_text=_snippet(texts[int(gen_idx[top])]),
+            )
+        )
 
 
 def _unit_vectors(
@@ -489,6 +593,44 @@ def _example_lines(
     return lines
 
 
+def _near_reference_lines(report: DispersionReport, room: int) -> list[RenderableType]:
+    """The near-reference share, its percentiles, and where the rows cluster."""
+    n = report.embedded
+    share = report.near_reference or 0.0
+    flag = "! " if share >= _NEAR_FLAG else ""
+    targets = report.near_reference_targets
+    lines: list[RenderableType] = [
+        _metric(
+            f"{flag}near reference",
+            f"{share:.2f}",
+            f"{report.near_reference_rows:,}/{n:,} rows, on {targets:,} reference "
+            f"row{'s' if targets != 1 else ''} (about 0.10 for rows drawn like "
+            "the reference)",
+        )
+    ]
+    details = [
+        "counts rows more similar to their nearest reference row than 90% of "
+        f"reference rows are to theirs ({report.reference_nearest_p90:.2f})",
+        f"nearest reference p50 {report.nearest_p50:.2f} / p90 "
+        f"{report.nearest_p90:.2f} · reference to nearest other p50 "
+        f"{report.reference_nearest_p50:.2f} / p90 {report.reference_nearest_p90:.2f}",
+    ]
+    if report.reference_copies:
+        threshold = report.duplicate_threshold
+        details[-1] += f" · {report.reference_copies:,} at cosine ≥ {threshold:g}"
+    lines += [Padding(Text(d, style="dim"), (0, 0, 0, 4)) for d in details]
+    half = (room - 34) // 2
+    for near in report.nearest_references:
+        line = Text(
+            f"{near.rows:,} row{'s' if near.rows != 1 else ''} near ", style="dim"
+        )
+        line.append(_quote(near.text, half))
+        line.append(f"  closest {near.similarity:.2f}: ", style="dim")
+        line.append(_quote(near.example_text, half))
+        lines.append(Padding(line, (0, 0, 0, 4)))
+    return lines
+
+
 def _report_renderable(report: DispersionReport, *, width: int) -> RenderableType:
     indent = (0, 0, 0, 4)
     room = max(width - 10, 40)  # characters of an example row on its line
@@ -527,6 +669,8 @@ def _report_renderable(report: DispersionReport, *, width: int) -> RenderableTyp
             )
         )
         body += _example_lines("outside", report.off_distribution_rows, room)
+    if report.near_reference is not None:
+        body += _near_reference_lines(report, room)
 
     dup = (
         f"{report.near_duplicate_rows:,}/{report.embedded:,} rows in "
