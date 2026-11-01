@@ -111,6 +111,12 @@ inspect embedding_dispersion ─────────────────
   off-distribution 0.07  2/29 rows are outside every reference row's 5-NN radius
       outside: "Translate 'good morning' into French."  nearest 0.00
       outside: "Write a haiku about the ocean at dawn."  nearest 0.06
+  ! near reference 0.93  27/29 rows, on 24 reference rows (about 0.10 for rows drawn like the reference)
+      counts rows more similar to their nearest reference row than 90% of reference rows are to theirs (0.85)
+      nearest reference p50 1.00 / p90 1.00 · reference to nearest other p50 0.79 / p90 0.85 · 27 at cosine ≥ 0.95
+      3 rows near "A fair die is rolled 2 times. What is…"  closest 1.00: "A fair die is rolled 2 times. What is…"
+      2 rows near "Two cards are drawn from a standard d…"  closest 1.00: "Two cards are drawn from a standard d…"
+      1 row near "Solve for x: 7x + 8 = 10x - 4."  closest 1.00: "Solve for x: 7x + 8 = 10x - 4."
   near-duplicates 0.17  5/29 rows in 4 pairs with cosine ≥ 0.95 (3 rows repeat an earlier row exactly)
       1.00 "A fair die is rolled 2 times. What is the probability that a six appears at least once?"  exact copy
       1.00 "Two cards are drawn from a standard deck. What is the probability both are aces?"  exact copy
@@ -122,6 +128,11 @@ inspect embedding_dispersion ─────────────────
   reference are missing; `not covered:` lists them. It grows with the number of rows, so it is computed on equal-size
   random samples of both sets. Two samples of one distribution score about 0.97 at `k=5`.
 - **off-distribution**: the share of `rows` outside every reference row's ball, e.g. off-topic or malformed rows.
+- **near reference**: the share of `rows` more similar to their nearest reference row than 90% of reference rows are
+  to their nearest other one. Rows drawn like the reference score about 0.10; rows that restate, re-parameterize, or
+  vary individual reference rows score higher, even below `duplicate_threshold`, and `!` marks 0.25 or more. The
+  lines below list the reference rows those rows cluster on, each with its closest row, and the count at cosine of
+  at least `duplicate_threshold` to a reference row. Here the rows copy reference problems, so 27 of 29 count.
 - **near-duplicates**: rows in a pair with cosine similarity of at least `duplicate_threshold`. 0.95 counts
   near-verbatim copies. With Qwen3-Embedding-0.6B, copies of 220-word coding problems with whitespace, case, a few
   numbers, or one sentence changed score 0.95 to 1.00 (at least 92% of each kind), and among 1,131 distinct

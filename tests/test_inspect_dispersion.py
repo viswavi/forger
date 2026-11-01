@@ -226,6 +226,66 @@ def test_equal_size_comparison_and_small_inputs():
     assert report.off_distribution is not None
 
 
+def _gaussian_table(names, seed):
+    rng = np.random.default_rng(seed)
+    return {name: rng.normal(size=16) for name in names}
+
+
+def test_near_reference_separates_variants_from_rows_drawn_like_the_reference():
+    """Variants of 4 reference rows are flagged; fresh draws score about 0.10."""
+    rng = np.random.default_rng(3)
+    table = _gaussian_table([f"ref {i}" for i in range(200)], seed=0)
+    table.update(_gaussian_table([f"fresh {i}" for i in range(200)], seed=1))
+    for j in range(4):  # 5 re-parameterized versions of each of 4 reference rows
+        for v in range(5):
+            table[f"variant {j}.{v}"] = table[f"ref {j}"] + 0.2 * rng.normal(size=16)
+
+    def embed(docs):
+        return np.array([table[d] for d in docs])
+
+    reference = [{"t": f"ref {i}"} for i in range(200)]
+    fresh = embedding_dispersion(
+        [{"t": f"fresh {i}"} for i in range(200)],
+        "t",
+        reference=reference,
+        embed_fn=embed,
+    )
+    variants = embedding_dispersion(
+        [{"t": f"variant {j}.{v}"} for j in range(4) for v in range(5)],
+        "t",
+        reference=reference,
+        embed_fn=embed,
+    )
+
+    assert 0.03 <= fresh.near_reference <= 0.2
+    assert fresh.reference_copies == 0
+    assert variants.near_reference == 1.0
+    assert variants.near_reference_targets == 4
+    assert sorted(n.rows for n in variants.nearest_references) == [5, 5, 5]
+    near = variants.nearest_references[0]
+    assert near.text == f"ref {near.index}"
+    assert near.example_text.startswith(f"variant {near.index}.")
+    assert variants.nearest_p50 > variants.reference_nearest_p90
+    text = render_dispersion_report(variants)
+    assert "! near reference 1.00" in text and "5 rows near" in text
+    assert "! near reference" not in render_dispersion_report(fresh)
+
+
+def test_near_reference_counts_copies_of_reference_rows():
+    """The fixture's rows copy reference rows; the 2 unlike rows do not."""
+    rows, reference = _fixture()
+    report = embedding_dispersion(
+        rows, "problem", reference=reference, embedding_model="tfidf"
+    )
+
+    assert report.reference_copies == 27
+    assert report.near_reference == pytest.approx(27 / 29, abs=1e-4)
+    assert report.nearest_references[0].similarity == pytest.approx(1.0)
+    no_ref = embedding_dispersion(rows, "problem", embedding_model="tfidf")
+    assert no_ref.near_reference is None and not no_ref.nearest_references
+    assert "near reference" not in render_dispersion_report(no_ref)
+
+
 def test_near_duplicate_threshold():
     """Pairs count as near-duplicates at or above duplicate_threshold."""
     vectors = {
