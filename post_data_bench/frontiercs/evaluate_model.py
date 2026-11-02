@@ -19,6 +19,7 @@ import argparse
 import asyncio
 import json
 import os
+import traceback
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -139,18 +140,44 @@ def load_existing_predictions(log_dir: str | None) -> list[dict]:
     return read_predictions(os.path.join(log_dir, "predictions.jsonl"))
 
 
+JUDGE_ATTEMPTS = 3
+
+
 def judge_code(split: str, problem_id: str, code: str) -> dict:
-    """Judge one program on one problem (runs in a worker process)."""
+    """Judge one program on one problem (runs in a worker process).
+
+    A file error while judging is the host's, not the program's, so judging is
+    tried again: under apptainer --fakeroot, a new temp file that reuses a just
+    deleted directory's inode can stat as that directory for a moment, and opening
+    it raises IsADirectoryError. An error on every attempt still fails the run.
+    """
     root = split_root(split)
-    return judge.judge(
-        root / "problems" / problem_id,
-        code,
-        testlib_dir=DATA_DIR / "testlib",
-        # The benchmark is mounted read-only for host and sandbox evaluation, so
-        # compiled checkers go to a private writable cache instead.
-        cache_dir=judge.default_cache_dir(),
-        workers=4,
-    )
+
+    def run() -> dict:
+        return judge.judge(
+            root / "problems" / problem_id,
+            code,
+            testlib_dir=DATA_DIR / "testlib",
+            # The benchmark is mounted read-only for host and sandbox evaluation,
+            # so compiled checkers go to a private writable cache instead.
+            cache_dir=judge.default_cache_dir(),
+            workers=4,
+        )
+
+    for _ in range(JUDGE_ATTEMPTS - 1):
+        try:
+            return run()
+        except OSError as e:
+            # e.g. "IsADirectoryError: [Errno 21] Is a directory:
+            # '/tmp/fcs-case-ab12/out.txt' (cpp_judge.py:678)"
+            where = traceback.extract_tb(e.__traceback__)[-1]
+            print(
+                f"[warn] judging id={problem_id} failed, judging again: "
+                f"{type(e).__name__}: {e} ({Path(where.filename).name}:"
+                f"{where.lineno})",
+                flush=True,
+            )
+    return run()
 
 
 def _clip(text: str, limit: int = 200) -> str:
@@ -319,10 +346,11 @@ async def generate_and_score_all(
 
     failures = [item for item in outcomes if isinstance(item, BaseException)]
     if failures:
+        # Chained, so the traceback shows where the first failure was raised.
         raise RuntimeError(
             f"Evaluation incomplete: {len(failures)} request/grading failures "
             f"(first: {failures[0]!r}); successful rows saved"
-        )
+        ) from failures[0]
     return output_rows
 
 

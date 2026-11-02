@@ -1,10 +1,14 @@
 """frontiercs.judge scores C++ solutions as FrontierCS's go-judge engine does."""
+import contextlib
 import importlib.util
+import io
+import os
 import shutil
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 FRONTIERCS = Path(__file__).resolve().parents[1] / "frontiercs"
 
@@ -38,6 +42,18 @@ judge = (
 )
 
 HAS_GXX = shutil.which("g++") is not None and sys.platform.startswith("linux")
+HAS_OPENAI = importlib.util.find_spec("openai") is not None
+
+
+def _load_evaluator():
+    """Import evaluate_model.py with its sibling imports bound to frontiercs/."""
+    with mock.patch.dict(sys.modules), mock.patch.object(
+        sys, "path", [str(FRONTIERCS), *sys.path]
+    ):
+        for name in ("checkers", "judge", "prompt_building", "eval_state"):
+            sys.modules.pop(name, None)
+        return _load("evaluate_model")
+
 
 # A checker: full marks for the right sum, 0.5 via testlib's points exit (7)
 # for an answer off by one, wrong answer (exit 1) otherwise.
@@ -232,6 +248,58 @@ class LimitsAndExtractionTests(unittest.TestCase):
         """A truncated trace has no answer."""
         self.assertEqual(checkers.extract_code("<think>```cpp\nint main(){}\n```"), "")
         self.assertEqual(checkers.extract_code(None), "")
+
+
+@unittest.skipUnless(HAS_OPENAI, "evaluate_model imports openai")
+class JudgeFileErrorTests(unittest.TestCase):
+    """A file error while judging is judged again instead of failing the run."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Load the evaluator; its judge cache goes to a temp directory."""
+        cls.evaluate = _load_evaluator()
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.env = mock.patch.dict(os.environ, {"CPP_JUDGE_CACHE_DIR": cls.tmp.name})
+        cls.env.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        """Restore the environment and remove the cache directory."""
+        cls.env.stop()
+        cls.tmp.cleanup()
+
+    def judge_code(self, side_effect):
+        """judge_code on a synthetic problem, with judge.judge mocked."""
+        with mock.patch.object(
+            self.evaluate.judge, "judge", side_effect=side_effect
+        ) as judged, contextlib.redirect_stdout(io.StringIO()) as out:
+            try:
+                return self.evaluate.judge_code("val", "1", SUM), judged, out
+            except Exception as e:  # noqa: BLE001
+                return e, judged, out
+
+    def test_a_temp_file_that_stats_as_a_directory_is_judged_again(self):
+        """The one-off IsADirectoryError that failed whole test-split runs."""
+        verdict = {"status": "done", "score": 100.0, "score_unbounded": 100.0}
+        error = IsADirectoryError(21, "Is a directory", "/tmp/fcs-case-x/out.txt")
+        result, judged, out = self.judge_code([error, verdict])
+        self.assertEqual(result, verdict)
+        self.assertEqual(judged.call_count, 2)
+        self.assertIn("IsADirectoryError", out.getvalue())
+        self.assertIn("out.txt", out.getvalue())
+
+    def test_a_file_error_on_every_attempt_still_fails(self):
+        """A broken host is not scored as the program's failure."""
+        error = IsADirectoryError(21, "Is a directory")
+        result, judged, _ = self.judge_code(error)
+        self.assertIsInstance(result, IsADirectoryError)
+        self.assertEqual(judged.call_count, self.evaluate.JUDGE_ATTEMPTS)
+
+    def test_other_judge_errors_are_not_retried(self):
+        """A checker that does not compile fails at once."""
+        result, judged, _ = self.judge_code(RuntimeError("chk.cc does not compile"))
+        self.assertIsInstance(result, RuntimeError)
+        self.assertEqual(judged.call_count, 1)
 
 
 if __name__ == "__main__":
