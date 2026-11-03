@@ -129,7 +129,6 @@ def generate_result(
     raise AssertionError("unreachable")
 
 
-
 def generate_validated(
     request: Request,
     *,
