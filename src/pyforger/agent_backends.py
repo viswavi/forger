@@ -23,9 +23,10 @@ def require_learner_runtime(backend: AgentBackend, agent: AgentSpec) -> None:
         return
     if runtime.reasoning_replay:
         raise NotImplementedError("Reasoning replay requires a shared learner runner")
-    if runtime.condenser_max_tokens is not None and not getattr(
-        backend, "supports_sdk_condensation", False
-    ):
+    if (
+        runtime.condenser_max_tokens is not None
+        or runtime.condenser_max_events is not None
+    ) and not getattr(backend, "supports_sdk_condensation", False):
         raise NotImplementedError(f"{backend.name} cannot honor SDK condensation")
     if runtime.tools == "science-rl" and not getattr(
         backend, "supports_science_rl_tools", False
@@ -40,5 +41,8 @@ def require_learner_runtime(backend: AgentBackend, agent: AgentSpec) -> None:
         "agent_context",
     }:
         raise ValueError("Agent kwargs conflict with the explicit tool profile")
-    if runtime.condenser_max_tokens is not None and "condenser" in agent.kwargs:
+    if (
+        runtime.condenser_max_tokens is not None
+        or runtime.condenser_max_events is not None
+    ) and "condenser" in agent.kwargs:
         raise ValueError("Agent kwargs conflict with the explicit condenser settings")

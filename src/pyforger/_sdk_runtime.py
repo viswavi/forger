@@ -137,7 +137,9 @@ def sdk_history_kwargs(spec: AgentSpec, llm: LLM) -> dict[str, Any]:
     the protected prefix and generated summary can exceed that target.
     """
     runtime = spec.runtime
-    if runtime is None or runtime.condenser_max_tokens is None:
+    if runtime is None or (
+        runtime.condenser_max_tokens is None and runtime.condenser_max_events is None
+    ):
         return {}
     if "condenser" in spec.kwargs:
         raise ValueError("Agent kwargs conflict with the explicit condenser settings")
@@ -145,7 +147,7 @@ def sdk_history_kwargs(spec: AgentSpec, llm: LLM) -> dict[str, Any]:
         "condenser": TaskPreservingCondenser(
             llm=llm,
             max_tokens=runtime.condenser_max_tokens,
-            max_size=sys.maxsize,
+            max_size=runtime.condenser_max_events or sys.maxsize,
             keep_first=2,
         )
     }

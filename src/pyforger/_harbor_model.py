@@ -49,8 +49,9 @@ def runner_source() -> str:
     ).replace(anchor, replacement)
     condenser_anchor = "    agent = Agent(**agent_kwargs)"
     condenser = """    limit = os.environ.get("FORGER_CONDENSER_MAX_TOKENS")
-    if limit:
-        agent_kwargs["condenser"] = TaskPreservingCondenser(llm=llm, max_tokens=int(limit), max_size=sys.maxsize, keep_first=2)
+    events = os.environ.get("FORGER_CONDENSER_MAX_EVENTS")
+    if limit or events:
+        agent_kwargs["condenser"] = TaskPreservingCondenser(llm=llm, max_tokens=int(limit) if limit else None, max_size=int(events) if events else sys.maxsize, keep_first=2)
     agent = Agent(**agent_kwargs)"""
     if source.count(condenser_anchor) != 1:
         raise RuntimeError("Unsupported Harbor SDK runner: agent construction changed")

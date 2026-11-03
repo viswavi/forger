@@ -68,3 +68,4 @@ Thumbs.db
 
 # Local agent scratch space and bulky execution traces
 .agent_tmp/
+uv.lock

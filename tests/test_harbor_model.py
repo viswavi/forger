@@ -208,6 +208,8 @@ def test_runtime_uses_shared_token_condenser_and_unlimited_iteration_adapter():
 
     source = runner_source()
     assert "TaskPreservingCondenser(llm=llm, max_tokens=int(limit)" in source
+    assert 'os.environ.get("FORGER_CONDENSER_MAX_EVENTS")' in source
+    assert "max_size=int(events) if events else sys.maxsize" in source
     assert "keep_first=2" in source
     assert 'os.environ.get("MAX_ITERATIONS") or str(sys.maxsize)' in source
 
