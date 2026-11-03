@@ -54,11 +54,17 @@ class LearnerRuntime:
     ``condenser_max_tokens`` uses SDK token estimates and the agent model for
     summaries. Local/Sail preserve system/task and target half this threshold
     before inserting a summary; this is not a gateway-counted hard context cap.
+
+    ``condenser_max_events`` caps the conversation view in events (each LLM
+    round-trip adds several events); condensation targets half this cap too.
+    When unset, no event-count trigger applies, matching the SDK default of
+    token-only condensation for this runtime.
     """
 
     tools: str = "backend-default"
     reasoning_replay: bool = False
     condenser_max_tokens: int | None = None
+    condenser_max_events: int | None = None
 
     def __post_init__(self) -> None:
         """Reject unknown profiles and ambiguous threshold values."""
@@ -70,10 +76,19 @@ class LearnerRuntime:
             type(self.condenser_max_tokens) is not int or self.condenser_max_tokens < 1
         ):
             raise ValueError("condenser_max_tokens must be a positive integer")
+        if self.condenser_max_events is not None and (
+            type(self.condenser_max_events) is not int or self.condenser_max_events < 1
+        ):
+            raise ValueError("condenser_max_events must be a positive integer")
 
     def cache_key(self) -> object:
         """Identify requested behavior without endpoint credentials."""
-        return (self.tools, self.reasoning_replay, self.condenser_max_tokens)
+        return (
+            self.tools,
+            self.reasoning_replay,
+            self.condenser_max_tokens,
+            self.condenser_max_events,
+        )
 
 
 @dataclass(frozen=True)

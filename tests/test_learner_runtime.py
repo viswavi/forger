@@ -31,6 +31,11 @@ def spec(**settings):
         {"condenser_max_tokens": -1},
         {"condenser_max_tokens": 1.5},
         {"condenser_max_tokens": "104857"},
+        {"condenser_max_events": True},
+        {"condenser_max_events": 0},
+        {"condenser_max_events": -1},
+        {"condenser_max_events": 1.5},
+        {"condenser_max_events": "160"},
     ],
 )
 def test_runtime_validation(settings):
@@ -125,10 +130,96 @@ def test_local_condenser_uses_agent_model(tmp_path):
     try:
         condenser = session.agent.condenser
         assert condenser.max_tokens == 104857
+        assert condenser.max_size > 10**6
         assert condenser.keep_first == 2
         assert condenser.llm is session.agent.llm
     finally:
         session.close()
+
+
+def test_event_cap_serializes_for_harbor(monkeypatch):
+    """Pass the event cap to the Harbor runner environment."""
+    monkeypatch.setenv("LITELLM_API_KEY", "fixture-local-only")
+    backend = HarborBackend()
+    agent = spec(condenser_max_events=160)
+    require_learner_runtime(backend, agent)
+    config = backend._agent_config(agent)
+    assert config.env["FORGER_CONDENSER_MAX_EVENTS"] == "160"
+    assert "FORGER_CONDENSER_MAX_TOKENS" not in config.env
+
+
+def test_local_event_cap_condenser(tmp_path):
+    """Build the condenser from the event cap alone."""
+    import sys
+
+    session = LocalBackend()._sdk_session(
+        tmp_path, WorkspaceTask(instruction="test"), spec(condenser_max_events=160)
+    )
+    try:
+        condenser = session.agent.condenser
+        assert condenser.max_tokens is None
+        assert condenser.max_size == 160
+        assert condenser.keep_first == 2
+        assert condenser.llm is session.agent.llm
+    finally:
+        session.close()
+
+
+def test_local_event_cap_http_condensation(tmp_path):
+    """Cross the event cap in the native SDK loop without a token cap."""
+    import json
+
+    from completion import completion_server
+    from openhands.sdk.event.condenser import Condensation
+
+    def tool(name, arguments):
+        return {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_" + name,
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": json.dumps(arguments),
+                    },
+                }
+            ],
+        }
+
+    responses = [
+        tool("terminal", {"command": "marker old output"}),
+        tool("terminal", {"command": "marker old output"}),
+        tool("terminal", {"command": "marker old output"}),
+        tool("terminal", {"command": "marker old output"}),
+        {"role": "assistant", "content": "The command printed marker old output."},
+        tool("finish", {"message": "done"}),
+    ]
+    with completion_server(responses) as (url, requests):
+        agent = AgentSpec(
+            model=Model("openai/gpt-4o", api_base=url, api_key="test"),
+            max_iterations=8,
+            runtime=LearnerRuntime(condenser_max_events=8),
+        )
+        session = LocalBackend()._sdk_session(
+            tmp_path, WorkspaceTask(instruction="test"), agent
+        )
+        try:
+            session.send_message("ORIGINAL_TASK: print marker output then finish")
+            session.run()
+            events = list(session.state.events)
+            condensations = [e for e in events if isinstance(e, Condensation)]
+            assert len(condensations) == 1
+            condensation = condensations[0]
+            assert condensation.summary_offset == 2
+            assert condensation.forgotten_event_ids
+            assert events[0].id not in condensation.forgotten_event_ids
+            assert events[1].id not in condensation.forgotten_event_ids
+            final_messages = json.dumps(requests[-1]["messages"])
+            assert "ORIGINAL_TASK" in final_messages
+        finally:
+            session.close()
 
 
 def test_local_http_condensation_preserves_task(tmp_path):

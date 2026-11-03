@@ -29,9 +29,9 @@ class _JournalReference(dict):
         self._sealed = tuple(sorted(self.items()))
 
 
-_PRIVATE_JOURNALS: weakref.WeakValueDictionary[int, _JournalReference] = (
-    weakref.WeakValueDictionary()
-)
+_PRIVATE_JOURNALS: weakref.WeakValueDictionary[
+    int, _JournalReference
+] = weakref.WeakValueDictionary()
 
 
 def is_private_reference(value: Any) -> bool:

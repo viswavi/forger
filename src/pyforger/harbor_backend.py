@@ -345,6 +345,10 @@ class HarborBackend:
             config.env["FORGER_CONDENSER_MAX_TOKENS"] = str(
                 agent.runtime.condenser_max_tokens
             )
+        if agent.runtime is not None and agent.runtime.condenser_max_events is not None:
+            config.env["FORGER_CONDENSER_MAX_EVENTS"] = str(
+                agent.runtime.condenser_max_events
+            )
         return config
 
     def run_agent(self, task: WorkspaceTask, agent: AgentSpec) -> AgentRunResult:

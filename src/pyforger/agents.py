@@ -37,8 +37,6 @@ def _default(backend: AgentBackend | None) -> AgentBackend:
     return backend if backend is not None else LocalBackend()
 
 
-
-
 def generate_files(
     instruction: str,
     files: Mapping[str, str | bytes | FileInput],

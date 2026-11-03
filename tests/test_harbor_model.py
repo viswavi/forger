@@ -6,6 +6,7 @@ import json
 import os
 
 import pytest
+
 from pyforger.acquire.model import Model
 from pyforger.harbor import harbor_agent_config
 
@@ -64,6 +65,7 @@ def test_native_factory_and_generated_runtime(tmp_path, monkeypatch):
     import ast
 
     from harbor.agents.factory import AgentFactory
+
     from pyforger._harbor_model import ForgerOpenHandsSDK, runner_source
     from pyforger._sdk_llm import ConfiguredLLM
 
@@ -188,6 +190,7 @@ def test_endpoint_and_network_policy(monkeypatch):
 def test_bridge_control_environment_does_not_match_native_credentials(monkeypatch):
     """Native scrubbing must not treat a numeric configuration flag as a secret."""
     from harbor.utils.env import is_sensitive_env_key
+
     from pyforger.harbor import harbor_agent_config
 
     monkeypatch.setenv("LLM_API_KEY", "fixture-model-credential")
@@ -208,6 +211,8 @@ def test_runtime_uses_shared_token_condenser_and_unlimited_iteration_adapter():
 
     source = runner_source()
     assert "TaskPreservingCondenser(llm=llm, max_tokens=int(limit)" in source
+    assert 'os.environ.get("FORGER_CONDENSER_MAX_EVENTS")' in source
+    assert "max_size=int(events) if events else sys.maxsize" in source
     assert "keep_first=2" in source
     assert 'os.environ.get("MAX_ITERATIONS") or str(sys.maxsize)' in source
 
@@ -347,7 +352,9 @@ def test_native_install_refuses_wrong_sdk_sources_without_pip(tmp_path, monkeypa
             command = command.replace(
                 "/opt/openhands-sdk-venv/bin/python", sys.executable
             )
-            command = command.replace("/installed-agent", str(tmp_path / "installed-agent"))
+            command = command.replace(
+                "/installed-agent", str(tmp_path / "installed-agent")
+            )
             result = subprocess.run(command, shell=True, capture_output=True, text=True)
             return SimpleNamespace(return_code=result.returncode)
 
@@ -374,6 +381,7 @@ def test_native_install_uses_exact_imported_sdk_and_creates_runner_directory(
     from types import SimpleNamespace
 
     from harbor.agents.factory import AgentFactory
+
     from pyforger._sdk_install import sdk_provenance_command
 
     subprocess.run(sdk_provenance_command(sys.executable), shell=True, check=True)
