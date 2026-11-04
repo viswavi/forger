@@ -66,6 +66,9 @@ MAX_RESPONSE_LEN=""
 LR="3e-6"
 KL_LOSS_COEF="1e-3"
 TEMPERATURE="1.0"
+EPS_CLIP_HIGH="0.28"
+WEIGHT_DECAY="0.1"
+ADAM_BETA2="0.98"
 SAVE_INTERVAL=20
 EVAL_INTERVAL=10
 SKIP_FINAL_EVAL=0
@@ -109,6 +112,9 @@ while [[ $# -gt 0 ]]; do
     --lr) LR="$2"; shift 2 ;;
     --kl-loss-coef) KL_LOSS_COEF="$2"; shift 2 ;;
     --temperature) TEMPERATURE="$2"; shift 2 ;;
+    --eps-clip-high) EPS_CLIP_HIGH="$2"; shift 2 ;;
+    --weight-decay) WEIGHT_DECAY="$2"; shift 2 ;;
+    --adam-beta2) ADAM_BETA2="$2"; shift 2 ;;
     --save-interval) SAVE_INTERVAL="$2"; shift 2 ;;
     --eval-interval) EVAL_INTERVAL="$2"; shift 2 ;;
     --no-thinking) NO_THINKING=1; shift ;;
@@ -435,13 +441,13 @@ ray job submit --address=http://127.0.0.1:8265 --submission-id=\"\$RAY_JOB_ID\" 
   --kl-loss-type low_var_kl \
   --entropy-coef 0.00 \
   --eps-clip 0.2 \
-  --eps-clip-high 0.28 \
+  --eps-clip-high $EPS_CLIP_HIGH \
   --optimizer adam \
   --lr $LR \
   --lr-decay-style constant \
-  --weight-decay 0.1 \
+  --weight-decay $WEIGHT_DECAY \
   --adam-beta1 0.9 \
-  --adam-beta2 0.98 \
+  --adam-beta2 $ADAM_BETA2 \
   --tensor-model-parallel-size 2 \
   --sequence-parallel \
   --pipeline-model-parallel-size 1 \
