@@ -9,18 +9,21 @@ from pathlib import Path
 _CPP_BLOCK = re.compile(r"```(?:cpp|c\+\+)?\s*\n(.*?)```", re.DOTALL)
 
 
-def extract_code(completion: str | None) -> str:
+def extract_code(completion: str | None, lenient: bool = False) -> str:
     """The C++ program in a completion's answer, or "" when there is none.
 
     The answer is the text after the last ``</think>``; an unclosed reasoning trace
     is not an answer. Within it, the benchmark's own extraction rule: the longest
     ```cpp (or ```c++ / bare ```) block, else the text with fences stripped.
+    With ``lenient``, an unclosed trace is searched as the answer, as FrontierSmith's
+    reward and validation do: a response cut off by the token limit is judged on
+    the longest draft block in its reasoning.
     """
     if not completion:
         return ""
     if "</think>" in completion:
         completion = completion.rsplit("</think>", 1)[-1]
-    if "<think>" in completion:
+    if "<think>" in completion and not lenient:
         return ""
     text = completion.strip()
     blocks = _CPP_BLOCK.findall(text)

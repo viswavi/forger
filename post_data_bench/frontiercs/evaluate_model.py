@@ -89,6 +89,13 @@ def parse_args() -> argparse.Namespace:
         "--enable-thinking", dest="enable_thinking", action="store_true", default=None
     )
     p.add_argument("--disable-thinking", dest="enable_thinking", action="store_false")
+    p.add_argument(
+        "--answer-extraction",
+        choices=("strict", "lenient"),
+        default="strict",
+        help="lenient also judges code in an unclosed reasoning trace, as "
+        "FrontierSmith's validation does (see checkers.extract_code).",
+    )
     p.add_argument("--json-output-file", type=str, default=None)
     p.add_argument("--log-dir", type=str, default=None)
     p.add_argument("--merge-shards", type=str, nargs="+", default=None)
@@ -322,7 +329,9 @@ async def generate_and_score_all(
 
         async def judge_choice(choice) -> dict:
             completion = choice.message.content or ""
-            code = checkers.extract_code(completion)
+            code = checkers.extract_code(
+                completion, lenient=args.answer_extraction == "lenient"
+            )
             result = (
                 await loop.run_in_executor(
                     pool, judge_code, args.split, row["id"], code
@@ -456,7 +465,9 @@ def run_from_raw(args: argparse.Namespace) -> None:
                 (
                     k,
                     completion,
-                    checkers.extract_code(completion),
+                    checkers.extract_code(
+                        completion, lenient=args.answer_extraction == "lenient"
+                    ),
                     s.get("finish_reason"),
                 )
             )

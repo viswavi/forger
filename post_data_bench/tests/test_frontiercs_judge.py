@@ -249,6 +249,13 @@ class LimitsAndExtractionTests(unittest.TestCase):
         self.assertEqual(checkers.extract_code("<think>```cpp\nint main(){}\n```"), "")
         self.assertEqual(checkers.extract_code(None), "")
 
+    def test_lenient_judges_the_longest_draft_in_unclosed_thinking(self):
+        """Lenient extraction searches a truncated trace; a closed one still wins."""
+        truncated = "<think>```cpp\nint a;\n```\n```cpp\nint main(){}\n```\nso"
+        self.assertEqual(checkers.extract_code(truncated, lenient=True), "int main(){}")
+        closed = "<think>```cpp\nint draft;\n```</think>```cpp\nint b;\n```"
+        self.assertEqual(checkers.extract_code(closed, lenient=True), "int b;")
+
 
 @unittest.skipUnless(HAS_OPENAI, "evaluate_model imports openai")
 class JudgeFileErrorTests(unittest.TestCase):
