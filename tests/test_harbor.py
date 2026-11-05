@@ -467,6 +467,47 @@ def test_environment_start_timeout_retries_even_after_agent_result():
     assert _transient_startup_failure(_fake_result(timeout, agent_result=object()))
 
 
+def test_sailbox_refresh_rejection_is_retried():
+    """Sail's pre-creation admission rejection creates no box: retry it.
+
+    Controls and verifiers run through Harbor's own Sail environment, whose
+    Sailbox.create call has no retry wrapper. The rejection text matches neither
+    the HTTP-status nor the transient-name pattern, so without this case the
+    trial is abandoned even though no agent work was consumed.
+    """
+    from pyforger.harbor import _transient_startup_failure
+
+    refresh = _FakeException(
+        "SailboxCreationError",
+        "Sailbox concurrency limits are refreshing; retry shortly",
+    )
+    assert _transient_startup_failure(_fake_result(refresh))
+    # The message survives in the traceback too, which is how Harbor serializes it.
+    assert _transient_startup_failure(
+        _fake_result(
+            _FakeException(
+                "SailboxCreationError",
+                "creation failed",
+                traceback_="SailboxCreationError: Sailbox concurrency limits are "
+                "refreshing; retry shortly",
+            )
+        )
+    )
+    # A refresh rejection after an agent result is still a fresh-creation fault,
+    # but the agent-result gate does not apply: it is checked before the gate, so
+    # it retries even when a result exists.
+    assert _transient_startup_failure(_fake_result(refresh, agent_result=object()))
+
+
+def test_unrelated_sailbox_creation_error_is_not_retried():
+    """A deterministic creation rejection must not be retried."""
+    from pyforger.harbor import _transient_startup_failure
+
+    assert not _transient_startup_failure(
+        _fake_result(_FakeException("SailboxCreationError", "insufficient credits"))
+    )
+
+
 def _install_flaky_trial(monkeypatch, outcomes):
     """Substitute Trial.create/run with scripted outcomes; real runner logic stays."""
     from types import SimpleNamespace
@@ -517,6 +558,26 @@ def test_runner_does_not_retry_deterministic_failure(task, tmp_path, monkeypatch
     )
     assert result.status == "failed"
     assert len(calls) == 1
+
+
+def test_runner_retries_sailbox_refresh_rejection(task, tmp_path, monkeypatch):
+    """Sail's concurrency-refresh rejection is retried and the later success returned."""
+    outcomes = [
+        _fake_result(
+            _FakeException(
+                "SailboxCreationError",
+                "Sailbox concurrency limits are refreshing; retry shortly",
+            )
+        ),
+        _fake_result(),
+    ]
+    calls = _install_flaky_trial(monkeypatch, outcomes)
+    runner = HarborTaskRunner(agent={"name": "nop"}, environment={"type": "docker"})
+    result = runner.run(
+        HarborRequest(trial_id="refresh", task=task), tmp_path / "native"
+    )
+    assert result.status == "completed"
+    assert len(calls) == 2
 
 
 def test_runner_bounds_transient_retries(task, tmp_path, monkeypatch):
