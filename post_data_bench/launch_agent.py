@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Generate data with OpenHands, then train and evaluate on the host.
 
-sft-rl (default) accepts shared prompt/ground-truth/rubric triples and a final RL
-checkpoint, freezes the submission, then runs secret-test evaluation only. SFT, RL
-and evaluation use --backend tinker (Qwen3-8B LoRA) or --backend local (Qwen3-4B on
-the allocated GPUs). The legacy --training-mode sft runs raw data -> local SFT -> test.
+sft-rl (default) accepts prompt/rubric rows (ground_truth optional) and a final RL
+checkpoint, freezes the submission, then runs secret-test evaluation only. Training
+and evaluation use --backend tinker (Qwen3-8B LoRA; SFT trials, then RL) or
+--backend local (Qwen3-4B on the allocated GPUs; RL only, from the base model).
+The legacy --training-mode sft runs raw data -> local SFT -> test.
 --timeout-hours bounds only the agent phase. See coding/rl/UNIFIED_TRAINING.md.
 """
 import argparse
@@ -20,7 +21,7 @@ from typing import TextIO, cast
 from agent_boundary import model_cache_bind
 from agent_nudges import low_rows_message
 from backend_prompts import prompt_sections
-from coding.rl.backends import MODELS, saved_backend
+from coding.rl.backends import MODELS, RL_DEFAULTS, saved_backend
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument(
@@ -153,7 +154,9 @@ args.model = args.model or MODELS[args.backend]
 ROW_TARGET = 500 if args.task == "frontiercs" else 1250
 if args.min_rows_nudge is None:
     args.min_rows_nudge = 200 if args.task == "frontiercs" else 1000
-# Time a nudged agent needs for SFT plus RL (80 algorithmic RL steps take ~10 h).
+# Time a nudged agent needs to retrain. Set when 80 algorithmic RL steps of 32
+# prompts took ~10 h; the RL-only recipe's 100 steps of 8 took ~4.6 h (Orchard
+# 164619, 165011-165013).
 NUDGE_SECONDS_LEFT = (11 if args.task == "frontiercs" else 7) * 3600
 if args.training_mode == "sft-rl" and args.model != MODELS[args.backend]:
     parser.error(
@@ -647,9 +650,8 @@ TASK_PUBLIC_FILES = {
 }[args.task]
 
 if args.training_mode == "sft-rl":
-    # Only local runs need the GPU SFT entry point.
-    if args.backend == "tinker":
-        TASK_PUBLIC_FILES.remove("train_model.sh")
+    # Tinker trains remotely and local runs are RL-only: no SFT entry point.
+    TASK_PUBLIC_FILES.remove("train_model.sh")
     TASK_PUBLIC_FILES += [
         f"rl/{name}"
         for name in (
@@ -888,7 +890,7 @@ def build_agent_mounts(
     dest_task_dir = os.path.join(forger_copy, task_rel)
     os.makedirs(dest_task_dir, exist_ok=True)
     _task_public_copies(task_dir, dest_task_dir)
-    if args.backend == "local":
+    if args.backend == "local" and args.training_mode != "sft-rl":
         for name in ("train_sft.py", "fsdp.yaml"):
             _copy_into(
                 forger_copy,
@@ -1121,7 +1123,7 @@ if AGENT_ENABLE_SLIME:
         "inspect rollouts and compare reward shapes. You have "
         "a total of "
         f"{TIMEOUT:g}"
-        " hours for data generation, SFT, RL and validation. "
+        " hours for data generation, RL and validation. "
         "Write checkpoints and rollout dumps "
         "under your persistent agent data directory, and leave /tmp/rl_cache alone (it "
         "holds the flashinfer JIT cache). Ray works; its temp dir "
@@ -1293,12 +1295,15 @@ try:
                 # One nudge if it finished with a small dataset; finishing
                 # again (or running out of time) ends the session.
                 seconds_left = AGENT_ALARM_AT - time.time()
+                schedule = RL_DEFAULTS[args.backend]
                 nudge = low_rows_message(
                     RAW_DATA_PATH,
                     args.min_rows_nudge,
                     seconds_left,
                     target=ROW_TARGET,
                     min_seconds_left=NUDGE_SECONDS_LEFT,
+                    prompt_draws=schedule["num_rollout"]
+                    * schedule["rollout_batch_size"],
                 )
                 if nudge is not None:
                     logger.info(f"Low-row nudge sent to the agent: {nudge}")

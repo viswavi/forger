@@ -6,6 +6,12 @@ import os
 from pathlib import Path
 
 MODELS = {"tinker": "Qwen/Qwen3-8B", "local": "Qwen/Qwen3-4B"}
+# Agent RL schedule when --num-rollout etc. are omitted; the local optimizer
+# settings are local_training.RECIPE.
+RL_DEFAULTS = {
+    "local": {"num_rollout": 100, "rollout_batch_size": 8, "n_samples_per_prompt": 8},
+    "tinker": {"num_rollout": 80, "rollout_batch_size": 32, "n_samples_per_prompt": 8},
+}
 
 
 def resolve_backend(value=None):

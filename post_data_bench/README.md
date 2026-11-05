@@ -233,13 +233,16 @@ python launch_agent.py --task coding --training-mode sft-rl \
   --benchmark-dir /path/to/new/coding --prompt coding/FORGER_PROMPT.txt
 ```
 
-The agent has **15 hours** for data generation, SFT, RL and validation, and submits
-its chosen **final RL checkpoint** plus its dataset. It may repeat training,
-continue RL from earlier checkpoints, and revise data between experiments.
-The default recipe is **80 steps × 32 prompts × 8 completions per optimizer
-step**: 2,560 prompt draws and 20,480 completions, 20% fewer than 25 × 128 × 8.
-Planning guidelines are roughly one hour for SFT, 40 minutes for evaluation on
-1,500 examples, and six hours for RL; actual times depend on the backend and data.
+The agent has **15 hours** for data generation, training and validation, and submits
+its chosen **final RL checkpoint** plus its dataset (prompts and rubrics; a
+ground_truth reference is optional). It may repeat training, continue RL from
+earlier checkpoints, and revise data between experiments. With `--backend local`,
+training is **RL only**, from the base model: **100 steps × 8 prompts × 8
+completions** by default (`--num-rollout` changes the length), lr 1e-6 and
+16,000-token responses (see `coding/rl/UNIFIED_TRAINING.md`). Tinker keeps SFT
+trials and **80 steps × 32 prompts × 8 completions** (2,560 prompt draws, 20,480
+completions); its planning guidelines are roughly one hour for SFT, 40 minutes for
+evaluation on 1,500 examples, and six hours for RL.
 After the workspace closes, the host freezes the selected RL checkpoint and
 runs only secret-test evaluation. It does not train further. An error or timeout
 still permits evaluation of an already saved valid submission. The agent should

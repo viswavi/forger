@@ -1,6 +1,8 @@
-"""Agent-side SFT/probe helpers and host-side finalization for unified submissions.
+"""Agent-side RL/probe helpers and host-side finalization for unified submissions.
 
-SFT and RL use the selected Tinker or local GPU backend.
+Local (GPU) runs are RL-only: RL starts from the base model or an earlier RL
+checkpoint, with a fixed recipe (local_training.RECIPE). Tinker keeps its SFT
+trials, which its RL runs start from.
 Run from coding/: python -m rl.agent_training --help
 """
 from __future__ import annotations
@@ -15,7 +17,12 @@ import sys
 import tempfile
 from pathlib import Path
 
-from .backends import MODELS, resolve_backend, saved_backend  # noqa: ABS101
+from .backends import (  # noqa: ABS101
+    MODELS,
+    RL_DEFAULTS,
+    resolve_backend,
+    saved_backend,
+)
 from .lineage import check as check_lineage  # noqa: ABS101
 from .lineage import record_start  # noqa: ABS101
 
@@ -47,11 +54,11 @@ def run(command, cwd=CODING, env=None):
     subprocess.run(list(map(str, command)), cwd=cwd, check=True, env=env)
 
 
-def prepare(data, directory, model=BASE_MODEL):
-    """Validate shared triples and compile the identical SFT and RL prompts."""
+def prepare(data, directory, model=BASE_MODEL, sft=False):
+    """Validate rows and compile the training prompts (and SFT targets if `sft`)."""
     from transformers import AutoTokenizer
 
-    return compile_data(data, directory, AutoTokenizer.from_pretrained(model))
+    return compile_data(data, directory, AutoTokenizer.from_pretrained(model), sft=sft)
 
 
 def checkpoint_files(checkpoint, backend="tinker"):
@@ -81,17 +88,18 @@ def digest(path):
 
 
 def sft(args):
-    """Train and record an SFT trial on the fixed training partition."""
+    """Train and record a Tinker SFT trial on the fixed training partition."""
     if resolve_backend(args.backend) == "local":
-        from .local_training import sft as local_sft  # noqa: ABS101
-
-        return local_sft(args)
+        raise ValueError(
+            "local training is RL-only: run rl.agent_training rl, which starts "
+            "from the base model when --checkpoint is omitted"
+        )
     from .tinker_training import run_sft  # noqa: ABS101
 
     output = Path(args.output_dir).resolve()
     if output.exists():
         raise ValueError(f"use a new output directory for each SFT trial: {output}")
-    prepared = prepare(args.data, str(output) + ".data")
+    prepared = prepare(args.data, str(output) + ".data", sft=True)
     record = run_sft(
         prepared / "sft.jsonl",
         output,
@@ -479,10 +487,11 @@ def rl_run(args):
     reward_preflight(args.data_dir, judge_config)
     if resolve_backend(args.backend) == "local":
         from .local_training import execute_rl  # noqa: ABS101
+        from .local_training import start_checkpoint  # noqa: ABS101
 
         return execute_rl(
             args.data_dir,
-            checkpoint_files(args.checkpoint, "local"),
+            start_checkpoint(args.checkpoint),
             args.output_dir,
             judge_config,
             probe=args.local_probe,
@@ -592,7 +601,8 @@ def main():
     check.add_argument("--data", required=True)
     check.add_argument(
         "--checkpoint",
-        help="Also check that this checkpoint's SFT and RL runs used these prompts",
+        help="Also check that the training runs behind this checkpoint used these "
+        "prompts",
     )
     check.set_defaults(action=validate)
     resume = commands.add_parser(
@@ -602,7 +612,7 @@ def main():
     resume.set_defaults(action=run_final)
     train = commands.add_parser(
         "sft",
-        help="Train any number of SFT trials on the fixed 90%% training partition",
+        help="Tinker only: train an SFT trial on the fixed 90%% training partition",
     )
     train.add_argument("--data", required=True)
     train.add_argument("--output-dir", required=True)
@@ -614,9 +624,7 @@ def main():
     )
     train.add_argument("--epochs", type=int, default=4)
     train.add_argument(
-        "--lr",
-        type=float,
-        help="Full-finetune LR; LoRA uses 10x (default 1e-5 local, 1e-6 tinker)",
+        "--lr", type=float, help="Full-finetune LR; LoRA uses 10x (default 1e-6)"
     )
     train.add_argument("--lora-rank", type=int)
     train.add_argument("--batch-size", type=int, default=128)
@@ -636,10 +644,15 @@ def main():
             )
             command.set_defaults(action=finalize)
         else:
-            command.add_argument("--checkpoint", required=True)
-            command.add_argument("--num-rollout", type=int, default=80)
-            command.add_argument("--rollout-batch-size", type=int, default=32)
-            command.add_argument("--n-samples-per-prompt", type=int, default=8)
+            command.add_argument(
+                "--checkpoint",
+                help="Start from this RL checkpoint (Tinker: or SFT trial); local "
+                "runs start from the base model when omitted",
+            )
+            # Defaults depend on the backend (RL_DEFAULTS).
+            command.add_argument("--num-rollout", type=int)
+            command.add_argument("--rollout-batch-size", type=int)
+            command.add_argument("--n-samples-per-prompt", type=int)
             command.set_defaults(action=probe if name == "probe" else train_rl)
     # Internal: built by rl_command from trusted code, never from agent input.
     rl = commands.add_parser("rl-run", help=argparse.SUPPRESS)
@@ -666,11 +679,9 @@ def main():
         if args.command == "sft":
             args.backend = saved_backend(Path(args.data).resolve().parent, args.backend)
             if args.lora_rank is None:
-                args.lora_rank = 32 if args.backend == "tinker" else 256
-            # Local MLP-only LoRA on Qwen3-4B needs LoRA 1e-4 to seed abstention
-            # (Orchard 161710, babel Sep 2026); 1e-5 left it at 0/136 samples.
+                args.lora_rank = 32
             if args.lr is None:
-                args.lr = 1e-6 if args.backend == "tinker" else 1e-5
+                args.lr = 1e-6
             args.model = args.model or MODELS[args.backend]
             if args.model != MODELS[args.backend]:
                 raise ValueError("Model does not match the selected backend recipe")
@@ -686,6 +697,10 @@ def probe(args):
 
 def train_rl(args, short=False):
     """Run agent-controlled RL without secret benchmark evaluation."""
+    backend = saved_backend(Path(args.data).resolve().parent, args.backend)
+    for key, value in RL_DEFAULTS[backend].items():
+        if getattr(args, key) is None:
+            setattr(args, key, value)
     if any(
         value < 1
         for value in (
@@ -702,8 +717,14 @@ def train_rl(args, short=False):
         Path(args.data).resolve().parent / "judge_token_usage.json",
         task=getattr(args, "task", None),
     )
-    backend = saved_backend(Path(args.data).resolve().parent, args.backend)
-    checkpoint = checkpoint_files(args.checkpoint, backend)
+    if backend == "local":
+        from .local_training import start_checkpoint  # noqa: ABS101
+
+        checkpoint = start_checkpoint(args.checkpoint)
+    elif args.checkpoint is None:
+        raise ValueError("Tinker RL starts from an SFT trial or RL checkpoint")
+    else:
+        checkpoint = checkpoint_files(args.checkpoint, backend)
     data = prepare(args.data, str(args.output_dir) + ".data", MODELS[backend])
     record_start(data, checkpoint)
     reward_preflight(data, judge_config)

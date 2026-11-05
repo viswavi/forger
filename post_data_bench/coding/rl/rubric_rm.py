@@ -501,7 +501,7 @@ async def custom_rm(args, sample, **kwargs):
     """Compute the weighted reward using the fixed rubric executor."""
     metadata = sample.metadata
     rubric = validate_rubric(metadata["rubric"])
-    prompt = metadata["original_prompt"]  # Pre-template prompt, exactly as in SFT.
+    prompt = metadata["original_prompt"]  # Pre-template prompt, exactly as submitted.
     response = without_stop_tokens(sample.response)  # as the evaluator sees it
     total = 0.0
     for criterion, weight in rubric:

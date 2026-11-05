@@ -55,7 +55,7 @@ class DatasetTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             write_rows(root / "input", rows())
-            data.compile_data(root / "input", root / "a")
+            data.compile_data(root / "input", root / "a", sft=True)
             train, val, sft = [
                 read(root / "a" / name)
                 for name in ("train.jsonl", "val.jsonl", "sft.jsonl")
@@ -75,6 +75,26 @@ class DatasetTests(unittest.TestCase):
                 (root / "a/train.jsonl").read_bytes(),
                 (root / "b/train.jsonl").read_bytes(),
             )
+            self.assertFalse((root / "b/sft.jsonl").exists())
+
+    def test_rl_rows_need_no_ground_truth(self):
+        """RL rows are prompt + rubric; ground_truth is optional free text."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bare = [{key: row[key] for key in ("prompt", "rubric")} for row in rows()]
+            bare[0]["ground_truth"] = "a reference answer, no thinking trace"
+            write_rows(root / "input", bare)
+            data.compile_data(root / "input", root / "a")
+            labels = {
+                r["label"]
+                for name in ("train.jsonl", "val.jsonl")
+                for r in read(root / "a" / name)
+            }
+            self.assertEqual(labels, {"", "a reference answer, no thinking trace"})
+            with self.assertRaisesRegex(ValueError, "SFT needs"):
+                data.compile_data(root / "input", root / "b", sft=True)
+            with self.assertRaisesRegex(ValueError, "may have"):
+                data.validate_row({**bare[1], "response": "x"})
 
     def test_reject_duplicate_and_small(self):
         """Verify reject duplicate and small."""
@@ -123,14 +143,31 @@ class DatasetTests(unittest.TestCase):
     def test_thinking_and_overlength(self):
         """Verify thinking and overlength."""
         with self.assertRaises(ValueError):
-            data.validate_row({**rows()[0], "ground_truth": "answer"})
+            data.validate_sft_target("answer")
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "input"
             write_rows(path, rows())
-            tokenizer = SimpleNamespace(apply_chat_template=lambda *a, **k: [0] * 101)
-            with self.assertRaisesRegex(ValueError, "exceeds"):
-                data.compile_data(path, Path(tmp) / "out", tokenizer, max_length=100)
-            self.assertFalse((Path(tmp) / "out").exists())
+            calls = []
+
+            def template(messages, **kwargs):
+                calls.append((messages, kwargs))
+                return [0] * 101
+
+            tokenizer = SimpleNamespace(apply_chat_template=template)
+            for sft in (False, True):
+                with self.subTest(sft=sft), self.assertRaisesRegex(
+                    ValueError, "exceeds"
+                ):
+                    data.compile_data(
+                        path, Path(tmp) / "out", tokenizer, max_length=100, sft=sft
+                    )
+                self.assertFalse((Path(tmp) / "out").exists())
+            # RL checks the prompt alone; SFT checks prompt plus target.
+            (rl_messages, rl_kwargs), (sft_messages, sft_kwargs) = calls
+            self.assertEqual(rl_messages[-1]["role"], "user")
+            self.assertTrue(rl_kwargs["add_generation_prompt"])
+            self.assertEqual(sft_messages[-1]["role"], "assistant")
+            self.assertFalse(sft_kwargs["add_generation_prompt"])
 
 
 class CodeTests(unittest.TestCase):
@@ -631,6 +668,99 @@ class FinalizationTests(unittest.TestCase):
         self.assertIn("--skip-final-eval", command)
         self.assertEqual(command[command.index("--num-rollout") + 1], "2")
         self.assertEqual(command[command.index("--rollout-batch-size") + 1], "16")
+
+
+def last_value(command, flag):
+    """The wrapper takes the last value given for a flag."""
+    return command[len(command) - 1 - command[::-1].index(flag) + 1]
+
+
+class LocalRLOnlyTests(unittest.TestCase):
+    """Local runs are RL-only: base-model start, fixed recipe, no SFT."""
+
+    def test_local_sft_is_refused(self):
+        """The sft command names the RL command instead of training."""
+        args = argparse.Namespace(backend="local", output_dir="unused")
+        with self.assertRaisesRegex(ValueError, "RL-only"):
+            training.sft(args)
+
+    def test_recipe_and_default_schedule(self):
+        """100 steps x 8 prompts x 8 samples at lr 1e-6 and 16,000 tokens."""
+        from coding.rl import local_training
+
+        command = local_training.rl_command("data", "ckpt", "out", "env", "deps")
+        expected = {
+            "--num-rollout": "100",
+            "--rollout-batch-size": "8",
+            "--n-samples-per-prompt": "8",
+            "--global-batch-size": "64",
+            "--lr": "1e-6",
+            "--max-response-len": "16000",
+            "--eps-clip-high": "0.2",
+            "--weight-decay": "0.01",
+            "--adam-beta2": "0.999",
+            "--save-interval": "10",
+        }
+        for flag, value in expected.items():
+            with self.subTest(flag=flag):
+                self.assertEqual(last_value(command, flag), value)
+        probe = local_training.rl_command(
+            "data", "ckpt", "out", "env", "deps", probe=True
+        )
+        self.assertEqual(last_value(probe, "--num-rollout"), "2")
+        self.assertEqual(last_value(probe, "--save-interval"), "1")
+
+    def test_start_checkpoint_defaults_to_the_base_snapshot(self):
+        """No --checkpoint, or the base snapshot itself, starts from base."""
+        from coding.rl import local_training
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "huggingface_hub.snapshot_download", return_value=tmp
+        ):
+            base = Path(tmp).resolve()
+            self.assertEqual(local_training.start_checkpoint(), base)
+            self.assertEqual(local_training.start_checkpoint(tmp), base)
+            with self.assertRaises(OSError):
+                local_training.start_checkpoint(Path(tmp) / "missing")
+
+    def test_rl_without_checkpoint_runs_the_default_schedule_from_base(self):
+        """`rl --data ...` alone: base start, local defaults, lineage recorded."""
+        from coding.rl import local_training
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_rows(root / "rows.jsonl", rows())
+            args = argparse.Namespace(
+                data=str(root / "rows.jsonl"),
+                output_dir=str(root / "rl_trial_1"),
+                backend="local",
+                task="coding",
+                checkpoint=None,
+                num_rollout=None,
+                rollout_batch_size=None,
+                n_samples_per_prompt=None,
+            )
+            commands, starts = [], []
+            with patch.object(
+                training, "judge_configuration", return_value=None
+            ), patch.object(training, "reward_preflight"), patch.object(
+                training,
+                "prepare",
+                side_effect=lambda d, out, model: Path(out),
+            ), patch.object(
+                training, "record_start", side_effect=lambda d, c: starts.append(c)
+            ), patch.object(
+                training, "run", side_effect=commands.append
+            ), patch.object(
+                local_training, "start_checkpoint", return_value=root / "base"
+            ):
+                training.train_rl(args)
+        (command,) = commands
+        self.assertEqual(starts, [root / "base"])
+        self.assertEqual(last_value(command, "--checkpoint"), str(root / "base"))
+        self.assertEqual(last_value(command, "--num-rollout"), "100")
+        self.assertEqual(last_value(command, "--rollout-batch-size"), "8")
+        self.assertIn("--skip-final-eval", command)
 
 
 class TinkerBudgetTests(unittest.TestCase):

@@ -8,7 +8,7 @@ module); short statements such as a two-sentence situation use 8-word windows
 least the signature's `min_matches`. Windows found in `COMMON` or more statements,
 counting the validation statements too, are boilerplate (e.g. a site's standard
 definition of lexicographic order) and ignored. Training data goes through
-`filter_rows` before every SFT and RL run, and only the number of removed rows is
+`filter_rows` before every training run, and only the number of removed rows is
 reported.
 
   python -m rl.decontaminate --data rows.jsonl   # how many rows overlap

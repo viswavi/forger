@@ -101,7 +101,7 @@ def select_result(output, initial_checkpoint, exit_code, quota_file):
         )
         if initial_fallback:
             warning += (
-                " No RL checkpoint was saved; returning the submitted SFT "
+                " No RL checkpoint was saved; returning the starting "
                 "checkpoint (no saved RL progress)."
             )
         print("WARNING: " + warning, file=sys.stderr, flush=True)

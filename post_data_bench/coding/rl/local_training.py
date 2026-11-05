@@ -7,9 +7,28 @@ import shutil
 import sys
 from pathlib import Path
 
-from .agent_training import CODING, JUDGE_FLAGS, digest, prepare, run  # noqa: ABS101
+from .agent_training import CODING, JUDGE_FLAGS, run  # noqa: ABS101
+from .backends import RL_DEFAULTS  # noqa: ABS101
 
 BASE_MODEL = "Qwen/Qwen3-4B"
+# The local RL recipe, with 100 steps x 8 prompts x 8 samples (RL_DEFAULTS):
+# lr 1e-6, 16,000-token responses, clip 0.2 on both sides, weight decay 0.01,
+# Adam beta2 0.999, and a checkpoint every 10 steps. The wrapper's defaults
+# supply the rest (KL 1e-3 low_var_kl, temperature 1.0, eps-clip 0.2 below).
+RECIPE = [
+    "--lr",
+    "1e-6",
+    "--max-response-len",
+    "16000",
+    "--eps-clip-high",
+    "0.2",
+    "--weight-decay",
+    "0.01",
+    "--adam-beta2",
+    "0.999",
+    "--save-interval",
+    "10",
+]
 
 
 def checkpoint_files(checkpoint):
@@ -65,55 +84,18 @@ def checkpoint_files(checkpoint):
     return checkpoint
 
 
-def sft(args):
-    """Train and record an SFT trial on the fixed training partition."""
-    output = Path(args.output_dir).resolve()
-    if output.exists():
-        raise ValueError(f"use a new output directory for each SFT trial: {output}")
-    prepared = prepare(args.data, str(output) + ".data", args.model)
-    run(
-        [
-            "bash",
-            CODING / "train_model.sh",
-            "--model",
-            args.model,
-            "--data-file",
-            prepared / "sft.jsonl",
-            "--output-dir",
-            output,
-            "--epochs",
-            args.epochs,
-            "--lr",
-            args.lr,
-            "--conda-env",
-            args.conda_env,
-            "--train-arg",
-            "--lora-r",
-            "--train-arg",
-            str(args.lora_rank),
-        ],
-        env={**os.environ, "SFT_GLOBAL_BATCH": str(args.batch_size)},
-    )
-    checkpoint_files(output)
-    # Record the actual prompts/targets used, separate from mutable rubrics.
-    (output / "sft_submission.json").write_text(
-        json.dumps(
-            {
-                "sft_sha256": digest(prepared / "sft.jsonl"),
-                "base_model": args.model,
-                "data_directory": str(prepared),
-                "thinking": True,
-                "backend": "local",
-                "epochs": args.epochs,
-                "learning_rate": args.lr,
-                "lora_rank": args.lora_rank,
-                "batch_size": args.batch_size,
-            },
-            indent=2,
-        )
-        + "\n"
-    )
-    print(f"SFT complete: {output}. Use this as --checkpoint for rl.agent_training rl.")
+def start_checkpoint(checkpoint=None):
+    """The checkpoint an RL run starts from: the base model when None.
+
+    The base model is the host's Hugging Face cache snapshot, whose files are
+    links into the cache's blobs, so it skips the agent-checkpoint checks.
+    """
+    from huggingface_hub import snapshot_download
+
+    base = Path(snapshot_download(BASE_MODEL, local_files_only=True)).resolve()
+    if checkpoint is None or Path(checkpoint).resolve() == base:
+        return base
+    return checkpoint_files(checkpoint)
 
 
 def rl_command(
@@ -124,9 +106,9 @@ def rl_command(
     slime_deps,
     probe=False,
     judge_config=None,
-    num_rollout=80,
-    rollout_batch_size=32,
-    n_samples_per_prompt=8,
+    num_rollout=RL_DEFAULTS["local"]["num_rollout"],
+    rollout_batch_size=RL_DEFAULTS["local"]["rollout_batch_size"],
+    n_samples_per_prompt=RL_DEFAULTS["local"]["n_samples_per_prompt"],
 ):
     """Build the fixed Slime command for a probe or final run."""
     command = [
@@ -144,6 +126,7 @@ def rl_command(
         "--slime-deps",
         slime_deps,
         "--skip-final-eval",
+        *RECIPE,
     ]
     command += [
         "--num-rollout",
@@ -210,9 +193,9 @@ def execute_rl(
     probe=False,
     slime_env=None,
     slime_deps=None,
-    num_rollout=80,
-    rollout_batch_size=32,
-    n_samples_per_prompt=8,
+    num_rollout=RL_DEFAULTS["local"]["num_rollout"],
+    rollout_batch_size=RL_DEFAULTS["local"]["rollout_batch_size"],
+    n_samples_per_prompt=RL_DEFAULTS["local"]["n_samples_per_prompt"],
     evaluate=False,
 ):
     """Run Slime then evaluate the resulting checkpoint with local vLLM."""
