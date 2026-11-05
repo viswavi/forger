@@ -8,12 +8,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-# The default RL recipe draws this many prompts (80 steps x 32 prompts), from
-# the 90% of rows the harness keeps for training.
+# The Tinker RL recipe draws this many prompts (80 steps x 32 prompts), from
+# the 90% of rows the harness keeps for training; local runs draw 100 x 8.
 RL_PROMPT_DRAWS = 80 * 32
 TRAIN_SHARE = 0.9
-# Adding rows means regenerating data and retraining SFT; with less time
-# left, a half-finished attempt could break a valid submission.
+# Adding rows means regenerating data and retraining; with less time left, a
+# half-finished attempt could break a valid submission.
 MIN_SECONDS_LEFT = 7 * 60 * 60
 
 
@@ -26,13 +26,19 @@ def count_rows(path: str | Path) -> int | None:
         return None
 
 
-def low_rows_message(path: str | Path, minimum: int, seconds_left: float) -> str | None:
+def low_rows_message(
+    path: str | Path,
+    minimum: int,
+    seconds_left: float,
+    prompt_draws: int = RL_PROMPT_DRAWS,
+) -> str | None:
     """A note for an agent that finished with fewer than ``minimum`` rows.
 
     e.g. 321 rows with ``minimum=1000``: the note says RL would see each
     training prompt about 11 times, and that finishing again keeps the
     dataset as it is. None when ``minimum`` is 0, the dataset has enough rows,
-    or under seven hours are left (leave time for SFT and RL).
+    or under seven hours are left (leave time for training). ``prompt_draws``
+    is the default RL schedule's steps x prompts per step.
     """
     if minimum <= 0 or seconds_left < MIN_SECONDS_LEFT:
         return None
@@ -48,16 +54,16 @@ def low_rows_message(path: str | Path, minimum: int, seconds_left: float) -> str
     if rows is None:
         found = f"There is no dataset at {path} yet."
     else:
-        visits = RL_PROMPT_DRAWS / max(1.0, rows * TRAIN_SHARE)
+        visits = prompt_draws / max(1.0, rows * TRAIN_SHARE)
         found = (
             f"Your dataset at {path} has {rows} rows. The default RL recipe draws "
-            f"{RL_PROMPT_DRAWS:,} prompts from your training rows, so each would be "
+            f"{prompt_draws:,} prompts from your training rows, so each would be "
             f"seen about {visits:.0f} times; about 1,250 rows is a good target, and "
             f"at least {minimum:,} is what we expect realistically."
         )
     return (
         f"{found} You have {left} left. If you want to add rows, continue now: "
-        "build a new dataset version and run additional SFT/RL experiments if "
+        "build a new dataset version and run additional training experiments if "
         "you expect them to help. Keep submission.json pointing at your current "
         "completed RL checkpoint until a better RL checkpoint is ready. "
         "You need not retrain merely to match the latest data file. If you are "

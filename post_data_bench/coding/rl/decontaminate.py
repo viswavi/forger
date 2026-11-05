@@ -6,7 +6,7 @@ module). A row overlaps a test problem when its prompt contains at least
 `FRACTION` of that problem's windows (and at least `MIN_MATCHES`). Windows found in
 `COMMON` or more statements, counting the validation statements too, are
 boilerplate (e.g. a site's standard definition of lexicographic order) and
-ignored. Training data goes through `filter_rows` before every SFT and RL run, and
+ignored. Training data goes through `filter_rows` before every training run, and
 only the number of removed rows is reported.
 
   python -m rl.decontaminate --data rows.jsonl   # how many rows overlap

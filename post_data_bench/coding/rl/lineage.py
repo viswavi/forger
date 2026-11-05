@@ -1,10 +1,12 @@
-"""Which data trained a checkpoint: its RL runs, back to the SFT trial they began from.
+"""Which data trained a checkpoint: its RL runs, back to where they began.
+
+They begin from the base model or, on Tinker, from an SFT trial.
 
 The final submission allows any number of experiments, but the selected checkpoint's
-own training (its SFT trial and every RL run on the way to it) must use at most
-MAX_ROWS rows per run, all with prompts from the final dataset. Each RL run records
-the checkpoint it started from in `lineage.json`, inside its compiled data directory
-(`<run>.data/`); SFT and RL receipts name that directory.
+own training (every RL run on the way to it, and its SFT trial if any) must use at
+most MAX_ROWS rows per run, all with prompts from the final dataset. Each RL run
+records the checkpoint it started from in `lineage.json`, inside its compiled data
+directory (`<run>.data/`); SFT and RL receipts name that directory.
 """
 from __future__ import annotations
 
@@ -79,6 +81,6 @@ def check(checkpoint, final_data):
         if missing:
             raise ValueError(
                 f"{name} used {len(missing)} prompts not in the final dataset; "
-                "the submitted checkpoint's SFT and RL data must come from its prompts"
+                "the submitted checkpoint's training data must come from its prompts"
             )
     return runs

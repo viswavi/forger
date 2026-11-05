@@ -1,20 +1,23 @@
-# Agent-controlled SFT and RL
+# Agent-controlled RL (and Tinker SFT)
 
 `launch_agent.py --task coding --prompt coding/FORGER_PROMPT.txt` gives the agent
-15 hours (`--timeout-hours`) for data generation, SFT, RL and validation. The
+15 hours (`--timeout-hours`) for data generation, training and validation. The
 minimal scaffold uses `coding/minimal_scaffold_prompt.txt` and the same training
 contract. Both prompts render backend-specific commands from `backend_prompts.py`.
 
 ## Backends and defaults
 
-- `--backend tinker` (default): Qwen/Qwen3-8B, remote LoRA training.
-- `--backend local`: Qwen/Qwen3-4B, local TRL SFT with merged LoRA weights,
-  Slime full-parameter RL, and vLLM validation and final evaluation.
-- RL defaults on both: 80 optimizer steps, 32 prompts × 8 completions per step
-  (256 completions per optimizer batch). Total: 2,560 prompt draws and 20,480
-  completions; the old Tinker default was 25 × 128 × 8 = 25,600 completions.
+- `--backend tinker` (default): Qwen/Qwen3-8B, remote LoRA SFT trials, then RL from
+  an SFT trial or RL checkpoint. RL defaults: 80 optimizer steps, 32 prompts × 8
+  completions per step (2,560 prompt draws, 20,480 completions).
+- `--backend local`: Qwen/Qwen3-4B, RL only: Slime full-parameter RL from the base
+  model (or an earlier RL checkpoint), and vLLM validation and final evaluation.
+  The recipe (`local_training.RECIPE`, `backends.RL_DEFAULTS`) follows FrontierSmith:
+  100 steps × 8 prompts × 8 completions, lr 1e-6, 16,000-token responses, clip
+  0.2 / 0.2, weight decay 0.01, Adam β2 0.999, KL 1e-3 (low_var_kl), temperature
+  1.0, a checkpoint every 10 steps. There is no local SFT command.
 - Agents may change the number of steps or batch shape, repeat runs, and continue
-  RL from an SFT or RL checkpoint in a fresh output directory.
+  RL from an earlier checkpoint in a fresh output directory.
 - Planning estimates: SFT roughly 1 hour, validation on 1,500 examples roughly
   40 minutes, RL roughly 6 hours. These are guidelines, not deadlines or guarantees.
 - Generation/judge token quotas and Tinker dollar caps remain unchanged. Tinker
@@ -31,6 +34,9 @@ Run from `coding/`, with all outputs inside the agent data directory:
 
 ```bash
 python -m rl.agent_training validate --data "$DATA/generated_raw.jsonl"
+# Local: RL from the base model (no --checkpoint), e.g. 150 steps.
+python -m rl.agent_training rl --data "$DATA/generated_raw.jsonl" --output-dir "$DATA/rl_1" --num-rollout 150
+# Tinker: SFT trial, then RL from it.
 python -m rl.agent_training sft --data "$DATA/generated_raw.jsonl" --output-dir "$DATA/sft_1"
 python -m rl.agent_training rl --data "$DATA/generated_raw.jsonl" --checkpoint "$DATA/sft_1" --output-dir "$DATA/rl_1"
 ```
@@ -40,10 +46,13 @@ python -m rl.agent_training rl --data "$DATA/generated_raw.jsonl" --checkpoint "
 command performs secret-test evaluation. Use `evaluate_model.sh --split val`
 with `--server-backend tinker` (the sampler path) or `vllm` (the HF directory).
 
-Dataset rows remain prompt/ground_truth/rubric triples, with 10–2,000 unique
-prompts and thinking-mode targets within 18,800 tokens. The fixed generated
-holdout is 10%. Agents may revise data between training runs; selecting a final
-checkpoint no longer requires its SFT data hash to match the latest dataset.
+Dataset rows are `{"prompt", "rubric"}` with an optional `"ground_truth"` (free
+text criteria receive; `""` when absent), with 10–2,000 unique prompts, each
+within 18,800 tokens. Tinker SFT additionally needs every row's ground_truth to be
+a `<think>...</think>` target, with prompt plus target within 18,800 tokens. The
+fixed generated holdout is 10%. Agents may revise data between training runs;
+selecting a final checkpoint no longer requires its SFT data hash to match the
+latest dataset.
 
 Write `submission.json` atomically as `{"checkpoint": "/absolute/checkpoint/path"}`:
 
@@ -91,7 +100,7 @@ Weights must be finite and nonnegative, with a positive sum. Reward is
   parameters and defaults are accepted; decorators, keyword-only parameters,
   `*args`, and `**kwargs` are rejected. Do not rebind or delete `grade`.
   `prompt` is the original list of chat messages; `response` retains the policy's
-  thinking trace; `ground_truth` is the complete assistant target string. The returned
+  thinking trace; `ground_truth` is the row's ground_truth (`""` when absent). The returned
   score is checked at runtime, without trying to predict rubric behavior during
   format validation. Code runs in the standalone `rubric_sandbox.py` clone of the
   existing Forger RestrictedPython implementation, in a disposable process with

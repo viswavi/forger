@@ -1,4 +1,4 @@
-"""Validate shared triples and compile identical SFT/RL training prompts."""
+"""Validate prompt/rubric rows and compile the RL (and Tinker SFT) training data."""
 from __future__ import annotations
 
 import argparse
@@ -10,7 +10,7 @@ import random
 from functools import lru_cache
 from pathlib import Path
 
-# Rows per SFT or RL run (and in the final dataset); experiments are unlimited.
+# Rows per training run (and in the final dataset); experiments are unlimited.
 MAX_ROWS = 2000
 
 
@@ -140,9 +140,17 @@ def validate_rubric(rubric):
 
 
 def validate_row(row):
-    """Validate and normalize one shared prompt, target and rubric triple."""
-    if not isinstance(row, dict) or set(row) != {"prompt", "ground_truth", "rubric"}:
-        raise ValueError("row must have exactly prompt, ground_truth, rubric")
+    """Validate and normalize one row: a prompt, a rubric, an optional reference.
+
+    "ground_truth" is optional free text that criteria receive as their third
+    argument (e.g. a reference answer); it becomes "" when absent.
+    """
+    if not isinstance(row, dict) or not (
+        {"prompt", "rubric"} <= set(row) <= {"prompt", "ground_truth", "rubric"}
+    ):
+        raise ValueError(
+            'row must have "prompt" and "rubric", and may have "ground_truth"'
+        )
     prompt = row["prompt"]
     if isinstance(prompt, str) and prompt.strip():
         prompt = [{"role": "user", "content": prompt}]
@@ -159,22 +167,27 @@ def validate_row(row):
             raise ValueError("invalid prompt message")
     if prompt[-1]["role"] != "user":
         raise ValueError("prompt must end in a user turn")
-    target = row["ground_truth"]
-    if not isinstance(target, str) or not target.strip():
-        raise ValueError("ground_truth must be the complete nonempty assistant target")
-    # Thinking is part of the SFT target; never silently create empty traces.
-    if not target.startswith("<think>") or "</think>" not in target:
-        raise ValueError(
-            "ground_truth must include <think>reasoning</think> followed by the answer"
-        )
-    reasoning, answer = target[len("<think>") :].split("</think>", 1)
-    if not reasoning.strip() or not answer.strip():
-        raise ValueError("ground_truth must contain both reasoning and a final answer")
+    target = row.get("ground_truth", "")
+    if not isinstance(target, str):
+        raise ValueError("ground_truth must be a string")
     return {
         "prompt": prompt,
         "ground_truth": target,
         "rubric": validate_rubric(row["rubric"]),
     }
+
+
+def validate_sft_target(target):
+    """Tinker SFT trains on ground_truth: <think>reasoning</think>, then the answer."""
+    # Thinking is part of the SFT target; never silently create empty traces.
+    if not target.startswith("<think>") or "</think>" not in target:
+        raise ValueError(
+            "SFT needs each ground_truth to be <think>reasoning</think> followed by "
+            "the answer"
+        )
+    reasoning, answer = target[len("<think>") :].split("</think>", 1)
+    if not reasoning.strip() or not answer.strip():
+        raise ValueError("ground_truth must contain both reasoning and a final answer")
 
 
 def read_rows(path):
@@ -214,8 +227,12 @@ def validate_dataset(source):
     return rows
 
 
-def compile_data(source, out_dir, tokenizer=None, max_length=18800):
-    """Fixed seed, 90/10 split. Fail on overlength rows rather than truncate SFT.
+def compile_data(source, out_dir, tokenizer=None, max_length=18800, sft=False):
+    """Fixed seed, 90/10 split. Fail on overlength rows rather than truncate them.
+
+    RL checks each prompt's length; `sft=True` (Tinker SFT) checks prompt plus
+    ground_truth, requires every ground_truth to be a thinking target, and also
+    writes sft.jsonl.
 
     Rows that overlap the held-out test problems are removed first (see
     `decontaminate`); only their number is reported.
@@ -238,13 +255,21 @@ def compile_data(source, out_dir, tokenizer=None, max_length=18800):
     n_eval = max(1, len(ordered) // 10)
     evaluation, train = ordered[:n_eval], ordered[n_eval:]
     for row in train + evaluation:
+        if sft:
+            try:
+                validate_sft_target(row["ground_truth"])
+            except ValueError as exc:
+                raise ValueError(f"prompt {prompt_id(row)}: {exc}") from exc
         if tokenizer is not None:
-            messages = row["prompt"] + [
-                {"role": "assistant", "content": row["ground_truth"]}
-            ]
+            messages = row["prompt"] + (
+                [{"role": "assistant", "content": row["ground_truth"]}] if sft else []
+            )
             length = len(
                 tokenizer.apply_chat_template(
-                    messages, tokenize=True, return_dict=False
+                    messages,
+                    tokenize=True,
+                    return_dict=False,
+                    add_generation_prompt=not sft,
                 )
             )
             if length > max_length:
@@ -260,16 +285,17 @@ def compile_data(source, out_dir, tokenizer=None, max_length=18800):
         )
 
     write("submitted.jsonl", rows)
-    write(
-        "sft.jsonl",
-        [
-            {
-                "messages": r["prompt"]
-                + [{"role": "assistant", "content": r["ground_truth"]}]
-            }
-            for r in train
-        ],
-    )
+    if sft:
+        write(
+            "sft.jsonl",
+            [
+                {
+                    "messages": r["prompt"]
+                    + [{"role": "assistant", "content": r["ground_truth"]}]
+                }
+                for r in train
+            ],
+        )
     for filename, rows in [("train.jsonl", train), ("val.jsonl", evaluation)]:
         write(
             filename,
