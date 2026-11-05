@@ -178,6 +178,25 @@ def test_native_agent_budget_is_configured_independently_of_environment_setup(tm
     assert native_task.agent.timeout_sec == 1
 
 
+def test_environment_build_timeout_exceeds_harbor_default(tmp_path):
+    """Packaged tasks raise the environment build/start budget above 600s."""
+    from harbor.models.task.config import EnvironmentConfig
+
+    artifact = _package(
+        WorkspaceTask(instruction="submit", files={}, outputs=("result.json",)),
+        AgentSpec(kind="nop"),
+        tmp_path / "task",
+        ["/work/result.json"],
+    )
+    task_toml = artifact.path("task.toml").read_text()
+    assert "build_timeout_sec = 900" in task_toml
+    parsed = EnvironmentConfig.model_validate(
+        TaskConfig.model_validate_toml(task_toml).environment.model_dump()
+    )
+    assert parsed.build_timeout_sec == 900
+    assert parsed.build_timeout_sec > EnvironmentConfig().build_timeout_sec
+
+
 def test_agent_image_uses_shared_exact_sdk_sources_with_git(tmp_path):
     from pyforger.sail_sdk import SDK_REQUIREMENT, TOOLS_REQUIREMENT
 

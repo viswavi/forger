@@ -82,12 +82,30 @@ _TRANSIENT_NAMES = re.compile(
     r"overloaded|try again|api.?error",
     re.I,
 )
+# A separate verifier environment starting is pure infrastructure: it runs no
+# agent work, so a start timeout consumes nothing that a fresh attempt cannot
+# redo. This is the one failure that is retried even after the agent produced a
+# result, because the agent result is not invalidated by a verifier-start fault.
+_ENVIRONMENT_START_TIMEOUT = re.compile(r"\bEnvironmentStartTimeout(?:Error)?\b")
+
+
+def _environment_start_timeout(exception: Any) -> bool:
+    """True when a trial failed because a Harbor environment failed to start."""
+    evidence = " ".join(
+        str(getattr(exception, field, "") or "")
+        for field in ("exception_type", "exception_message", "exception_traceback")
+    )
+    return bool(_ENVIRONMENT_START_TIMEOUT.search(evidence))
 
 
 def _transient_startup_failure(result: Any) -> bool:
     """Return True when a trial failed transiently before any agent result."""
     exception = getattr(result, "exception_info", None)
-    if exception is None or getattr(result, "agent_result", None) is not None:
+    if exception is None:
+        return False
+    if _environment_start_timeout(exception):
+        return True
+    if getattr(result, "agent_result", None) is not None:
         return False
     evidence = " ".join(
         str(getattr(exception, field, "") or "")

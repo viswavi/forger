@@ -450,6 +450,23 @@ def test_transient_startup_failure_classification():
     assert not _transient_startup_failure(_fake_result())
 
 
+def test_environment_start_timeout_retries_even_after_agent_result():
+    """A verifier environment start timeout is pure infrastructure: retry it.
+
+    The separate verifier environment boots after the agent finishes, so an
+    agent_result already exists when its start times out. No agent work is
+    invalidated, so this is the one failure retried past the agent-result gate.
+    """
+    from pyforger.harbor import _transient_startup_failure
+
+    timeout = _FakeException(
+        "EnvironmentStartTimeoutError",
+        "Verifier environment start timed out after 600.0 seconds",
+    )
+    assert _transient_startup_failure(_fake_result(timeout))
+    assert _transient_startup_failure(_fake_result(timeout, agent_result=object()))
+
+
 def _install_flaky_trial(monkeypatch, outcomes):
     """Substitute Trial.create/run with scripted outcomes; real runner logic stays."""
     from types import SimpleNamespace
