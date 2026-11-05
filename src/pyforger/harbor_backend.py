@@ -50,6 +50,13 @@ _NETWORK = {
     Network.PUBLIC: "public",
 }
 
+# Harbor defaults the environment build/start budget to 600s. Native tasks boot
+# a fresh image per agent and verifier environment, and a slow cold pull or a
+# contended host can exceed that default, surfacing as a verifier environment
+# start timeout. Give each environment start a larger ceiling so transient
+# slowness does not abort an otherwise valid trial.
+_ENVIRONMENT_BUILD_TIMEOUT_SEC = 900
+
 
 def _validate_packaged_inputs(task: WorkspaceTask, agent: AgentSpec) -> None:
     secrets = {value.encode("utf-8") for value in credential_values([agent]) if value}
@@ -150,6 +157,7 @@ def _package(
         f"timeout_sec = {max(1, int(task.timeout_s))}\n"
         'network_mode = "no-network"\n'
         f'[environment]\nnetwork_mode = "{_NETWORK[task.network]}"\n'
+        f"build_timeout_sec = {_ENVIRONMENT_BUILD_TIMEOUT_SEC}\n"
         "cpus = 2\nmemory_mb = 4096\n"
     )
     if agent.kind == "oracle":

@@ -691,6 +691,7 @@ def remote_sdk_session(
             app=sail.App.find(backend.app, mint_if_missing=True),
             image=image,
             name="forger-sdk-" + uuid.uuid4().hex,
+            size="m",
             memory_limit_gib=8,
             egress_policy={"allowlist": [urlsplit(endpoint).hostname]},
             max_lifetime_seconds=max(60, math.ceil(budget.remaining_s()) + 60),

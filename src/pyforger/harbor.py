@@ -82,17 +82,50 @@ _TRANSIENT_NAMES = re.compile(
     r"overloaded|try again|api.?error",
     re.I,
 )
+# A separate verifier environment starting is pure infrastructure: it runs no
+# agent work, so a start timeout consumes nothing that a fresh attempt cannot
+# redo. This is the one failure that is retried even after the agent produced a
+# result, because the agent result is not invalidated by a verifier-start fault.
+_ENVIRONMENT_START_TIMEOUT = re.compile(r"\bEnvironmentStartTimeout(?:Error)?\b")
+# Sail's pre-creation admission rejection when the control plane is refreshing
+# its concurrency accounting. No Sailbox is created, so no agent work is
+# consumed and the same request may succeed shortly. This exact phrase is the
+# only verified signal: the trial result carries the stringified exception, not
+# the status code or body that sail_provision.create_sailbox inspects, so match
+# the message rather than retrying the broad retryable/5xx class here.
+_SAILBOX_REFRESH = re.compile(
+    r"Sailbox concurrency limits are refreshing; retry shortly"
+)
+
+
+def _exception_evidence(exception: Any) -> str:
+    """Flatten a trial exception's type, message, and traceback into one string."""
+    return " ".join(
+        str(getattr(exception, field, "") or "")
+        for field in ("exception_type", "exception_message", "exception_traceback")
+    )
+
+
+def _environment_start_timeout(exception: Any) -> bool:
+    """True when a trial failed because a Harbor environment failed to start."""
+    return bool(_ENVIRONMENT_START_TIMEOUT.search(_exception_evidence(exception)))
+
+
+def _sailbox_refresh_rejection(exception: Any) -> bool:
+    """True when Sail rejected sandbox creation while refreshing its limits."""
+    return bool(_SAILBOX_REFRESH.search(_exception_evidence(exception)))
 
 
 def _transient_startup_failure(result: Any) -> bool:
     """Return True when a trial failed transiently before any agent result."""
     exception = getattr(result, "exception_info", None)
-    if exception is None or getattr(result, "agent_result", None) is not None:
+    if exception is None:
         return False
-    evidence = " ".join(
-        str(getattr(exception, field, "") or "")
-        for field in ("exception_type", "exception_message", "exception_traceback")
-    )
+    if _environment_start_timeout(exception) or _sailbox_refresh_rejection(exception):
+        return True
+    if getattr(result, "agent_result", None) is not None:
+        return False
+    evidence = _exception_evidence(exception)
     return bool(_TRANSIENT_HTTP.search(evidence) or _TRANSIENT_NAMES.search(evidence))
 
 
