@@ -171,7 +171,7 @@ def seed_topics(model: Model) -> dict[str, list[dict]]:
     Justification: we compared 4 candidates:
         1. Write a list of topics ourselves from memory, and generate problems.
         2. Use the validation examples directly as seeds.
-        3. Retrieve problems from a public dataset by subject (SUBJECTS) and
+        3. Retrieve problems from a public dataset by subject (S    UBJECTS) and
            rephrase them into new problems.
         4. Search the web (QUERIES), extract topics from the results, and
            generate problems.
@@ -181,11 +181,12 @@ def seed_topics(model: Model) -> dict[str, list[dict]]:
     set. #3 saw 25% of problems near-match a validation problem, which is too high (the
     public dataset shares its source with our validation set and rephrasing doesn't fix
     this). #2 came second (19%) -- the validation-driven examples were close to the
-    validation set and lacked diversity (Vendi score is 14 and deduplication left only
-    31 distinct problems out of 50). #1 mostly avoided contamination and covered 48% of
-    the validation set (Vendi of 21); it failed to cover a few important topics (e.g.
-    geometry and precalculus). #4 achieved a coverage of 79%, with Vendi 36, and its
-    near-reference share was only 8%. Thus, we picked #4: extract topics via search.
+    validation set and lacked diversity (Vendi score is 14 and near-duplicates collapsed
+    its 50 problems into about 31 distinct ones). #1 mostly avoided contamination and
+    covered 48% of the validation set (Vendi of 21); it failed to cover a few important
+    topics (e.g. geometry and precalculus). #4 achieved a coverage of 79%, with Vendi
+    36, and its near-reference share was only 8%. Thus, we picked #4: extract topics via
+    search.
     """
     pages = acquire.retrieve_from_web(QUERIES, n=5)
     extracted = alter.generate_from_context(
