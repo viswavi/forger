@@ -20,6 +20,10 @@ common pattern is to start with a simple pipeline (e.g. a single `retrieval` or 
 `alter` and `filter` steps to improve quality. Forger's caching capabilities avoid repeating expensive steps while
 tweaking parameters.
 
+For a complete worked example, read [`examples/rl_math/pipeline.py`](../examples/rl_math/pipeline.py): an RL dataset
+of math problems with code rubrics, from web search to a difficulty band and rubric probes. Each step's docstring
+records the options compared, the inspect measurements that told them apart, and what was chosen.
+
 ## Credentials and Cost
 
 ### Credentials
