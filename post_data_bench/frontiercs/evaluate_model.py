@@ -93,8 +93,8 @@ def parse_args() -> argparse.Namespace:
         "--answer-extraction",
         choices=("strict", "lenient"),
         default="strict",
-        help="lenient also judges code in an unclosed reasoning trace, as "
-        "FrontierSmith's validation does (see checkers.extract_code).",
+        help="lenient also judges code in an unclosed reasoning trace "
+        "(see checkers.extract_code).",
     )
     p.add_argument("--json-output-file", type=str, default=None)
     p.add_argument("--log-dir", type=str, default=None)

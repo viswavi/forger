@@ -15,9 +15,8 @@ def extract_code(completion: str | None, lenient: bool = False) -> str:
     The answer is the text after the last ``</think>``; an unclosed reasoning trace
     is not an answer. Within it, the benchmark's own extraction rule: the longest
     ```cpp (or ```c++ / bare ```) block, else the text with fences stripped.
-    With ``lenient``, an unclosed trace is searched as the answer, as FrontierSmith's
-    reward and validation do: a response cut off by the token limit is judged on
-    the longest draft block in its reasoning.
+    With ``lenient``, an unclosed trace is searched as the answer: a response cut
+    off by the token limit is judged on the longest draft block in its reasoning.
     """
     if not completion:
         return ""
