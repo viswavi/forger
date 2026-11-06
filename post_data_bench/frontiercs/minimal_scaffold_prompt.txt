@@ -16,6 +16,8 @@ You are allowed to use any publicly available tools and libraries, including LLM
 
 The right approach is usually hard-to-easy generalization: find or create problems harder than the ones in the benchmark, and train on those. Beyond that, how you build, check and select your data is up to you.
 
+Keep the spirit of the task in view: the goal is a student that is genuinely better at this kind of problem, including problems it has never seen, not one fitted to the validation set. Build data from a space broader and harder than the benchmark. Use validation to learn the format, the scoring, and where the student fails, never as a list of problems to rebuild: rows that restate, re-parameterize, or vary individual validation problems teach the student those problems rather than the skill, and leave validation useless for choosing checkpoints.
+
 There are two open-source libraries which you are NOT allowed to use. You are not allowed to use the Forger data generation framework (pyforger in pypi) or the Bespoke Curator library (bespokelabs.curator in pypi). If you try to download or use either of these libraries, you will instantly be terminated and fail the task. Otherwise, you are free to use any other libraries or tools that you wish.
 
 # Data Format
