@@ -1,4 +1,4 @@
-"""An RL dataset of AMC-style math problems with integer answers and code rubrics.
+"""An RL dataset of olympiad-style math problems with integer answers and code rubrics.
 
 Each step's docstring says what it does and why: the options we compared, how we
 measured them, and what we chose. The numbers in those justifications are
@@ -27,13 +27,13 @@ from pathlib import Path
 from pyforger import acquire, alter, filter, inspect, pipeline, step
 from pyforger.acquire import LocalModel, Model
 
-# Web searches for competition problems; topics come from their results. AMC is
-# left out: it is the validation set's source.
+# Web searches for competition problems; topics come from their results. ARML and
+# the IMO are left out: the validation set draws from them.
 QUERIES = [
     "AIME problems and solutions",
     "HMMT February problems and solutions",
     "HMMT November problems and solutions",
-    "ARML individual and team round problems",
+    "Purple Comet math meet problems",
     "Mathcounts national competition problems",
     "Srinivasa Ramanujan Mathematics Competition problems",
     "Art of Problem Solving competition problems with solutions",
@@ -52,9 +52,10 @@ SUBJECTS = [
     "prealgebra",
     "precalculus",
 ]
-# Held out: 83 AMC 12 problems (2022-2023) with integer answers, the kind we want
-# the student to improve on.
-VALIDATION = "project-numina/aimo-validation-amc"
+# Held out: OlympiadBench's English competition problems with an integer answer
+# (about 400 of 674), the kind we want the student to improve on.
+VALIDATION = "Hothan/OlympiadBench"
+VALIDATION_CONFIG = "OE_TO_maths_en_COMP"
 ASK = "\n\nReason step by step, and put your final answer in \\boxed{}."
 
 # The rubric's one criterion: the last \boxed{} after the reasoning must hold the
@@ -170,15 +171,15 @@ def seed_topics(model: Model) -> dict[str, list[dict]]:
 
     We generated 50 problems from each and used inspect.embedding_dispersion(...,
     reference=validation) to analyze their embeddings and overlap with the validation
-    set. #3 saw 25% of problems near-match a validation problem, which is too high (the
-    public dataset shares its source with our validation set and rephrasing doesn't fix
-    this). #2 came second (19%) -- the validation-driven examples were close to the
-    validation set and lacked diversity (Vendi score is 14 and near-duplicates collapsed
-    its 50 problems into about 31 distinct ones). #1 mostly avoided contamination and
-    covered 48% of the validation set (Vendi of 21); it failed to cover a few important
-    topics (e.g. geometry and precalculus). #4 achieved a coverage of 79%, with Vendi
-    36, and its near-reference share was only 8%. Thus, we picked #4: extract topics via
-    search.
+    set. #3 saw 25% of problems near-match a validation problem, which is too high
+    (rephrased competition problems stayed close to the competition problems in our
+    validation set). #2 came second (19%) -- the validation-driven examples were close
+    to the validation set and lacked diversity (Vendi score is 14 and near-duplicates
+    collapsed its 50 problems into about 31 distinct ones). #1 mostly avoided
+    contamination and covered 48% of the validation set (Vendi of 21); it failed to
+    cover a few important topics (e.g. geometry and precalculus). #4 achieved a coverage
+    of 79%, with Vendi 36, and its near-reference share was only 8%. Thus, we picked #4:
+    extract topics via search.
     """
     pages = acquire.retrieve_from_web(QUERIES, n=5)
     extracted = alter.generate_from_context(
@@ -192,7 +193,17 @@ def seed_topics(model: Model) -> dict[str, list[dict]]:
         if isinstance(topic, str) and topic.strip()
     ]
     topics = filter.by_embedding_similarity(topics, field="topic", threshold=0.9)
-    validation = acquire.retrieve_from_hf(VALIDATION, split="train", n=10**5)
+    # n caps at the split's size: all of it.
+    olympiad = acquire.retrieve_from_hf(
+        VALIDATION, config=VALIDATION_CONFIG, split="train", n=10**5
+    )
+    validation = [
+        {"problem": v["question"], "answer": as_integer(v["final_answer"][0])}
+        for v in olympiad
+    ]
+    validation = filter.by_predicate(
+        validation, lambda v: v["answer"] is not None, label="integer answer"
+    )
     return {"topics": topics, "validation": validation}
 
 
