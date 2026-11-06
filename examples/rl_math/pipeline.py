@@ -180,12 +180,12 @@ def seed_topics(model: Model) -> dict[str, list[dict]]:
     reference=validation) to analyze their embeddings and overlap with the validation
     set. #3 saw 25% of its problems near a validation problem, which is too high -- the
     public dataset shares its source with our validation set, and rephrasing does not
-    help enough. #2 came second (19%), because the extracted topics were too specific,
-    leading to problems too close to the val set. #1 mostly avoided contamination and
-    covered 48% of the validation set; it failed to cover a few important topics (e.g.
-    geometry and precalculus). #4 achieved a coverage of 79% for #4, with Vendi 21
-    against 36, and it's near-reference overlap was only 8%.
-    Therefore, we picked #4: extract topics via search.
+    help enough. #2 came second (19%) -- the validation-conditional examples were close
+    to the validation set and lacked diversity (Vendi 14, and near-duplicate groups left
+    about 31 distinct problems of 50). #1 mostly avoided contamination and covered 48%
+    of the validation set (Vendi 21); it failed to cover a few important topics (e.g.
+    geometry and precalculus). #4 achieved a coverage of 79%, with Vendi 36, and its
+    near-reference share was only 8%. Thus, we picked #4: extract topics via search.
     """
     pages = acquire.retrieve_from_web(QUERIES, n=5)
     extracted = alter.generate_from_context(
