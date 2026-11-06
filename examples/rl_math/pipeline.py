@@ -171,7 +171,7 @@ def seed_topics(model: Model) -> dict[str, list[dict]]:
     Justification: we compared 4 candidates:
         1. Write a list of topics ourselves from memory, and generate problems.
         2. Use the validation examples directly as seeds.
-        3. Retrieve problems from a public dataset by subject (S    UBJECTS) and
+        3. Retrieve problems from a public dataset by subject (SUBJECTS) and
            rephrase them into new problems.
         4. Search the web (QUERIES), extract topics from the results, and
            generate problems.
