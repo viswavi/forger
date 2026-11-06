@@ -20,6 +20,7 @@ from pyforger.filter.model_difficulty import _field_prompt, _predictions
 from pyforger.op import op, skip_cache_write, tracked
 
 Grade = Callable[[str, dict], "float | bool | None"]
+Probe = Callable[[dict], "str | None"]
 
 BINS = ["0", "(0, 0.25]", "(0.25, 0.5]", "(0.5, 0.75]", "(0.75, 1)", "1"]
 CONTROLS = ("empty", "random", "other_row")
@@ -36,15 +37,34 @@ class Example(BaseModel):
     response: str
 
 
+class Paired(BaseModel):
+    """One column against the reference column, row by row.
+
+    ``rows`` counts rows both graded (a sampled column's row score is its
+    samples' mean). ``below``, ``tied`` and ``above`` count rows where the
+    column scored lower than, the same as, or higher than ``reference``;
+    ``mean_gap`` is the mean of reference minus column. A rubric that
+    separates strong from weak responses puts a weak column mostly below.
+    """
+
+    reference: str
+    rows: int = 0
+    below: int = 0
+    tied: int = 0
+    above: int = 0
+    mean_gap: float | None = None
+
+
 class ColumnScores(BaseModel):
     """The scores of one column of responses.
 
     ``kind`` is ``"field"`` (a row field, e.g. the SFT target), ``"sampled"``
-    (the model's ``k`` samples per prompt), or ``"control"``. ``scores[i]`` holds
-    the scores of the responses to the report's ``rows[i]`` (one, or ``k`` for
-    sampled), None when ungradable. ``counts`` is aligned with ``BINS``; shares
-    are of the gradable responses. Scores outside [0, 1] are counted in
-    ``out_of_range``, not in a bin, and are in ``mean``.
+    (the model's ``k`` samples per prompt), ``"probe"``, or ``"control"``.
+    ``scores[i]`` holds the scores of the responses to the report's
+    ``rows[i]`` (one, or ``k`` for sampled), None when ungradable.
+    ``counts`` is aligned with ``BINS``; shares are of the gradable
+    responses. Scores outside [0, 1] are counted in ``out_of_range``, not in
+    a bin, and are in ``mean``.
     """
 
     name: str
@@ -69,6 +89,10 @@ class ColumnScores(BaseModel):
     constant_at_0: int = 0
     constant_at_1: int = 0
 
+    # Field, probe, and sampled columns other than the reference: how each
+    # row's score compares with the reference's on the same row.
+    vs_reference: Paired | None = None
+
     def histogram(self) -> dict[str, int]:
         """``{bin label: count}``, e.g. ``{"0": 3, ..., "1": 47}``."""
         return dict(zip(BINS, self.counts))
@@ -78,8 +102,8 @@ class RubricScoreReport(BaseModel):
     """What ``rubric_scores`` measured; ``model_dump()`` gives plain JSON data.
 
     ``rows`` are the indices of the sampled rows, in order. ``flags`` has one
-    line per control that earns at least half the reference column's mean
-    (the first field column, else the sampled one).
+    line per control or probe that earns at least half the reference
+    column's mean (the first field column, else the sampled one).
     """
 
     grade: str
@@ -252,6 +276,7 @@ def rubric_scores(
     *,
     n: int | None = 50,
     response_fields: list[str] | str | None = "response",
+    probes: dict[str, Probe] | None = None,
     model: Any = None,
     k: int = 4,
     prompt_field: str = "prompt",
@@ -274,7 +299,12 @@ def rubric_scores(
 
     ``n`` rows are drawn with ``seed``. Columns, one per kind:
 
-    - each of ``response_fields``, e.g. the SFT target;
+    - each of ``response_fields``, e.g. a reference solution and a weak
+      baseline's response;
+    - each of ``probes``: ``probe(row)`` builds a response that should not
+      score well, e.g. a program printing a valid but trivial answer, or the
+      example output hard-coded. Probes earning half the reference's mean are
+      flagged, like the controls;
     - with ``model``, ``k`` samples per prompt: what RL sees. The report counts
       prompts whose samples all got the same score, which give GRPO-style RL
       no gradient;
@@ -284,6 +314,13 @@ def rubric_scores(
       rubric that gives 1.0 to any response without a code block puts
       ``empty`` at 1; it is flagged.
 
+    The first field column (else the sampled one) is the reference. Every
+    other field, probe, and sampled column is also compared with it row by
+    row: on how many rows it scores below, tied with, or above the reference,
+    and the mean gap, e.g. "baseline: below reference on 31, tied 15, above 4
+    of 50 rows, mean gap 0.21". Many ties between a reference and a weak
+    baseline mean the rubric cannot tell them apart.
+
     Bins are ``0``, ``(0, 0.25]``, ``(0.25, 0.5]``, ``(0.5, 0.75]``,
     ``(0.75, 1)``, ``1``. Rows are not modified.
 
@@ -291,7 +328,11 @@ def rubric_scores(
         rows: The rows (dicts); each is passed to ``grade`` as is.
         grade: ``(response, row) -> float | bool | None``.
         n: Rows to sample; None grades every row.
-        response_fields: Fields holding responses to grade as they are.
+        response_fields: Fields holding responses to grade as they are; the
+            first is the reference.
+        probes: ``{name: probe(row) -> response or None}``; None is
+            ungradable. Probes run on every call; their responses' grades
+            are cached like the others.
         model: Model whose samples to grade, e.g. the SFT checkpoint; needs
             ``generate_batch``. Completions are graded whole, thinking
             included.
@@ -312,15 +353,21 @@ def rubric_scores(
         if isinstance(response_fields, str)
         else list(response_fields or [])
     )
+    probes = dict(probes or {})
     clash = set(fields) & {*CONTROLS, "sampled"}
     if clash:
         raise ValueError(f"response_fields {sorted(clash)} clash with column names")
+    clash = set(probes) & {*fields, *CONTROLS, "sampled"}
+    if clash:
+        raise ValueError(f"probes {sorted(clash)} clash with column names")
     if model is not None and k < 1:
         raise ValueError(f"k must be at least 1, got {k}")
     if model is not None and k > 1 and temperature is not None and temperature <= 0:
         raise ValueError("temperature must be > 0 when k > 1: samples would match")
-    if not fields and model is None:
-        raise ValueError("pass response_fields or a model: there is nothing to grade")
+    if not fields and model is None and not probes:
+        raise ValueError(
+            "pass response_fields, probes, or a model: there is nothing to grade"
+        )
     picked = _sample_rows(len(rows), n, seed)
     sample = [rows[i] for i in picked]
     report = RubricScoreReport(
@@ -347,6 +394,11 @@ def rubric_scores(
             batch_size=None,
         )
         columns.append(("sampled", "sampled", completions))
+    for name, probe in probes.items():
+        built = [probe(r) for r in sample]
+        columns.append(
+            (name, "probe", [[None if t is None else str(t)] for t in built])
+        )
     if control_columns and sample:
         columns.append(("empty", "control", [[""] for _ in sample]))
         columns.append(("random", "control", [[_random_text(seed, i)] for i in picked]))
@@ -359,6 +411,7 @@ def rubric_scores(
         col = ColumnScores(name=name, kind=kind, scores=scores)
         _summarize(col, responses, errors, picked, examples)
         report.columns.append(col)
+    _pair_with_reference(report)
     report.flags = _flags(report)
     console = _console()
     _emit(_renderable(report, width=console.width), console)
@@ -372,13 +425,55 @@ def _name(grade: Grade) -> str:
     return repr(grade)[:120]
 
 
+def _reference(report: RubricScoreReport) -> ColumnScores | None:
+    """The first field column, else the sampled one."""
+    for kind in ("field", "sampled"):
+        for c in report.columns:
+            if c.kind == kind:
+                return c
+    return None
+
+
+def _row_score(scores: list[float | None]) -> float | None:
+    good = [s for s in scores if s is not None]
+    return sum(good) / len(good) if good else None
+
+
+def _pair_with_reference(report: RubricScoreReport) -> None:
+    reference = _reference(report)
+    if reference is None:
+        return
+    for c in report.columns:
+        if c is reference or c.kind == "control":
+            continue
+        paired = Paired(reference=reference.name)
+        gaps = []
+        for ref_scores, scores in zip(reference.scores, c.scores):
+            ref, own = _row_score(ref_scores), _row_score(scores)
+            if ref is None or own is None:
+                continue
+            paired.rows += 1
+            gap = ref - own
+            gaps.append(gap)
+            if abs(gap) <= _EPS:
+                paired.tied += 1
+            elif gap > 0:
+                paired.below += 1
+            else:
+                paired.above += 1
+        if gaps:
+            paired.mean_gap = sum(gaps) / len(gaps)
+        c.vs_reference = paired
+
+
 def _flags(report: RubricScoreReport) -> list[str]:
-    reference = next((c for c in report.columns if c.kind != "control"), None)
+    reference = _reference(report)
     if reference is None or not reference.mean:
         return []
     flags = []
     for c in report.columns:
-        if c.kind == "control" and c.mean is not None and c.mean >= reference.mean / 2:
+        unwanted = c.kind in ("control", "probe")
+        if unwanted and c.mean is not None and c.mean >= reference.mean / 2:
             flags.append(
                 f"{c.name} scores {c.mean:.2f} on average, at least half of "
                 f"{reference.name}'s {reference.mean:.2f}: RL can earn it too"
@@ -435,6 +530,17 @@ def _renderable(report: RubricScoreReport, *, width: int) -> RenderableType:
     body += [Text(""), _fit_table(headers, lines, width - 2, left=set())]
     notes: list[Text] = []
     for c in cols:
+        p = c.vs_reference
+        if p is not None and p.rows:
+            gap = "" if p.mean_gap is None else f", mean gap {p.mean_gap:+.2f}"
+            notes.append(
+                Text(
+                    f"{_label(c, report.k)}: below {_clean(p.reference)} on "
+                    f"{p.below}, tied {p.tied}, above {p.above} of {p.rows} "
+                    f"rows{gap}"
+                )
+            )
+    for c in cols:
         if c.kind == "sampled" and c.prompts_compared:
             notes.append(
                 Text(
@@ -460,7 +566,7 @@ def _renderable(report: RubricScoreReport, *, width: int) -> RenderableType:
     shown = [
         c
         for c in cols
-        if c.kind != "control" or c.name in flagged - {"empty", "random"}
+        if c.kind not in ("control", "probe") or c.name in flagged - {"empty", "random"}
     ]
     for c in shown:
         for tag, picks in (("lowest", c.lowest), ("highest", c.highest)):

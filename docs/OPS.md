@@ -973,6 +973,7 @@ by_pass_at_k(
     completions_field: str | None = None,
     verifier_workers: int = 8,
     truncated: Literal["fail", "exclude"] = "fail",
+    histogram: bool = False,
 ) -> list[dict]
 ```
 
@@ -1269,6 +1270,7 @@ rubric_scores(
     *,
     n: int | None = 50,
     response_fields: list[str] | str | None = "response",
+    probes: dict[str, Probe] | None = None,
     model: Any = None,
     k: int = 4,
     prompt_field: str = "prompt",

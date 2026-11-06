@@ -193,6 +193,10 @@ strong model gets right. `by_pass_at_k` is the most expensive but most reliable 
 row in one `n=k` call, keeping rows whose pass rate (the mean valid grade) is in `[min_rate, max_rate]` (default
 `[0.1, 0.9]`, inclusive). A verifier may return a score in [0, 1] instead of a bool (e.g. a partial-credit grader);
 the rate is then the row's mean score. `by_comparative_difficulty` needs pass/fail grades.
+`by_pass_at_k(..., histogram=True)` prints the pass-rate histogram the step report shows, outside a step and on a
+cache hit too (it is not part of the cache key). A line under it counts the rows whose samples all got the same grade,
+which give GRPO-style RL no gradient, e.g. `31 of 120 rows gave every sample the same grade (22 all 0, 9 all 1): no
+GRPO gradient there`.
 `by_judged_difficulty` (least expensive, least reliable) only asks a judge how hard a task looks.
 
 No answer format is imposed. The prompt is the task itself (`prompt_template` replaces it, e.g. to ask for a final

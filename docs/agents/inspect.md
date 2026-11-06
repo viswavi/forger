@@ -64,7 +64,7 @@ default `data_parallel_size="auto"`). Scoring is fast; sampling the student's ow
 long reasoning responses took 37 minutes on one L40S and 19 on two. Its median rate is stable with the default 64
 samples.
 
-`rubric_scores(rows, grade, *, n=50, response_fields="response", model=None, k=4, prompt_field="prompt",
+`rubric_scores(rows, grade, *, n=50, response_fields="response", probes=None, model=None, k=4, prompt_field="prompt",
 control_columns=True, seed=0, ...)` shows a reward's distribution before RL. `grade(response, row)` returns a score in
 [0, 1] (a bool counts as 0 or 1) or None when ungradable: a code rubric, an LLM judge, or exact match. It grades `n`
 rows drawn with `seed`, one column per response field (e.g. the SFT target), `k` samples per prompt from `model` (what
@@ -90,10 +90,26 @@ that gave 1.0 to any response without a python code block, the targets looked fi
   sampled ×3 highest: row 59 1.00  I cannot
 ```
 
+Two more checks ask whether the reward separates good responses from bad ones, not only whether it is computed
+right. `probes={"name": probe(row) -> response}` adds a column of responses built per row that a sound rubric should
+score low: for a program-checked task, e.g. one printing a valid but trivial answer, or the example output
+hard-coded; for an answer-checked one, the number from the problem statement. A probe earning half the reference's
+mean is flagged like a control. And the first field column (else the sampled one) is the reference: every other field,
+probe, and sampled column is compared with it row by row, e.g. with `response_fields=["solution", "baseline"]`:
+
+```text
+  baseline: below solution on 31, tied 15, above 4 of 50 rows, mean gap +0.21
+  trivial: below solution on 50, tied 0, above 0 of 50 rows, mean gap +0.88
+```
+
+Ties between a reference and a known-weak baseline are rows where the rubric cannot tell them apart; a sampled column
+tied on most rows is a student that already earns the reference's score.
+
 It returns a `RubricScoreReport`; `report.model_dump()` is plain JSON data: `bins`, and per column `counts` (aligned
-with `bins`), `mean`, `share_at_0`, `share_at_1`, `ungradable`, `errors`, the per-row `scores`, and the lowest and
-highest examples. `grade` is part of the cache key (an object by its `cache_key()`), so the grades are cached; a
-grading that raised is counted with its message and runs again next time. Rows are not modified.
+with `bins`), `mean`, `share_at_0`, `share_at_1`, `ungradable`, `errors`, the per-row `scores`, `vs_reference`
+(`below`, `tied`, `above`, `mean_gap`), and the lowest and highest examples. `grade` is part of the cache key (an object
+by its `cache_key()`), so the grades are cached; a grading that raised is counted with its message and runs again next
+time. Rows are not modified.
 
 `embedding_dispersion(rows, field, *, reference=None, reference_field=None, embed_fn=None, embedding_model=...,
 k=5, duplicate_threshold=0.95, max_rows=2000, examples=3, seed=0)` measures how spread out `rows` are, ideally against
@@ -118,6 +134,7 @@ inspect embedding_dispersion ─────────────────
       2 rows near "Two cards are drawn from a standard d…"  closest 1.00: "Two cards are drawn from a standard d…"
       1 row near "Solve for x: 7x + 8 = 10x - 4."  closest 1.00: "Solve for x: 7x + 8 = 10x - 4."
   near-duplicates 0.17  5/29 rows in 4 pairs with cosine ≥ 0.95 (3 rows repeat an earlier row exactly)
+      they form 2 groups, the largest of 3 rows: the 29 rows hold about 26 distinct ones
       1.00 "A fair die is rolled 2 times. What is the probability that a six appears at least once?"  exact copy
       1.00 "Two cards are drawn from a standard deck. What is the probability both are aces?"  exact copy
   Vendi 11.4  effective number of distinct rows among 29 (reference 17.5)
@@ -141,6 +158,9 @@ inspect embedding_dispersion ─────────────────
   template variant (same structure, other numbers and objects) 0.77, the nearest different problem 0.66. Lower it to
   0.9 for short rows. Under TF-IDF, one changed number in a one-line problem scores 0.83 and a paraphrase 0.20.
   [`filter.by_embedding_similarity`](filter.md) with the same threshold and embedding drops the later row of each pair.
+  Rows linked by pairs, directly or through other rows, form a group (`near_duplicate_groups`, `largest_group`):
+  40 instances of one template that differ only in numbers are one group of 40, so "415 rows hold about 13 distinct
+  ones" says the set is 13 problems. `!` marks a share of 0.25 or more.
 - **Vendi** ([Friedman & Dieng 2023](https://arxiv.org/abs/2210.02410)): the effective number of distinct rows, from 1
   (all the same) to the sample size, on the same equal-size samples. It cannot exceed the embedding's dimension (at
   most 256 for TF-IDF).

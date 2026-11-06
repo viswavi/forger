@@ -38,6 +38,8 @@ _EXAMPLE_OVERLAP = 0.5
 # compare_to_reference flags 25% outside the reference's 5th-95th percentiles.
 _NEAR_QUANTILE = 0.9
 _NEAR_FLAG = 0.25
+# Flagged like the near-reference share: a quarter of rows with a near-copy.
+_DUPLICATE_FLAG = 0.25
 
 
 class DispersionExample(BaseModel):
@@ -128,6 +130,10 @@ class DispersionReport(BaseModel):
     duplicate_threshold: float
     near_duplicate_pairs: int = 0
     near_duplicate_rows: int = 0
+    # Rows linked by near-duplicate pairs, directly or through other rows,
+    # form a group: e.g. 40 instances of one template are one group of 40.
+    near_duplicate_groups: int = 0
+    largest_group: int = 0
     exact_duplicates: int = 0
     near_duplicates: list[NearDuplicatePair] = Field(default_factory=list)
     vendi: float
@@ -164,7 +170,9 @@ def embedding_dispersion(
     report lists the reference rows they cluster on, each beside its closest
     row. Always
     reports near-duplicate pairs (cosine similarity at least
-    ``duplicate_threshold``) and the Vendi score, the effective number of
+    ``duplicate_threshold``), the groups they link rows into (e.g. "415 rows
+    form 13 groups, largest 40: about 13 distinct rows", flagged when a
+    quarter of rows have a near-copy), and the Vendi score, the effective number of
     distinct rows (from 1 when all are the same up to the number of rows),
     for ``rows`` and the reference on equal-size random samples. Numbers
     depend on the embedding: compare datasets under the same embedding.
@@ -445,6 +453,14 @@ def _near_duplicates(
     doc = np.array([ids.setdefault(texts[i], len(ids)) for i in gen_idx])
     threshold = report.duplicate_threshold - _TOL
     in_pair = np.zeros(n, dtype=bool)
+    parent = list(range(n))  # union-find over near-duplicate pairs
+
+    def root(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
     pairs = 0
     candidates: list[tuple[bool, float, int, int]] = []  # (exact, -sim, a, b)
     for start in range(0, n, _CHUNK):
@@ -456,6 +472,10 @@ def _near_duplicates(
         pairs += len(rows_i)
         in_pair[rows_i] = True
         in_pair[cols] = True
+        for a, b in zip(rows_i.tolist(), cols.tolist()):
+            ra, rb = root(a), root(b)
+            if ra != rb:
+                parent[ra] = rb
         values = sims[rows_i - start, cols]
         exact = doc[rows_i] == doc[cols]
         # Copies with edits first: exact copies are counted on their own.
@@ -467,6 +487,12 @@ def _near_duplicates(
             ]
     report.near_duplicate_pairs = pairs
     report.near_duplicate_rows = int(in_pair.sum())
+    sizes: dict[int, int] = {}
+    for i in np.flatnonzero(in_pair).tolist():
+        r = root(i)
+        sizes[r] = sizes.get(r, 0) + 1
+    report.near_duplicate_groups = len(sizes)
+    report.largest_group = max(sizes.values(), default=0)
     sampled = [texts[i] for i in gen_idx]
     report.exact_duplicates = len(sampled) - len(set(sampled))
     seen: set[tuple[str, str]] = set()
@@ -680,7 +706,24 @@ def _report_renderable(report: DispersionReport, *, width: int) -> RenderableTyp
     if report.exact_duplicates:
         dup += f" ({report.exact_duplicates:,} rows repeat an earlier row exactly)"
     share = report.near_duplicate_rows / max(report.embedded, 1)
-    body.append(_metric("near-duplicates", f"{share:.2f}", dup))
+    flag = "! " if share >= _DUPLICATE_FLAG else ""
+    body.append(_metric(f"{flag}near-duplicates", f"{share:.2f}", dup))
+    if report.near_duplicate_groups:
+        distinct = (
+            report.embedded - report.near_duplicate_rows + report.near_duplicate_groups
+        )
+        body.append(
+            Padding(
+                Text(
+                    f"they form {report.near_duplicate_groups:,} group"
+                    f"{'s' if report.near_duplicate_groups != 1 else ''}, the "
+                    f"largest of {report.largest_group:,} rows: the "
+                    f"{report.embedded:,} rows hold about {distinct:,} distinct ones",
+                    style="dim",
+                ),
+                indent,
+            )
+        )
     for pair in report.near_duplicates:
         line = Text(f"{pair.similarity:.2f} ", style="dim")
         if pair.first_text == pair.second_text:
