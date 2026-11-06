@@ -47,11 +47,12 @@ SFT set for Qwen3-4B:
 
 ## `rubric_scores`
 
-`rubric_scores(rows, grade, *, n=50, response_fields="response", model=None, k=4, ...)` bins a reward's scores before
-RL. `grade(response, row)` returns a score in [0, 1] or None: a code rubric, an LLM judge, or exact match. Columns: each
-response field (e.g. the SFT target), `k` samples per prompt from `model` (what RL sees), and three controls no task
-should reward: `empty`, `random` (200 random characters), and `other_row` (another row's response). On a rubric that
-gave 1.0 to any response without a python code block, the targets looked fine; `empty` did not:
+`rubric_scores(rows, grade, *, n=50, response_fields="response", probes=None, model=None, k=4, ...)` bins a reward's
+scores before RL. `grade(response, row)` returns a score in [0, 1] or None: a code rubric, an LLM judge, or exact match.
+Columns: each response field (e.g. the SFT target), each probe, `k` samples per prompt from `model` (what RL sees), and
+three controls no task should reward: `empty`, `random` (200 random characters), and `other_row` (another row's
+response). On a rubric that gave 1.0 to any response without a python code block, the targets looked fine; `empty`
+did not:
 
 ```text
   score          response   sampled ×3   empty   random   other_row
@@ -64,8 +65,13 @@ gave 1.0 to any response without a python code block, the targets looked fine; `
 
 - A control earning half the reference column's mean is flagged. Prompts whose samples all score the same give no
   RL gradient.
-- `report.model_dump()` is plain JSON: bins, and per column counts, mean, shares at 0 and 1, and per-row scores.
-  Grades are cached (`grade` by its `cache_key()`).
+- `probes={"name": probe(row) -> response}`: responses a sound reward scores low, built per row: a program printing a
+  valid but trivial answer, the example output hard-coded, the number from the statement. Flagged like the controls.
+- The first field column (else the sampled one) is the reference; every other field, probe, and sampled column is
+  compared with it row by row: `baseline: below solution on 31, tied 15, above 4 of 50 rows, mean gap +0.21`. Ties
+  with a known-weak baseline are rows the reward cannot tell apart.
+- `report.model_dump()` is plain JSON: bins, and per column counts, mean, shares at 0 and 1, per-row scores, and
+  `vs_reference` (`below`, `tied`, `above`, `mean_gap`). Grades are cached (`grade` by its `cache_key()`).
 
 ## `embedding_dispersion`
 
@@ -79,6 +85,7 @@ gave 1.0 to any response without a python code block, the targets looked fine; `
   ! near reference 0.93  27/29 rows, on 24 reference rows (about 0.10 for rows drawn like the reference)
       3 rows near "A fair die is rolled 2 times. What is…"  closest 1.00: "A fair die is rolled 2 times. What is…"
   near-duplicates 0.17  5/29 rows in 4 pairs with cosine ≥ 0.95 (3 rows repeat an earlier row exactly)
+      they form 2 groups, the largest of 3 rows: the 29 rows hold about 26 distinct ones
   Vendi 11.4  effective number of distinct rows among 29 (reference 17.5)
 ```
 
@@ -93,6 +100,8 @@ gave 1.0 to any response without a python code block, the targets looked fine; `
   LiveCodeBench problems reaches 0.95 (5% of rows at 0.9). Use 0.9 for one-line rows: one changed number scores 0.93
   (median), the nearest different problem 0.66.
   [`filter.by_embedding_similarity`](filter.md) with the same threshold and embedding drops the later row of each pair.
+  Rows linked by pairs, directly or through other rows, form a group: 40 instances of one template that differ only
+  in numbers are one group of 40, so "415 rows hold about 13 distinct ones" says the set is 13 problems. `!` at 0.25.
 - Same embedding backends as `topic_based_clustering`. Numbers depend on the embedding: compare datasets under one
   embedding, not one number alone. Without a `reference`, only near-duplicates and Vendi are reported.
 

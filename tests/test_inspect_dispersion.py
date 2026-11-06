@@ -98,6 +98,8 @@ def test_reference_metrics_on_fixture(capsys):
     assert report.near_duplicate_pairs == 4
     assert report.near_duplicate_rows == 5
     assert report.near_duplicates[0].first_text == report.near_duplicates[0].second_text
+    # Rows 0, 24, 25 are one group and rows 7, 26 another.
+    assert (report.near_duplicate_groups, report.largest_group) == (2, 3)
     # Two topics are less diverse than six.
     assert report.vendi < report.reference_vendi
     out = capsys.readouterr().out
@@ -307,6 +309,34 @@ def test_near_duplicate_threshold():
     pair = loose.near_duplicates[0]
     assert (pair.first, pair.second) == (0, 1)
     assert pair.similarity == pytest.approx(0.97, abs=1e-3)
+
+
+def test_near_duplicates_group_into_templates():
+    """Rows linked through other rows share a group; a large share is flagged."""
+    # Two templates of three rows each (a chain: a1~a2~a3), and two loners.
+    vectors = {
+        "a1": [1.0, 0.0, 0.0, 0.0],
+        "a2": [0.98, 0.199, 0.0, 0.0],
+        "a3": [0.92, 0.392, 0.0, 0.0],  # 0.98 with a2 but 0.92 with a1
+        "b1": [0.0, 0.0, 1.0, 0.0],
+        "b2": [0.0, 0.0, 0.99, 0.141],
+        "b3": [0.0, 0.0, 0.98, 0.199],
+        "c": [0.0, 1.0, 0.0, 0.0],
+        "d": [0.0, 0.0, 0.0, 1.0],
+    }
+    rows = [{"t": t} for t in vectors]
+
+    def embed(docs):
+        x = np.array([vectors[d] for d in docs])
+        return x / np.linalg.norm(x, axis=1, keepdims=True)
+
+    report = embedding_dispersion(rows, "t", embed_fn=embed)
+    assert report.near_duplicate_rows == 6
+    assert (report.near_duplicate_groups, report.largest_group) == (2, 3)
+    text = render_dispersion_report(report)
+    assert "! near-duplicates 0.75" in text
+    assert "they form 2 groups, the largest of 3 rows" in text
+    assert "the 8 rows hold about 4 distinct ones" in text
 
 
 def test_cached_result_is_printed_again(capsys):

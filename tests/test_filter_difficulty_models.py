@@ -268,6 +268,59 @@ class TestPassAtK:
         kept = _pass_at_k(self.ROWS, ScriptedModel("m", self.SCRIPT))
         assert [r["task"] for r in kept] == ["t2", "t4"]
 
+    def test_spread_note_counts_rows_without_gradient(self, monkeypatch):
+        """Rows whose samples all got one grade are counted, by that grade."""
+        monkeypatch.setenv("FORGER_STEP_REPORT", "0")
+        model = ScriptedModel("m", self.SCRIPT)
+
+        @step
+        def hard(rows):
+            return _pass_at_k(rows, model, min_rate=0.0)
+
+        hard(self.ROWS)
+        scores = _tracking.step_records()["hard"].ops[0].scores
+        assert scores is not None and scores.note is not None
+        assert scores.note.startswith(
+            "2 of 4 rows gave every sample the same grade (1 all 0, 1 all 1)"
+        )
+        assert "no GRPO gradient" in render_scores(scores)
+
+    def test_spread_note_counts_one_partial_score(self, monkeypatch):
+        """A partial-credit grader giving every sample 0.5 leaves no spread too."""
+        monkeypatch.setenv("FORGER_STEP_REPORT", "0")
+
+        def half(prediction, row):
+            return 0.5
+
+        @step
+        def hard(rows):
+            return by_pass_at_k(
+                rows,
+                model=ScriptedModel("m", self.SCRIPT),
+                input_field="task",
+                metric=half,
+                min_rate=0.0,
+            )
+
+        hard(self.ROWS)
+        note = _tracking.step_records()["hard"].ops[0].scores.note
+        assert note.startswith("4 of 4 rows gave every sample the same grade")
+        assert "4 one partial score" in note
+
+    def test_histogram_prints_on_a_cache_hit_too(self, capsys):
+        """histogram=True prints the step report's histogram; it is not keyed."""
+        model = ScriptedModel("m", self.SCRIPT)
+        _pass_at_k(self.ROWS, model)
+        assert "pass rate" not in capsys.readouterr().out
+        for _ in range(2):
+            kept = _pass_at_k(self.ROWS, model, histogram=True)
+            out = capsys.readouterr().out
+            assert "filter.by_pass_at_k" in out
+            assert "keeps 0.1 to 0.9: 2 of 4" in out
+            assert "2 of 4 rows gave every sample the same grade" in out
+        assert [r["task"] for r in kept] == ["t2", "t4"]
+        assert len(model.calls) == 1  # both histogram calls were cache hits
+
     def test_bounds_are_inclusive(self):
         """Rates equal to min_rate or max_rate are kept."""
         model = ScriptedModel("m", self.SCRIPT)
@@ -426,7 +479,8 @@ class TestPassAtK:
 
         hard([{"task": "t", "answer": "1"}])
         scores = _tracking.step_records()["hard"].ops[0].scores
-        assert scores is not None and scores.note is None
+        assert scores is not None and scores.note is not None
+        assert "truncated" not in scores.note
 
     def test_answer_segment_for_verifier(self):
         """A verifier gets the stripped completion after its closed <think> block."""

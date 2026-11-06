@@ -263,7 +263,7 @@ def by_comparative_difficulty(
     return kept
 
 
-@op(name="filter.by_pass_at_k")
+@op(name="filter.by_pass_at_k", report_arg="histogram")
 def by_pass_at_k(
     items: list[dict],
     *,
@@ -285,6 +285,7 @@ def by_pass_at_k(
     completions_field: str | None = None,
     verifier_workers: int = 8,
     truncated: Literal["fail", "exclude"] = "fail",
+    histogram: bool = False,
 ) -> list[dict]:
     """Keep rows whose pass rate over ``k`` samples is within the bounds.
 
@@ -303,8 +304,11 @@ def by_pass_at_k(
     (excluded), which ``truncated="exclude"`` restores.
 
     In a ``@step`` report the per-row score is the pass rate, or ``None`` when
-    too few grades are valid; a line under the histogram counts the truncated
-    samples.
+    too few grades are valid; ``histogram=True`` prints the same histogram
+    outside a step. Lines under it count the truncated samples and the rows
+    whose samples all got the same grade (all 0, all 1, or one partial score),
+    which give GRPO-style RL no gradient, e.g. "31 of 120 rows gave every
+    sample the same grade (22 all 0, 9 all 1)".
 
     The prompt and answer extraction work as in ``by_comparative_difficulty``:
     by default the whole answer segment is compared.
@@ -356,6 +360,8 @@ def by_pass_at_k(
             ``"fail"`` (default) grades it ``False`` without calling
             ``extract_answer`` or the verifier; ``"exclude"`` grades it
             ``None``, like an empty answer.
+        histogram: Print the pass-rate histogram when the filter returns, on a
+            cache hit too. Not part of the cache key.
 
     Returns:
         The kept rows, in input order.
@@ -425,15 +431,41 @@ def by_pass_at_k(
                     {"model": row_completions},
                 )
             )
+    notes = [_truncation_note(completions, truncated), _spread_note(grades)]
     _tracking.record_scores(
         "pass rate",
         rates,
         keep="between",
         lower=min_rate,
         upper=max_rate,
-        note=_truncation_note(completions, truncated),
+        note="\n".join(n for n in notes if n) or None,
     )
     return kept
+
+
+def _spread_note(grades: list[list[bool | float | None]]) -> str | None:
+    """Count rows whose valid grades all match: GRPO gets no gradient from them.
+
+    E.g. "31 of 120 rows gave every sample the same grade (22 all 0, 9 all 1)".
+    Rows with fewer than 2 valid grades are not compared.
+    """
+    compared = [
+        [float(g) for g in row if g is not None]
+        for row in grades
+        if sum(g is not None for g in row) >= 2
+    ]
+    if not compared:
+        return None
+    same = [row for row in compared if max(row) - min(row) <= 1e-9]
+    at_0 = sum(row[0] <= 1e-9 for row in same)
+    at_1 = sum(row[0] >= 1 - 1e-9 for row in same)
+    parts = [f"{at_0} all 0", f"{at_1} all 1"]
+    if len(same) - at_0 - at_1:
+        parts.append(f"{len(same) - at_0 - at_1} one partial score")
+    return (
+        f"{len(same)} of {len(compared)} rows gave every sample the same grade "
+        f"({', '.join(parts)}): no GRPO gradient there"
+    )
 
 
 # A sampler, not a filter: its first argument is prompts, and it drops nothing.
