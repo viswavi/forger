@@ -289,6 +289,65 @@ def ignores_n(empty_n1=False):
     return fake_completion
 
 
+def rejects_n(
+    message="n must be 1 on serverless. To generate multiple samples, "
+    "send separate requests.",
+):
+    """Fake completion that answers n=1 ("Q#0", ...) and rejects n > 1 with a 400."""
+    import litellm
+
+    seen: dict[str, int] = {}
+    lock = threading.Lock()
+
+    def fake_completion(messages, n=1, **kwargs):
+        if n > 1:
+            raise litellm.BadRequestError(
+                message=message, model="FW-GLM-5.3", llm_provider="azure_ai"
+            )
+        text = messages[0]["content"]
+        with lock:
+            k = seen.get(text, 0)
+            seen[text] = k + 1
+        return make_response([f"{text}#{k}"])
+
+    return fake_completion
+
+
+class TestRejectedN:
+    """A provider that rejects n > 1 with a 400 gets n=1 requests instead."""
+
+    def test_rejected_n_is_resent_as_n1_and_learned(self, mock_litellm, caplog):
+        """n=3 is rejected: one warning, three n=1 requests, fan-out from then on."""
+        mock_litellm.completion.side_effect = rejects_n()
+        model = Model("litellm_proxy/azure_ai/FW-GLM-5.3", max_concurrency=1)
+        with caplog.at_level("WARNING", logger="pyforger.acquire.model"):
+            assert model.generate("Q", n=3) == ["Q#0", "Q#1", "Q#2"]
+        sent_n = [c.kwargs["n"] for c in mock_litellm.completion.call_args_list]
+        assert sent_n == [3, 1, 1, 1]
+        warnings = [r.getMessage() for r in caplog.records]
+        assert len(warnings) == 1 and "rejected n=3 (" in warnings[0]
+        assert _fans_out_n("litellm_proxy/azure_ai/FW-GLM-5.3")
+        mock_litellm.completion.reset_mock()
+        assert model.generate_batch(["A", "B"], n=2) == [["A#0", "A#1"], ["B#0", "B#1"]]
+        sent_n = [c.kwargs["n"] for c in mock_litellm.completion.call_args_list]
+        assert sent_n == [1, 1, 1, 1]
+
+    def test_several_prompts_rejected_in_one_batch(self, mock_litellm):
+        """Every rejected prompt is resent, each slot as its own request."""
+        mock_litellm.completion.side_effect = rejects_n()
+        model = Model("litellm_proxy/serverless-alias", max_concurrency=4)
+        result = model.generate_batch(["A", "B"], n=2)
+        assert [sorted(r) for r in result] == [["A#0", "A#1"], ["B#0", "B#1"]]
+
+    def test_other_bad_requests_still_raise(self, mock_litellm):
+        """A 400 about something else is not taken for a rejected n."""
+        mock_litellm.completion.side_effect = rejects_n("max_tokens is too large")
+        model = Model("litellm_proxy/other-alias", max_concurrency=1)
+        with pytest.raises(Exception, match="max_tokens is too large"):
+            model.generate("Q", n=2)
+        assert not _fans_out_n("litellm_proxy/other-alias")
+
+
 class TestShortN:
     """A model that should support n but returns fewer is refilled with n=1."""
 

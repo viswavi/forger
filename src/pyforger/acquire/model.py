@@ -12,6 +12,7 @@ import inspect
 import math
 import os
 import random
+import re
 import statistics
 import threading
 import time
@@ -1019,19 +1020,42 @@ _LEARNED_NO_N: set[str] = set()
 _LEARNED_NO_N_LOCK = threading.Lock()
 
 
-def _learn_no_n(model_id: str, n: int, got: int) -> None:
-    """Fan out `model_id` from now on; warn the first time."""
+def _learn_no_n(model_id: str, n: int, got: int | str) -> None:
+    """Fan out `model_id` from now on; warn the first time.
+
+    ``got`` is the number of completions a request returned, or the provider's
+    error when it rejected ``n`` outright.
+    """
     with _LEARNED_NO_N_LOCK:
         if model_id in _LEARNED_NO_N:
             return
         _LEARNED_NO_N.add(model_id)
-    _logger.warning(
-        "%s returned %d completions for n=%d; sending the missing ones as n=1 "
-        "requests, and fanning out n for this model from now on.",
-        model_id,
-        got,
-        n,
+    what = (
+        f"returned {got} completions for n={n}"
+        if isinstance(got, int)
+        else f"rejected n={n} ({got})"
     )
+    _logger.warning(
+        "%s %s; sending the missing ones as n=1 requests, and fanning out n for "
+        "this model from now on.",
+        model_id,
+        what,
+    )
+
+
+# A 400 saying the provider takes only n=1, e.g. Fireworks serverless through a
+# LiteLLM gateway: "n must be 1 on serverless. To generate multiple samples,
+# send separate requests."
+_REJECTS_N = re.compile(
+    r"\bn must be 1\b|\bonly n ?= ?1\b|unsupported (?:parameter|value):? ?'?n'?\b"
+)
+
+
+def _rejects_n(exc: BaseException) -> bool:
+    """True for a bad request (400) whose message says only n=1 is accepted."""
+    if getattr(exc, "status_code", None) not in (400, None):
+        return False
+    return bool(_REJECTS_N.search(str(exc)))
 
 
 def _family(model_id: str) -> str:
@@ -1997,9 +2021,12 @@ class Model:
             if _truncation_stopping()
             else None
         )
+        # A provider may reject n > 1 outright (a 400); those requests come back
+        # as exceptions so their slots can be resent as n=1 requests below.
+        tolerant = n != 1 and not fan_out
         try:
             responses = self._send(
-                requests, call_kwargs, progress, return_exceptions, store
+                requests, call_kwargs, progress, return_exceptions or tolerant, store
             )
         finally:
             _TRUNCATION.reset(truncation_token)
@@ -2009,23 +2036,41 @@ class Model:
         # gateway alias that ignores n): send each missing slot as an n=1
         # request. A short response keeps the first of its slots.
         refilled = False
-        if n != 1 and not fan_out:
+        if tolerant:
+            rejected = {
+                j
+                for j, r in enumerate(responses)
+                if isinstance(r, Exception) and _rejects_n(r)
+            }
             failed = {
-                i for (i, _), r in zip(owners, responses) if isinstance(r, Exception)
+                i
+                for j, ((i, _), r) in enumerate(zip(owners, responses))
+                if isinstance(r, Exception) and j not in rejected
             }
             refill_owners = [
                 (i, [slot])
-                for (i, asked), r in zip(owners, responses)
+                for j, ((i, asked), r) in enumerate(zip(owners, responses))
                 if i not in failed
-                for slot in asked[len(r.choices) :]
+                for slot in (asked if j in rejected else asked[len(r.choices) :])
             ]
             if refill_owners:
-                first_short = next(
-                    (len(asked), len(r.choices))
-                    for (_, asked), r in zip(owners, responses)
-                    if not isinstance(r, Exception) and len(r.choices) < len(asked)
-                )
-                _learn_no_n(self._model_id, *first_short)
+                if rejected:
+                    first = min(rejected)
+                    _learn_no_n(
+                        self._model_id,
+                        len(owners[first][1]),
+                        str(responses[first]).splitlines()[0][:200],
+                    )
+                    for j in rejected:
+                        if owners[j][0] not in failed:
+                            responses[j] = None  # resent below, slot by slot
+                else:
+                    first_short = next(
+                        (len(asked), len(r.choices))
+                        for (_, asked), r in zip(owners, responses)
+                        if not isinstance(r, Exception) and len(r.choices) < len(asked)
+                    )
+                    _learn_no_n(self._model_id, *first_short)
                 offset = len(owners)
                 owners.extend(refill_owners)
                 refill = [
@@ -2039,10 +2084,16 @@ class Model:
                     lambda j, response: store(offset + j, response),
                 )
                 refilled = True
+            if not return_exceptions:  # as _send would have, had we not tolerated
+                for response in responses:
+                    if isinstance(response, Exception):
+                        raise response
 
         fresh: list[list[tuple[list[int], Any]]] = [[] for _ in prompts]
         errors: list[list[Exception]] = [[] for _ in prompts]
         for (i, asked), response in zip(owners, responses):
+            if response is None:  # rejected n, resent as n=1 requests
+                continue
             if isinstance(response, Exception):
                 errors[i].append(response)
             else:
