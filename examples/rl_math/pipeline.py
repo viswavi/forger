@@ -291,9 +291,10 @@ def write(
 def calibrate(rows: list[dict], student: LocalModel) -> list[dict]:
     """Filter out problems the student solves 0% or 100% of the time (bad for RL).
 
-    Justification: we considered two pass@8 ranges, [2/8, 6/8] and [1/8, 7/8].
-    On 892 problems, the former kept 361 and the latter 508, so we opted for
-    the latter.
+    Justification: we considered two pass@8 ranges, [2/8, 6/8] and [1/8, 7/8]. On a
+    sample of 25 problems, the former kept 10 and the latter 14, so we used the latter.
+    We also tried using an LLM-as-a-judge to grade problem difficulty on this sample,
+    but it scored every example 3/5 (16 of 25) or 4/5 (9 of 25) -- not informative.
     """
     return filter.by_pass_at_k(
         rows,
