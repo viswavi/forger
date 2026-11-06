@@ -71,6 +71,10 @@ Read the file for the ops you use:
 - [`pipelines.md`](agents/pipelines.md): `@step` / `@pipeline`, reports, spend caps, composing pipelines, patterns.
 - [`dynamic_step.md`](agents/dynamic_step.md): input-specific sub-pipelines with `dynamic_step`.
 
+For a complete worked example, read [`examples/rl_math/pipeline.py`](../examples/rl_math/pipeline.py): an RL dataset
+of math problems with code rubrics, from web search to a difficulty band and rubric probes. Each step's docstring
+records the options compared, the inspect measurements that told them apart, and what was chosen.
+
 ## Credentials and Cost
 
 ### Credentials
