@@ -293,10 +293,8 @@ def calibrate(rows: list[dict], student: LocalModel) -> list[dict]:
 
     Justification: we considered two pass@8 ranges, [2/8, 6/8] and [1/8, 7/8]. On a
     sample of 25 problems, the former kept 10 and the latter 14, so we used the latter.
-    We also tried an LLM-as-a-judge (filter.by_judged_difficulty) on this sample, but
-    it scored every problem 3/5 (16 of 25) or 4/5 (9 of 25), and it rated the 4
-    problems the student never solved like the 7 it always solved (mean 3.5 vs 3.3):
-    it did not track the student's difficulty.
+    An LLM-as-a-judge (filter.by_judged_difficulty) rated problems the student never
+    solved like those it always solved (mean 3.5 vs 3.3), so we dropped it.
     """
     return filter.by_pass_at_k(
         rows,
