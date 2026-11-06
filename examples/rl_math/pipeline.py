@@ -1,4 +1,4 @@
-"""An RL dataset of math problems with integer answers, each with a code rubric.
+"""An RL dataset of AMC-style math problems with integer answers and code rubrics.
 
 Each step's docstring says what it does and why: the options we compared, how we
 measured them, and what we chose. The numbers in those justifications are
@@ -27,26 +27,18 @@ from pathlib import Path
 from pyforger import acquire, alter, filter, inspect, pipeline, step
 from pyforger.acquire import LocalModel, Model
 
-# Web searches for competition-style problems; topics come from their results.
+# Web searches for competition problems; topics come from their results. AMC is
+# left out: it is the validation set's source.
 QUERIES = [
-    "AMC 12 counting and probability problems with solutions",
-    "AIME number theory problems modular arithmetic",
-    "AIME combinatorics problems with answers",
-    "HMMT February algebra round problems",
-    "HMMT combinatorics round problems and solutions",
-    "ARML team round problems",
-    "AMC 10 geometry problems area and similar triangles",
-    "AIME geometry problems circles and tangents",
-    "olympiad polynomial problems roots and coefficients",
-    "competition math problems on sequences and recursions",
-    "competition math functional equations integer answer",
-    "Mathcounts national problems with solutions",
-    "competition math problems on digits and base representation",
-    "competition probability problems expected value",
-    "competition math problems complex numbers roots of unity",
-    "competition trigonometry problems with integer answers",
-    "competition math inequalities AM-GM problems",
-    "combinatorial geometry competition problems lattice points",
+    "AIME problems and solutions",
+    "HMMT February problems and solutions",
+    "HMMT November problems and solutions",
+    "ARML individual and team round problems",
+    "Mathcounts national competition problems",
+    "Srinivasa Ramanujan Mathematics Competition problems",
+    "Art of Problem Solving competition problems with solutions",
+    "PUMaC problems and solutions",
+    "Berkeley Math Tournament problems",
 ]
 # The alternative we compared in seed_topics (#3), kept for reference: problems
 # from a public dataset's subjects, retrieve_from_hf(SUBJECTS_DATASET, config=s).
@@ -60,8 +52,9 @@ SUBJECTS = [
     "prealgebra",
     "precalculus",
 ]
-# Held out: problems like the ones we want the student to improve on.
-VALIDATION = "HuggingFaceH4/MATH-500"
+# Held out: 83 AMC 12 problems (2022-2023) with integer answers, the kind we want
+# the student to improve on.
+VALIDATION = "project-numina/aimo-validation-amc"
 ASK = "\n\nReason step by step, and put your final answer in \\boxed{}."
 
 # The rubric's one criterion: the last \boxed{} after the reasoning must hold the
@@ -106,6 +99,8 @@ def rubric_for(answer: str) -> list:
     return [[{"code": GRADE_CODE.replace("__ANSWER__", repr(answer))}, 1.0]]
 
 
+# Grading runs thousands of times (k samples per row in two pass@k filters and
+# rubric_scores); compile each rubric's code once, not on every call.
 @functools.lru_cache(maxsize=None)
 def _grader(code: str) -> Callable[[str, str, str], float]:
     namespace: dict = {}
@@ -136,7 +131,7 @@ def whole(completion: str) -> str:
 
 
 def probes() -> dict[str, Callable[[dict], str]]:
-    """Responses per row that only a broken rubric would pay for."""
+    """Responses per row that a sound rubric scores 0."""
 
     def largest_number(row: dict) -> str:
         numbers = re.findall(r"-?\d+", row["problem"]) or ["0"]
@@ -200,7 +195,7 @@ def seed_topics(model: Model) -> dict[str, list[dict]]:
         if isinstance(topic, str) and topic.strip()
     ]
     topics = filter.by_embedding_similarity(topics, field="topic", threshold=0.9)
-    validation = acquire.retrieve_from_hf(VALIDATION, split="test", n=10**5)
+    validation = acquire.retrieve_from_hf(VALIDATION, split="train", n=10**5)
     return {"topics": topics, "validation": validation}
 
 
@@ -314,14 +309,14 @@ def check_rubrics(rows: list[dict], student: LocalModel, skyline: Model) -> list
     r"""Score solutions, a skyline, probes and student samples with the rubrics.
 
     The skyline is a model stronger than the student (here the writer's model)
-    solving each problem afresh: what a capable response earns.
+    solving each problem afresh: the score a capable model gets.
 
     Justification: we compared two rubric criteria:
         1. Any \boxed{} in the response holds the answer.
         2. The last \boxed{} after the reasoning holds the answer.
 
-    inspect.rubric_scores with the probes below paid 0.71 on average to
-    every_box and 1.00 to unclosed_thinking under #1, against 0.00 under #2,
+    In inspect.rubric_scores, the probes below scored 0.71 on average for
+    every_box and 1.00 for unclosed_thinking under #1, against 0.00 under #2,
     while solutions scored 1.00 under both. number_from_statement scored 0.06
     under #1, which is why write drops answers printed in the statement.
     Therefore, we use #2. Under it, the skyline tied the solution on 182 of 200
