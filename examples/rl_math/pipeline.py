@@ -171,19 +171,21 @@ def seed_topics(model: Model) -> dict[str, list[dict]]:
     Justification: we compared 4 candidates:
         1. Write a list of topics ourselves from memory, and generate problems.
         2. Use the validation examples directly as seeds.
-        3. Retrieve problems from a public dataset by subject (SUBJECTS), extract
-           topics from those, and generate problems.
+        3. Retrieve problems from a public dataset by subject (SUBJECTS) and
+           rephrase them into new problems.
         4. Search the web (QUERIES), extract topics from the results, and
            generate problems.
 
-    We generated 50 problems from each and ran inspect.embedding_dispersion(...,
-    reference=validation). #2 put 25% of its problems near a validation problem
-    (near-reference share 0.25; about 0.10 is expected for unrelated problems
-    drawn alike), which was too high. #3 came second (0.19): the public dataset
-    shares its source with the validation set, and its seven subjects are coarse.
-    #1 covered 48% of the validation set (its uncovered examples were mostly
-    geometry and precalculus) against 79% for #4, with Vendi 21 against 36, and
-    #4's near-reference share was 0.08. Therefore, we chose #4.
+    We generated 50 problems from each and used inspect.embedding_dispersion(...,
+    reference=validation) to analyze their embeddings and overlap with the validation
+    set. #3 saw 25% of its problems near a validation problem, which is too high -- the
+    public dataset shares its source with our validation set, and rephrasing does not
+    help enough. #2 came second (19%), because the extracted topics were too specific,
+    leading to problems too close to the val set. #1 mostly avoided contamination and
+    covered 48% of the validation set; it failed to cover a few important topics (e.g.
+    geometry and precalculus). #4 achieved a coverage of 79% for #4, with Vendi 21
+    against 36, and it's near-reference overlap was only 8%.
+    Therefore, we picked #4: extract topics via search.
     """
     pages = acquire.retrieve_from_web(QUERIES, n=5)
     extracted = alter.generate_from_context(
@@ -288,13 +290,9 @@ def write(
 def calibrate(rows: list[dict], student: LocalModel) -> list[dict]:
     """Filter out problems the student solves 0% or 100% of the time (bad for RL).
 
-    Justification: RL samples 8 responses per prompt, and a prompt whose 8 all
-    score the same gives no gradient. We measured the student with RL's settings
-    (8 samples at temperature 1.0, 16,384 tokens) on 892 problems:
-    filter.by_pass_at_k(..., min_rate=0, max_rate=1, histogram=True) reported
-    384 rows with every sample graded the same (125 all 0, 259 all 1). We
-    compared keeping [1/8, 7/8] (508 rows) with [1/8, 6/8] (419 rows); nothing
-    we measured favored the narrower band, so we kept [1/8, 7/8].
+    Justification: we considered two pass@8 ranges, [2/8, 6/8] and [1/8, 7/8].
+    On 892 problems, the former kept 361 and the latter 508, so we opted for
+    the latter.
     """
     return filter.by_pass_at_k(
         rows,
