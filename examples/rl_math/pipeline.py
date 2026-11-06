@@ -178,12 +178,12 @@ def seed_topics(model: Model) -> dict[str, list[dict]]:
 
     We generated 50 problems from each and used inspect.embedding_dispersion(...,
     reference=validation) to analyze their embeddings and overlap with the validation
-    set. #3 saw 25% of its problems near a validation problem, which is too high -- the
-    public dataset shares its source with our validation set, and rephrasing does not
-    help enough. #2 came second (19%) -- the validation-conditional examples were close
-    to the validation set and lacked diversity (Vendi 14, and near-duplicate groups left
-    about 31 distinct problems of 50). #1 mostly avoided contamination and covered 48%
-    of the validation set (Vendi 21); it failed to cover a few important topics (e.g.
+    set. #3 saw 25% of problems near-match a validation problem, which is too high (the
+    public dataset shares its source with our validation set and rephrasing doesn't fix
+    this). #2 came second (19%) -- the validation-driven examples were close to the
+    validation set and lacked diversity (Vendi score is 14 and deduplication left only
+    31 distinct problems out of 50). #1 mostly avoided contamination and covered 48% of
+    the validation set (Vendi of 21); it failed to cover a few important topics (e.g.
     geometry and precalculus). #4 achieved a coverage of 79%, with Vendi 36, and its
     near-reference share was only 8%. Thus, we picked #4: extract topics via search.
     """
