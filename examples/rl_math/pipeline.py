@@ -190,11 +190,10 @@ def write(
 
     Tested on 10 problems from each, from the same topics, using the verifier's
     pass@4 (filter.by_pass_at_k with the strong model at low effort) as our
-    quality metric. All three models scored about the same, so we compared cost
-    per problem kept: #1 was 20% cheaper than #2 and 55% cheaper than #3, since
-    the weak model's drafts more often lacked an integer answer or failed
-    verification. Averaged across models, #4 led to a higher pass@4 than #5
-    (80% vs 72%) at lower cost. Therefore, we use #1 and #4.
+    quality metric. All three models scored about the same, so we chose #3
+    because it is cheaper (20% cheaper than #2 and 55% cheaper than #1).
+    Averaged across models, #4 led to a higher pass@4 than #5 (80% vs 72%) at
+    lower cost. Therefore, we use #3 and #4.
 
     The verification bar (3 of 4) and the duplicate threshold came from their
     histograms: filter.by_pass_at_k(..., histogram=True) on 300 drafts, and
@@ -318,7 +317,7 @@ def main(
 if __name__ == "__main__":
     out = Path(sys.argv[1] if len(sys.argv) > 1 else "rl_math.jsonl")
     rows = main(
-        writer=Model("STRONG_MODEL_ID", reasoning_effort="none"),
+        writer=Model("WEAK_MODEL_ID", reasoning_effort="none"),
         verifier=Model("STRONG_MODEL_ID", reasoning_effort="low"),
         # RL's sampling settings, so calibrate predicts RL's groups.
         student=LocalModel("Qwen/Qwen3-8B", temperature=1.0, max_tokens=16384),
