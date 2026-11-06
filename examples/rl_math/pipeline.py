@@ -8,8 +8,8 @@ The output is one JSON line per problem: the ``prompt`` and its ``rubric``, a li
 of ``[criterion, weight]`` pairs whose one criterion is code that checks the final
 answer (the format ``acquire.generate_custom_rubric`` produces).
 
-Run with STRONG_MODEL_ID and WEAK_MODEL_ID replaced by gateway model ids, and
-BRAVE_API_KEY set for web search:
+Run with STRONG_MODEL_ID and WEAK_MODEL_ID replaced by gateway model ids,
+BRAVE_API_KEY set for web search, and a GPU for the student (a vLLM LocalModel):
 
     FORGER_LIMIT=3 python examples/rl_math/pipeline.py     # a smoke run, 3 rows a step
     python examples/rl_math/pipeline.py rl_math.jsonl      # the full run
@@ -110,14 +110,11 @@ def _grader(code: str) -> Callable[[str, str, str], float]:
 
 def reward(response: str, row: dict) -> float:
     """The row's rubric score for ``response``: the weighted mean of its criteria."""
-    total = sum(weight for _, weight in row["rubric"])
-    return (
-        sum(
-            weight * _grader(criterion["code"])(row["prompt"], response, "")
-            for criterion, weight in row["rubric"]
-        )
-        / total
-    )
+    scored = [
+        (weight, _grader(criterion["code"])(row["prompt"], response, ""))
+        for criterion, weight in row["rubric"]
+    ]
+    return sum(w * score for w, score in scored) / sum(w for w, _ in scored)
 
 
 def solved(response: str, row: dict) -> bool:
@@ -244,20 +241,16 @@ def write(
         output_schema={"problem": str, "solution": str, "answer": str},
         merge=True,
     )
-    rows = []
-    for d in drafts:
-        answer = as_integer(d["answer"])
-        rows.append(
-            {
-                "topic": d["topic"],
-                "source_url": d["url"],
-                "problem": d["problem"].strip(),
-                "prompt": d["problem"].strip() + ASK,
-                "solution": d["solution"],
-                "answer": answer,
-                "rubric": rubric_for(answer) if answer is not None else None,
-            }
-        )
+    rows = [
+        {
+            "topic": d["topic"],
+            "source_url": d["url"],
+            "problem": d["problem"].strip(),
+            "solution": d["solution"],
+            "answer": as_integer(d["answer"]),
+        }
+        for d in drafts
+    ]
     rows = filter.by_predicate(
         rows, lambda r: r["answer"] is not None, label="integer answer"
     )
@@ -266,6 +259,10 @@ def write(
         lambda r: r["answer"] not in re.findall(r"-?\d+", r["problem"]),
         label="answer not in statement",
     )
+    rows = [
+        {**r, "prompt": r["problem"] + ASK, "rubric": rubric_for(r["answer"])}
+        for r in rows
+    ]
     rows = filter.by_pass_at_k(
         rows,
         model=verifier,
@@ -277,9 +274,15 @@ def write(
         extract_answer=whole,
         min_yield=0.4,
     )
-    return filter.by_embedding_similarity(
+    rows = filter.by_embedding_similarity(
         rows, field="problem", threshold=0.9, reference=validation
     )
+    # The numbers seed_topics' justification compares: coverage, near-reference
+    # share, near-duplicate groups and Vendi, for the problems we keep.
+    inspect.embedding_dispersion(
+        rows, "problem", reference=validation, duplicate_threshold=0.9
+    )
+    return rows
 
 
 @step
