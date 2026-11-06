@@ -40,17 +40,18 @@ QUERIES = [
     "PUMaC problems and solutions",
     "Berkeley Math Tournament problems",
 ]
-# The alternative we compared in seed_topics (#3), kept for reference: problems
-# from a public dataset's subjects, retrieve_from_hf(SUBJECTS_DATASET, config=s).
-SUBJECTS_DATASET = "EleutherAI/hendrycks_math"
+# The alternative we compared in seed_topics (#3), kept for reference: problems on
+# these subjects retrieved from a public dataset, then rephrased.
 SUBJECTS = [
-    "algebra",
-    "counting_and_probability",
-    "geometry",
-    "intermediate_algebra",
-    "number_theory",
-    "prealgebra",
-    "precalculus",
+    "enumerative combinatorics",
+    "number theory and modular arithmetic",
+    "polynomials and their roots",
+    "inequalities",
+    "functional equations",
+    "Euclidean geometry",
+    "sequences and recurrences",
+    "probability and expected value",
+    "combinatorial geometry",
 ]
 # Held out: OlympiadBench's English competition problems with an integer answer
 # (about 400 of 674), the kind we want the student to improve on.
