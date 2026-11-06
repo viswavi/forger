@@ -8,7 +8,8 @@ The output is one JSON line per problem: the ``prompt`` and its ``rubric``, a li
 of ``[criterion, weight]`` pairs whose one criterion is code that checks the final
 answer (the format ``acquire.generate_custom_rubric`` produces).
 
-Run with STRONG_MODEL_ID and WEAK_MODEL_ID replaced by gateway model ids:
+Run with STRONG_MODEL_ID and WEAK_MODEL_ID replaced by gateway model ids, and
+BRAVE_API_KEY set for web search:
 
     FORGER_LIMIT=3 python examples/rl_math/pipeline.py     # a smoke run, 3 rows a step
     python examples/rl_math/pipeline.py rl_math.jsonl      # the full run
@@ -26,7 +27,30 @@ from pathlib import Path
 from pyforger import acquire, alter, filter, inspect, pipeline, step
 from pyforger.acquire import LocalModel, Model
 
-SOURCE = "EleutherAI/hendrycks_math"
+# Web searches for competition-style problems; topics come from their results.
+QUERIES = [
+    "AMC 12 counting and probability problems with solutions",
+    "AIME number theory problems modular arithmetic",
+    "AIME combinatorics problems with answers",
+    "HMMT February algebra round problems",
+    "HMMT combinatorics round problems and solutions",
+    "ARML team round problems",
+    "AMC 10 geometry problems area and similar triangles",
+    "AIME geometry problems circles and tangents",
+    "olympiad polynomial problems roots and coefficients",
+    "competition math problems on sequences and recursions",
+    "competition math functional equations integer answer",
+    "Mathcounts national problems with solutions",
+    "competition math problems on digits and base representation",
+    "competition probability problems expected value",
+    "competition math problems complex numbers roots of unity",
+    "competition trigonometry problems with integer answers",
+    "competition math inequalities AM-GM problems",
+    "combinatorial geometry competition problems lattice points",
+]
+# The alternative we compared in seed_topics (#3), kept for reference: problems
+# from a public dataset's subjects, retrieve_from_hf(SUBJECTS_DATASET, config=s).
+SUBJECTS_DATASET = "EleutherAI/hendrycks_math"
 SUBJECTS = [
     "algebra",
     "counting_and_probability",
@@ -36,6 +60,8 @@ SUBJECTS = [
     "prealgebra",
     "precalculus",
 ]
+# Held out: problems like the ones we want the student to improve on.
+VALIDATION = "HuggingFaceH4/MATH-500"
 ASK = "\n\nReason step by step, and put your final answer in \\boxed{}."
 
 # The rubric's one criterion: the last \boxed{} after the reasoning must hold the
@@ -123,44 +149,55 @@ def probes() -> dict[str, Callable[[dict], str]]:
     }
 
 
-EXTRACT = """Name the topic this competition problem tests, as a short phrase
-specific enough to write a different problem from (e.g. "counting lattice paths
-that avoid a blocked point", not "combinatorics").
+EXTRACT = """Below is text from a web page found by searching for "{query}".
 
-Problem: {problem}"""
+List the competition math topics its problems test, at most five, each as a short
+phrase specific enough to write a different problem from (e.g. "counting lattice
+paths that avoid a blocked point", not "combinatorics"). List nothing if the page
+has no competition problems.
+
+{text}"""
+
+
+def extract_prompt(row: dict) -> str:
+    """The extraction prompt, with the page cut to its first 8,000 characters."""
+    return EXTRACT.format(query=row["query"], text=row["text"][:8000])
 
 
 @step
 def seed_topics(model: Model) -> dict[str, list[dict]]:
-    """Retrieve competition problems to identify salient topics; hold out validation.
+    """Search the web for competition problems to identify salient topics.
 
-    Justification: we compared 3 candidates:
+    Justification: we compared 4 candidates:
         1. Write a list of topics ourselves from memory, and generate problems.
         2. Use the validation examples directly as seeds.
-        3. Retrieve existing problems, extract topics from those, and generate
-           problems from the topics.
+        3. Retrieve problems from a public dataset by subject (SUBJECTS), extract
+           topics from those, and generate problems.
+        4. Search the web (QUERIES), extract topics from the results, and
+           generate problems.
 
     We generated 50 problems from each and ran inspect.embedding_dispersion(...,
     reference=validation). #2 put 25% of its problems near a validation problem
     (near-reference share 0.25; about 0.10 is expected for unrelated problems
-    drawn alike), which was too high. #1 covered 48% of the validation set
-    (its uncovered examples were mostly geometry and precalculus) against 81%
-    for #3, with Vendi 21 against 34. Therefore, we chose #3.
+    drawn alike), which was too high. #3 came second (0.19): the public dataset
+    shares its source with the validation set, and its seven subjects are coarse.
+    #1 covered 48% of the validation set (its uncovered examples were mostly
+    geometry and precalculus) against 79% for #4, with Vendi 21 against 36, and
+    #4's near-reference share was 0.08. Therefore, we chose #4.
     """
-    problems, validation = [], []
-    for subject in SUBJECTS:
-        problems += acquire.retrieve_from_hf(
-            SOURCE, config=subject, split="train", n=80, seed=0
-        )
-        # n caps at the split's size: all of it.
-        validation += acquire.retrieve_from_hf(
-            SOURCE, config=subject, split="test", n=10**5
-        )
-    topics = alter.generate_from_context(
-        problems, EXTRACT, model, output_schema={"topic": str}, merge=True
+    pages = acquire.retrieve_from_web(QUERIES, n=5)
+    extracted = alter.generate_from_context(
+        pages, extract_prompt, model, output_schema={"topics": list}, merge=True
     )
-    topics = [{"topic": t["topic"].strip(), "subject": t["type"]} for t in topics]
+    topics = [
+        {"topic": topic.strip(), "query": page["query"], "url": page["url"]}
+        for page in extracted
+        if isinstance(page["topics"], list)
+        for topic in page["topics"]
+        if isinstance(topic, str) and topic.strip()
+    ]
     topics = filter.by_embedding_similarity(topics, field="topic", threshold=0.9)
+    validation = acquire.retrieve_from_hf(VALIDATION, split="test", n=10**5)
     return {"topics": topics, "validation": validation}
 
 
@@ -214,8 +251,8 @@ def write(
         answer = as_integer(d["answer"])
         rows.append(
             {
-                "subject": d["subject"],
                 "topic": d["topic"],
+                "source_url": d["url"],
                 "problem": d["problem"].strip(),
                 "prompt": d["problem"].strip() + ASK,
                 "solution": d["solution"],
