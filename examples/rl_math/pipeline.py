@@ -60,33 +60,16 @@ VALIDATION_CONFIG = "OE_TO_maths_en_COMP"
 ASK = "\n\nReason step by step, and put your final answer in \\boxed{}."
 
 # The rubric's one criterion: the last \boxed{} after the reasoning must hold the
-# answer. __ANSWER__ is replaced per row. No imports or augmented assignment, so
-# it runs in a restricted grading sandbox.
+# answer (__ANSWER__, filled in per row). A response cut off mid-thought scores 0.
 GRADE_CODE = r"""
 def grade(prompt, response, ground_truth):
-    answer = __ANSWER__
+    import re
     if "<think>" in response and "</think>" not in response:
         return 0.0
     text = response.split("</think>")[-1]
-    start = text.rfind("\\boxed{")
-    if start < 0:
-        return 0.0
-    depth = 0
-    got = None
-    begin = start + len("\\boxed{")
-    for j in range(begin, len(text)):
-        if text[j] == "{":
-            depth = depth + 1
-        elif text[j] == "}":
-            if depth == 0:
-                got = text[begin:j]
-                break
-            depth = depth - 1
-    if got is None:
-        return 0.0
-    for junk in (" ", ",", "$", "\\!", "\\,"):
-        got = got.replace(junk, "")
-    return 1.0 if got == answer else 0.0
+    box = re.match(r"\\boxed\{([^{}]*)\}", text[text.rfind("\\boxed{"):])
+    got = box.group(1).strip(" $").replace(",", "") if box else None
+    return 1.0 if got == __ANSWER__ else 0.0
 """.strip()
 
 
