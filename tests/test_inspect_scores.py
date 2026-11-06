@@ -228,3 +228,65 @@ def test_needs_something_to_grade():
         rubric_scores(_rows(), strict, response_fields=None)
     with pytest.raises(ValueError, match="clash"):
         rubric_scores(_rows(), strict, response_fields=["empty"])
+
+
+def _graded_rows(n: int = 20) -> list[dict]:
+    """A right answer, and a baseline right on even rows, trivial on odd ones."""
+    return [
+        {
+            "prompt": f"task {i}",
+            "answer": str(i + 1),
+            "baseline": str(i + 1) if i % 2 == 0 else "0",
+        }
+        for i in range(n)
+    ]
+
+
+def partial(response: str, row: dict) -> float:
+    """1 for the answer, 0.5 for the trivial "0", else 0."""
+    return 1.0 if response == row["answer"] else 0.5 if response == "0" else 0.0
+
+
+def test_paired_comparison_with_the_reference():
+    """Other columns are compared with the first field row by row."""
+    report = rubric_scores(
+        _graded_rows(), partial, n=None, response_fields=["answer", "baseline"]
+    )
+    assert report.column("answer").vs_reference is None
+    paired = report.column("baseline").vs_reference
+    assert paired is not None
+    assert (paired.reference, paired.rows) == ("answer", 20)
+    assert (paired.below, paired.tied, paired.above) == (10, 10, 0)
+    assert paired.mean_gap == pytest.approx(0.25)
+    assert report.column("empty").vs_reference is None  # controls are not paired
+    text = render_rubric_score_report(report)
+    assert "baseline: below answer on 10, tied 10, above 0 of 20 rows" in text
+    assert "mean gap +0.25" in text
+
+
+def test_probes_are_graded_flagged_and_paired():
+    """A probe earning half the reference's mean is flagged like a control."""
+    report = rubric_scores(
+        _graded_rows(),
+        partial,
+        n=None,
+        response_fields="answer",
+        probes={"trivial": lambda row: "0", "unbuilt": lambda row: None},
+    )
+    trivial = report.column("trivial")
+    assert (trivial.kind, trivial.mean) == ("probe", 0.5)
+    assert trivial.vs_reference is not None and trivial.vs_reference.below == 20
+    assert report.column("unbuilt").ungradable == 20
+    assert any(f.startswith("trivial scores 0.50") for f in report.flags)
+    assert "trivial lowest: row 0 0.50" in render_rubric_score_report(report)
+    only = rubric_scores(
+        _graded_rows(),
+        partial,
+        n=None,
+        response_fields=None,
+        probes={"trivial": lambda row: "0"},
+        control_columns=False,
+    )
+    assert [c.name for c in only.columns] == ["trivial"]
+    with pytest.raises(ValueError, match="probes .* clash"):
+        rubric_scores(_graded_rows(), partial, probes={"empty": lambda row: ""})

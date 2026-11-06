@@ -532,6 +532,7 @@ def op(
     unkeyed: tuple[str, ...] = (),
     category: str | None = None,
     smoke: tuple[str, ...] = (),
+    report_arg: str | None = None,
 ) -> Any:
     """Decorator: cache output on disk, content-addressed by inputs.
 
@@ -580,7 +581,14 @@ def op(
     rows, e.g. ``@op(name="acquire.sample_from_LLM", smoke=("n",))``. The
     request cache is not keyed on the limit, so the full run reuses the
     completions the limited run got for the same rows.
+
+    ``report_arg`` names a boolean parameter that, when true, prints the
+    histograms of the per-row scores the op recorded (as in a ``@step``
+    report) once it returns, on a cache hit too, e.g.
+    ``filter.by_pass_at_k(rows, ..., histogram=True)``. It is never keyed.
     """
+    # A report switch only prints: it cannot change what the op returns.
+    keyless = unkeyed + ((report_arg,) if report_arg is not None else ())
 
     def decorate(fn: Callable[..., T]) -> Callable[..., T]:
         try:
@@ -588,8 +596,10 @@ def op(
         except (TypeError, ValueError) as exc:
             # Built-in functions and some callables don't have inspectable signatures.
             logger.debug("inspect.signature failed for %s: %s", fn, exc)
-            if unkeyed:
-                raise TypeError("unkeyed needs a function with a signature") from exc
+            if keyless:
+                raise TypeError(
+                    "unkeyed and report_arg need a function with a signature"
+                ) from exc
             sig = None
         else:
             # These names are reserved for per-call cache controls and yield checks.
@@ -603,6 +613,8 @@ def op(
             for param in unkeyed:
                 if param not in sig.parameters:
                     raise TypeError(f"unkeyed names {param!r}, not a parameter")
+            if report_arg is not None and report_arg not in sig.parameters:
+                raise TypeError(f"report_arg names {report_arg!r}, not a parameter")
             _check_smoke_params(sig, smoke)
 
         op_name = name or f"{fn.__module__}.{fn.__qualname__}"
@@ -648,6 +660,7 @@ def op(
             with _RUNNING_CALLS_LOCK:
                 _RUNNING_CALLS.add(state)
             call: _tracking.OpCall | None = None
+            recorded: list[_tracking.ScoreRecord] = []
             rows: tuple[Any, Any] = (args[0] if args else None, None)
             start = time.perf_counter()
             try:
@@ -655,6 +668,7 @@ def op(
                     args, kwargs, _no_cache, _cache_only, state
                 )
                 rows = (first_arg, result)
+                recorded = _tracking.current_scores()
                 call = _op_call(
                     op_name,
                     op_category,
@@ -684,6 +698,8 @@ def op(
                 if scope_token is not None:
                     _NO_CACHE_SCOPE.reset(scope_token)
                 _tracking.exit_op(token, call, rows)
+            if report_arg is not None and kwargs.get(report_arg):
+                _print_scores(op_name, recorded)
             return result
 
         def _call(
@@ -712,7 +728,7 @@ def op(
                 args = bound.args
                 kwargs = bound.kwargs
                 normalized = dict(bound.arguments)
-                for param in unkeyed:
+                for param in keyless:
                     normalized.pop(param, None)
             else:
                 normalized = {"args": list(args), "kwargs": dict(kwargs)}
@@ -993,6 +1009,20 @@ def _note_step_file(cache_path: Path, cache_root: Path) -> None:
 def _read_result(cache_path: Path, cache_root: Path) -> Any:
     """Load what ``_write_result`` wrote, or an entry pickled without blobs."""
     return _blobs.loads(cache_path.read_bytes(), cache_root / "blobs")
+
+
+def _print_scores(op_name: str, records: list[_tracking.ScoreRecord]) -> None:
+    """Print each recorded score list as the ``@step`` report's histogram."""
+    from pyforger import _render  # imports op indirectly: import at call time
+
+    console = _render._console()
+    for record in records:
+        hist = _render._histogram(record)
+        _render._emit(
+            _render._histogram_renderable(hist, op_name, width=console.width), console
+        )
+    if not records:
+        logger.info("%s recorded no scores to show", op_name)
 
 
 def tracked(

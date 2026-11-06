@@ -123,6 +123,8 @@ Each takes the task in `input_field` (text or chat messages). From cheapest and 
   `metric=filter.program_verifier("tests")` (`language="cpp"` for C++, `min_score=` for partial credit).
   A metric may return a score in [0, 1] instead of a bool (e.g. a partial-credit grader); the rate is then the
   row's mean score. `by_comparative_difficulty` needs pass/fail grades.
+  `histogram=True` prints the pass-rate histogram outside a step and on a cache hit (not keyed), with a line
+  counting rows whose samples all got one grade: no GRPO gradient there.
 
 Grading guardrails for `by_comparative_difficulty` and `by_pass_at_k`:
 

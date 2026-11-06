@@ -1191,7 +1191,7 @@ class TestTruncation:
             "max_tokens=50 (4 mid-thought), so their text is cut off; raise the "
             "TinkerModel's max_tokens"
         ]
-        assert call.scores.note == (
+        assert call.scores.note.splitlines()[0] == (
             "4 of 8 samples truncated (<think> never closed), graded failed; "
             "raise max_tokens if that is too many"
         )
@@ -1245,7 +1245,7 @@ class TestTruncation:
             "max_tokens=50, so their text is cut off; raise the TinkerModel's "
             "max_tokens"
         ]
-        assert call.scores.note is None
+        assert "truncated" not in (call.scores.note or "")
 
     def test_judge_cut_off_mid_thought_gets_one_warning(self, world, monkeypatch):
         """The unscored-calls warning covers it; the max_tokens one leaves it out."""
