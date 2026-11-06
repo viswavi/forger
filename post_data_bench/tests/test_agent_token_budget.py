@@ -242,6 +242,50 @@ completion(model='litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731')
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(json.loads(ledger.read_text())["token_units"], 22)
 
+    def test_worked_example_reaches_only_the_forger_arm(self):
+        """examples/rl_math is copied with src/ and docs/, and hidden with them."""
+        scope = launcher_functions(
+            "build_agent_mounts",
+            "_copy_into",
+            "_touch_placeholder",
+            args=SimpleNamespace(backend="local", training_mode="rl"),
+            _task_public_copies=lambda source, target: None,
+        )
+        for hide_forger in (False, True):
+            with self.subTest(
+                hide_forger=hide_forger
+            ), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                repo = root / "source"
+                for relative in (
+                    "post_data_bench/coding/rl/token_budget.py",
+                    "src/pyforger/token_units.py",
+                    "docs/AGENTS.md",
+                    "examples/rl_math/pipeline.py",
+                    "examples/training/train_sft.py",
+                    "examples/training/fsdp.yaml",
+                ):
+                    destination = repo / relative
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.write_text("x")
+                task_dir = repo / "post_data_bench" / "coding"
+                task_dir.mkdir(parents=True, exist_ok=True)
+                scratch = root / "copy"
+                run = root / "run"
+                run.mkdir()
+                scope["build_agent_mounts"](
+                    host_forger_repo=str(repo),
+                    forger_repo=str(repo),
+                    curator_repo=str(root / "curator"),
+                    task_dir=str(task_dir),
+                    agent_data_dir=str(run),
+                    scratch_dir=str(scratch),
+                    hide_forger=hide_forger,
+                    hide_curator=True,
+                )
+                example = scratch / "forger/examples/rl_math/pipeline.py"
+                self.assertEqual(example.exists(), not hide_forger)
+
     def test_host_env_aliases_fill_internal_names(self):
         """Map the host .env names without overriding explicit settings."""
         tree = ast.parse((ROOT / "launch_agent.py").read_text())

@@ -881,6 +881,12 @@ def build_agent_mounts(
     if not hide_forger:
         _copy_into(forger_copy, "src", os.path.join(host_forger_repo, "src"))
         _copy_into(forger_copy, "docs", os.path.join(host_forger_repo, "docs"))
+        # The worked example docs/AGENTS.md points to (Forger arm only).
+        _copy_into(
+            forger_copy,
+            "examples/rl_math",
+            os.path.join(host_forger_repo, "examples/rl_math"),
+        )
 
     task_rel = (
         os.path.relpath(sandbox_task_dir, forger_repo)
