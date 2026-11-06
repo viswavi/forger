@@ -67,7 +67,7 @@ response = completion(
 )
 ```
 
-DeepSeek-V4-Flash returns its reasoning separately from its answer, in `response.choices[0].message.reasoning_content`. Use it for <think>...</think> targets instead of making another call to write reasoning. DeepSeek-V4-Flash reads the effort only as `reasoning={{"effort": ...}}` and does not think at all without it; GLM-5.3 reads `reasoning_effort="low"` (or "medium", "high") instead. The setting controls how long the reasoning is.
+DeepSeek-V4-Flash returns its reasoning separately from its answer, in `response.choices[0].message.reasoning_content`. DeepSeek-V4-Flash reads the effort only as `reasoning={{"effort": ...}}` and does not think at all without it; GLM-5.3 reads `reasoning_effort="low"` (or "medium", "high") instead. The setting controls how long the reasoning is.
 
 {BACKEND_STUDENT_USAGE}
 
