@@ -272,8 +272,11 @@ def calibrate(rows: list[dict], student: LocalModel) -> list[dict]:
 
 
 @step
-def check_rubrics(rows: list[dict], student: LocalModel, baseline: Model) -> list[dict]:
-    r"""Score solutions, a weak baseline, probes and student samples with the rubrics.
+def check_rubrics(rows: list[dict], student: LocalModel, skyline: Model) -> list[dict]:
+    r"""Score solutions, a skyline, probes and student samples with the rubrics.
+
+    The skyline is a model stronger than the student (here the writer's model)
+    solving each problem afresh: what a capable response earns.
 
     Justification: we compared two rubric criteria:
         1. Any \boxed{} in the response holds the answer.
@@ -283,19 +286,19 @@ def check_rubrics(rows: list[dict], student: LocalModel, baseline: Model) -> lis
     every_box and 1.00 to unclosed_thinking under #1, against 0.00 under #2,
     while solutions scored 1.00 under both. number_from_statement scored 0.06
     under #1, which is why write drops answers printed in the statement.
-    Therefore, we use #2. Under it, the baseline (the weak model at no effort)
-    scored below the solution on 88 of 200 rows and tied on 112, rows both got
-    right.
+    Therefore, we use #2. Under it, the skyline tied the solution on 182 of 200
+    rows and scored below it on 18 (mean 0.91), while the student's samples
+    averaged 0.52: room between the student and a stronger model.
     """
     rows = alter.generate_from_context(
-        rows, "{prompt}", baseline, merge=True, output_field="baseline"
+        rows, "{prompt}", skyline, merge=True, output_field="skyline"
     )
-    rows = [{**r, "baseline_solution": r["baseline"]["text"]} for r in rows]
+    rows = [{**r, "skyline_solution": r["skyline"]["text"]} for r in rows]
     inspect.rubric_scores(
         rows,
         reward,
         n=200,
-        response_fields=["solution", "baseline_solution"],
+        response_fields=["solution", "skyline_solution"],
         probes=probes(),
         model=student,
         k=8,
@@ -304,14 +307,12 @@ def check_rubrics(rows: list[dict], student: LocalModel, baseline: Model) -> lis
 
 
 @pipeline
-def main(
-    writer: Model, verifier: Model, student: LocalModel, baseline: Model
-) -> list[dict]:
+def main(writer: Model, verifier: Model, student: LocalModel) -> list[dict]:
     """Topics, then verified problems, a difficulty band, and checked rubrics."""
-    seeds = seed_topics(baseline)
+    seeds = seed_topics(writer)
     rows = write(seeds["topics"], seeds["validation"], writer, verifier)
     rows = calibrate(rows, student)
-    return check_rubrics(rows, student, baseline)
+    return check_rubrics(rows, student, skyline=writer)
 
 
 if __name__ == "__main__":
@@ -321,7 +322,6 @@ if __name__ == "__main__":
         verifier=Model("STRONG_MODEL_ID", reasoning_effort="low"),
         # RL's sampling settings, so calibrate predicts RL's groups.
         student=LocalModel("Qwen/Qwen3-8B", temperature=1.0, max_tokens=16384),
-        baseline=Model("WEAK_MODEL_ID", reasoning_effort="none"),
     )
     # What RL trains on: each prompt with the rubric that scores its responses.
     out.write_text(
