@@ -33,7 +33,7 @@ Forger ops for common needs:
 
 When `generate_custom_rubric` or `convert_rubric_criteria` writes code criteria, pass the sandbox rules (see Data Format) and the `judge_cpp` helper as `code_guidelines=` (a string), so the criteria it writes compile in the RL grader and judge responses through that helper.
 
-Before RL, `pyforger.inspect.rubric_scores(rows, rubric_score(), response_fields="response")` (with `from rl.solution_runner import rubric_score`, on rows holding responses sampled from the student) helps you understand your rubric's behavior on sampled responses. `probes={name: fn(row) -> response}` adds responses that should score low (e.g. a program printing a trivial valid answer, or the example output hard-coded), and each column is compared row by row with the first.
+Before RL, `pyforger.inspect.rubric_scores(rows, rubric_score(), response_fields="response")` (with `from rl.solution_runner import rubric_score`, on rows holding responses sampled from the student) helps you understand your rubric's behavior on sampled responses. `probes={{name: fn(row) -> response}}` adds responses that should score low (e.g. a program printing a trivial valid answer, or the example output hard-coded), and each column is compared row by row with the first.
 
 # Data Format
 
