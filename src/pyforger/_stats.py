@@ -1,4 +1,4 @@
-"""Small-sample statistics for reports: yield and mean intervals.
+"""Small-sample statistics for reports: yield intervals, mean intervals, tests.
 
 Reports quote 95% intervals so that a yield from 50 rows reads as the range it
 is: ``0.42 (0.29–0.56)``. No imports from other pyforger modules.
@@ -39,6 +39,43 @@ def mean_interval(values: Sequence[float]) -> tuple[float, float] | None:
     return mean, Z95 * math.sqrt(var / n)
 
 
+def diff_interval(
+    kept_a: int, seen_a: int, kept_b: int, seen_b: int
+) -> tuple[float, float]:
+    """95% interval of yield A minus yield B (Newcombe's hybrid score method).
+
+    e.g. 80 of 120 vs 109 of 120 → (-0.34, -0.14): B keeps clearly more.
+    """
+    pa = kept_a / seen_a if seen_a else 0.0
+    pb = kept_b / seen_b if seen_b else 0.0
+    la, ua = wilson(kept_a, seen_a)
+    lb, ub = wilson(kept_b, seen_b)
+    d = pa - pb
+    return (
+        d - math.sqrt((pa - la) ** 2 + (ub - pb) ** 2),
+        d + math.sqrt((ua - pa) ** 2 + (pb - lb) ** 2),
+    )
+
+
+def sign_test(a: int, b: int) -> float:
+    """Two-sided exact p-value that ``a`` vs ``b`` is a fair coin's split.
+
+    For rows only one of two runs kept: 29 vs 2 → p < 0.001 (clearly
+    different); 6 vs 4 → p = 0.75 (within noise).
+    """
+    n = a + b
+    if n == 0:
+        return 1.0
+    k = min(a, b)
+    tail = sum(math.comb(n, i) for i in range(k + 1)) / 2**n
+    return min(1.0, 2 * tail)
+
+
 def fmt_range(lo: float, hi: float) -> str:
     """``0.29–0.56``."""
     return f"{lo:.2f}–{hi:.2f}"
+
+
+def fmt_p(p: float) -> str:
+    """``p < 0.001``, ``p = 0.03``, ``p = 0.75``."""
+    return "p < 0.001" if p < 0.001 else f"p = {p:.2g}" if p < 0.1 else f"p = {p:.2f}"
