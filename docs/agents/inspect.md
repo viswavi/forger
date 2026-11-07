@@ -11,6 +11,7 @@ producing new rows in the pipeline.
 | `inspect_step` | no | Print the full report of the latest run of a `@step` and return its `StepRecord`. |
 | `spend` | no | Print and return the spend ledger's totals by run, pipeline, and step. |
 | `runs` | no | Print and return the saved `@pipeline` runs with step yields, e.g. `runs("main")`. |
+| `compare_pipelines` | no | Print where two saved pipeline runs diverge and how each differing step's rows differ. |
 | `phrase_frequency` | no | Print and return, per string field, the phrases and names the most rows share. No LLM. |
 
 `phrase_frequency(rows, fields=None, *, ngram_range=(2, 4), top_k=10, min_share=0.05, max_rows=2000,
@@ -105,3 +106,50 @@ dropped rows (with 95% intervals) and the mean of the last filter score. It retu
   main-20261022-130510-4242  13:05:10  2 steps → 20 rows  $0.60  LIMIT 50
       judge 0.40 (0.28–0.54) · mean filter.by_llm_score score 3.20 ± 0.20
 ```
+
+## Comparing pipeline runs
+
+Each saved run also records every step's cache key and a digest of each part of it (the step's code, each global it
+reads, each argument). To try a variant, write it as a second pipeline in the same file that calls the same steps;
+the steps they share hit the cache:
+
+```python
+@pipeline
+def main_a(model):
+    return verify(solve(find_problems(model), model, prompt=PROMPT_A))
+
+@pipeline
+def main_b(model):
+    return verify(solve(find_problems(model), model, prompt=PROMPT_B))
+```
+
+After running both, `compare_pipelines("main_a", "main_b")` prints each step of both runs, its rows in → out and
+cost, and why its cache keys differ:
+
+```text
+  step            A in → out     cost      B in → out     cost  difference
+  find_problems      0 → 143    $0.00         0 → 143    $0.00  same
+  solve            143 → 143    $0.41       143 → 143    $0.52  argument prompt differs
+  verify            143 → 61    $0.04        143 → 88    $0.05  input rows differ (from an earlier step)
+  first difference: solve
+
+  verify:
+    filter.by_tests: A 61/143 (0.43)  B 88/143 (0.62)  · B − A +0.19 (95% CI +0.07 to +0.30): clearly different
+    rows (matched by id): 59 in both, 2 only in A, 29 only in B
+      2 vs 29: clearly different (B keeps more of them; sign test p < 0.001)
+      only in B: {"id": "p017", "statement": "Given n intervals…", ...}
+```
+
+Each difference comes with a verdict, `clearly different` or `within noise`: an op's yield difference with its 95%
+interval, score means (`mean ... A 3.10 ± 0.20  B 3.60 ± 0.18`) compared by their intervals, and a sign test on the
+rows only one run kept (`6 vs 4: within noise (... p = 0.75)`).
+
+A step's difference is `code differs`, `global PROMPT differs`, `argument <name> differs`, or `input rows differ`
+when only its rows argument changed (an earlier step caused it). For each step that differs it also lists, when both
+outputs are still in the step cache, the output rows only one run has, matched by `key=` (default: an `id` field, or
+another field unique in both runs), and for rows both runs have, which fields differ (`rows in both whose values
+differ: solution in 120`). With no arguments it compares the latest run with the run before it (both limited or both
+full); a name means that pipeline's latest run, and a run id from `runs()` names one run. Runs saved before steps
+recorded their keys say `no key recorded (an older run)` for each step. It returns a dict: `first_difference`, and per
+step `same`, `why`, `ops` (with `b_minus_a`: the difference, its `ci`, and `clear`), `scores`, and `rows` (with
+`sign_test_p`).

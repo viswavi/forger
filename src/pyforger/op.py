@@ -317,6 +317,27 @@ def skip_cache_write() -> None:
         state.skip_write = True
 
 
+def _key_parts(
+    body_key: Any, globals_key: dict[str, Any], normalized: dict[str, Any], rest: list
+) -> dict[str, str]:
+    """A short digest of each part of a step's cache key, by part name.
+
+    e.g. ``{"code": "3f2a...", "global PROMPT": "9b1c...", "argument rows":
+    "77d0..."}``; ``rest`` are the extra parts (``["smoke", 3]`` in a limited
+    run → ``"run smoke"``). Only for ``compare_pipelines``: the cache key is
+    still the hash of the whole list.
+    """
+    parts = {"code": _hash(body_key)[0][:16]}
+    for name, value in globals_key.items():
+        parts[f"global {name}"] = _hash(value)[0][:16]
+    for name, value in normalized.items():
+        parts[f"argument {name}"] = _hash(value)[0][:16]
+    for value in rest:
+        label = value[0] if isinstance(value, list) and value else "other"
+        parts[f"run {label}"] = _hash(value)[0][:16]
+    return parts
+
+
 _STEP_META_SUFFIX = ".step.json"
 # A filter's per-row scores, so a cache hit still shows its histogram.
 _SCORES_SUFFIX = ".scores.json"
@@ -725,6 +746,10 @@ def op(
             t0 = time.perf_counter()
             input_hash, hash_size = _hash(key)
             _maybe_warn_hash_cost(op_name, time.perf_counter() - t0, hash_size)
+            # Recorded beside the key, for compare_pipelines; the key is unchanged.
+            if op_name.startswith(_tracking.STEP_OP_PREFIX):
+                parts = _key_parts(body_key, globals_key, normalized, key[5:])
+                _tracking.note_step_key(input_hash, parts)
 
             cache_root = _cache_dir()
             cache_path = (cache_root / safe_op_name / f"{input_hash}.pkl").resolve()

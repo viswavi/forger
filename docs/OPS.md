@@ -87,6 +87,8 @@ Keywords left out of the signatures below:
   - [`by_topic_frequency`](#filter-by_topic_frequency): Downsample over-represented topics and drop rare ones.
   - [`program_verifier`](#filter-program_verifier): A `metric` for the difficulty filters that runs programs on tests.
 - [`pyforger.inspect`](#inspect)
+  - [`compare_pipelines`](#inspect-compare_pipelines): Print where two saved pipeline runs diverge, and how their steps
+    differ.
   - [`eval_tree`](#inspect-eval_tree): Build an EvalTree report from scored model outputs.
   - [`inspect_step`](#inspect-inspect_step): Print the full report of the latest run of step `name` and return it.
   - [`phrase_frequency`](#inspect-phrase_frequency): Print and return the phrases and names that the most rows share,
@@ -1096,6 +1098,23 @@ A `metric` for the difficulty filters that runs programs on tests.
 Inspect operations: analyze existing data.
 
 Also exported, not documented here: `PhraseReport`, `SpendReport`, `SpendTotal`.
+
+<a name="inspect-compare_pipelines"></a>
+
+### `inspect.compare_pipelines`
+
+Not cached: a plain function.
+
+```python
+compare_pipelines(
+    a: str | PipelineRecord | None = None,
+    b: str | PipelineRecord | None = None,
+    *,
+    key: str | None = None,
+) -> dict[str, Any]
+```
+
+Print where two saved pipeline runs diverge, and how their steps differ.
 
 <a name="inspect-eval_tree"></a>
 

@@ -109,7 +109,8 @@ flag in brackets. Dim `INFO:` lines are about how the code is written. Run each 
 A batch of model requests that would not fit a cap or quota stops early, after about 5% of it
 (`SpendProjectionError`; see "Spend projection").
 Every pipeline run is saved, and `pyforger.inspect.runs()` lists them with their rows, cost, step yields, and
-warnings (see "Saved pipeline runs" in `inspect.md`).
+warnings (see "Saved pipeline runs" in `inspect.md`). `inspect.compare_pipelines("main_a", "main_b")` shows which
+step two runs first differ at and why (see "Comparing pipeline runs" in `inspect.md`).
 See [`docs/agents/pipelines.md`](agents/pipelines.md) for the reports, warnings, suppression flags, spend ledger, and
 spending caps.
 
@@ -157,7 +158,7 @@ The detailed reference is split by topic under `docs/agents/`; read the file for
 - [`docs/agents/filter.md`](agents/filter.md): Quality and diversity filters, including the LLM judge, `by_predicate`,
   `by_tests`, the difficulty filters, and `by_topic_frequency`.
 - [`docs/agents/inspect.md`](agents/inspect.md): Reports on rows: `topic_based_clustering`, `eval_tree`,
-  `inspect_step`, `spend`, and `runs` (saved pipeline runs).
+  `inspect_step`, `spend`, `runs`, and `compare_pipelines` (saved pipeline runs).
 - [`docs/agents/models.md`](agents/models.md): The `Model` class, gateway credentials, concurrency, `n` fan-out,
   reasoning effort, prompt types.
 - [`docs/agents/caching.md`](agents/caching.md): How `@op` caching, the request cache, and tracing work.
