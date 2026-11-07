@@ -17,7 +17,7 @@ BRAVE_API_KEY set for web search, and a GPU for the student (a vLLM LocalModel):
 seed_topics' alternative #1 runs as its own pipeline; compare the two runs with
 ``inspect.compare_pipelines("main", "main_from_memory")``:
 
-    FORGER_LIMIT=50 python examples/rl_math/pipeline.py --from-memory
+    FORGER_LIMIT=25 python examples/rl_math/pipeline.py --from-memory
 """
 
 from __future__ import annotations
@@ -161,7 +161,7 @@ def seed_topics(model: Model, source: str = "web") -> dict[str, list[dict]]:
         4. Search the web (QUERIES), extract topics from the results, and
            generate problems.
 
-    We ran each as its own pipeline on 50 problems (FORGER_LIMIT=50; #1 is
+    We ran each as its own pipeline on 25 problems (FORGER_LIMIT=25; #1 is
     main_from_memory, #4 is main) and compared their embeddings and overlap with the
     validation set: each write step's inspect.embedding_dispersion(...,
     reference=validation) report, and the runs side by side with
@@ -169,10 +169,10 @@ def seed_topics(model: Model, source: str = "web") -> dict[str, list[dict]]:
     near-match a validation problem, which is too high (rephrased competition problems
     stayed close to the competition problems in our validation set). #2 came second
     (19%) -- the validation-driven examples were close to the validation set and lacked
-    diversity (Vendi score is 14 and near-duplicates collapsed its 50 problems into
-    about 31 distinct ones). #1 mostly avoided contamination and covered 48% of the
-    validation set (Vendi of 21); it failed to cover a few important topics (e.g.
-    geometry and precalculus). #4 achieved a coverage of 79%, with Vendi 36, and its
+    diversity (Vendi score is 8 and near-duplicates collapsed its 25 problems into
+    about 16 distinct ones). #1 mostly avoided contamination and covered 48% of the
+    validation set (Vendi of 11); it failed to cover a few important topics (e.g.
+    geometry and precalculus). #4 achieved a coverage of 79%, with Vendi 18, and its
     near-reference share was only 8%. Thus, we picked #4: extract topics via search.
     """
     if source == "memory":
@@ -228,7 +228,7 @@ def write(
         #4: joint problem-solution generation
         #5: independent problem and solution generation
 
-    Tested on 10 problems from each, from the same topics, using the verifier's
+    Tested on 50 problems from each, from the same topics, using the verifier's
     pass@4 (filter.by_pass_at_k with the strong model at low effort) as our
     quality metric. All three models scored about the same, so we chose #3
     because it is cheaper (20% cheaper than #2 and 55% cheaper than #1).
