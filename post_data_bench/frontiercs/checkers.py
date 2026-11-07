@@ -22,12 +22,15 @@ def extract_code(completion: str | None, lenient: bool = False) -> str:
         return ""
     if "</think>" in completion:
         completion = completion.rsplit("</think>", 1)[-1]
-    if "<think>" in completion and not lenient:
+    unclosed = "<think>" in completion
+    if unclosed and not lenient:
         return ""
     text = completion.strip()
     blocks = _CPP_BLOCK.findall(text)
     if blocks:
         return max(blocks, key=len).strip()
+    if unclosed:  # lenient: reasoning prose with no draft block is not a program
+        return ""
     for fence in ("```cpp", "```c++", "```"):
         if text.startswith(fence):
             text = text[len(fence) :].strip()

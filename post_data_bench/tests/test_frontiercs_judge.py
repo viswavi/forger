@@ -255,6 +255,7 @@ class LimitsAndExtractionTests(unittest.TestCase):
         self.assertEqual(checkers.extract_code(truncated, lenient=True), "int main(){}")
         closed = "<think>```cpp\nint draft;\n```</think>```cpp\nint b;\n```"
         self.assertEqual(checkers.extract_code(closed, lenient=True), "int b;")
+        self.assertEqual(checkers.extract_code("<think>no code yet", lenient=True), "")
 
 
 @unittest.skipUnless(HAS_OPENAI, "evaluate_model imports openai")

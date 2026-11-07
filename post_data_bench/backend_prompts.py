@@ -68,7 +68,7 @@ TASK_EDITS = {
     "frontiercs": [
         (
             "10 minutes for a validation evaluation",
-            "25 minutes for a validation evaluation (4 sampled answers per problem)",
+            "25 minutes for a validation evaluation (5 sampled answers per problem)",
         ),
         (
             "a few hours for a 100-step RL run (steps of 32 prompts took 3-4 minutes "
