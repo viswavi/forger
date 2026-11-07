@@ -1,5 +1,6 @@
 """Inspect operations: analyze existing data."""
 from pyforger.inspect.cluster import topic_based_clustering
+from pyforger.inspect.compare import compare_pipelines
 from pyforger.inspect.dispersion import DispersionReport, embedding_dispersion
 from pyforger.inspect.eval_tree import eval_tree
 from pyforger.inspect.likelihood import (
@@ -25,6 +26,7 @@ __all__ = [
     "SpendTotal",
     "embedding_dispersion",
     "compare_to_reference",
+    "compare_pipelines",
     "eval_tree",
     "inspect_step",
     "phrase_frequency",

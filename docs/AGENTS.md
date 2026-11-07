@@ -15,6 +15,8 @@ ops (typically acquire or alter, then filter) from `list[dict]` rows to rows.
 - A batch of model requests that would not fit a cap or quota stops after about 5% of it (`SpendProjectionError`).
 - `pyforger.inspect.runs()` lists saved runs with rows, cost, step yields and warnings ("Saved pipeline runs" in
   [`inspect.md`](agents/inspect.md)).
+- `pyforger.inspect.compare_pipelines("main_a", "main_b")` shows the step where two runs first differ and why
+  ("Comparing pipeline runs" in [`inspect.md`](agents/inspect.md)).
 
 More, including limited runs and spend projection: [`pipelines.md`](agents/pipelines.md).
 
@@ -65,7 +67,7 @@ Read the file for the ops you use:
 - [`filter.md`](agents/filter.md): LLM judge, `by_predicate`, `by_tests`, difficulty filters,
   `by_embedding_similarity`, `by_topic_frequency`.
 - [`inspect.md`](agents/inspect.md): `topic_based_clustering`, `eval_tree`, `rubric_scores`, `embedding_dispersion`,
-  `compare_to_reference`, `inspect_step`, `spend`, `runs`, `student_log_likelihood`.
+  `compare_to_reference`, `inspect_step`, `spend`, `runs`, `compare_pipelines`, `student_log_likelihood`.
 - [`models.md`](agents/models.md): `Model`, gateway credentials, concurrency, `n` fan-out, reasoning effort.
 - [`caching.md`](agents/caching.md): `@op` caching, the request cache, tracing.
 - [`pipelines.md`](agents/pipelines.md): `@step` / `@pipeline`, reports, spend caps, composing pipelines, patterns.
