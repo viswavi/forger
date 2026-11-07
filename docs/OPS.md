@@ -93,6 +93,8 @@ Keywords left out of the signatures below:
     embedding space.
   - [`compare_to_reference`](#inspect-compare_to_reference): Print each feature of `rows` beside the same feature of
     `reference`.
+  - [`compare_pipelines`](#inspect-compare_pipelines): Print where two saved pipeline runs diverge, and how their steps
+    differ.
   - [`eval_tree`](#inspect-eval_tree): Build an EvalTree report from scored model outputs.
   - [`inspect_step`](#inspect-inspect_step): Print the full report of the latest run of step `name` and return it.
   - [`phrase_frequency`](#inspect-phrase_frequency): Print and return the phrases and names that the most rows share,
@@ -1198,6 +1200,23 @@ Print each feature of `rows` beside the same feature of `reference`.
 
 **Returns:** A `ReferenceReport`, also printed. A numeric feature is flagged when at least 25% of rows fall outside the
 reference's 5th-95th percentiles; a label when its shares differ by at least 0.2 in total (total variation distance).
+
+<a name="inspect-compare_pipelines"></a>
+
+### `inspect.compare_pipelines`
+
+Not cached: a plain function.
+
+```python
+compare_pipelines(
+    a: str | PipelineRecord | None = None,
+    b: str | PipelineRecord | None = None,
+    *,
+    key: str | None = None,
+) -> dict[str, Any]
+```
+
+Print where two saved pipeline runs diverge, and how their steps differ.
 
 <a name="inspect-eval_tree"></a>
 

@@ -349,6 +349,12 @@ class StepRecord(BaseModel):
     # The cache entry holding this run's output, relative to FORGER_CACHE
     # (e.g. "step.write_targets/3f2a….pkl"); None when it was not cached.
     cache_file: str | None = None
+    # The step's cache key, and a digest of each part of it: "code", "global
+    # PROMPT", "argument rows", ... ``inspect.compare_pipelines`` uses them to
+    # say why a step of two runs differs, e.g. "argument prompt differs". Runs
+    # saved before these were recorded load with None and {}.
+    cache_key: str | None = None
+    key_parts: dict[str, str] = Field(default_factory=dict)
 
 
 class PipelineRecord(BaseModel):
@@ -2028,6 +2034,14 @@ def store_step(rec: StepRecord) -> None:
     with _REGISTRY_LOCK:
         _STEP_HISTORY.pop(rec.name, None)
         _STEP_HISTORY[rec.name] = rec
+
+
+def note_step_key(key: str, parts: dict[str, str]) -> None:
+    """Record the active step's cache key and its parts (see ``StepRecord``)."""
+    rec = _ACTIVE_STEP.get()
+    if rec is not None:
+        rec.cache_key = key
+        rec.key_parts = parts
 
 
 def store_pipeline(rec: PipelineRecord) -> None:
