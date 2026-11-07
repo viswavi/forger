@@ -13,6 +13,11 @@ BRAVE_API_KEY set for web search, and a GPU for the student (a vLLM LocalModel):
 
     FORGER_LIMIT=3 python examples/rl_math/pipeline.py     # a smoke run, 3 rows a step
     python examples/rl_math/pipeline.py rl_math.jsonl      # the full run
+
+seed_topics' alternative #1 runs as its own pipeline; compare the two runs with
+``inspect.compare_pipelines("main", "main_from_memory")``:
+
+    FORGER_LIMIT=50 python examples/rl_math/pipeline.py --from-memory
 """
 
 from __future__ import annotations
@@ -40,8 +45,8 @@ QUERIES = [
     "PUMaC problems and solutions",
     "Berkeley Math Tournament problems",
 ]
-# The alternative we compared in seed_topics (#3), kept for reference: problems on
-# these subjects retrieved from a public dataset, then rephrased.
+# The alternative we compared in seed_topics (#1): topics we wrote from memory.
+# main_from_memory below runs it, so the comparison can be rerun.
 SUBJECTS = [
     "enumerative combinatorics",
     "number theory and modular arithmetic",
@@ -142,41 +147,49 @@ def extract_prompt(row: dict) -> str:
 
 
 @step
-def seed_topics(model: Model) -> dict[str, list[dict]]:
+def seed_topics(model: Model, source: str = "web") -> dict[str, list[dict]]:
     """Search the web for competition problems to identify salient topics.
 
+    ``source="memory"`` uses SUBJECTS instead (candidate #1 below).
+
     Justification: we compared 4 candidates:
-        1. Write a list of topics ourselves from memory, and generate problems.
+        1. Write a list of topics ourselves from memory (SUBJECTS), and
+           generate problems.
         2. Use the validation examples directly as seeds.
-        3. Retrieve problems from a public dataset by subject (SUBJECTS) and
-           rephrase them into new problems.
+        3. Retrieve problems from a public dataset by subject and rephrase
+           them into new problems.
         4. Search the web (QUERIES), extract topics from the results, and
            generate problems.
 
-    We generated 50 problems from each and used inspect.embedding_dispersion(...,
-    reference=validation) to analyze their embeddings and overlap with the validation
-    set. #3 saw 25% of problems near-match a validation problem, which is too high
-    (rephrased competition problems stayed close to the competition problems in our
-    validation set). #2 came second (19%) -- the validation-driven examples were close
-    to the validation set and lacked diversity (Vendi score is 14 and near-duplicates
-    collapsed its 50 problems into about 31 distinct ones). #1 mostly avoided
-    contamination and covered 48% of the validation set (Vendi of 21); it failed to
-    cover a few important topics (e.g. geometry and precalculus). #4 achieved a coverage
-    of 79%, with Vendi 36, and its near-reference share was only 8%. Thus, we picked #4:
-    extract topics via search.
+    We ran each as its own pipeline on 50 problems (FORGER_LIMIT=50; #1 is
+    main_from_memory, #4 is main) and compared their embeddings and overlap with the
+    validation set: each write step's inspect.embedding_dispersion(...,
+    reference=validation) report, and the runs side by side with
+    inspect.compare_pipelines("main", "main_from_memory"). #3 saw 25% of problems
+    near-match a validation problem, which is too high (rephrased competition problems
+    stayed close to the competition problems in our validation set). #2 came second
+    (19%) -- the validation-driven examples were close to the validation set and lacked
+    diversity (Vendi score is 14 and near-duplicates collapsed its 50 problems into
+    about 31 distinct ones). #1 mostly avoided contamination and covered 48% of the
+    validation set (Vendi of 21); it failed to cover a few important topics (e.g.
+    geometry and precalculus). #4 achieved a coverage of 79%, with Vendi 36, and its
+    near-reference share was only 8%. Thus, we picked #4: extract topics via search.
     """
-    pages = acquire.retrieve_from_web(QUERIES, n=5)
-    extracted = alter.generate_from_context(
-        pages, extract_prompt, model, output_schema={"topics": list}, merge=True
-    )
-    topics = [
-        {"topic": topic.strip(), "query": page["query"], "url": page["url"]}
-        for page in extracted
-        if isinstance(page["topics"], list)
-        for topic in page["topics"]
-        if isinstance(topic, str) and topic.strip()
-    ]
-    topics = filter.by_embedding_similarity(topics, field="topic", threshold=0.9)
+    if source == "memory":
+        topics = [{"topic": s, "query": None, "url": None} for s in SUBJECTS]
+    else:
+        pages = acquire.retrieve_from_web(QUERIES, n=5)
+        extracted = alter.generate_from_context(
+            pages, extract_prompt, model, output_schema={"topics": list}, merge=True
+        )
+        topics = [
+            {"topic": topic.strip(), "query": page["query"], "url": page["url"]}
+            for page in extracted
+            if isinstance(page["topics"], list)
+            for topic in page["topics"]
+            if isinstance(topic, str) and topic.strip()
+        ]
+        topics = filter.by_embedding_similarity(topics, field="topic", threshold=0.9)
     # n caps at the split's size: all of it.
     olympiad = acquire.retrieve_from_hf(
         VALIDATION, config=VALIDATION_CONFIG, split="train", n=10**5
@@ -346,9 +359,25 @@ def main(writer: Model, verifier: Model, student: LocalModel) -> list[dict]:
     return check_rubrics(rows, student, skyline=writer)
 
 
+@pipeline
+def main_from_memory(writer: Model, verifier: Model, student: LocalModel) -> list[dict]:
+    """seed_topics' candidate #1 (topics from memory), for comparing with main.
+
+    It calls the same steps as main, so compare_pipelines lines the two runs up step
+    by step, and the ops they share (the validation download) come from the cache.
+    Run it with ``--from-memory``.
+    """
+    seeds = seed_topics(writer, source="memory")
+    rows = write(seeds["topics"], seeds["validation"], writer, verifier)
+    rows = calibrate(rows, student)
+    return check_rubrics(rows, student, skyline=writer)
+
+
 if __name__ == "__main__":
-    out = Path(sys.argv[1] if len(sys.argv) > 1 else "rl_math.jsonl")
-    rows = main(
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    run = main_from_memory if "--from-memory" in sys.argv else main
+    out = Path(args[0] if args else "rl_math.jsonl")
+    rows = run(
         writer=Model("WEAK_MODEL_ID", reasoning_effort="none"),
         verifier=Model("STRONG_MODEL_ID", reasoning_effort="low"),
         # RL's sampling settings, so calibrate predicts RL's groups.
