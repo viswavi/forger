@@ -93,6 +93,12 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--disable-thinking", dest="enable_thinking", action="store_false")
     p.add_argument(
+        "--keep-special-tokens",
+        action="store_true",
+        help="Ask the server to keep special tokens in the text, for models whose "
+        "reasoning delimiters are special tokens (Gemma 4's <|channel>...<channel|>).",
+    )
+    p.add_argument(
         "--answer-extraction",
         choices=("strict", "lenient"),
         default="lenient",
@@ -273,6 +279,8 @@ async def generate_and_score_all(
     extra_body: dict = {"min_p": args.min_p, "top_k": args.top_k}
     if args.enable_thinking is not None:
         extra_body["chat_template_kwargs"] = {"enable_thinking": args.enable_thinking}
+    if args.keep_special_tokens:
+        extra_body["skip_special_tokens"] = False
 
     sem = asyncio.Semaphore(args.max_connections)
     pool = ProcessPoolExecutor(args.judge_processes)
@@ -331,7 +339,7 @@ async def generate_and_score_all(
                     await asyncio.sleep(2 * (attempt + 1))
 
         async def judge_choice(choice) -> dict:
-            completion = choice.message.content or ""
+            completion = checkers.normalize_reasoning(choice.message.content)
             code = checkers.extract_code(
                 completion, lenient=args.answer_extraction == "lenient"
             )
