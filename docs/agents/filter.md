@@ -127,6 +127,8 @@ Each takes the task in `input_field` (text or chat messages). From cheapest and 
   counting rows whose samples all got one grade: no GRPO gradient there.
   The bounds can keep such rows under partial credit (samples all at 0.6 give rate 0.6); another line counts them
   among the kept rows, and a warning is logged when they are at least 20% of the kept rows (and at least 5).
+  Under partial credit one more line histograms every sample's grade before filtering, with the highest and
+  most common grade, since a rate is a mean and hides where samples land.
 
 Grading guardrails for `by_comparative_difficulty` and `by_pass_at_k`:
 

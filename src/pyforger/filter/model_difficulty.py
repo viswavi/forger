@@ -313,7 +313,11 @@ def by_pass_at_k(
     rate 0.6. A further line counts them among the kept rows, e.g. "of the 220
     kept rows, 61 gave every sample the same grade (52 all 0.6, 9 all 0.3)",
     and a warning is logged when they are at least 20% of the kept rows (and
-    at least 5 rows).
+    at least 5 rows). Under a partial-credit grader another line histograms
+    every sample's grade before filtering, with the highest and most common
+    grade, since a rate is a mean and hides where samples land, e.g. "sample
+    grades (640, before filtering): 0 22% | ... | (0.4, 0.6] 61% | ... | 1 0%;
+    highest 0.64, most common 0.6 (36%)".
 
     The prompt and answer extraction work as in ``by_comparative_difficulty``:
     by default the whole answer segment is compared.
@@ -445,6 +449,7 @@ def by_pass_at_k(
     notes = [
         _truncation_note(completions, truncated),
         _spread_note(grades),
+        _grade_note(grades),
         kept_note,
     ]
     _tracking.record_scores(
@@ -456,6 +461,41 @@ def by_pass_at_k(
         note="\n".join(n for n in notes if n) or None,
     )
     return kept
+
+
+def _grade_note(grades: list[list[bool | float | None]]) -> str | None:
+    """Histogram of every sample's grade before filtering, for partial credit.
+
+    A row's rate is a mean, so it hides where single samples land: rates of
+    0.45 can be samples at 0, 0.6, 0.6, 0.6, with none above 0.6. E.g.
+    "sample grades (640, before filtering): 0 22% | (0, 0.2] 6% | (0.2, 0.4] 4%
+    | (0.4, 0.6] 61% | (0.6, 0.8] 7% | (0.8, 1) 0% | 1 0%; highest 0.64, most
+    common 0.6 (36%)". None when every grade is pass/fail: the rate histogram
+    then says the same.
+    """
+    values = [float(g) for row in grades for g in row if g is not None]
+    if not values or all(v in (0.0, 1.0) for v in values):
+        return None
+    eps = 1e-9
+    bins = [
+        ("0", lambda v: v <= eps),
+        ("(0, 0.2]", lambda v: eps < v <= 0.2 + eps),
+        ("(0.2, 0.4]", lambda v: 0.2 + eps < v <= 0.4 + eps),
+        ("(0.4, 0.6]", lambda v: 0.4 + eps < v <= 0.6 + eps),
+        ("(0.6, 0.8]", lambda v: 0.6 + eps < v <= 0.8 + eps),
+        ("(0.8, 1)", lambda v: 0.8 + eps < v < 1 - eps),
+        ("1", lambda v: v >= 1 - eps),
+    ]
+    n = len(values)
+    parts = [f"{label} {sum(map(test, values)) / n:.0%}" for label, test in bins]
+    counts: dict[float, int] = {}
+    for v in values:
+        counts[round(v, 2)] = counts.get(round(v, 2), 0) + 1
+    common, times = max(counts.items(), key=lambda kv: (kv[1], kv[0]))
+    return (
+        f"sample grades ({n}, before filtering): {' | '.join(parts)}; "
+        f"highest {max(values):.2f}, most common {common:g} ({times / n:.0%})"
+    )
 
 
 def _spread_note(grades: list[list[bool | float | None]]) -> str | None:

@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -422,8 +423,8 @@ def test_failed_request_keeps_hold_when_it_may_be_billed(tmp_path, error, charge
     assert state["unreturned_calls"] == int(charged)
 
 
-def test_killed_process_leaves_its_hold_charged(tmp_path):
-    """A process killed mid-request cannot report back, so its hold stays used."""
+def test_killed_process_releases_its_hold(tmp_path):
+    """A process killed mid-request frees its hold on the next read: not spent."""
     path = tmp_path / "usage.json"
     code = (
         "import os, sys; from pyforger.token_units import TokenUnitBudget\n"
@@ -436,8 +437,50 @@ def test_killed_process_leaves_its_hold_charged(tmp_path):
     src = str(Path(pyforger.__file__).parents[1])
     env = {**os.environ, "PYTHONPATH": src}
     subprocess.run([sys.executable, "-c", code], check=False, env=env)
-    with pytest.raises(TokenUnitQuotaExceeded):
-        TokenUnitBudget(path, 1000).check()
+    state = TokenUnitBudget(path, 1000).check()
+    assert (state["held_token_units"], state["token_units"]) == (0, 0)
+    assert (state["released_calls"], state["released_token_units"]) == (1, 1000)
+    assert state["unreturned_calls"] == 0
+
+
+def test_live_process_keeps_its_hold(tmp_path):
+    """Another live process's hold stays held: only dead owners are released."""
+    path = tmp_path / "usage.json"
+    ready = tmp_path / "ready"
+    code = (
+        "import time; from pathlib import Path\n"
+        "from pyforger.token_units import TokenUnitBudget\n"
+        f"ledger = TokenUnitBudget({str(path)!r}, 1000)\n"
+        f"with ledger.hold({DEEPSEEK!r}, 400):\n"
+        f"    Path({str(ready)!r}).touch()\n"
+        "    time.sleep(30)\n"
+    )
+    import pyforger
+
+    env = {**os.environ, "PYTHONPATH": str(Path(pyforger.__file__).parents[1])}
+    child = subprocess.Popen([sys.executable, "-c", code], env=env)
+    try:
+        for _ in range(600):
+            if ready.exists():
+                break
+            time.sleep(0.05)
+        state = TokenUnitBudget(path, 1000).snapshot()
+        assert (state["held_token_units"], state["released_calls"]) == (400, 0)
+    finally:
+        child.kill()
+        child.wait()
+    assert TokenUnitBudget(path, 1000).snapshot()["released_calls"] == 1
+
+
+def test_interrupt_releases_the_hold(tmp_path):
+    """Ctrl-C inside a request is the process stopping, not a billed failure."""
+    ledger = TokenUnitBudget(tmp_path / "usage.json", 1000)
+    with pytest.raises(KeyboardInterrupt):
+        with ledger.hold(DEEPSEEK, 300):
+            raise KeyboardInterrupt
+    state = ledger.snapshot()
+    assert (state["token_units"], state["held_token_units"]) == (0, 0)
+    assert (state["released_calls"], state["unreturned_calls"]) == (1, 0)
 
 
 def test_held_units_assume_long_prompts_and_full_completions():
@@ -447,23 +490,16 @@ def test_held_units_assume_long_prompts_and_full_completions():
     assert held_units(DEEPSEEK, [], max_tokens=None) == 3 * 65_536
 
 
-def test_stale_holds_of_killed_processes_count_as_unreturned(tmp_path, monkeypatch):
-    """After two hours a hold can only belong to a dead process: it is spent."""
-    path = tmp_path / "usage.json"
-    code = (
-        "import os; from pyforger.token_units import TokenUnitBudget\n"
-        f"ledger = TokenUnitBudget({str(path)!r}, 1000)\n"
-        f"with ledger.hold({DEEPSEEK!r}, 400):\n"
-        "    os._exit(1)\n"
-    )
-    import pyforger
+def test_stale_holds_are_released(tmp_path, monkeypatch):
+    """After two hours a hold can only belong to a dead process: it is released.
 
-    env = {**os.environ, "PYTHONPATH": str(Path(pyforger.__file__).parents[1])}
-    subprocess.run([sys.executable, "-c", code], check=False, env=env)
-    ledger = TokenUnitBudget(path, 1000)
-    assert ledger.snapshot()["held_token_units"] == 400
-    now = __import__("time").time()
-    monkeypatch.setattr("pyforger.token_units.time.time", lambda: now + 3 * 3600)
-    state = ledger.snapshot()
-    assert (state["held_token_units"], state["token_units"]) == (0, 400)
-    assert state["unreturned_calls"] == 1
+    This covers owners whose death cannot be seen, e.g. on another host.
+    """
+    ledger = TokenUnitBudget(tmp_path / "usage.json", 1000)
+    with ledger.hold(DEEPSEEK, 400):
+        assert ledger.snapshot()["held_token_units"] == 400
+        now = time.time()
+        monkeypatch.setattr("pyforger.token_units.time.time", lambda: now + 3 * 3600)
+        state = ledger.snapshot()
+    assert (state["held_token_units"], state["token_units"]) == (0, 0)
+    assert (state["released_calls"], state["unreturned_calls"]) == (1, 0)
