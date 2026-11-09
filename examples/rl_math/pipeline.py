@@ -304,14 +304,13 @@ def calibrate(rows: list[dict], student: LocalModel) -> list[dict]:
         #1: (0, 7/8], problems the student solves at least once
         #2: [0, 6/8], also keeping problems it has not solved yet
 
-    On 300 problems, filter.by_pass_at_k(..., histogram=True) put 63 at 0/8, 156
-    between 1/8 and 6/8, 27 at 7/8 and 54 at 8/8, so #1 kept 183 and #2 kept 219.
-    We then ran 50 RL steps on each. Under #1, 41% of prompt groups at steps
-    40-49 gave all 8 samples the same reward (no gradient), against 23% under #2.
-    Of #2's 63 unsolved problems, 22 (35%) were solved at least once by step 50.
-    Held-out pass@1 rose 5.8 points under #2 and 3.9 under #1, a gap within the
-    noise of 200 held-out problems (standard error about 1.5 each), so we chose
-    on the first two measurements. Therefore, we use #2.
+    On 450 problems, filter.by_pass_at_k(..., histogram=True) put 92 at 0/8, 220
+    between 1/8 and 6/8, 38 at 7/8 and 100 at 8/8. We want to focus on difficult,
+    information-rich data, so we omit the 8/8 problems from consideration. Given
+    the relatively small number of 7/8 problems, we omit them as well to keep only
+    difficult examples without affecting dataset size too much. We considered
+    omitting problems with pass@k of 0.0, but found a larger model (the skyline) can
+    solve a sample of them consistently (65% pass rate), so we keep them for training.
     An LLM-as-a-judge (filter.by_judged_difficulty) scored every problem 3/5 or 4/5,
     rating those the student never solved like those it always solved (mean 3.5 vs
     3.3) -- not informative.
