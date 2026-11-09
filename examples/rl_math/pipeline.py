@@ -217,7 +217,7 @@ def write(
     """Three new problems per topic, each with the writer's solution and integer answer.
 
     Kept problems have an integer answer that is not printed in the statement,
-    that the verifier reproduces on at least 3 of 4 tries, and no near-copy
+    that the verifier reproduces on at least 2 of 4 tries, and no near-copy
     among the kept problems or in the validation set.
 
     Justification: we compared 3 writer models:
@@ -235,7 +235,7 @@ def write(
     Averaged across models, #4 led to a higher pass@4 than #5 (80% vs 72%) at
     lower cost. Therefore, we use #3 and #4.
 
-    The verification bar (3 of 4) and the duplicate threshold came from their
+    The verification bar (2 of 4) and the duplicate threshold came from their
     histograms: filter.by_pass_at_k(..., histogram=True) on 300 drafts, and
     inspect.embedding_dispersion(..., duplicate_threshold=t) for t in 0.95,
     0.9 and 0.85. At 0.9 the groups were siblings with their numbers swapped;
@@ -271,12 +271,15 @@ def write(
         {**r, "prompt": r["problem"] + ASK, "rubric": rubric_for(r["answer"])}
         for r in rows
     ]
+    # A correctness check, not a difficulty band: the verifier is a strong model,
+    # not the student, and a problem it cannot reproduce is likely wrong. The
+    # student's difficulty band is calibrate's job.
     rows = filter.by_pass_at_k(
         rows,
         model=verifier,
         input_field="prompt",
         k=4,
-        min_rate=0.75,
+        min_rate=0.5,
         max_rate=1.0,
         metric=solved,
         extract_answer=whole,
@@ -297,8 +300,9 @@ def write(
 def calibrate(rows: list[dict], student: LocalModel) -> list[dict]:
     """Filter out problems the student solves 0% or 100% of the time (bad for RL).
 
-    Justification: we considered two pass@8 ranges, [2/8, 6/8] and [1/8, 7/8]. On a
-    sample of 25 problems, the former kept 10 and the latter 14, so we used the latter.
+    Justification: we considered two pass@8 ranges, [2/8, 6/8] and (0, 7/8], the
+    latter keeping any problem the student solves at least once. On a sample of 25
+    problems, the former kept 10 and the latter 14, so we used the latter.
     An LLM-as-a-judge (filter.by_judged_difficulty) scored every problem 3/5 or 4/5,
     rating those the student never solved like those it always solved (mean 3.5 vs
     3.3) -- not informative.
@@ -308,7 +312,7 @@ def calibrate(rows: list[dict], student: LocalModel) -> list[dict]:
         model=student,
         input_field="prompt",
         k=8,
-        min_rate=1 / 8,
+        min_rate=0.0001,  # solved at least once
         max_rate=7 / 8,
         metric=solved,
         extract_answer=whole,
