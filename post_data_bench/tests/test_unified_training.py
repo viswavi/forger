@@ -685,7 +685,7 @@ class LocalRLOnlyTests(unittest.TestCase):
             training.sft(args)
 
     def test_recipe_and_default_schedule(self):
-        """100 steps x 8 prompts x 8 samples at lr 1e-6 and 16,000 tokens."""
+        """100 steps x 8 prompts x 8 samples at lr 1.5e-6 and 16,000 tokens."""
         from coding.rl import local_training
 
         command = local_training.rl_command("data", "ckpt", "out", "env", "deps")
@@ -694,7 +694,7 @@ class LocalRLOnlyTests(unittest.TestCase):
             "--rollout-batch-size": "8",
             "--n-samples-per-prompt": "8",
             "--global-batch-size": "64",
-            "--lr": "1e-6",
+            "--lr": "1.5e-6",
             "--max-response-len": "16000",
             "--eps-clip-high": "0.2",
             "--weight-decay": "0.01",

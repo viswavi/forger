@@ -12,10 +12,11 @@ contract. Both prompts render backend-specific commands from `backend_prompts.py
   completions per step (2,560 prompt draws, 20,480 completions).
 - `--backend local`: Qwen/Qwen3-4B, RL only: Slime full-parameter RL from the base
   model (or an earlier RL checkpoint), and vLLM validation and final evaluation.
-  The recipe (`local_training.RECIPE`, `backends.RL_DEFAULTS`) follows FrontierSmith:
-  100 steps × 8 prompts × 8 completions, lr 1e-6, 16,000-token responses, clip
-  0.2 / 0.2, weight decay 0.01, Adam β2 0.999, KL 1e-3 (low_var_kl), temperature
-  1.0, a checkpoint every 10 steps. There is no local SFT command.
+  The recipe (`local_training.RECIPE`, `backends.RL_DEFAULTS`) follows FrontierSmith
+  except for the learning rate: 100 steps × 8 prompts × 8 completions, lr 1.5e-6,
+  16,000-token responses, clip 0.2 / 0.2, weight decay 0.01, Adam β2 0.999, KL 1e-3
+  (low_var_kl), temperature 1.0, a checkpoint every 10 steps. There is no local
+  SFT command.
 - `--task culture` runs the same recipe with `--backend local` only (its evaluator
   has no Tinker sampler yet). The sandbox gets a flat copy of the culture evaluator
   (`agent_validation.copy_culture_evaluator`), coding's `rl/` and `train_model.sh`,
@@ -32,8 +33,13 @@ contract. Both prompts render backend-specific commands from `backend_prompts.py
   `rl/cpp_judge.py`; validation problems renamed val_000..., in problems/<id>/
   with testlib/testlib.h) and decontamination signatures with 13-word windows and
   `LONG_FRACTION`.
-- Agents may change the number of steps or batch shape, repeat runs, and continue
-  RL from an earlier checkpoint in a fresh output directory.
+- Local: a submitted checkpoint has exactly 100 RL steps behind it in total
+  (`backends.RL_STEP_BUDGET`), counting the runs it continues from, at 8 prompts ×
+  8 completions; `rl` refuses runs that would exceed it, and `validate` and
+  `finalize` reject other totals. Agents may repeat runs, continue RL from an
+  earlier checkpoint in a fresh output directory, and vary probes freely.
+- Tinker: agents may change the number of steps or batch shape, repeat runs, and
+  continue RL from an earlier checkpoint in a fresh output directory.
 - Planning estimates: SFT roughly 1 hour, validation on 1,500 examples roughly
   40 minutes, RL roughly 6 hours. These are guidelines, not deadlines or guarantees.
 - Generation/judge token quotas and Tinker dollar caps remain unchanged. Tinker

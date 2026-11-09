@@ -54,9 +54,9 @@ RL_COMMAND = """
 
 
 LOCAL_RL_COMMAND = """
-- RL training (default 100 steps × 8 prompts × 8 completions per optimizer step):
+- RL training (100 steps × 8 prompts × 8 completions per optimizer step):
   python -m rl.agent_training rl --data {RAW_DATA_PATH} --output-dir {AGENT_DATA_DIR}/rl_trial_1
-  It starts from the base model; --checkpoint <RL checkpoint directory> continues from an earlier RL checkpoint instead. Optional: --num-rollout (for example 150 for a longer run), --rollout-batch-size, --n-samples-per-prompt. The recipe is fixed otherwise: learning rate 1e-6, responses of up to 16,000 tokens, sampling temperature 1.0, and a checkpoint every 10 steps (hf_rollout9, hf_rollout19, ...). Each default optimizer batch contains 64 sampled completions. All agent training commands evaluate only your generated holdout or public validation data; secret-test evaluation is host-only.
+  It starts from the base model; --checkpoint <RL checkpoint directory> continues from an earlier RL checkpoint instead. The submitted checkpoint must have exactly 100 RL steps behind it in total, counting the runs it continues from: one 100-step run from the base model, or for example 60 steps and then a 40-step run (--num-rollout 40) continuing from the 60-step checkpoint, perhaps on revised data. The rl command refuses a run that would take its checkpoints past 100 steps, and validate rejects a submission with any other total. The recipe is fixed: learning rate 1.5e-6, responses of up to 16,000 tokens, sampling temperature 1.0, 64 sampled completions per optimizer step, and a checkpoint every 10 steps (hf_rollout9, hf_rollout19, ...). All agent training commands evaluate only your generated holdout or public validation data; secret-test evaluation is host-only.
 """
 
 # Per-task edits to the backend sections, as (old text, new text). The algorithmic
