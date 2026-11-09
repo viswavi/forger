@@ -290,6 +290,32 @@ class TestPassAtK:
             "2 of 4 rows gave every sample the same grade (1 all 0, 1 all 1)"
         )
         assert "no GRPO gradient" in render_scores(scores)
+        assert "sample grades" not in scores.note  # pass/fail: the rates say it
+
+    def test_sample_grade_histogram_shows_where_partial_scores_land(self, monkeypatch):
+        """0.6 for a right answer: half the samples at 0.6, none above."""
+        monkeypatch.setenv("FORGER_STEP_REPORT", "0")
+
+        def sixty_if_right(prediction, row):
+            return 0.6 if prediction == row["answer"] else 0.0
+
+        @step
+        def band(rows):
+            return by_pass_at_k(
+                rows,
+                model=ScriptedModel("m", self.SCRIPT),
+                input_field="task",
+                metric=sixty_if_right,
+                min_rate=0.1,
+            )
+
+        band(self.ROWS)
+        note = _tracking.step_records()["band"].ops[0].scores.note
+        assert (
+            "sample grades (16, before filtering): 0 50% | (0, 0.2] 0% | "
+            "(0.2, 0.4] 0% | (0.4, 0.6] 50% | (0.6, 0.8] 0% | (0.8, 1) 0% | 1 0%; "
+            "highest 0.60, most common 0.6 (50%)"
+        ) in note
 
     def test_spread_note_counts_one_partial_score(self, monkeypatch):
         """A partial-credit grader giving every sample 0.5 leaves no spread too."""

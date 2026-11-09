@@ -6,6 +6,7 @@ import contextlib
 import json
 import math
 import os
+import socket
 import tempfile
 import time
 import uuid
@@ -19,7 +20,8 @@ _WEIGHTS = {"deepseek-v4-flash": (1, 3), "glm-5.3": (4, 12.5)}
 _DEFAULT_HELD_COMPLETION = 65_536
 # Prompt characters per held token: below the 3-4 real tokenizers give.
 _HELD_CHARS_PER_TOKEN = 3
-# A hold this old belongs to a killed process: no attempt runs this long.
+# A hold this old belongs to a killed process: no attempt runs this long. It is
+# released, like the hold of a process seen to have died.
 _STALE_HOLD_S = 2 * 60 * 60
 # Statuses the gateway returns without running the model, so nothing is billed:
 # bad request, auth, forbidden, not found, payload too large, unprocessable, 429,
@@ -170,19 +172,53 @@ def held_units(model_id, messages, n=1, max_tokens=None):
 def billed_on_error(exc):
     """Whether a failed request may still be billed, e.g. after a timeout.
 
-    The gateway finishes (and bills) a request whose client timed out, lost
-    the connection, or was interrupted; it bills nothing it refused (4xx).
+    The gateway finishes (and bills) a request whose client timed out or lost
+    the connection; it bills nothing it refused (4xx). A process that is
+    interrupted or exits mid-request releases its holds instead (see
+    `TokenUnitBudget`).
     """
+    if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+        return False
     return getattr(exc, "status_code", None) not in _UNBILLED_STATUS
+
+
+def _owner():
+    """This process's identity for its holds: pid, host and pid namespace."""
+    try:
+        namespace = os.readlink("/proc/self/ns/pid")
+    except OSError:
+        namespace = None
+    return {"pid": os.getpid(), "host": socket.gethostname(), "pid_ns": namespace}
+
+
+def _owner_dead(entry, me):
+    """Whether a hold's process is known to be gone: same host and namespace only."""
+    if entry.get("host") != me["host"] or entry.get("pid_ns") != me["pid_ns"]:
+        return False
+    pid = entry.get("pid")
+    if not isinstance(pid, int) or pid <= 0 or pid == me["pid"]:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False  # alive but not ours to signal
+    return False
 
 
 class TokenUnitBudget:
     """Share actual usage across processes; gate new calls once the quota is used.
 
     Each request holds its worst case (`held_units`) while in flight, and the
-    hold counts as used: a response replaces it with actual usage, a failure
-    that may be billed (timeout, lost connection) keeps it, and so does a
-    killed process: its holds count as spent once two hours old.
+    hold counts as used: a response replaces it with actual usage, and a
+    failure that may be billed (timeout, lost connection) keeps it. A process
+    that dies mid-request releases its holds rather than charging them: the
+    next read of the ledger drops holds whose process is gone (same host and
+    pid namespace), or any hold two hours old, and counts them in
+    `released_calls`; an interrupt or exit inside a request releases its hold
+    too. Requests the gateway still finishes for a killed process can then
+    overshoot the quota slightly.
     A separate lock file protects atomic ledger replacement. Use a shared
     filesystem with POSIX file locks.
     """
@@ -233,6 +269,8 @@ class TokenUnitBudget:
                 "held_token_units": 0.0,
                 "unreturned_calls": 0,
                 "unreturned_token_units": 0.0,
+                "released_calls": 0,
+                "released_token_units": 0.0,
             }
         with os.fdopen(descriptor) as stream:
             state = json.load(stream)
@@ -255,16 +293,20 @@ class TokenUnitBudget:
         state.setdefault("held_token_units", 0.0)
         state.setdefault("unreturned_calls", 0)
         state.setdefault("unreturned_token_units", 0.0)
+        state.setdefault("released_calls", 0)
+        state.setdefault("released_token_units", 0.0)
         if not isinstance(state["held"], dict):
             raise ValueError("Invalid token usage ledger")
-        stale = [
+        me = _owner()
+        orphaned = [
             hold
             for hold, entry in state["held"].items()
             if time.time() - entry.get("since", 0) > _STALE_HOLD_S
+            or _owner_dead(entry, me)
         ]
-        for hold in stale:
-            self._charge_hold(state, hold)
-        changed = bool(stale)
+        for hold in orphaned:
+            self._release_hold(state, hold)
+        changed = bool(orphaned)
         changed = _normalize_cost_metadata(state) or changed
         for model in state["models"].values():
             changed = _normalize_cost_metadata(model) or changed
@@ -319,7 +361,8 @@ class TokenUnitBudget:
 
         Pass the id to `record` (or `mark_unmetered`) once the response
         arrives. If the block raises, the hold is charged when the request
-        may have been billed (`billed_on_error`) and dropped otherwise.
+        may have been billed (`billed_on_error`) and dropped otherwise; an
+        interrupt or exit releases it (`released_calls`).
         """
         hold = f"{os.getpid()}-{uuid.uuid4().hex}"
         with self._locked():
@@ -328,6 +371,7 @@ class TokenUnitBudget:
                 "model": model_id,
                 "token_units": float(units),
                 "since": time.time(),
+                **_owner(),
             }
             state["held_token_units"] += units
             self._write(state)
@@ -336,12 +380,22 @@ class TokenUnitBudget:
         except BaseException as exc:
             with self._locked():
                 state = self._read()
-                if billed_on_error(exc):
+                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                    self._release_hold(state, hold)
+                elif billed_on_error(exc):
                     self._charge_hold(state, hold)
                 else:
                     self._drop_hold(state, hold)
                 self._write(state)
             raise
+
+    def _release_hold(self, state, hold):
+        """Drop a hold whose process stopped mid-request, and count it."""
+        entry = self._drop_hold(state, hold)
+        if entry is None:
+            return
+        state["released_calls"] += 1
+        state["released_token_units"] += entry["token_units"]
 
     def _drop_hold(self, state, hold):
         entry = state["held"].pop(hold, None)

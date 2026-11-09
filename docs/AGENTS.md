@@ -99,9 +99,9 @@ costs 4 and 12.5.
 - `FORGER_TOKEN_USAGE_FILE` (a JSON ledger) and `FORGER_TOKEN_UNIT_LIMIT` share one quota across models and
   processes; `reset_history()` never resets it. Each request holds its worst case (prompt plus `max_tokens` per
   completion, 65,536 without it) until its response replaces it with actual usage; new calls stop once used plus
-  held units reach the quota. A request that times out, loses its connection, or whose process is killed stays
-  charged at its hold, since the gateway may still bill it (`unreturned_calls`; a killed process's holds move there
-  after two hours).
+  held units reach the quota. A request that times out or loses its connection stays charged at its hold, since
+  the gateway may still bill it (`unreturned_calls`). A process that dies or is interrupted mid-request releases
+  its holds (`released_calls`): the next ledger read frees them, or after two hours when its death cannot be seen.
 - The benchmark launcher sets a generation quota and a separate judge quota, both given in the task instructions.
 - Direct API calls must use the launcher's `rl.token_budget` helpers to be counted; they make one attempt per call
   (no `num_retries`), so retry in your own code.
