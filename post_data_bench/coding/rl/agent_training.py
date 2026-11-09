@@ -20,11 +20,12 @@ from pathlib import Path
 from .backends import (  # noqa: ABS101
     MODELS,
     RL_DEFAULTS,
+    RL_STEP_BUDGET,
     resolve_backend,
     saved_backend,
 )
 from .lineage import check as check_lineage  # noqa: ABS101
-from .lineage import record_start  # noqa: ABS101
+from .lineage import record_start, rl_steps  # noqa: ABS101
 
 # Supports both `rl` CLI imports and `coding.rl` library imports.
 from .rubric_data import compile_data, validate_dataset, validate_rubric  # noqa: ABS101
@@ -674,6 +675,34 @@ def probe(args):
     return train_rl(args, short=True)
 
 
+def check_rl_budget(backend, checkpoint, args):
+    """Refuse an RL run its checkpoints could not be submitted from.
+
+    A submitted checkpoint has exactly RL_STEP_BUDGET steps behind it at the
+    default batch shape, so a run continuing from 60 steps may add at most 40.
+    """
+    budget = RL_STEP_BUDGET[backend]
+    if budget is None:
+        return
+    shape = {
+        k: RL_DEFAULTS[backend][k]
+        for k in ("rollout_batch_size", "n_samples_per_prompt")
+    }
+    for key, value in shape.items():
+        if getattr(args, key) != value:
+            flag = "--" + key.replace("_", "-")
+            raise ValueError(
+                f"{flag} is fixed at {value} for RL runs (probes may vary it)"
+            )
+    done = rl_steps(checkpoint)
+    if done + args.num_rollout > budget:
+        raise ValueError(
+            f"A submitted checkpoint has exactly {budget} RL steps in total, counting "
+            f"the runs it continues from. This run starts from {done}, so "
+            f"--num-rollout may be at most {budget - done}"
+        )
+
+
 def train_rl(args, short=False):
     """Run agent-controlled RL without secret benchmark evaluation."""
     backend = saved_backend(Path(args.data).resolve().parent, args.backend)
@@ -700,6 +729,8 @@ def train_rl(args, short=False):
         from .local_training import start_checkpoint  # noqa: ABS101
 
         checkpoint = start_checkpoint(args.checkpoint)
+        if not short:
+            check_rl_budget(backend, checkpoint, args)
     elif args.checkpoint is None:
         raise ValueError("Tinker RL starts from an SFT trial or RL checkpoint")
     else:

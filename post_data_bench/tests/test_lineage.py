@@ -3,9 +3,10 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from coding.rl import lineage
+from coding.rl import agent_training, lineage
 from coding.rl import rubric_data as data
 
 from tests.test_unified_training import rows, write_rows
@@ -85,6 +86,82 @@ class LineageTests(unittest.TestCase):
         with patch.object(data, "MAX_ROWS", 19):
             with self.assertRaisesRegex(ValueError, "at most 19"):
                 data.validate_dataset(path)
+
+
+class StepBudgetTests(unittest.TestCase):
+    """Local checkpoints: exactly RL_STEP_BUDGET steps over the whole lineage."""
+
+    def setUp(self):
+        """A final dataset and a base model directory."""
+        self.root = Path(tempfile.mkdtemp())
+        self.final = rows()
+        self.final_path = self.root / "generated_raw.jsonl"
+        write_rows(self.final_path, self.final)
+        self.base = self.root / "Qwen3-4B"
+        self.base.mkdir()
+
+    def local_run(self, name, steps, start):
+        """A local RL checkpoint after `steps` steps, continuing from `start`."""
+        compiled = self.root / f"{name}.data"
+        compiled.mkdir()
+        write_rows(compiled / "submitted.jsonl", self.final)
+        lineage.record_start(compiled, start)
+        checkpoint = self.root / name / f"hf_rollout{steps - 1}"
+        checkpoint.mkdir(parents=True)
+        (checkpoint / "rl_submission.json").write_text(
+            json.dumps(
+                {
+                    "stage": "rl",
+                    "backend": "local",
+                    "completed_steps": steps,
+                    "data_directory": str(compiled),
+                }
+            )
+        )
+        return checkpoint
+
+    def test_steps_add_up_over_continuations(self):
+        """60 steps, then 40 more from that checkpoint: 100, submittable."""
+        first = self.local_run("rl_trial_1", 60, self.base)
+        second = self.local_run("rl_trial_2", 40, first)
+        self.assertEqual(lineage.rl_steps(second), 100)
+        self.assertEqual(len(lineage.check(second, self.final_path)), 2)
+
+    def test_other_totals_are_rejected(self):
+        """119 steps (100 + 19) and 90 steps both fail; the message gives the total."""
+        first = self.local_run("rl_trial_1", 100, self.base)
+        over = self.local_run("rl_trial_2", 19, first)
+        with self.assertRaisesRegex(ValueError, "has 119 RL steps .* exactly 100"):
+            lineage.check(over, self.final_path)
+        under = self.local_run("rl_trial_3", 90, self.base)
+        with self.assertRaisesRegex(ValueError, "has 90 RL steps"):
+            lineage.check(under, self.final_path)
+
+    def test_rl_refuses_a_run_past_the_budget(self):
+        """From 60 steps, --num-rollout 50 is refused and 40 allowed."""
+        first = self.local_run("rl_trial_1", 60, self.base)
+        args = SimpleNamespace(
+            num_rollout=50, rollout_batch_size=8, n_samples_per_prompt=8
+        )
+        with self.assertRaisesRegex(ValueError, "--num-rollout may be at most 40"):
+            agent_training.check_rl_budget("local", first, args)
+        args.num_rollout = 40
+        agent_training.check_rl_budget("local", first, args)
+
+    def test_rl_refuses_another_batch_shape(self):
+        """More prompts per step would be more training in the same 100 steps."""
+        args = SimpleNamespace(
+            num_rollout=100, rollout_batch_size=32, n_samples_per_prompt=8
+        )
+        with self.assertRaisesRegex(ValueError, "--rollout-batch-size is fixed at 8"):
+            agent_training.check_rl_budget("local", self.base, args)
+
+    def test_tinker_has_no_budget(self):
+        """Tinker runs keep any number of steps and batch shape."""
+        args = SimpleNamespace(
+            num_rollout=500, rollout_batch_size=64, n_samples_per_prompt=4
+        )
+        agent_training.check_rl_budget("tinker", self.base, args)
 
 
 if __name__ == "__main__":

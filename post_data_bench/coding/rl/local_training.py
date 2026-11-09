@@ -12,12 +12,14 @@ from .backends import RL_DEFAULTS  # noqa: ABS101
 
 BASE_MODEL = "Qwen/Qwen3-4B"
 # The local RL recipe, with 100 steps x 8 prompts x 8 samples (RL_DEFAULTS):
-# lr 1e-6, 16,000-token responses, clip 0.2 on both sides, weight decay 0.01,
-# Adam beta2 0.999, and a checkpoint every 10 steps. The wrapper's defaults
-# supply the rest (KL 1e-3 low_var_kl, temperature 1.0, eps-clip 0.2 below).
+# lr 1.5e-6 (FrontierSmith's 1e-6 x 1.5, since a submitted checkpoint gets
+# exactly 100 steps: backends.RL_STEP_BUDGET), 16,000-token responses, clip 0.2
+# on both sides, weight decay 0.01, Adam beta2 0.999, and a checkpoint every 10
+# steps. The wrapper's defaults supply the rest (KL 1e-3 low_var_kl, temperature
+# 1.0, eps-clip 0.2 below).
 RECIPE = [
     "--lr",
-    "1e-6",
+    "1.5e-6",
     "--max-response-len",
     "16000",
     "--eps-clip-high",
