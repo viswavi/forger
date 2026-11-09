@@ -82,9 +82,9 @@ Set `FORGER_TOKEN_USAGE_FILE` to a persistent JSON ledger and
 Ledgers retain `cost_usd` and count missing prices in `unpriced_calls`.
 Each request holds its worst case (prompt plus `max_tokens` per completion, 65,536 without it) while in flight,
 and new calls stop once used plus held units reach the quota. A response replaces its hold with actual usage;
-a request that times out, loses its connection, or whose process is killed keeps its hold as spent, because
-the gateway may still bill it (`unreturned_calls` in the ledger; a killed process's holds move there after two
-hours).
+a request that times out or loses its connection keeps its hold as spent, because the gateway may still bill it
+(`unreturned_calls` in the ledger). A process that dies or is interrupted mid-request releases its holds
+(`released_calls`): the next ledger read frees them, or after two hours when the process's death cannot be seen.
 Unknown model weights or missing token counts stop budgeted calls instead of counting as free.
 The benchmark launcher sets a generation quota and a separate judge quota, both
 given in the task instructions.
