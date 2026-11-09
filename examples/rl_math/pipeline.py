@@ -298,11 +298,13 @@ def write(
 
 @step
 def calibrate(rows: list[dict], student: LocalModel) -> list[dict]:
-    """Filter out problems the student solves 0% or 100% of the time (bad for RL).
+    """Drop problems the student nearly always solves; keep those it cannot solve yet.
 
-    Justification: we considered two pass@8 ranges, [2/8, 6/8] and (0, 7/8], the
-    latter keeping any problem the student solves at least once. On a sample of 25
-    problems, the former kept 10 and the latter 14, so we used the latter.
+    Justification: we considered two pass@8 ranges, (0, 7/8] and [0, 6/8], and use
+    the latter. A problem the student solves 7 or 8 times in 8 gives nearly every
+    sample the same reward, so RL learns little from it. A problem it has not
+    solved yet can still teach it: RL makes several passes over the data, and the
+    student may solve it on a later pass.
     An LLM-as-a-judge (filter.by_judged_difficulty) scored every problem 3/5 or 4/5,
     rating those the student never solved like those it always solved (mean 3.5 vs
     3.3) -- not informative.
@@ -312,8 +314,8 @@ def calibrate(rows: list[dict], student: LocalModel) -> list[dict]:
         model=student,
         input_field="prompt",
         k=8,
-        min_rate=0.0001,  # solved at least once
-        max_rate=7 / 8,
+        min_rate=0.0,  # keeps problems not solved yet
+        max_rate=6 / 8,
         metric=solved,
         extract_answer=whole,
     )

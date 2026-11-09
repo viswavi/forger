@@ -308,7 +308,12 @@ def by_pass_at_k(
     outside a step. Lines under it count the truncated samples and the rows
     whose samples all got the same grade (all 0, all 1, or one partial score),
     which give GRPO-style RL no gradient, e.g. "31 of 120 rows gave every
-    sample the same grade (22 all 0, 9 all 1)".
+    sample the same grade (22 all 0, 9 all 1)". The bounds can keep such
+    rows: under a partial-credit grader, a row whose samples all score 0.6 has
+    rate 0.6. A further line counts them among the kept rows, e.g. "of the 220
+    kept rows, 61 gave every sample the same grade (52 all 0.6, 9 all 0.3)",
+    and a warning is logged when they are at least 20% of the kept rows (and
+    at least 5 rows).
 
     The prompt and answer extraction work as in ``by_comparative_difficulty``:
     by default the whole answer segment is compared.
@@ -417,11 +422,13 @@ def by_pass_at_k(
     )
 
     kept: list[dict] = []
+    kept_grades: list[list[bool | float | None]] = []
     rates: list[float | None] = []
     for item, row_grades, row_completions in zip(items, grades, completions):
         rate = _pass_rate(row_grades, min_valid)
         rates.append(rate)
         if rate is not None and min_rate <= rate <= max_rate:
+            kept_grades.append(row_grades)
             kept.append(
                 _annotate(
                     item,
@@ -431,7 +438,15 @@ def by_pass_at_k(
                     {"model": row_completions},
                 )
             )
-    notes = [_truncation_note(completions, truncated), _spread_note(grades)]
+    kept_note, kept_warning = _kept_spread(kept_grades, k)
+    if kept_warning:
+        _logger().warning(kept_warning)
+        _tracking.add_op_warning(kept_warning, "kept_same_grade")
+    notes = [
+        _truncation_note(completions, truncated),
+        _spread_note(grades),
+        kept_note,
+    ]
     _tracking.record_scores(
         "pass rate",
         rates,
@@ -466,6 +481,58 @@ def _spread_note(grades: list[list[bool | float | None]]) -> str | None:
         f"{len(same)} of {len(compared)} rows gave every sample the same grade "
         f"({', '.join(parts)}): no GRPO gradient there"
     )
+
+
+# Warn when at least this share of the kept rows, and this many, gave every
+# sample one grade.
+KEPT_SAME_GRADE_WARN_SHARE = 0.2
+KEPT_SAME_GRADE_WARN_ROWS = 5
+
+
+def _kept_spread(
+    kept_grades: list[list[bool | float | None]], k: int
+) -> tuple[str | None, str | None]:
+    """Count kept rows whose valid grades all match, as (note, warning).
+
+    The rate bounds keep a row whose samples all scored one partial value,
+    e.g. every sample 0.6 under a partial-credit grader, since its rate is
+    that value. E.g. note "of the 220 kept rows, 61 gave every sample the same
+    grade (52 all 0.6, 9 all 0.3)"; the warning comes when such rows are at
+    least ``KEPT_SAME_GRADE_WARN_SHARE`` of the kept rows and at least
+    ``KEPT_SAME_GRADE_WARN_ROWS`` rows.
+    """
+    compared = [
+        [float(g) for g in row if g is not None]
+        for row in kept_grades
+        if sum(g is not None for g in row) >= 2
+    ]
+    same = [row[0] for row in compared if max(row) - min(row) <= 1e-9]
+    if not same:
+        return None, None
+    by_value: dict[str, int] = {}
+    for value in same:
+        label = f"{value:.2f}".rstrip("0").rstrip(".")
+        by_value[label] = by_value.get(label, 0) + 1
+    ranked = sorted(by_value.items(), key=lambda kv: -kv[1])
+    parts = [f"{n} all {label}" for label, n in ranked[:3]]
+    if len(ranked) > 3:
+        parts.append(f"{sum(n for _, n in ranked[3:])} at other values")
+    note = (
+        f"of the {len(kept_grades)} kept rows, {len(same)} gave every sample "
+        f"the same grade ({', '.join(parts)})"
+    )
+    if (
+        len(same) < KEPT_SAME_GRADE_WARN_SHARE * len(kept_grades)
+        or len(same) < KEPT_SAME_GRADE_WARN_ROWS
+    ):
+        return note, None
+    warning = (
+        f"filter.by_pass_at_k: {len(same)} of {len(kept_grades)} kept rows "
+        f"({len(same) / len(kept_grades):.0%}) gave all {k} samples the same "
+        f"grade ({', '.join(parts)}): the rate bounds keep them, but GRPO gets "
+        "no gradient from a row whose samples all score alike"
+    )
+    return note, warning
 
 
 # A sampler, not a filter: its first argument is prompts, and it drops nothing.

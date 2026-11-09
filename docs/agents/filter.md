@@ -125,6 +125,8 @@ Each takes the task in `input_field` (text or chat messages). From cheapest and 
   row's mean score. `by_comparative_difficulty` needs pass/fail grades.
   `histogram=True` prints the pass-rate histogram outside a step and on a cache hit (not keyed), with a line
   counting rows whose samples all got one grade: no GRPO gradient there.
+  The bounds can keep such rows under partial credit (samples all at 0.6 give rate 0.6); another line counts them
+  among the kept rows, and a warning is logged when they are at least 20% of the kept rows (and at least 5).
 
 Grading guardrails for `by_comparative_difficulty` and `by_pass_at_k`:
 
