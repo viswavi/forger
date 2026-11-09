@@ -199,7 +199,10 @@ which give GRPO-style RL no gradient, e.g. `31 of 120 rows gave every sample the
 GRPO gradient there`. Under a partial-credit grader the bounds can keep such rows: a row whose samples all score 0.6
 has rate 0.6. Another line counts them among the kept rows, e.g. `of the 220 kept rows, 61 gave every sample the same
 grade (52 all 0.6, 9 all 0.3)`, and a warning is logged when they are at least 20% of the kept rows (and at least
-5 rows).
+5 rows). Under a partial-credit grader, one more line histograms every sample's grade before filtering, with the
+highest and most common grade, since a rate is a mean and hides where samples land, e.g. `sample grades (640, before
+filtering): 0 25% | (0, 0.2] 6% | (0.2, 0.4] 0% | (0.4, 0.6] 38% | (0.6, 0.8] 31% | (0.8, 1) 0% | 1 0%; highest 0.64,
+most common 0.64 (31%)`.
 `by_judged_difficulty` (least expensive, least reliable) only asks a judge how hard a task looks.
 
 No answer format is imposed. The prompt is the task itself (`prompt_template` replaces it, e.g. to ask for a final
