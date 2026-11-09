@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 import threading
 import time
 from typing import Any
@@ -12,7 +13,12 @@ from pydantic import StrictBool, TypeAdapter
 from pyforger import _tracking
 from pyforger._render import render_scores, render_step
 from pyforger.acquire.model import GenerateResult, Model
-from pyforger.filter import by_comparative_difficulty, by_pass_at_k, program_verifier
+from pyforger.filter import (
+    by_comparative_difficulty,
+    by_pass_at_k,
+    model_difficulty,
+    program_verifier,
+)
 from pyforger.filter.model_difficulty import answer_segment
 from pyforger.op import op, trace
 from pyforger.steps import pipeline, step
@@ -306,6 +312,46 @@ class TestPassAtK:
         note = _tracking.step_records()["hard"].ops[0].scores.note
         assert note.startswith("4 of 4 rows gave every sample the same grade")
         assert "4 one partial score" in note
+
+    def test_kept_rows_at_one_partial_score_are_counted_and_warned(
+        self, monkeypatch, caplog
+    ):
+        """Bounds on the rate keep rows whose samples all scored 0.6; say so."""
+        monkeypatch.setenv("FORGER_STEP_REPORT", "0")
+        # Four rows here; the warning otherwise waits for five.
+        monkeypatch.setattr(model_difficulty, "KEPT_SAME_GRADE_WARN_ROWS", 4)
+
+        def sixty(prediction, row):
+            return 0.6
+
+        @step
+        def band(rows):
+            return by_pass_at_k(
+                rows,
+                model=ScriptedModel("m", self.SCRIPT),
+                input_field="task",
+                metric=sixty,
+                min_rate=0.01,
+                max_rate=0.85,
+            )
+
+        with caplog.at_level(logging.WARNING):
+            kept = band(self.ROWS)
+        assert len(kept) == 4
+        note = _tracking.step_records()["band"].ops[0].scores.note
+        assert (
+            "of the 4 kept rows, 4 gave every sample the same grade (4 all 0.6)" in note
+        )
+        assert (
+            "4 of 4 kept rows (100%) gave all 4 samples the same grade" in caplog.text
+        )
+
+    def test_no_kept_line_when_kept_rows_vary(self, caplog):
+        """The default bounds keep only rows with mixed grades: no kept line."""
+        with caplog.at_level(logging.WARNING):
+            kept = _pass_at_k(self.ROWS, ScriptedModel("m", self.SCRIPT))
+        assert [r["task"] for r in kept] == ["t2", "t4"]
+        assert "kept rows" not in caplog.text
 
     def test_histogram_prints_on_a_cache_hit_too(self, capsys):
         """histogram=True prints the step report's histogram; it is not keyed."""
