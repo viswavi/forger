@@ -27,6 +27,15 @@ The validation set is yours to use however you like. (Training on validation pro
 
 "task_text" is the exact user turn a model sees at evaluation (the "question" field in predictions.jsonl is the same text): "Problem:", the statement, a "Judging limits ..." line with the enforced limits and the compiler, and "Generate solution code:", separated by blank lines. Before it comes a fixed system message (`SYSTEM_PROMPT` in {TASK_DIR}/prompt_building.py) asking for only C++ code in a ```cpp fence. Each answer is sampled at temperature 1.0 with up to 16,000 tokens. The evaluator judges the longest ```cpp block after the final </think>, or the longest one in the reasoning if the response runs out of tokens before closing it; a response with no code block scores 0. Your prompts are used verbatim for training, and a different format will not transfer to evaluation, so build them the same way: `prompt_building.build_candidate_prompt(prompt_building.build_user_content(statement, time_limit_s, memory_mb))` returns the system message and the user turn."""
 
+# The Forger arm's task opens by framing the run as a Forger demonstration.
+TASK_OPENING = "You must generate a training dataset to finetune"
+FORGER_OPENING = (
+    "You must produce a demonstration of how to effectively and extensively use a new data "
+    "generation library called Forger. You will show that your demonstration is effective by "
+    "generating a training dataset to finetune"
+)
+assert TASK_OPENING in TASK
+
 GROUND_TRUTH = """- "ground_truth" is optional text that your criteria receive, for example a reference answer (one complete C++17 program in a ```cpp fence); it is "" when omitted. Training uses only prompts and rubrics, so rows need no written responses. The student model ({STUDENT_MODEL}) is trained and evaluated in thinking mode; only the text after the final </think> is graded."""
 
 # TODO(harness): judge_cpp / Sandbox().judge_cpp and solution_runner support for
@@ -69,10 +78,13 @@ ROW_EDITS = [
 def build(source: Path) -> str:
     """The FrontierCS prompt for one coding prompt file."""
     lines = source.read_text().split("\n")
-    # Both arms share the task section; they differ only in the Scaffold's Forger lines.
+    # Both arms share the task section, but the Forger arm's opens with its framing.
     task = next(i for i, line in enumerate(lines) if line.startswith("# Task"))
     native = "minimal_scaffold" in source.name
-    out = lines[:task] + [TASK, ""]
+    out = lines[:task] + [
+        TASK if native else TASK.replace(TASK_OPENING, FORGER_OPENING, 1),
+        "",
+    ]
     rules = [
         ('- "ground_truth" is optional text', GROUND_TRUTH),
         ('  - {{"code": ...}}', CODE),
