@@ -352,6 +352,7 @@ completion(model='litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731')
             "coding/FORGER_PROMPT.txt",
             "culture/FORGER_PROMPT.txt",
             "coding/minimal_scaffold_prompt.txt",
+            "culture/minimal_scaffold_prompt.txt",
         ):
             with self.subTest(prompt=relative):
                 prompt = prompts[relative] = (
@@ -361,12 +362,12 @@ completion(model='litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731')
                 self.assertNotIn("llm_spend", prompt)
                 # Agents must never learn benchmark names.
                 self.assertIsNone(BENCHMARK_NAMES.search(prompt))
-        # Forger agents generate through Forger; only the native baseline (and
-        # the legacy culture prompt) gets the direct LiteLLM generation helper.
+        # Forger agents generate through Forger; only the native baselines get
+        # the direct LiteLLM generation helper.
         helper = "from rl.token_budget import completion"
-        self.assertNotIn(helper, prompts["coding/FORGER_PROMPT.txt"])
-        self.assertIn(helper, prompts["coding/minimal_scaffold_prompt.txt"])
-        self.assertIn(helper, prompts["culture/FORGER_PROMPT.txt"])
+        for task in ("coding", "culture"):
+            self.assertNotIn(helper, prompts[f"{task}/FORGER_PROMPT.txt"])
+            self.assertIn(helper, prompts[f"{task}/minimal_scaffold_prompt.txt"])
         # The coding arms differ only in Forger access: the Scaffold section's
         # library paragraphs and how LLM calls are made. Everything else,
         # demands and rules included, is word for word the same.

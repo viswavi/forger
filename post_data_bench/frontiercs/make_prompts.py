@@ -20,21 +20,12 @@ In this setup, a model is given a problem statement and must answer, in a single
 
 Every test counts equally, so an answer that is valid and reasonable on every test can outscore one that is excellent on some tests but invalid, too slow, or crashing on others. Your data should make the model's programs better: reading the statement and its scoring rule carefully, producing valid output every time, staying within the limits, and finding better solutions with good algorithms and heuristics.
 
-The validation set is yours to use however you like: to see what the problems look like, how they are judged, and where the baseline model fails. (Training on validation problems is allowed, but leaves validation much less useful for choosing checkpoints.) It consists of:
+The validation set is yours to use however you like. (Training on validation problems is allowed, but leaves validation much less useful for choosing checkpoints.) It consists of:
 - {TASK_DIR}/validation_tasks.jsonl: one row per problem, with "id", "type" ("default" or "interactive"), "n_tests" (how many tests it is judged on), "time_limit_s", "memory_mb", "statement", and "task_text" (the exact prompt, described below).
 - {TASK_DIR}/problems/<id>/: each problem's judging files: config.yaml (its limits), testdata/ (every test's input and answer), and the source of its checker (chk.cc) or interactor (interactor.cc), written with {TASK_DIR}/testlib/testlib.h.
 - {TASK_DIR}/model_outputs/{BASELINE_MODEL}/val/, if present: the baseline model's results. metrics.json holds summary scores. In predictions.jsonl, each row's "samples" holds its sampled answers, and each answer's "cases" gives, for every test, its file in testdata/, its status and score, and the start of the checker's or interactor's message.
 
 "task_text" is the exact user turn a model sees at evaluation (the "question" field in predictions.jsonl is the same text): "Problem:", the statement, a "Judging limits ..." line with the enforced limits and the compiler, and "Generate solution code:", separated by blank lines. Before it comes a fixed system message (`SYSTEM_PROMPT` in {TASK_DIR}/prompt_building.py) asking for only C++ code in a ```cpp fence. Each answer is sampled at temperature 1.0 with up to 16,000 tokens. The evaluator judges the longest ```cpp block after the final </think>, or the longest one in the reasoning if the response runs out of tokens before closing it; a response with no code block scores 0. Your prompts are used verbatim for training, and a different format will not transfer to evaluation, so build them the same way: `prompt_building.build_candidate_prompt(prompt_building.build_user_content(statement, time_limit_s, memory_mb))` returns the system message and the user turn."""
-
-# The Forger arm's task opens by framing the run as a Forger demonstration.
-TASK_OPENING = "You must generate a training dataset to finetune"
-FORGER_OPENING = (
-    "You must produce a demonstration of how to effectively and extensively use a new data "
-    "generation library called Forger. You will show that your demonstration is effective by "
-    "generating a training dataset to finetune"
-)
-assert TASK_OPENING in TASK
 
 GROUND_TRUTH = """- "ground_truth" is optional text that your criteria receive, for example a reference answer (one complete C++17 program in a ```cpp fence); it is "" when omitted. Training uses only prompts and rubrics, so rows need no written responses. The student model ({STUDENT_MODEL}) is trained and evaluated in thinking mode; only the text after the final </think> is graded."""
 
@@ -43,7 +34,7 @@ GROUND_TRUTH = """- "ground_truth" is optional text that your criteria receive, 
 CODE = """  - {{"code": ...}}: Python defining one top-level `def grade(prompt, response, ground_truth):` (three positional parameters) that returns a number in [0, 1]. `prompt` is the chat messages; `response` includes its thinking trace. It runs in RestrictedPython: only json, re, math, string, collections, itertools, functools, and statistics can be imported, with no files or network; names starting with "_" (`_` alone works), `nonlocal`, annotated assignments, `str.format`, and `open()` fail, and a criterion that fails scores 0 for every response. grade() can call `judge_cpp(code, tests, checker=None, interactor=None, time_limit=1.0, memory_mb=256, details=False)`, which compiles and judges a C++ program as the evaluator does. `tests` is a list of {{"input": stdin, "answer": answer file, "args": [command-line arguments]}} ("answer" and "args" are optional; without "answer", a clean run passes). `checker` or `interactor` is testlib C++ source (with neither, the output must equal the answer up to whitespace) that scores a test by exiting with `quitf(_ok, ...)` (1), `quitp(x, ...)` printing `Ratio: <x>` (x), or `quitf(_wa, ...)` (0). It returns (mean score, per-test statuses), or with `details=True` (mean score, one {{"status", "ratio", "time", "stdout", "message"}} dict per test). Each criterion gets 20 seconds in total, compilation included, and runs on every sampled RL response, so use a few small, fast tests. From {TASK_DIR}: `from rl.rubric_sandbox import Sandbox` gives `Sandbox().judge_cpp(...)`; `python rl/rubric_worker.py < criterion.json` (a JSON object with "code", "prompt", "response", and "ground_truth") prints the score RL would give; and `from rl.solution_runner import score_targets` scores each row's ground_truth with its own code criteria (`score_targets(rows)`), so a target that scores lower than you expect has a rubric, checker, or program that fails in RL."""
 
 
-PROMPT_CRITERION = """  - {{"prompt": ...}}: a natural-language criterion. The judge model (DeepSeek-V4-Flash) scores it given the criterion, the prompt, the full response, and the ground truth. With {{"prompt": ..., "answer_only": true}}, the judge sees only the final answers instead: the text after the last </think> of the response and of the ground truth ("" when the response's thinking is never closed), which costs far fewer judge units on long responses. For this task, code criteria are usually the better choice: a program's validity and the quality of its answers can be measured exactly, while prompted criteria use judge quota and make the RL reward noisier."""
+PROMPT_CRITERION = """  - {{"prompt": ...}}: a natural-language criterion. The judge model (DeepSeek-V4-Flash) scores it given the criterion, the prompt, the full response, and the ground truth. With {{"prompt": ..., "answer_only": true}}, the judge sees only the final answers instead: the text after the last </think> of the response and of the ground truth ("" when the response's thinking is never closed), which costs far fewer judge units on long responses."""
 
 CONTAMINATION = """Your model will be tested on a public benchmark of expert-written algorithmic problems, the same one the validation tasks come from. Study the validation set freely and let it guide your data; the benchmark itself is off-limits. Do not search for, download, or browse it. Do not train on its problems (or ones you suspect are in it), their solutions (including published model solutions), or edited versions of them, and do not try to reconstruct it or work out which problems it contains. General public material such as tutorials, algorithm references, and documentation is fine and encouraged. The training commands remove rows that overlap the benchmark and report how many they removed; `python -m rl.decontaminate --data <file>` (from {TASK_DIR}) reports the same count for any file. Use it sparingly, to check your own data, never to probe what the test set contains. Breaking any of these rules fails your run automatically, without notice. The goal is a model that is genuinely strong at this kind of problem, not one that has memorized the benchmark."""
 
@@ -56,12 +47,6 @@ JUDGE_NEW = (
     "- You have {JUDGE_TOKEN_UNIT_LIMIT} token units of compute ({JUDGE_USAGE_PATH}) "
     "strictly for the judge, to use only if absolutely needed; they are shared by all "
     "your judge experiments and RL runs."
-)
-
-INSPECT_OLD = "and performance on solvable and impossible validation tasks."
-INSPECT_NEW = (
-    "and per-problem validation scores with their per-test results (compile errors, "
-    "invalid answers, time and memory limits, partial credit)."
 )
 
 GUIDELINES = """When `generate_custom_rubric` or `convert_rubric_criteria` writes code criteria, pass the sandbox rules (see Data Format) and the `judge_cpp` helper as `code_guidelines=` (a string), so the criteria it writes compile in the RL grader and judge responses through that helper."""
@@ -84,13 +69,10 @@ ROW_EDITS = [
 def build(source: Path) -> str:
     """The FrontierCS prompt for one coding prompt file."""
     lines = source.read_text().split("\n")
-    # An opening before the task section (the Forger arm's) is kept as is.
+    # Both arms share the task section; they differ only in the Scaffold's Forger lines.
     task = next(i for i, line in enumerate(lines) if line.startswith("# Task"))
     native = "minimal_scaffold" in source.name
-    out = lines[:task] + [
-        TASK if native else TASK.replace(TASK_OPENING, FORGER_OPENING, 1),
-        "",
-    ]
+    out = lines[:task] + [TASK, ""]
     rules = [
         ('- "ground_truth" is optional text', GROUND_TRUTH),
         ('  - {{"code": ...}}', CODE),
@@ -117,13 +99,9 @@ def build(source: Path) -> str:
                 assert f"rows{i}" not in used
                 line = line.replace(row_old, row_new)
                 used.add(f"rows{i}")
-        if line.startswith("RL optimizes the student against your rubrics"):
-            assert INSPECT_OLD in line
-            line = line.replace(INSPECT_OLD, INSPECT_NEW)
-            used.add("inspect")
         out.append(line)
     # The native arm has no rubric-writing ops, so it lacks the guidelines line.
-    expected = {r[0] for r in rules} | {"inspect", "judge", "rows0", "rows1"}
+    expected = {r[0] for r in rules} | {"judge", "rows0", "rows1"}
     if native:
         expected.discard("When `generate_custom_rubric`")
     assert used == expected, expected - used
