@@ -368,11 +368,19 @@ completion(model='litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731')
         for task in ("coding", "culture"):
             self.assertNotIn(helper, prompts[f"{task}/FORGER_PROMPT.txt"])
             self.assertIn(helper, prompts[f"{task}/minimal_scaffold_prompt.txt"])
-        # The coding arms differ only in Forger access: the Scaffold section's
-        # library paragraphs and how LLM calls are made. Everything else,
-        # demands and rules included, is word for word the same.
+        # The coding arms differ only in Forger access: the Forger arm's
+        # demonstration framing, the Scaffold section's library paragraphs, and
+        # how LLM calls are made. Everything else, demands and rules included,
+        # is word for word the same.
+
+        framing = (
+            "You must produce a demonstration of how to effectively and extensively "
+            "use a new data generation library called Forger. You will show that "
+            "your demonstration is effective by generating"
+        )
 
         def shared(text):
+            text = text.replace(framing, "You must generate", 1)
             for start, stop in (
                 ("# Scaffold", "# Data Format"),
                 ("Credentials are provided as", "Web search uses"),
@@ -396,7 +404,7 @@ completion(model='litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731')
             for advice in ("DECISIONS.md", "end-to-end loop", "hard-to-easy"):
                 self.assertNotIn(advice, text)
         self.assertIn("/forger/docs/AGENTS.md", forger)
-        self.assertNotIn("demonstration", forger)
+        self.assertIn(framing, forger)
 
 
 if __name__ == "__main__":
