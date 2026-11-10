@@ -35,6 +35,10 @@ using `min_yield=` and `max_yield=`, e.g. `filter.by_llm_score(rows, ..., min_yi
 the contract. You can call `pyforger.inspect.inspect_step("step_name")` to see more sample rows when a step's yield
 or samples look off. [`pipelines.md`](agents/pipelines.md) has a complete example.
 
+Read [`methodology.md`](agents/methodology.md) before you build a dataset: it describes this way of working in
+detail, from a first end-to-end loop and comparing alternatives to inspecting every set of rows, filtering, and
+building RL data.
+
 ## Operation reference
 
 Ops (all but `filter.by_predicate`) and retrieval are cached on disk. Pass `_no_cache=True` for a fresh result
@@ -60,6 +64,7 @@ Every op's signature and defaults are in [OPS.md](OPS.md), generated from the co
 
 Read the file for the ops you use:
 
+- [`methodology.md`](agents/methodology.md): how to build a dataset: loops, comparisons, inspection, filters, RL data.
 - [`docs/OPS.md`](OPS.md): every op's signature, generated from the code.
 - [`acquire.md`](agents/acquire.md): `sample_from_LLM`, student sampling (`LocalModel`, `TinkerModel`), retrieval, rubrics.
 - [`alter.md`](agents/alter.md): `generate_from_context`, translation, code execution, running Python or C++

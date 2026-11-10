@@ -34,6 +34,13 @@ def launcher_functions(*names, **namespace):
     return scope
 
 
+class _Placeholders(dict):
+    """Format values; unlisted fields, e.g. {BACKEND_TRAINING}, stay as they are."""
+
+    def __missing__(self, key):
+        return "{" + key + "}"
+
+
 class AgentTokenBudgetTests(unittest.TestCase):
     """Check persistent budgets and sandbox helper exports."""
 
@@ -348,7 +355,7 @@ completion(model='litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731')
         ):
             with self.subTest(prompt=relative):
                 prompt = prompts[relative] = (
-                    (ROOT / relative).read_text().format(**values)
+                    (ROOT / relative).read_text().format_map(_Placeholders(values))
                 )
                 self.assertIn("180000000 token units", prompt)
                 self.assertNotIn("llm_spend", prompt)
@@ -360,19 +367,35 @@ completion(model='litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731')
         self.assertNotIn(helper, prompts["coding/FORGER_PROMPT.txt"])
         self.assertIn(helper, prompts["coding/minimal_scaffold_prompt.txt"])
         self.assertIn(helper, prompts["culture/FORGER_PROMPT.txt"])
-        # Both coding scaffolds share the operational contract verbatim.
-        for start, stop in (
-            ("# Data Format", "# LLM API Usage"),
-            ("# Training and Validation", "# High-Level Approach"),
-            ("# High-Level Approach", "# Scaffold"),
-        ):
-            sections = {
-                text[text.index(start) : text.index(stop)]
-                for name, text in prompts.items()
-                if name.startswith("coding/")
-            }
-            self.assertEqual(len(sections), 1, start)
-            self.assertIn("$400", prompts["coding/FORGER_PROMPT.txt"])
+        # The coding arms differ only in Forger access: the Scaffold section's
+        # library paragraphs and how LLM calls are made. Everything else,
+        # demands and rules included, is word for word the same.
+
+        def shared(text):
+            for start, stop in (
+                ("# Scaffold", "# Data Format"),
+                ("Credentials are provided as", "Web search uses"),
+            ):
+                text = text[: text.index(start)] + text[text.index(stop) :]
+            return text
+
+        self.assertEqual(
+            shared(prompts["coding/FORGER_PROMPT.txt"]),
+            shared(prompts["coding/minimal_scaffold_prompt.txt"]),
+        )
+        forger, native = (
+            prompts["coding/FORGER_PROMPT.txt"],
+            prompts["coding/minimal_scaffold_prompt.txt"],
+        )
+        for text in (forger, native):
+            # Both arms state the same demands on the dataset.
+            self.assertIn("The dataset you submit must be:", text)
+            # How to work (comparing alternatives, small loops first) belongs
+            # in Forger's docs, not in either arm's prompt.
+            for advice in ("DECISIONS.md", "end-to-end loop", "hard-to-easy"):
+                self.assertNotIn(advice, text)
+        self.assertIn("/forger/docs/AGENTS.md", forger)
+        self.assertNotIn("demonstration", forger)
 
 
 if __name__ == "__main__":
