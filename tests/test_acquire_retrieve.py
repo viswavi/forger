@@ -118,6 +118,15 @@ class TestRetrieve:
         assert len(results) == 3
         assert all(isinstance(r, dict) for r in results)
 
+    @patch("pyforger.acquire.sources.WikiRetrievalSource.fetch")
+    def test_retrieve_from_wiki_forwards_full_text(self, mock_fetch):
+        """full_text=True reaches fetch(); a default call does not pass it."""
+        mock_fetch.return_value = [{"title": "t", "id": "1", "text": "x"}]
+        retrieve_from_wiki("Quicksort", n=1, full_text=True, _no_cache=True)
+        assert mock_fetch.call_args.kwargs.get("full_text") is True
+        retrieve_from_wiki("Quicksort", n=1, _no_cache=True)
+        assert "full_text" not in mock_fetch.call_args.kwargs
+
     @patch("pyforger.acquire.sources.ArxivRetrievalSource.fetch")
     def test_retrieve_from_arxiv_returns_list(self, mock_fetch):
         """Return search results from retrieve_from_arxiv."""

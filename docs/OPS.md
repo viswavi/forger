@@ -246,7 +246,8 @@ retrieve_from_wiki(
 
 Fetch Wikipedia articles. QUERY (full-text) or RANDOM (random article).
 
-**Returns:** Rows with `text` (the intro extract), `id` (the page ID), `title`, `summary` (same as `text`), and `query`.
+**Returns:** Rows with `text` (the intro, or the whole article with `full_text=True`), `id` (the page ID), `title`,
+`summary` (same as `text`), and `query`.
 
 <a name="acquire-retrieve_from_hf"></a>
 

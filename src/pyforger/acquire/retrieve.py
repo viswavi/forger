@@ -151,9 +151,14 @@ def retrieve_from_wiki(
 ) -> list[dict]:
     """Fetch Wikipedia articles. QUERY (full-text) or RANDOM (random article).
 
+    ``text`` is the article's intro. Pass ``full_text=True`` for the whole
+    article as plain text (one request per result; e.g. Quicksort is about
+    50,000 characters, against about 1,400 for its intro).
+
     Returns:
-        Rows with ``text`` (the intro extract), ``id`` (the page ID),
-        ``title``, ``summary`` (same as ``text``), and ``query``.
+        Rows with ``text`` (the intro, or the whole article with
+        ``full_text=True``), ``id`` (the page ID), ``title``, ``summary`` (same
+        as ``text``), and ``query``.
     """
     source = WikiRetrievalSource(language=language, **kwargs)
     return retrieve.__wrapped__(

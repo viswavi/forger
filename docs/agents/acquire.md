@@ -94,6 +94,7 @@ from pyforger.acquire import retrieve_from_web, retrieve_from_wiki
 pages = retrieve_from_web(["interval scheduling greedy proof", "monotonic stack patterns"], n=5)
 # pages[i] has "text" (extracted page content), "title", "url", and "query".
 articles = retrieve_from_wiki("Segment tree", n=2)
+# articles[i]["text"] is the intro; full_text=True returns whole articles, one request each.
 ```
 
 `n` is per query, so three queries with `n=5` return up to 15 rows. A Semantic Scholar query asks the API for only `n`
