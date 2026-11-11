@@ -32,6 +32,8 @@ Keywords left out of the signatures below:
   - [`retrieve_from_arxiv`](#acquire-retrieve_from_arxiv): Fetch arXiv papers. QUERY (text search) or RANDOM (sample
     from category).
   - [`retrieve_from_s2`](#acquire-retrieve_from_s2): Fetch papers from Semantic Scholar.
+  - [`retrieve_from_pubmed`](#acquire-retrieve_from_pubmed): Search PubMed: articles, case reports, reviews, trials and
+    more.
   - [`sample_from_LLM`](#acquire-sample_from_llm): Generate from `model` until `n` samples are generated.
   - [`generate_custom_rubric`](#acquire-generate_custom_rubric): Generate mixed prompt/code rubrics in one call
     (recommended entry point).
@@ -44,6 +46,8 @@ Keywords left out of the signatures below:
   - [`WikiRetrievalSource`](#acquire-wikiretrievalsource): Retrieval source that fetches articles from Wikipedia via the
     MediaWiki API.
   - [`HFRetrievalSource`](#acquire-hfretrievalsource): Hugging Face dataset discovery and retrieval.
+  - [`PubMedRetrievalSource`](#acquire-pubmedretrievalsource): Search PubMed and return each hit's citation and
+    abstract.
   - [`ArxivRetrievalSource`](#acquire-arxivretrievalsource): Retrieval source that fetches papers from arXiv via the
     API.
   - [`S2RetrievalSource`](#acquire-s2retrievalsource): Retrieval source that fetches papers from Semantic Scholar via
@@ -318,6 +322,28 @@ Fetch papers from Semantic Scholar.
 
 **Returns:** Rows with `text` (title and abstract), `id` (the paper id), `title`, `summary` (the abstract), and `query`.
 
+<a name="acquire-retrieve_from_pubmed"></a>
+
+### `acquire.retrieve_from_pubmed`
+
+Disk-cached (`@op`).
+
+```python
+retrieve_from_pubmed(
+    queries: str | list[str] | None = None,
+    *,
+    n: int = 10,
+    api_key: str | None = None,
+    sort: str = "relevance",
+    **kwargs: Any,
+) -> list[dict]
+```
+
+Search PubMed: articles, case reports, reviews, trials and more.
+
+**Returns:** Rows with `text` (title and abstract), `id` (the PMID), `title`, `summary` (the abstract), `authors`,
+`journal`, `year`, `publication_types`, `mesh_terms`, `doi`, `pmcid`, `url` and `query`.
+
 <a name="acquire-sample_from_llm"></a>
 
 ### `acquire.sample_from_LLM`
@@ -457,6 +483,18 @@ HFRetrievalSource(
 ```
 
 Hugging Face dataset discovery and retrieval.
+
+<a name="acquire-pubmedretrievalsource"></a>
+
+### `acquire.PubMedRetrievalSource`
+
+Class: construct it and pass it to ops.
+
+```python
+PubMedRetrievalSource(api_key: str | None = None, **kwargs: Any)
+```
+
+Search PubMed and return each hit's citation and abstract.
 
 <a name="acquire-arxivretrievalsource"></a>
 

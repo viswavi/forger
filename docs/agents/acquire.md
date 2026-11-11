@@ -9,7 +9,7 @@ Generate or retrieve new rows. Signatures and defaults for every export are in [
 | `convert_rubric_criteria` | yes | Convert existing textual rubrics, preserving order and weights. |
 | `generate_custom_rubric_criteria` | yes | Generate weighted textual rubrics with optional context and candidates. |
 | `retrieve` | yes | Generic retrieval against a `RetrievalSource` (`RetrieveMode.QUERY` or `RANDOM`). |
-| `retrieve_from_web` / `_wiki` / `_hf` / `_arxiv` / `_s2` | yes | Brave Search, Wikipedia, HF datasets, arXiv, S2. |
+| `retrieve_from_web` / `_wiki` / `_hf` / `_arxiv` / `_s2` / `_pubmed` | yes | Brave, Wikipedia, HF, arXiv, S2, PubMed. |
 | `Model` |   | LiteLLM wrapper; the user sets the model id. Generate through `sample_from_LLM`. |
 | `LocalModel` |   | On-GPU vLLM model with `Model`'s interface (needs the `vllm` extra). Zero cost, `<think>` inline. |
 | `TinkerModel` |   | Base model or `tinker://` checkpoint sampled on Tinker; `Model`'s interface, `<think>` inline. |
@@ -75,16 +75,22 @@ list of rows, each with its `query`. `n` is per query. `mode=RetrieveMode.RANDOM
 where supported.
 
 - Web search needs `BRAVE_API_KEY` (raises without it); Semantic Scholar reads `S2_API_KEY`.
+- PubMed reads `NCBI_API_KEY` if set (10 requests/second, else 3); Forger spaces requests and retries rate-limited
+  ones. It is QUERY only and returns abstracts, not full text.
 - `retrieve_from_s2` runs one query at a time (keys are usually limited to 1 request/second); raise `max_workers`
   only if your key allows more.
 
 ```python
-from pyforger.acquire import retrieve_from_web, retrieve_from_wiki
+from pyforger.acquire import retrieve_from_pubmed, retrieve_from_web, retrieve_from_wiki
 
 pages = retrieve_from_web(["interval scheduling greedy proof", "monotonic stack patterns"], n=5)
 # pages[i] has "text" (extracted page content), "title", "url", and "query".
 articles = retrieve_from_wiki("Segment tree", n=2)
 # articles[i]["text"] is the intro; full_text=True returns whole articles, one request each.
+reports = retrieve_from_pubmed("lung cancer case reports", n=20)
+# reports[i] has "text" (title and abstract), "publication_types" (e.g. ["Case Reports", ...]), "mesh_terms",
+# "authors", "journal", "year", "doi", "pmcid" and "url". PubMed search syntax works too:
+# '"lung neoplasms"[MeSH] AND case reports[pt]'.
 ```
 
 ## Rubrics

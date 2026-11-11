@@ -1,6 +1,7 @@
 """Retrieval sources for acquire.retrieve: abstract base and concrete backends.
 
-Concrete sources: web, Wikipedia, Hugging Face, ArXiv, Semantic Scholar.
+Concrete sources: web, Wikipedia, Hugging Face, ArXiv, Semantic Scholar
+(PubMed lives in pubmed.py).
 """
 
 from __future__ import annotations
