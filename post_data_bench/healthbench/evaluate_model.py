@@ -30,7 +30,9 @@ import prompt_building as pb
 from eval_state import atomic_json, read_predictions, stamp_metrics
 
 DATA_DIR = Path(os.environ.get("PDB_BENCHMARK_DIR", Path(__file__).resolve().parent))
-LABELS = ("use_case", "type", "difficulty")
+# A task row's graded fields; any others (the host's split carries analysis
+# labels) are copied onto its prediction row and summarized in context.by_label.
+TASK_FIELDS = ("id", "messages", "rubric_items", "physician_response")
 
 
 def parse_args() -> argparse.Namespace:
@@ -151,7 +153,7 @@ async def grade_row(
     n = len(samples)
     return {
         "id": row["id"],
-        **{name: row[name] for name in LABELS if name in row},
+        **{k: v for k, v in row.items() if k not in TASK_FIELDS},
         "n_samples": n,
         "score": sum(s["score_length_adjusted"] for s in samples) / n,
         "score_unadjusted": sum(s["score"] for s in samples) / n,
@@ -256,15 +258,22 @@ def compute_metrics(graded_rows: list[dict]) -> dict:
         for c in s["criteria"]:
             for key in usage:
                 usage[key] += c["usage"][key]
+    row_fields = {"id", "n_samples", "score", "score_unadjusted", "samples"}
     by_label = {}
-    for name in LABELS:
+    names = sorted({k for r in graded_rows for k in r} - row_fields)
+    for name in names:
         values: dict[str, list[float]] = {}
         for r in graded_rows:
-            if name in r:
-                values.setdefault(r[name], []).append(float(r["score"]))
+            if name in r and isinstance(r[name], (str, int, bool)):
+                values.setdefault(str(r[name]), []).append(float(r["score"]))
         if values:
+            # "score" is clipped like the headline; "mean" is not, e.g. -8.8.
             by_label[name] = {
-                k: {"n": len(v), "score": 100 * min(max(sum(v) / len(v), 0.0), 1.0)}
+                k: {
+                    "n": len(v),
+                    "score": 100 * min(max(sum(v) / len(v), 0.0), 1.0),
+                    "mean": 100 * sum(v) / len(v),
+                }
                 for k, v in sorted(values.items())
             }
     chars = sorted(s["answer_chars"] for s in samples)
