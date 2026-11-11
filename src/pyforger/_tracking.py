@@ -347,7 +347,8 @@ class StepRecord(BaseModel):
     smoke_rows: int | None = None
     smoke_n_in: int | None = None
     # The cache entry holding this run's output, relative to FORGER_CACHE
-    # (e.g. "step.write_targets/3f2a….pkl"); None when it was not cached.
+    # (e.g. "step.write_targets/3f2a….pkl"), or "3f2a….uncached.pkl" for a run
+    # kept out of the cache (never replayed); None with cache=False.
     cache_file: str | None = None
     # The step's cache key, and a digest of each part of it: "code", "global
     # PROMPT", "argument rows", ... ``inspect.compare_pipelines`` uses them to

@@ -24,6 +24,10 @@ Two different ops never share samples. Each op logs
 (e.g. a row holding `id(row)` or a timestamp). Not request-cached: direct `model.generate` calls outside an `@op` /
 `@step`, `LocalModel`, and requests with tools or logprobs. Your own `@op` that builds one prompt per row should pass
 `cache_rows=rows` to `generate_batch`.
+A completion is keyed on the exact prompt, so editing a template re-sends every row. When at least 20 rows and half of
+a batch were answered before by the same op in the same `@step` under another prompt or settings, the batch warns
+before sending, with the earlier cost (`249 of 498 rows were answered before under a different prompt or settings and
+will be asked again ...; ~12.45M token units at the earlier cost per row`); it never blocks.
 
 **Fresh samples and cache-only reads.**
 
@@ -58,7 +62,9 @@ and the arguments, callables included. It does not cover:
 
 - `pyforger.op.skip_cache_write()`, called inside an op, keeps its result (and every enclosing op's and step's) out
   of the cache, e.g. one holding `None`s for failed requests. From a worker thread, submit with
-  `contextvars.copy_context().run`, or every op and step running at that moment is left uncached.
+  `contextvars.copy_context().run`, or every op and step running at that moment is left uncached. A step kept out of
+  the cache still saves its output (`<key>.uncached.pkl`), never replayed, so `inspect_step(name, rows=True)` can
+  read it.
 - Entries are pickles: only use a cache directory you trust (files owned by another user are refused).
 - `from pyforger.op import trace, clear_trace`: `trace()` lists a `CallRecord` (op name, input and output hashes,
   `cache_hit`, `duration_s`) for each recent `@op` call in the process (up to 10,000); `clear_trace()` resets it.

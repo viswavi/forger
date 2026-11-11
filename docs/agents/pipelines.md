@@ -15,7 +15,8 @@ at the end, followed by every `WARNING:` line. **Read these reports after every 
 
 - `pyforger.inspect.inspect_step("name")` re-prints the full report of a step's latest run with up to 10 sample rows,
   also from another shell while the pipeline runs. `inspect_step("name", rows=True)` returns the run's whole output
-  from the cache, e.g. after a later step failed. `pyforger.inspect.runs()` lists saved pipeline runs (see
+  from the cache, e.g. after a later step failed; a run kept out of the cache (e.g. some requests timed out) saves its
+  rows for this too, with a warning that they may be partial. `pyforger.inspect.runs()` lists saved pipeline runs (see
   [inspect.md](inspect.md)).
 - A cached step prints one line (`step translate · 42 → 40 rows · cached · originally 0.5s · $0.0034`) and costs
   nothing this run. If a cached filter shows no score histogram, rerun it with `_no_cache=True`.

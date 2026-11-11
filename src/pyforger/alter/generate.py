@@ -17,6 +17,7 @@ from pyforger.acquire._model_utils import (
     _is_row_error,
     _is_transient,
     _parse_output,
+    _quota_spent,
     _raise_if_systemic,
     _reasoning_for,
     _report_provider_failures,
@@ -196,6 +197,8 @@ def generate_from_context(
     # again: those slots stay None.
     provider_errors: dict[int, str] = {}
     row_errors: dict[int, BaseException] = {}
+    # Item index -> the quota error for a prompt not sent (token-unit quota used up).
+    unsent: dict[int, BaseException] = {}
     # Slots whose output failed to parse after stopping at max_tokens.
     cut_off: set[int] = set()
     # Slots kept although they stopped at max_tokens (e.g. output_schema=None
@@ -247,10 +250,14 @@ def generate_from_context(
                 for (i, slots), completions in zip(batch, batch_results):
                     if isinstance(completions, BaseException):
                         # A content-filter block or an over-long prompt fails
-                        # only this row; a bad key, unknown model, or other
-                        # 400 fails every retry.
+                        # only this row, and so does a prompt not sent because
+                        # the token-unit quota is used up (cached prompts still
+                        # replay); a bad key, unknown model, or other 400 fails
+                        # every retry.
                         if _is_row_error(completions):
                             row_errors[i] = completions
+                        elif _quota_spent(completions):
+                            unsent[i] = completions
                         elif not _is_transient(completions):
                             raise completions
                         provider_errors[i] = _failure_label(completions)
@@ -328,7 +335,7 @@ def generate_from_context(
         log.warning(message)
         _tracking.add_op_warning(message, "parse_failure")
     _report_format_talk(format_talk, log)
-    _raise_if_systemic(list(row_errors.values()), len(prompts))
+    _raise_if_systemic([*row_errors.values(), *unsent.values()], len(prompts))
     if provider_errors:
         _report_provider_failures(
             f"alter.generate_from_context: {len(provider_errors)} of {len(prompts)} "
