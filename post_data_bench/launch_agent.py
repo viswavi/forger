@@ -28,7 +28,7 @@ parser.add_argument(
     "--prompt", required=False, help="Path to a file with data-generation instructions."
 )
 parser.add_argument(
-    "--task", required=True, choices=["coding", "culture", "frontiercs"]
+    "--task", required=True, choices=["coding", "culture", "frontiercs", "healthbench"]
 )
 parser.add_argument(
     "--backend",
@@ -150,10 +150,11 @@ args.backend = (
     else args.backend or "tinker"
 )
 args.model = args.model or MODELS[args.backend]
-# The algorithmic task recommends a smaller dataset (~500 rows, at most 800).
-ROW_TARGET = 500 if args.task == "frontiercs" else 1250
+# The algorithmic task recommends a smaller dataset (~500 rows, at most 800);
+# the clinical task asks for at least 400.
+ROW_TARGET = {"frontiercs": 500, "healthbench": 800}.get(args.task, 1250)
 if args.min_rows_nudge is None:
-    args.min_rows_nudge = 200 if args.task == "frontiercs" else 1000
+    args.min_rows_nudge = {"frontiercs": 200, "healthbench": 400}.get(args.task, 1000)
 # Time a nudged agent needs to retrain. Set when 80 algorithmic RL steps of 32
 # prompts took ~10 h; the RL-only recipe's 100 steps of 8 took ~4.6 h (Orchard
 # 164619, 165011-165013).
@@ -166,16 +167,20 @@ if args.training_mode == "sft-rl" and args.model != MODELS[args.backend]:
 # yet; see HANDOFF_culture_tinker_eval.md).
 if (
     args.training_mode == "sft-rl"
-    and args.task in ("culture", "frontiercs")
+    and args.task in ("culture", "frontiercs", "healthbench")
     and args.backend != "local"
 ):
     parser.error(f"the {args.task} unified recipe needs --backend local")
-if args.task == "frontiercs" and args.training_mode != "sft-rl":
-    parser.error("frontiercs runs only in the unified recipe (--training-mode sft-rl)")
+if args.task in ("frontiercs", "healthbench") and args.training_mode != "sft-rl":
+    parser.error(
+        f"{args.task} runs only in the unified recipe (--training-mode sft-rl)"
+    )
 # The task's name wherever the agent can see it: sandbox paths, the sandbox's
 # PDB_TASK and the run's token-budget policy. The agent must not learn which
 # benchmark it is evaluated on, e.g. frontiercs -> post_data_bench/algorithmic.
-PUBLIC_TASK = {"frontiercs": "algorithmic"}.get(args.task, args.task)
+PUBLIC_TASK = {"frontiercs": "algorithmic", "healthbench": "clinical"}.get(
+    args.task, args.task
+)
 if (
     args.finalize_submission or args.prepare_final_only
 ) and args.training_mode != "sft-rl":
@@ -462,6 +467,8 @@ class Tee:
             s2_api_key,
             os.environ.get("LLM_API_KEY"),
             os.environ.get("LITELLM_JUDGE_API_KEY"),
+            # The host's test grader key; never forwarded to the sandbox.
+            os.environ.get("LITELLM_OFFICIAL_JUDGE_KEY"),
             os.environ.get("TINKER_API_KEY"),
         ):
             if secret:
@@ -548,6 +555,10 @@ RAW_SCHEMA = {
     "frontiercs": (
         '{"prompt": [...chat messages...], "ground_truth": "<think>...</think>'
         '```cpp ...```", "rubric": [[criterion, weight], ...]}'
+    ),
+    "healthbench": (
+        '{"prompt": [...chat messages...], "ground_truth": "a reference answer", '
+        '"rubric": [[criterion, weight], ...]}'
     ),
 }[args.task]
 
@@ -647,6 +658,8 @@ TASK_PUBLIC_FILES = {
     "culture": ["validation_tasks_de_obfuscated.jsonl", "train_model.sh"],
     # The evaluator copy writes validation_tasks.jsonl and problems/.
     "frontiercs": ["train_model.sh"],
+    # The evaluator copy writes validation_tasks.jsonl.
+    "healthbench": ["train_model.sh"],
 }[args.task]
 
 if args.training_mode == "sft-rl":
@@ -846,7 +859,14 @@ def _task_public_copies(task_dir: str, dest_task_dir: str) -> None:
                     row[key] = ids[row[key]]
                     # The source's own problem number, e.g. "26".
                     row.pop("problem_id", None)
+                    # The dataset's labels, which agents infer for themselves.
+                    for label in ("use_case", "type", "difficulty", "specialty"):
+                        row.pop(label, None)
                 predictions.write_text("".join(json.dumps(r) + "\n" for r in rows))
+                if args.task == "healthbench":
+                    baseline.get("context", {}).pop("by_label", None)
+                    baseline.pop("source", None)
+                    copied_metrics.write_text(json.dumps(baseline, indent=2) + "\n")
 
 
 def build_agent_mounts(

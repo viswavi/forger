@@ -36,6 +36,8 @@ def source_id(row):
         return str(row["private_test_case_idx"])
     if "problem_id" in row:  # one row per judged C++ problem
         return f"problem:{row['problem_id']}"
+    if "rubric_items" in row:  # one row per rubric-graded chat
+        return f"chat:{row['id']}"
     return row["situation"].strip()
 
 

@@ -42,6 +42,8 @@ STATEMENT_FIELDS = {
     "question_content": "default",
     "situation": "short",
     "statement": "long",
+    # Chats: the user turns, joined (median ~40 words, like situations).
+    "messages": "short",
 }
 SIGNATURES = Path(__file__).with_name("decontamination_signatures.json")
 
@@ -92,6 +94,12 @@ def _statements(path):
         json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()
     ]
     field = next(f for f in STATEMENT_FIELDS if rows and f in rows[0])
+    if field == "messages":
+        texts = [
+            "\n".join(m["content"] for m in row["messages"] if m["role"] == "user")
+            for row in rows
+        ]
+        return texts, STATEMENT_FIELDS[field]
     return [row[field] for row in rows], STATEMENT_FIELDS[field]
 
 

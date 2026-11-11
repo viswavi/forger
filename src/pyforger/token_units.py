@@ -154,6 +154,10 @@ def default_generation_limit(task):
         return DEFAULT_GENERATION_LIMIT
     if normalized == "algorithmic":
         return 120_000_000
+    if normalized == "clinical":
+        # Mostly DeepSeek-V4-Flash: a 3-call example (question, reference answer,
+        # criteria) took ~8,500 units; GLM-5.3 at low effort ~244,000 (2026-11-11).
+        return 230_000_000
     raise ValueError("Unknown task for the generation token-unit quota")
 
 
@@ -169,6 +173,11 @@ def default_rl_limit(task):
     if normalized == "algorithmic":
         # Responses run ~15K tokens, so judging them costs more per rollout.
         return 150_000_000
+    if normalized == "clinical":
+        # Every answer is judged per criterion: 230M covers one 80 x 32 x 8 run at
+        # ~3-5 criteria per prompt, plus 40M for validation evaluations, which
+        # use this judge quota too.
+        return 270_000_000
     raise ValueError("Unknown task for RL token-unit quota")
 
 

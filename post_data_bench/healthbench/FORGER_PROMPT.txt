@@ -1,0 +1,102 @@
+# Task: Clinical Assistance for Physicians
+
+You must produce a demonstration of how to effectively and extensively use a new data generation library called Forger. You will show that your demonstration is effective by generating a training dataset to finetune a small reasoning model to get better at assisting physicians. The dataset must consist of prompts and rubrics, which can be used to perform RL training (GRPO) on the small model. You have {TIMEOUT_HOURS} hours and are welcome to iterate as time allows before selecting and submitting a final RL checkpoint for evaluation.
+
+In this setup, a model is given a chat between a physician and an assistant, ending in the physician's message, and must write the assistant's next reply in a single response, with no tools and no feedback. The chats are physicians' own tasks: consults about patients, writing and documentation, and questions about medical research; some test whether the assistant handles unsafe, misleading or underspecified requests well. Most chats are a single message, some have earlier turns, and they range from a few words to long pasted notes or papers. Each chat has its own rubric written by physicians: one to five criteria, each worth between -10 and 10 points. Positive criteria describe what a good reply does; negative criteria describe mistakes, such as unsafe advice. A grader model checks each criterion separately against the final answer only (the text after the last </think>; the reasoning is never graded) and decides whether it is met. An answer's score is the sum of the points of the criteria it meets (met negative criteria subtract) divided by the sum of the positive points, so it can be below 0. The score is then adjusted for length: it loses 0.0147 for every 500 characters of final answer beyond 2,000, and gains the same for every 500 characters short of 2,000. A chat's score is the mean over 8 independently sampled answers, and performance is the mean chat score, clipped to [0, 1] and multiplied by 100.
+
+Your data should make the model's replies better as physicians judge them.
+
+The validation set is yours to use however you like. (Training on validation chats is allowed, but leaves validation much less useful for choosing checkpoints.) It consists of:
+- {TASK_DIR}/validation_tasks.jsonl: one row per chat, with "id", "messages" (the chat, ending in the physician's message), "rubric_items" (its criteria, each {{"criterion_text", "points"}}), and "physician_response" (a physician's own reply to the chat).
+- {TASK_DIR}/model_outputs/{BASELINE_MODEL}/val/, if present: the baseline model's results. metrics.json holds summary scores. In predictions.jsonl, each row's "samples" holds its sampled answers, and each answer's "criteria" gives, for every criterion, whether it was met and the grader's explanation.
+
+"messages" is exactly what a model sees at evaluation, with no system message (`prompt_building.build_candidate_prompt(messages)` in {TASK_DIR}/prompt_building.py returns it). Each answer is sampled at temperature 1.0 with up to 28,672 tokens; a response that runs out of tokens before closing its reasoning is graded as an empty answer. The grader's prompt is `GRADER_TEMPLATE` in {TASK_DIR}/judge.py, and `bash {TASK_DIR}/evaluate_model.sh` runs the whole evaluation (see Training and Validation). Your prompts are used verbatim for training.
+
+# Scaffold
+
+You have access to Forger, a library for building synthetic data and RL environment pipelines. Extremely important: the whole point of this task is to show what Forger can do, so use Forger for every part of building your data. Forger is a superpower that will help you solve this task faster and better, compared to other people working on the same task who don't have access to this tool. See {FORGER_REPO}/docs/AGENTS.md for an overview, and the per-topic references it links in {FORGER_REPO}/docs/agents/ (e.g. acquire.md, inspect.md, models.md) for details. Then read {FORGER_REPO}/examples/rl_math/pipeline.py before you write any code: it is a complete worked example of the kind of idiomatic pipeline Forger affords, in a different domain (math). Its tasks come from Forger ops end to end: it retrieves sources from the web, has LLMs extract topics and write problems, solutions and answers, keeps those a strong model solves (pass@k), calibrates difficulty against the student, and checks its rubrics on student and skyline responses. Note that each step's docstring records the evidence behind its choices -- this is good practice but you can record the evidence behind your decisions in whichever format you prefer. Build your pipeline the same way: prompts, rubrics, etc should come from composing Forger's acquire, alter, and filter ops (retrieval, `sample_from_LLM`, `generate_from_context`, rubric generation), and every set of rows passes through Forger's inspect ops. Shared glue that turns those outputs into rows, like the example's grade() template, can be your own code. Rows produced by your own problem generators, templates, or parameter grids are not a use of Forger, even when wrapped in @op or @step: that is what someone without Forger would do, and a run built that way has failed, even if its data looks good. Everything an LLM generates is approximate, and that is completely expected. Filters, not micromanagement, are how you get good data: generate more than you need and let Forger's filter and inspect ops remove and understand what fails, instead of writing or hand-fixing problems yourself. Follow {FORGER_REPO}/docs/agents/methodology.md, which describes how Forger is meant to be used, as you build your dataset. You may also use any other publicly available tools and libraries, including Brave Search API, Semantic Scholar API, or any other library/API that does not require a paid subscription.
+
+The goal is a student that is genuinely better at this kind of chat, including chats it has never seen, not one fitted to the validation set. Your rows must not restate, paraphrase, or vary individual validation chats.
+
+How you build, check, and select your data is up to you. The dataset you submit must be:
+- valid: in the format below, passing the format check;
+- large: see the row counts under Data Format; we need enough data to enable learning
+- diverse: we need enough diversity in our data to enable generalization
+- correctly graded: each row's rubric rewards a response by how good it actually is.
+
+When `generate_custom_rubric` or `convert_rubric_criteria` writes code criteria, pass the sandbox rules (see Data Format) as `code_guidelines=` (a string), so the criteria it writes compile in the RL grader.
+
+`rubric_score()` from `rl.solution_runner` (see Training and Validation) returns a row's RL reward for a response, so it works as the metric of `filter.by_pass_at_k` and of `inspect.rubric_scores`.
+
+# Data Format
+
+Write ONE dataset to {RAW_DATA_PATH} (write a temporary file, then rename it). Each JSONL row has the fields "prompt" and "rubric", and optionally "ground_truth":
+{{"prompt": [{{"role": "system", "content": "..."}}, {{"role": "user", "content": "..."}}], "ground_truth": "a reference answer (optional)", "rubric": [[{{"prompt": "Describe a criterion for the judge", "answer_only": true}}, 1.0], [{{"code": "def grade(prompt, response, ground_truth):\n    return 1.0"}}, 1.0]]}}
+The constant score above only illustrates syntax; use meaningful criteria.
+
+- "prompt" is the chat messages, ending in a user turn. RL samples responses to these messages; neither the ground truth nor the rubric is ever shown to the policy.
+- "ground_truth" is optional text that your criteria receive, for example a reference answer; it is "" when omitted. Training uses only prompts and rubrics, so rows need no written responses. The student model ({STUDENT_MODEL}) is trained and evaluated in thinking mode; only the text after the final </think> is graded.
+- "rubric" is a nonempty list of [criterion, weight] pairs with finite, nonnegative weights and a positive sum. The RL reward is the weighted mean of the criterion scores. Each criterion is either:
+  - {{"code": ...}}: Python defining one top-level `def grade(prompt, response, ground_truth):` (three positional parameters) that returns a number in [0, 1]. `prompt` is the chat messages; `response` includes its thinking trace. It runs in RestrictedPython: only json, re, math, string, collections, itertools, functools, and statistics can be imported, with no files or network; names starting with "_" (`_` alone works), `nonlocal`, annotated assignments, `str.format`, and `open()` fail, and a criterion that fails scores 0 for every response. From {TASK_DIR}: `python rl/rubric_worker.py < criterion.json` (a JSON object with "code", "prompt", "response", and "ground_truth") prints the score RL would give.
+  - {{"prompt": ...}}: a natural-language criterion. The judge model (DeepSeek-V4-Flash) scores it given the criterion, the prompt, the full response, and the ground truth. With {{"prompt": ..., "answer_only": true}}, the judge sees only the final answers instead: the text after the last </think> of the response and of the ground truth ("" when the response's thinking is never closed), which costs far fewer judge units on long responses. The RL judge scores each criterion from 0 to 1 with its own prompt (`prompt_score` in {TASK_DIR}/rl/rubric_rm.py); the evaluation grader decides met or not met.
+
+Submit at least 10 and at most 2,000 rows, with no duplicate prompts; 2,000 is a hard limit. Submit at least 400 rows, and more if you can. The default RL recipe draws {RL_PROMPT_DRAWS} prompts and samples 8 completions per prompt ({RL_COMPLETIONS} completions total). Prompts are drawn repeatedly from the training partition; a small dataset is revisited more often. You may revise your data and run RL as often as your time and quotas allow.
+
+Your model will be tested on a public benchmark of physician-written chats and rubrics, the same one the validation chats come from. Study the validation set freely and let it guide your data; the benchmark itself is off-limits. Do not search for, download, or browse it. Do not train on its chats (or ones you suspect are in it), their rubrics or reference answers, or edited versions of them, and do not try to reconstruct it or work out which chats it contains. General public material such as clinical guidelines, textbooks, drug references, and research papers is fine and encouraged. The training commands remove rows that overlap the benchmark and report how many they removed; `python -m rl.decontaminate --data <file>` (from {TASK_DIR}) reports the same count for any file. Use it sparingly, to check your own data, never to probe what the test set contains. Breaking any of these rules fails your run automatically, without notice. The goal is a model that is genuinely strong at this kind of chat, not one that has memorized the benchmark.
+
+Each prompt must fit in {MAX_SFT_LENGTH} tokens; longer rows are rejected, not truncated. The harness holds out a fixed 10% of your rows to monitor RL reward and trains on the rest; do not generate a separate evaluation set.
+
+Check the format before training and again after your last edit (from {TASK_DIR}):
+python -m rl.agent_training validate --data {RAW_DATA_PATH}
+This checks the schema, weights, thinking targets, grade() signatures, and RestrictedPython compilation. It does not run criteria or call the judge. It prints the row count.
+
+# LLM API Usage
+
+Generation has a shared quota of {GENERATION_TOKEN_UNIT_LIMIT} token units. DeepSeek-V4-Flash costs 1 unit per input token and 3 units per output token; GLM-5.3 costs 4 units per input token and 12.5 units per output token. Count cached inputs at full weight and include reasoning in output tokens. Use `litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731` or `litellm_proxy/azure_ai/FW-GLM-5.3`; other model families have no defined unit weights for this run.
+
+Read `{GENERATION_USAGE_PATH}` for cumulative `token_units`, `remaining_token_units`, and `cost_usd`. `unpriced_calls` counts responses without dollar pricing; only token units enforce the quota. The quota spans all pipeline iterations and processes. Each call holds its worst case in the shared ledger while it is in flight (its prompt plus `max_tokens` for every completion, or 65,536 tokens per completion without `max_tokens`), and new calls stop once used plus held units reach the quota. A response replaces its hold with its actual usage. A call that times out, loses its connection, or is still running when its process is killed stays charged at its full hold, because the API may still bill it; the ledger counts these in `unreturned_calls` (a killed process's holds move there after two hours). Setting `max_tokens` keeps holds close to real usage. Do not delete/reset the ledger or change its environment settings. The OpenHands model driving your agent turns is accounted separately.
+
+Credentials are provided as `LITELLM_API_KEY` and `LITELLM_BASE_URL`; load them from the environment without printing them. Forger's Model records usage against this quota automatically, so make your generation calls through Forger and do not wrap Model calls a second time.
+
+DeepSeek-V4-Flash returns its reasoning separately from its answer, and Forger keeps it: `sample_from_LLM` and `generate_from_context` put it under each output's `thinking_trace` key. Set the effort explicitly, e.g. `Model(..., reasoning_effort="high")`: without it DeepSeek-V4-Flash does not think at all, and the setting controls how long the reasoning is.
+
+Measured on this gateway: GLM-5.3 still reasons with an effort of "none" (as at "low"); on hard prompts, DeepSeek-V4-Flash at "low" reasoned 10,000-25,000 tokens, and either model can spend all of `max_tokens` on reasoning and return no answer. Long GLM-5.3 requests can time out at the gateway.
+
+{BACKEND_STUDENT_USAGE}
+
+Web search uses `BRAVE_API_KEY`; Semantic Scholar uses `S2_API_KEY`. Web search has no fixed usage limit, but be reasonable: do not send hundreds of thousands of queries.
+
+# Training and Validation
+
+{BACKEND_TRAINING}
+
+You have {TIMEOUT_HOURS} hours for the entire agent workflow: data generation, RL, and validation. You decide how to divide that time, how many experiments to run, and which trained RL checkpoint to submit. You may train more than once, each run on whatever data you choose. {BACKEND_RL_START} A run's --data can be any file in the dataset format, not only {RAW_DATA_PATH}. Each file may have at most 2,000 rows. Use a fresh output directory for each training run. Terminal commands: the terminal tool's `timeout` is in seconds (3600 is one hour) and may not exceed 3600. Start anything that may run longer (RL, large sampling or evaluation) in the background, e.g. `nohup python ... > run.log 2>&1 &`, and check its log, so that a command that never finishes cannot block you.
+
+{BACKEND_TIMING} These are approximate guidelines, not guarantees; model, backend, sequence lengths, and service load affect wall-clock time. Leave enough time to complete a useful RL run, evaluate candidate checkpoints, and write submission.json. Keep a completed RL checkpoint selected while trying further experiments.
+
+`rl.solution_runner.rubric_verifier(threshold=1.0)` grades a whole sampled response, including thinking, using its row's code criteria and returns True when the reward reaches `threshold`; `rubric_score()` returns the reward itself.
+
+After your session ends, the host freezes your selected final RL checkpoint and evaluates it on the secret test set. The host does no additional training. Only this secret-test evaluation happens outside your time budget.
+
+# Budgets
+
+{BACKEND_BUDGET}
+- You have {JUDGE_TOKEN_UNIT_LIMIT} token units of compute ({JUDGE_USAGE_PATH}) strictly for the judge, to use only if absolutely needed; they are shared by all your judge experiments, RL runs, and validation evaluations. Exhausting it stops RL at its latest checkpoint. In-flight judge calls count at their worst case (prompt plus 4,096 output tokens) until they return, so many concurrent judge calls can stop RL before `token_units` alone reaches the quota. Judge credentials are `LITELLM_JUDGE_API_KEY` (and `LITELLM_JUDGE_BASE_URL`, defaulting to `LITELLM_BASE_URL`). For your own judge calls, use `completion` or `acompletion` from `rl.token_budget` (in {TASK_DIR}) with budget="judge"; they load the judge credentials and record usage. JUDGE_MODEL defaults to litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731, with reasoning effort JUDGE_REASONING_EFFORT (default low).
+- Validation evaluations grade with this judge and quota (DeepSeek-V4-Flash with the evaluation grader's prompt); the secret test set is graded by a different, stronger model with the same prompt. A validation evaluation of 8 answers per chat makes 1,552 grader calls, one per criterion of each answer.
+- Generation quota left unused when the session ends is simply lost.
+- Never delete or reset any usage ledger or change its environment settings.
+
+# Final Submission
+
+After choosing a completed RL checkpoint, write {SUBMISSION_PATH} as:
+{{"checkpoint": "<absolute path to your selected RL checkpoint directory>"}}
+{BACKEND_SUBMISSION}
+Keep your final dataset at {RAW_DATA_PATH} and all training outputs under {AGENT_DATA_DIR}. The selected checkpoint must have completed at least one RL step. The training helpers record an rl_submission.json receipt with RL checkpoints. You can revise your dataset between experiments and generate as much data as you like, but the selected checkpoint's own training (every training run on the way to it) must use only prompts from your final dataset at {RAW_DATA_PATH}; a checkpoint that fails this check cannot be submitted. Check the checkpoint you select with: python -m rl.agent_training validate --data {RAW_DATA_PATH} --checkpoint <checkpoint directory>. Preserve the data versions used by each experiment for your own records.
+
+Write a valid submission.json as soon as you have a completed RL checkpoint, and update it atomically when you choose a better one. If your time expires, the host evaluates the checkpoint already selected there. When you are satisfied, call the finish tool to start secret-test evaluation immediately.
+
+# Records
+
+Put all your data and code in {AGENT_DATA_DIR}/, including the code that produced your final dataset, and save that dataset to {RAW_DATA_PATH}. Before you finish, write {AGENT_DATA_DIR}/README.md: a short description of how your dataset was built.
+
+You have {TIMEOUT_HOURS} hours to do your work. After this, we will evaluate your selected final RL checkpoint. While you get no points for finishing early, if your training and checkpoint selection are complete, then you are free to end the session early with the finish tool (see Final Submission). Now let's get started!

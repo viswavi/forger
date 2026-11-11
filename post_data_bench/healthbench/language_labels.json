@@ -1,0 +1,3583 @@
+{
+ "method": "language_filter.py: DeepSeek-V4-Flash labels (user_language, answer_language, other_language_material) plus lingua on the physician response; English = en, en, false, en",
+ "labels": {
+  "004691ba3ff3eec87d6a5598d9e1b04b": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "00b999ff12f1161788913837860b6221": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "0187e39434668c08c7b18b8e81cc3604": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "01cc7b9ef04d9c06acfe88c14b268ad7": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "02f723bdccbbe759af218a406c9a0d82": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "03479a50f43fbc821469833b97d07197": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "04f0b56fe57072747e3d6721ab3e9dc9": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "050d51fae49ae14008ad94db8b035e45": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "0535beb34f00feaeb7fe28c697caa476": {
+   "user_language": "pt",
+   "answer_language": "pt",
+   "other_language_material": false,
+   "physician_language": "pt"
+  },
+  "05569de0534eb183cc9935ff9498a7cf": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "05b6fa65abadeec22256cc7d67f46e30": {
+   "user_language": "et",
+   "answer_language": "et",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "065a88b40640f4e6b26f6ebaa4d14f0c": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "068abd7e3805cfacf547bedf2be204d5": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "069140a41499956bda412db8a616992e": {
+   "user_language": "en",
+   "answer_language": "hi",
+   "other_language_material": true,
+   "physician_language": "sw"
+  },
+  "06d878d083a6cd90c882750bb08df30e": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "077cc5ea55c6378fd65b529e2928dff5": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "08589ea9e0b7b1d3115d7e6845d0ef21": {
+   "user_language": "pt",
+   "answer_language": "pt",
+   "other_language_material": false,
+   "physician_language": "pt"
+  },
+  "0a2ce20b6253077ae5ad31ea8f684ca3": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "0a874dd5b8a73803559f52953ca8ad9b": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "0bcb85b6e98449473140b1f17e0b69ca": {
+   "user_language": "et",
+   "answer_language": "et",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "0bfb5926e92991296c43e4ede7c06896": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "0c079a927262b3ab8cc826c60bd63bdd": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "0d15a0b94d2d68ccaf8fc89fbe504637": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "0df5ce0b5b83dd2a1907ad3d3debf0b6": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "0dfb42f288816984dfda2951b1da9339": {
+   "user_language": "am",
+   "answer_language": "am",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "0eedd9a1307d33aaa9ac9d72a7a1e2d8": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "0f994477d9c0e3125eb6a8687a4f0d68": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "102aee89bce36fe619f99ecd157cf0e7": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "1105c338936c6ad49af4ff5b44ebf3e8": {
+   "user_language": "et",
+   "answer_language": "et",
+   "other_language_material": false,
+   "physician_language": "et"
+  },
+  "113c9b4b5dae630e4f2f31a968e373b2": {
+   "user_language": "et",
+   "answer_language": "et",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "11cb964a58ffb9fb7abda7c811ca305f": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "121f0e276e5a2cb72d5b76f7f25a5d1f": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "127c01f70e757fa089c2c449c72d0d87": {
+   "user_language": "it",
+   "answer_language": "it",
+   "other_language_material": false,
+   "physician_language": "it"
+  },
+  "12807d77679896ad21c5b8b69a432f7b": {
+   "user_language": "es",
+   "answer_language": "es",
+   "other_language_material": false,
+   "physician_language": "es"
+  },
+  "12beaf3375f3ce85e04b651cf88de389": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "145254e9da9bd035b6a5a759d5a3b1b2": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "148caba6ee69c05895b4d9b0012d7a66": {
+   "user_language": "pt",
+   "answer_language": "pt",
+   "other_language_material": false,
+   "physician_language": "pt"
+  },
+  "1520a3e2742249f26d997d93d0df274c": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "15ca9d15616dda2597a76e8f52b9bc83": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "171d96950d977bccf3d646e5b5591bef": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "17456e318203cf0a9c7ca8980aa14c32": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "185626deee8d46c1249ae90f50ae1028": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "198d509ec40adbcbf08d00a1d402c2e7": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "19c0631140234e6847b03bd271cb3b5e": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "1acbd8f036de1be33f2df252e8ebfb41": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "1d45010f49e42dcfb9d635ff1aa58828": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "1e285599fa017458dbb6e8a9abc808a8": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "1e8d0f3aa88ceb306829e93d19a455ff": {
+   "user_language": "en",
+   "answer_language": "ur",
+   "other_language_material": false,
+   "physician_language": "yo"
+  },
+  "1fbeb885eb2615ab99d2e24521077cb0": {
+   "user_language": "pt",
+   "answer_language": "pt",
+   "other_language_material": false,
+   "physician_language": "pt"
+  },
+  "1fdab1ca31af653b3f0803b21ac60a4d": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "2014ab7a9d8865f0da483817843ccbc5": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "20cae7fd167b5eebe3ae19c6e25ccdac": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "2142fe540982b1ca76ab54dd6280d831": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "2159ea0354a2e29e4d8449527d600681": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "21a80ac4a9fc6cb728b444dd1caeca05": {
+   "user_language": "et",
+   "answer_language": "et",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "21b7e2c4ac5982729923429bc25c780d": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "21f409c6576ec3af6b92fe2457cf1ddc": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "2270211dc2e98eb192e67e1d36ca862f": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "22a7f2862a4fe89164daaead579fadec": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "23385171a6ac25cffc85a38817fe4874": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "2346e3e2d47f1326ba63811a6a4d0910": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "247501f61a88c48fbf4eccaaf0bb4c97": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "24fcee98a54e79c2289c6b7cc68ced5e": {
+   "user_language": "et",
+   "answer_language": "et",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "265c5c317c443f5d6ca22c95a82c3c5e": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "267e8dd437cd5940db3b4ee5c439556b": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "268b10d5db2f10ed89c751d8dd851af2": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "26ae3bcf430ac9c6b0885dde8c560447": {
+   "user_language": "et",
+   "answer_language": "et",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "27780da4d1b342caf1b83f5bdf726ba1": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "27bbb5684615ff90c2934062536a9abd": {
+   "user_language": "pt",
+   "answer_language": "pt",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "282e788a7f8be989ae55aa236fcd9f88": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "286d2d4a7872a39d284753d2f39e188e": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "286ea1fd32b143e4f5880cca26865741": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "28cb12d8cb27849de6005ccc890cd5d4": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "29a25e964b952d354b5dbba07e126bcb": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "29e0420f32428cbba98f88c0ced37939": {
+   "user_language": "en",
+   "answer_language": "ar",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "29f5c5398af1fb18200344adfd16a4fc": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "2b928aa6e784bfe90bf1d98304ec68a5": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "2c8aa4477bde810f48760f5001ec68d1": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "2cca611d46dfcb9a9e4af17c7e29cbb0": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "2cce06fea04e6701fab68e0a1b25635b": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "2d11620a117cb2aec3c1ad4054dbbc8f": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "2f0063180b7fe7da3c326912112d6cb7": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "2f173f44ccdf02cf8861698819805831": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "2f654b3e7680051dda0345c1493d0fdd": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "2fadeaf6f5af1e6a10ffde01c134b2ed": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "300b3bd58d750cb36e637b10bb567e2c": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "304e1196cbe5caa7907f30d170174adc": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "30d77137c6c4f79bc11e18f361be0e72": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "30df807354da23334ea56eff3588c915": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "3275d15c26cbd9e850b54c99514fa919": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "3342a2cb06f928ea2322aecd7c58eedc": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "33e41e1fbee61e8b71440b5b21dcf3c3": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "346463ff8f2fe8a4526f8ccccbfe07f9": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "34de42d85191eec893b650337159ae32": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "34e392723b3c5e4a18ffef591999b2ca": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "3533d9bfd2d32f8c465e7af62aec9781": {
+   "user_language": "en",
+   "answer_language": "zh",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "35466fb2f5a541d07de37a4504fe81b1": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "354a8bee8cf473e2aba50fe1716c08aa": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "35b3491359ab7e2232c335e8c5b01ed2": {
+   "user_language": "en",
+   "answer_language": "am",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "35b9ab1e8dc0ef2244dde26f4872d185": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "35cb554c59c8313f09594c0fddb8b445": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "35d92b74375c5b57b7a476abe295ab84": {
+   "user_language": "et",
+   "answer_language": "et",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "369121042da390db99c77b48abd11fc7": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "37101607e2947481e85e8fe3597a1acf": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "375c7dd8697a5589ebd8b144d01291ba": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "38a13bdef2c57f656969c2a2869f987e": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "38ed97e78292dfcf0805ac924311fa14": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "el"
+  },
+  "393359cdda634f9cc1afe3e0ff6629a8": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "3a6f1b8fa83a0dfb47cc0b2543969b49": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "3b22335d21170ba8dfc661926255c449": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "3b27921820d74d54d7114f6f7a569902": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "3b6768c0c7ec45fe4fb1aa6d9a4a8c8e": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "3decb44b98204650079838963bae22cc": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "3defc5cf72769c8971abc626ffd81aaf": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "3e700f616cccc0c3cbeea24244544f27": {
+   "user_language": "pt",
+   "answer_language": "pt",
+   "other_language_material": false,
+   "physician_language": "pt"
+  },
+  "40346f3978ae08ebb99213b99290fa90": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "415bf8bc30554039662afbaf4b778231": {
+   "user_language": "pt",
+   "answer_language": "pt",
+   "other_language_material": false,
+   "physician_language": "pt"
+  },
+  "41796b721daa453e639856fba8994e79": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "41ba225b4e2a8210c1d03112a34c0ab1": {
+   "user_language": "pt",
+   "answer_language": "pt",
+   "other_language_material": false,
+   "physician_language": "pt"
+  },
+  "422029560d6abd084ab320ed563a6ec5": {
+   "user_language": "es",
+   "answer_language": "es",
+   "other_language_material": false,
+   "physician_language": "es"
+  },
+  "4223ade5acc1d70a9b5d305cf6c8917d": {
+   "user_language": "en",
+   "answer_language": "pt",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "4248b300598106e33a9909e3d91a1aa3": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "429b73eaa771e2c0d07aca566689a026": {
+   "user_language": "pt",
+   "answer_language": "pt",
+   "other_language_material": false,
+   "physician_language": "pt"
+  },
+  "43195fe0fc4d3af8a379242fb06582dd": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "431c77787508a87f1847dbbc11511a3f": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "438e816288083f1398ef459a08d240ff": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "4414cb81ffaf3aa7f135fa69c922d576": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "449ba767eff17a9bfb86c974c11380b7": {
+   "user_language": "it",
+   "answer_language": "it",
+   "other_language_material": false,
+   "physician_language": "it"
+  },
+  "458add9eb24073846f7864852018af56": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "458c5d4af48964eb26cf49f27dcdf968": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "484dbbd65d250dafa61f86b40598d040": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "48e7e92683fe9a0e1feece4beb6f7d96": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "493bf76b2bd8230c55589b3c43800dc6": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "4942367456125379e7e5a0d3ae360341": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "4b082cffba36adb63899a5574aa67924": {
+   "user_language": "en",
+   "answer_language": "ar",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "4b21d2ae3dc5920673ec68881937653f": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "4b863d4f920b1e54cdebe37d6cd050b9": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "4d85894b4f67dec92b48bfe0d9f03540": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "4dfee0221452571b9508a8b0102f38d4": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "4ec442d1a4ab6ae633d47438531697c5": {
+   "user_language": "en",
+   "answer_language": "sw",
+   "other_language_material": false,
+   "physician_language": "sw"
+  },
+  "4f060015d211847c8970cd651943a271": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "4f08ae480b16ef825cf098eca6530e68": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "4f118b7f2841f4816f4b8d4b989e4500": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "4f8e076d432c53c2c56fb24215143490": {
+   "user_language": "et",
+   "answer_language": "et",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "503b75b4cba8e5abd656cd2512a449bb": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "5060922f2c0e9525177a1d251594bb9a": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "50ea172e8c130fae0a8fdbbf13e71c01": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "518014a61f0ec910cb3733e19c7e45c7": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "51dabf3bf5b6a7866163b8ccf780292d": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "51e988fb13e77892d08430e938f47864": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "5214b63dda27c2e185918b44bff7e98c": {
+   "user_language": "pt",
+   "answer_language": "pt",
+   "other_language_material": false,
+   "physician_language": "pt"
+  },
+  "521ac21c23b9bcd2bb4aa588195c087a": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "540588c49617772207aee3cc5f3f47cd": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "5433d7fd883062036203893c8b32e771": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "5452694fd36a2266f2e49e0184bf6d63": {
+   "user_language": "en",
+   "answer_language": "el",
+   "other_language_material": true,
+   "physician_language": "el"
+  },
+  "54927c2849dc77d31f5cdec37707a1c9": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "54f98e63dbdd317b1a6bf3d8f84f7bf0": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "566cbac70d31673e216abbe076c927ea": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "56ea2cd6b43ae4f70b6405e46c6f14cd": {
+   "user_language": "pt",
+   "answer_language": "pt",
+   "other_language_material": false,
+   "physician_language": "pt"
+  },
+  "571bb544ee42e1d03ad809b07dbc7223": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "57ceb8d0506f3263702e59eef9ce8ad3": {
+   "user_language": "pl",
+   "answer_language": "pl",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "57da2255d7685c4b569011cdec5c4a95": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "580369b90e7f6694db0f57e584b80bd8": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "584f84f2ba215592e2356cbcd98240e4": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "58cdb8fc379445fb8e6ddc8e7adcd511": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "591115a0e09b5c28a0a2e9df5566babb": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "591e65a532772478e98b0d9a8e579cf0": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "5957b85cb87ef57fde1032fe7af92d39": {
+   "user_language": "pt",
+   "answer_language": "pt",
+   "other_language_material": false,
+   "physician_language": "pt"
+  },
+  "5a5ff4b2b727dacb76eae6d10b15abea": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "5b139efb2c8c5881d782135358d5ec25": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "5b639eecb6a0a71ce39b9f5349cf50db": {
+   "user_language": "pt",
+   "answer_language": "pt",
+   "other_language_material": false,
+   "physician_language": "pt"
+  },
+  "5c0b7cf263e92801542db060a513a942": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "5c15466f11c7b3588ad54e198a56022f": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "5c3ac439452be4dd558976e3edfd3198": {
+   "user_language": "pt",
+   "answer_language": "pt",
+   "other_language_material": false,
+   "physician_language": "pt"
+  },
+  "5c67feb33ca184f2a0d39de298cebd62": {
+   "user_language": "en",
+   "answer_language": "ml",
+   "other_language_material": false,
+   "physician_language": "?"
+  },
+  "5ce259604fbfef1118840478e256e126": {
+   "user_language": "pt",
+   "answer_language": "pt",
+   "other_language_material": false,
+   "physician_language": "pt"
+  },
+  "5d02069b155114c21848a27903b22fa6": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "5d855a41628a8bc025883ce2badb47b6": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "5d8d28712724b471fc891215afff4448": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "5db1bd1d8f3009feca602881ad150d3b": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "5ec7e5dbe93d45a341a648d13fb73b12": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "5ed718b4a79b3c7233d56ae7d1fb985b": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "5ee17c763b59e50153e5bb9d8c8b7f5c": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "5f703b49693f425f0d620b58d2efaed9": {
+   "user_language": "et",
+   "answer_language": "et",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "5faae377aba3ff2a4d77da3d4d9c22d8": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "61bc9faa961acf03dd9e469f0603fe4e": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "61e5bd474a0a42d2248ac0fb88ce5ac3": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "62ae980c586068d1c735e24da18eefd4": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "636616fe96c980c5615f00f1c326f90a": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "637c1df5d0d11a9f6a8ff9ef183dfd02": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "6384557eb256644f65e540f9d3d5a3bb": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "6486d9363611a4f05b03c8041610ef64": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "64b00dd7c05e12a98720e3d47116124d": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "64cd0956e902983245ff32e92f5de6ae": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "64d1b286b9704b7f8d13fd8dc67b1d9e": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "6656f26e2d17a8bc7749020ba7129ee6": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "67521d535c05f9f20df83edddc3cbae6": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "678759b212fb0229a8de563938cd7fc0": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "688978f1706b8b81e54704a901457024": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "68ea82a57829bbb36ba708868b818a83": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "696a797226704ff41bd9ef444778d73e": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "69ce3f03e8cd876e3d6e65fb80062c47": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "69e4c5e898f11a8361cc128e69bb9f7d": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "6a1461a4f831cbf80ed23fdf8e253ceb": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "6a283f9cf0bbee74b98eb5709e98699c": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "6b8d7147e81bea94d88ffd1c7a99fb25": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "6b8d9731df7f17a0b1e5c9119dc68c83": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "6c393aec7444ed28f3db46c33459fa15": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "6c3ac900869912e93d445be13f7ca2bf": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "6c6696d2524ed63388050878da44f927": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "6c6a7487d662c66166643d2a629065cb": {
+   "user_language": "pt",
+   "answer_language": "pt",
+   "other_language_material": false,
+   "physician_language": "pt"
+  },
+  "6cc5e176790b69b97e11908b40a603d8": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "6d7385494242595c03cdc6d2812f4a3d": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "6d762acc294598202a2a8532467af93a": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "6daac09cf85897e495539f3255bcf14c": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "6dc5a81a96039b3b2ac2e44c4bab9119": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "6df6c53605808c8939d2187243747ec9": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "6eec0aa68d532306ea61f809bca7c2c9": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "6f0bc653dc58e27b9422eb8e8c34fd0b": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "6f2fb5f8acd1abf5d2fe47300cffc923": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "704fc35c00a01020f25a210f10bd1e8e": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "70b6d338c5f3d475537ff276228e979b": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "70ddd059964a0e287332df46770e9a46": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "7113e3e9fa7c36ba46ddb6b6bc76d94a": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "7234a53f01df890f449c3dd8e9c5c2bb": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "724609c648dd58d4a5176d75dc23fb65": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "725e0669a5554ccfc7609d1c831c8abb": {
+   "user_language": "pt",
+   "answer_language": "pt",
+   "other_language_material": false,
+   "physician_language": "pt"
+  },
+  "7287501c95bb4bf99928f74d77c8e8c9": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "728d95d7b101878e2fe2def0d4db75d9": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "73110e9f356bbc4991e5bf95def8d7c2": {
+   "user_language": "en",
+   "answer_language": "bg",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "732854175218b714e0ed4fc81bec984a": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "73a89ab53f56f0aade8fa8b229c125b0": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "74ba10a0332a386e5a36fe3c765c5789": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "75826cd07bfeffd48b53789dd4205f03": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "7758f6c90c218f63995d0340e2a4ce80": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "7773f345fcd7cf590aa2f34eaad66baa": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": true,
+   "physician_language": "en"
+  },
+  "7791cf509bfaa1defdc4efaec9b29eb9": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "78b02f28913d81712b01941bec4e9660": {
+   "user_language": "en",
+   "answer_language": "am",
+   "other_language_material": false,
+   "physician_language": "id"
+  },
+  "78e9b68da5c4260be91eb6698e0eba4e": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "793b14f48f77c3e6a7a5ab36f8d42b8d": {
+   "user_language": "en",
+   "answer_language": "el",
+   "other_language_material": true,
+   "physician_language": "en"
+  },
+  "7981fe2fccb07ed2e6ae749fb10035ff": {
+   "user_language": "pt",
+   "answer_language": "pt",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "79d2e7c5e03aa4949d55bf2bbd819ceb": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "7b0ad484ccf93f69612c2533d044c4b7": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "7b30b74bfdd1d0e781a5d1ff9430a6cb": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "7c7b94c17a575e18ab8669d2a64ae3f6": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "7c89332a3de133ed53ba5a4e99f03862": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "7d9ab07f18dec074944cdc230d366ac9": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "7ddaff0971d31fb1b8495587cd5b075c": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "7e0185d4e32080585cd03ca9ad076057": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "7e2f0b466ba696d1217dafe64560523d": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "7e56494678c6c2cb9e5ba6af14ff8170": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "7e885f8fa08be5f5540c0f20a5791d38": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "7ea425f696ec5a3e1a4fb10d50f7e263": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "7fefb6f5fdde9a80bdefb5d762d2c318": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "804cafd64fb62587fd8b1632a3dfa509": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "815c97141ca6bf23359012d8879c1c4f": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "819a2ff6b5fe93b0d30eb7fb5a15cb26": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "81bdf80a8bdacc473cd55967f4fbc017": {
+   "user_language": "en",
+   "answer_language": "ml",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "82dc4bfca3329f77018572273472d3d9": {
+   "user_language": "en",
+   "answer_language": "da",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "83a295db73b1bc551ed5941434655de1": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "83ecbe3590c0f6f9417b0241a64895fb": {
+   "user_language": "pt",
+   "answer_language": "pt",
+   "other_language_material": false,
+   "physician_language": "pt"
+  },
+  "842dab546eb15a13f76d2c63566d6d49": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "846f8c4d59d4ccbe9a14d2b20c7f175e": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "848194ac856a0c2286fca180bc124da1": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "84bd321367f5568594be5d8b6a5e9da3": {
+   "user_language": "en",
+   "answer_language": "am",
+   "other_language_material": false,
+   "physician_language": "?"
+  },
+  "856e608c5b92730fa9fcc8e0dea0ccac": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "859cd219aec1d40f93259c75ee21d3ba": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "85a3e2430c09452d714cd92fbd08273e": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "85cff5becde715a488427a2f7cd710e0": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "85d5c25a23936c0b1de8be3a25f41919": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "85e02afe2929d55de292e00d9e5cf844": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "862454301d0277efebf20dc0f48dbd27": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "86c26ce417fa42f10a2067928a814099": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "86fdc435479786318d4c2d0c7cc39920": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "873d2a07e72b02a20cdfb0c2f9c5399a": {
+   "user_language": "pt",
+   "answer_language": "pt",
+   "other_language_material": false,
+   "physician_language": "pt"
+  },
+  "874fd1c805541e26d3f9aed1d31ae99b": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "87b33fc3634f75b494607948dcb227ce": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "8806130930dcbba8864220bfe62aac78": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "880a9e8174d618b24158983f4e7d515b": {
+   "user_language": "et",
+   "answer_language": "et",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "892256e1c944089f29d5ac5c80d1ed3d": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "89fa33a367202e09dfe20b90cea964b5": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "8a4a8c84e3068dcb71ecdbd921d48075": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "8a527565d5a898accd0336efe4e48c00": {
+   "user_language": "pt",
+   "answer_language": "pt",
+   "other_language_material": false,
+   "physician_language": "pt"
+  },
+  "8a82fa895edbec8941116ea2c9633bc2": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "8aa3306c59a4c88c77a2780bf50aa2d3": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "8adcd2a801b62527fc519390b70f7aa6": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "8c50707e96f619c4387209337a1d585d": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "8c85c825f5a136570e526068f0b40d07": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "8d0d3d8e6bfb9f5d818689734d8a3857": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "8dc777ec90ff6c48fb0c9575a6ef3efd": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "8e019a6f0b4efdbb8661b546cdcfde23": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "8fc810b9b1cfae60006305c59ae6c036": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "8fe5d085a95e41452e82d715311795a9": {
+   "user_language": "pt",
+   "answer_language": "pt",
+   "other_language_material": false,
+   "physician_language": "pt"
+  },
+  "8ff15e203f0537239318271d60c97896": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "90945d27377c40a39ed5a393b8457c30": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "922986f9ef36c600dfca993f5febf46b": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "924b069395928cd26576cd3fb1aceab0": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "925eab45a9e25e626618be58ccda6033": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "926ae39b16ee45675b5bc0709fd51806": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "92bcf89bb6f0e399e0fc3ef0300ebbf0": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": true,
+   "physician_language": "et"
+  },
+  "92c0fa4473c8303e6caf38dfda11336c": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "92c4a9cc6ae29fcd6c7cac006c4bdfa0": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "92fdf7f68c0562be4f4208ed66f31385": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "933860102067253004fd605df29060fa": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "el"
+  },
+  "94590d286d889df73c78af2ef3fc8c3b": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "94e81100b5ef7fee15061235a4e22cdc": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "94fdd3ad2a1d4f8ad6c315b18bfbbd94": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "9566084de89c416408691006a6f06f9c": {
+   "user_language": "da",
+   "answer_language": "da",
+   "other_language_material": false,
+   "physician_language": "da"
+  },
+  "95e03c943504ff4a663f174f1bbd1ecf": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "95e372d4acf027eadf6534a7dae70e96": {
+   "user_language": "en",
+   "answer_language": "hi",
+   "other_language_material": false,
+   "physician_language": "hi"
+  },
+  "95f5388337c28b4cd6e32f586015d406": {
+   "user_language": "ne",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "968e73efa13662169407da207ecab45f": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "972ab92a49381a0124d95faa25d64df1": {
+   "user_language": "pt",
+   "answer_language": "pt",
+   "other_language_material": false,
+   "physician_language": "pt"
+  },
+  "977e41cb6526f2ad9c47a1deebe25cf6": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "977f694d9e913f02c3cc043c3e880cf3": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "9840a6872697a30f20d7f116acb93d3d": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "98b83983179d2bfbe2b70952cfda54ea": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "98bca240ac32ece9028791e722cb5438": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "99750e7472125ff9f35a896e532bb77a": {
+   "user_language": "en",
+   "answer_language": "it",
+   "other_language_material": true,
+   "physician_language": "it"
+  },
+  "99ee8862883a4aa73b1280f82454e82f": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "9a0a92b2f7944d9dd91772b48e59cf28": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "9a160f86c59743692e46fab89aae42f2": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "9cf2609c853ef5f331b729b9e86bd6ff": {
+   "user_language": "et",
+   "answer_language": "et",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "9e281123272f846018670b16abe14f10": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "9e58a51eaf28c59ca9f877f6671b2cbb": {
+   "user_language": "et",
+   "answer_language": "et",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "9eb06b084ccfda5fb49911bb1369ecc9": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "9ebc3fb7ab030379bbc530909c1c59ac": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "9edd7e399b7255607fb9c383563fd301": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "9ef408721223ce774d238db8e4df29f8": {
+   "user_language": "pt",
+   "answer_language": "pt",
+   "other_language_material": false,
+   "physician_language": "pt"
+  },
+  "9fe38f530e2efbca4bd3b60ab8c618d7": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "a0142561e9aeadbcb5d18ab74d40eff8": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "a0177e18b2a459793b382283433cf7e2": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "a0ece82c5a4dfc8f476a574e7637f634": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "a18720b4877c62f46d4a00c8c6f85876": {
+   "user_language": "pt",
+   "answer_language": "pt",
+   "other_language_material": false,
+   "physician_language": "pt"
+  },
+  "a19957de48835f42ea060e41b655f18b": {
+   "user_language": "en",
+   "answer_language": "bs",
+   "other_language_material": false,
+   "physician_language": "hr"
+  },
+  "a2341b190c3f7e6591c26ca5a0b87b10": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "a2662700c0b4e67f99c6397c5e115be4": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "a2ab1f20471d9a27fc3d36400c5d143c": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "a44e1793ac6ed12630160c1386c044f0": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "a49ba67e6243984987c93fdb0b6cc919": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "a55b3f44917cff2064614165c5c8e55f": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "a5778c7ecdb4eeccf9d252631e18a274": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "a585099acf153d0f72f74c786b115a87": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "a59578f36b999968132fb6af5e1ecc4e": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "a5ae0d76d5da23eca71028bb5bf82e15": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "a75babf5812e259a882aa7a1151f6dc0": {
+   "user_language": "es",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "a79240f2ad2bc52983bd65c417842661": {
+   "user_language": "en",
+   "answer_language": "fr",
+   "other_language_material": false,
+   "physician_language": "fr"
+  },
+  "a83cb237634f092349efe9f06815e0a1": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "a8b554a1eb39fac4d7e4bbf3c89891b4": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "a8f50fd2cf3c7cf8fc2cebb60e3f3202": {
+   "user_language": "es",
+   "answer_language": "es",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "ab8b45389459eebfc6b31682b1f12041": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "abd65b66e7b500936e15da34ae06cec2": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "ac5cbd8aa88e6322b594a78ebf8ae74e": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "ac7ce5c7f6b5fb860cd2feb7f9e4a6fe": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "ad801f60c742a903435e315fd2d89c44": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "adbd492362f7fdaf8db61216df114ad4": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "ae1a922b7cb36444211f034c7840ab75": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "aed140e65843002434c2ec18d245a721": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "af084d2efd59a494a296318516166794": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "af231e9755e0717989a6bf4ac17a467f": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "af318472f689935b2bf0cead6ae8ec41": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "af76c840abe8e2890236150d7812aaa9": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "b026978d1bcd145d88c80ad6ade9bc44": {
+   "user_language": "et",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "b079de6d5e0f373ab846b805317bf436": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "b14de0d6528a27139e85942f78ac8c88": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "b210ca9fc3caf01080f6df810ad8cbc4": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "b24258427538a4738c0fb8695b8e88c2": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "b2c8b3738be92e4d365863ecbe2f8a58": {
+   "user_language": "en",
+   "answer_language": "am",
+   "other_language_material": true,
+   "physician_language": "en"
+  },
+  "b2ca9a7335466400874603783b181252": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "b3aa5030453f046f0d9410bfd597a50a": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "b3d32c955eca9915b39e7844142e0a7c": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "b436aa3e35424fb868cbd87172dd7dfb": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "b49146d79a995a2e32ce3f2f7eb52955": {
+   "user_language": "es",
+   "answer_language": "es",
+   "other_language_material": false,
+   "physician_language": "es"
+  },
+  "b4b7b3c3610819fe8e30da6e7265c4f2": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "b5488448ecb8de7565b4c6c3f53b51bd": {
+   "user_language": "en",
+   "answer_language": "bg",
+   "other_language_material": true,
+   "physician_language": "bg"
+  },
+  "b55c4d32a1cacd6a2c949f46cff7dd68": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "b5ad1d97eeccdaeba7427a4ad67e483d": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "b65cc20413a64d10e8fc8f6a6d574b49": {
+   "user_language": "en",
+   "answer_language": "ur",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "b7c5baa14ffa82acccfce24a9ae0f362": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "b7c602e406d097649024fcd6cb66091a": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "b8dea8a27a3fd62dbffc67eab09d1b8f": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "b8fcd39ceb6161426de40c6508d742f1": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "b96c46ec3c96437b8e448e2cb1abe7a7": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "ba61acc5f41d03f6c4350fbec738c8f6": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "bab08061e5836026d850726cf87b2130": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "bb96444a828382b4f651369c3f4fed07": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "bd2ab710e7126941644cecc8a258388f": {
+   "user_language": "en",
+   "answer_language": "el",
+   "other_language_material": false,
+   "physician_language": "el"
+  },
+  "bd3fad90bd5ddd2f073fbb502635bfe8": {
+   "user_language": "pt",
+   "answer_language": "pt",
+   "other_language_material": false,
+   "physician_language": "pt"
+  },
+  "bddaae8902144bed80386db8885ad807": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "bdde297153ec143877b82dd9dd47b04f": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "bf0408de4ba232d7fae7fcf1582b462d": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "bf9e5af57ef45233ad32ab7b57e0e2e6": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "bfc0519bf04a9fa1c69f6e5285ffbe25": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "c0ac4b7f657724e74c85b782a985daf3": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "c0e2a4edbc03ba4a31a97d119c27075c": {
+   "user_language": "es",
+   "answer_language": "es",
+   "other_language_material": false,
+   "physician_language": "es"
+  },
+  "c1633d335487b8a56df1f7a993ce3be0": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "c19c2113ba68bb3c4a3e63836e31b558": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "c2762303277cc94b6807d83213de6add": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "c3d6ca3804ee1c9d04e99fa6ceaf6cfb": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "c3fc32bce9986b51c688e46c988116fe": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "c42bd4fc760487ac7b5e70fbb41a8edc": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "c443f1a285bc015ef677e65ea361113d": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "c475948e098348d5cfc532ef7c7acfc8": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "c48d8b2d75d26489f873d1b1cd12587a": {
+   "user_language": "et",
+   "answer_language": "et",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "c53a91d92f90db374b01997e5cbd43af": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "c602c219ff959d78675f36ad244dc426": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "c603be303303141a02f00551a96c8cab": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "c649bfda44029bfd4c6d207925e14f54": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "c689f41c9e6ad066728129ba58a984d4": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "c6b2da2a85e39bd9b9018cf135476cf0": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "c70db1fcf0a0e2e2b86e19141c7ab39e": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "c820187649a64fca4be8aa237bd93fd6": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "c857f17ea00406ca5ee18a8703dc80b5": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "c8fb9f90d8a429d9395b4a5989082631": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "c8ff5c99cc87bca185aa0432259deeff": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "c9bd569d826b3613bb2cee93b8c6395b": {
+   "user_language": "pt",
+   "answer_language": "pt",
+   "other_language_material": false,
+   "physician_language": "pt"
+  },
+  "c9c5f9605db3a65dc138d75eb5ac6ab1": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "c9dc69412a1715493c1c1fab39ce1281": {
+   "user_language": "es",
+   "answer_language": "es",
+   "other_language_material": false,
+   "physician_language": "es"
+  },
+  "c9e24f50a089434f7ded3c0f07c7762e": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "ca453ab13aa0ee164387f4cd8ef2e197": {
+   "user_language": "et",
+   "answer_language": "et",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "caa25e342c53b9fbd589582c4cb3883c": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "cab84d73bd44f93c310af1a08fa4d2a5": {
+   "user_language": "es",
+   "answer_language": "es",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "cb51e6a2ee096d0b5ea37b052143faf2": {
+   "user_language": "es",
+   "answer_language": "es",
+   "other_language_material": false,
+   "physician_language": "es"
+  },
+  "cbcda7f5945a918652b0718c8c018a9e": {
+   "user_language": "et",
+   "answer_language": "et",
+   "other_language_material": false,
+   "physician_language": "et"
+  },
+  "cca54d5849d80c7c9af86e02163bb927": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "cca6694e8f419c63c49965371c8c8c69": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "cd132a0c7cde74c0242aa8ef3850c9b9": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "cd5940a3d17aee98aa6e4018b35daa98": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "ce29eda24c251d0cf569aa6cadea3a36": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "ce4a4bcdf5684ff567c457996bba5437": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "ce6537c28c8f5c3193e939ec29b8922c": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "cf4dcb33df1de7f98b4e463fba383e7a": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "cfe155549d2470c9f6ffaa06097f7add": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "cff4218fded97514c5d9894b55eead3f": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "d07578daa48030c376c70d3e9bd81d48": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "d09add4f588755d3ccddfe9a7226993d": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "d0bd5b1c04da6754417366ce83d3df65": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "d108100b1872c6a1cb25c2ee46e7ee55": {
+   "user_language": "et",
+   "answer_language": "et",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "d1734ecd148132f2e1c33fd8479d4950": {
+   "user_language": "es",
+   "answer_language": "es",
+   "other_language_material": false,
+   "physician_language": "es"
+  },
+  "d1921cdcf48f8b3b70af8dd337ba8b2d": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "d1937a86dbc6f208e80e817f27a693d5": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "d1d03f0987be0ab9164a2bf3eb2b9474": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "d1eb45963258aa1be3eebe5aff02ed90": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "d2b09530619aa5cc9c4b666573deb12e": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "d2b888b434515d422c0d1588d08dc0c5": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "d4539436ceec439fbd0ad6bb204a13c9": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "d52fb2405d6f6c57e1e1472bfe5be65e": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "d602f741269ee8e8bf9781ee5b72f027": {
+   "user_language": "es",
+   "answer_language": "es",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "d640c598200dc506ccdca8d5f84d99b6": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "d701c74f2d7a7a70dee79fb1bbb1f7e6": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "d74a4cb4742287c5b8f0b31d2c2181ed": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "d78e01ce39d53760b290c7327833c313": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "d95585f5b770c6f49957a99996ec6f88": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "d9ac38c81f97c2d27297576a0ead67e4": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "da1ff050135a76bea11878d85f219df2": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "da4348ca2c9de9d4b966f48320ff6c5f": {
+   "user_language": "es",
+   "answer_language": "es",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "da5c4103568f23612ca916bb25138b2d": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "da8da5dc396717b3d4da883b2d058649": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "dace36cafe50a814df0d5b0f1dd65a7c": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "dadbebd3dce1b5928cac5a44dde095d3": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "dbec60751876c6e24fbd07c5fab139e9": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "dc4f101b1b9ead76d90067debe5c7d36": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "dcb10a237a47639ad33ac8c24da73740": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "dd0457d8e0ffc31711c9f85570827d78": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "dd071758280fbe216b19c95ae8aadf9c": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "de2ec257fc67783dcbd50058a779751a": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "de3557da4750e38b4e875d5ede5a4dd3": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "de721391f646b3844d7a52fa7e4e5511": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "de75fdb7fb48f4c7d9144ef2a11b4d76": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "dedf5543d9d7e5d4db33212e68ab6937": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "dfc3fb838a4e7f1c0a70ae7d1c6ded80": {
+   "user_language": "et",
+   "answer_language": "et",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "e0c349a39b1d47dbf229dae82c16c55e": {
+   "user_language": "pt",
+   "answer_language": "pt",
+   "other_language_material": false,
+   "physician_language": "pt"
+  },
+  "e14d56f5d3cd13761a0e576ac7d72ce1": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "e14ef032fa77fe2f8f13967b5272b5d3": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "e156871820fef362c392aedfc8429c48": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "e19d20e74fd53b0d532168e929ddd13b": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "e1e4f0d338d41f4e2eb7e53af9bdabfb": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "e28be8a15b09e3998487e167ffeb62de": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "e2b5e0f3974a0ccebfb22e6e2247359b": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "e2d17058591b30e7187df009d1e25495": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "e339f34a3a35f3f067422b5768287f7c": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "e3eb6d1155ac99d74fe22f86bc529837": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "e459e853ccd786cb1562870b375cfcc8": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "e5061cf5e16c233bf9af948a713df56a": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "e529c3dbebd813c64db0381d151944f7": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "e59b9ffb8d9cf945be86485ae83825dc": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "e5b252720b17453c32f2bce7e2c86415": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "e630f382e8c32cfc1d220f24235ba00f": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "e722104bcec5195f824b730d3ff11590": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "e89adb966d8a453f5d580fcaf93ec2d4": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "eab7f166cf24f5e9f049bd939f8c93c8": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "eb08335e527f0f9ee5238355fbd8ca61": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "eb566f349fbbd7e9ad3011be4bfe6cd7": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "eb91499e6f26bd490c9eb86b6fb5e43b": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "eba8602cffc95990c67a76ed51230e81": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "ec01cbca0e677185ae31af9a89ca7bea": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "ed8b3ca0a4dabfd0827c17a08513a181": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "ee22f5eac3f98988e773e1f9b27bbc7b": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": true,
+   "physician_language": "en"
+  },
+  "eec81e8363a30d53edf8ed8b55bd535c": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "ef04a4728fc73051e5835364024ef243": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "f00a97ad9c1f6f9d51f7595d2f1fb192": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "f03edbfec507df466d00e5eb0364eefb": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "f056cdb489e3636b0b51afb8fd6b3a8a": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "f06efa1a57f0a1b7e92c30a68d50fce3": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "f1fa1b4d3ae3502f2f17801bf23b2bef": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "f2418b4b359e762f05e72e3eaa96ecf2": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "f301f4968db6c4cdbfbd0423e4bb652d": {
+   "user_language": "et",
+   "answer_language": "et",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "f3be6c11c68c492d3ef08af1be07f547": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "f3c8ffa378bf114ce33d694db43d8412": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "f3f1182e86b37be585cfb0af4eb44ccd": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "f43fb7a12f9422cf517eac2d7ca5e808": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "f503eba0cbf774ba8a5df6ad67527721": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "f67e78bb923877e0114354cbbc6d1943": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "f73935ba6bbafaa945e13e0665d3010f": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "f9b2fb45780eab76111d763fa04fc852": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "fa30f3f57c7219130345f5c2e6d03d65": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "fa8bbaf7d4a2fb57f360b27d89b6bcd4": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "fb66c94b61f52f5e7bdf049d86ea472b": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "fd857f87bbc0740f370997e9b1bab301": {
+   "user_language": "en",
+   "answer_language": "gu",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "fdd5825f09e8d26f269d5707aefd8f81": {
+   "user_language": "es",
+   "answer_language": "es",
+   "other_language_material": false,
+   "physician_language": "es"
+  },
+  "fe022a5d992828991a3747d674027a79": {
+   "user_language": "pt",
+   "answer_language": "pt",
+   "other_language_material": false,
+   "physician_language": "pt"
+  },
+  "fe90fa8aecea9ecd618059ca246e149b": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "ff227f1cf3089a77df73966ccb24ea4c": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "ffbce4c57dabfd48a4e99047813723e7": {
+   "user_language": "en",
+   "answer_language": "en",
+   "other_language_material": false,
+   "physician_language": "en"
+  },
+  "fffda526f895edbfe4430f7cf57dd0a9": {
+   "user_language": "da",
+   "answer_language": "da",
+   "other_language_material": false,
+   "physician_language": "da"
+  }
+ },
+ "english_ids": [
+  "004691ba3ff3eec87d6a5598d9e1b04b",
+  "00b999ff12f1161788913837860b6221",
+  "0187e39434668c08c7b18b8e81cc3604",
+  "01cc7b9ef04d9c06acfe88c14b268ad7",
+  "02f723bdccbbe759af218a406c9a0d82",
+  "03479a50f43fbc821469833b97d07197",
+  "04f0b56fe57072747e3d6721ab3e9dc9",
+  "050d51fae49ae14008ad94db8b035e45",
+  "05569de0534eb183cc9935ff9498a7cf",
+  "065a88b40640f4e6b26f6ebaa4d14f0c",
+  "068abd7e3805cfacf547bedf2be204d5",
+  "06d878d083a6cd90c882750bb08df30e",
+  "077cc5ea55c6378fd65b529e2928dff5",
+  "0a2ce20b6253077ae5ad31ea8f684ca3",
+  "0a874dd5b8a73803559f52953ca8ad9b",
+  "0bfb5926e92991296c43e4ede7c06896",
+  "0c079a927262b3ab8cc826c60bd63bdd",
+  "0d15a0b94d2d68ccaf8fc89fbe504637",
+  "0df5ce0b5b83dd2a1907ad3d3debf0b6",
+  "0eedd9a1307d33aaa9ac9d72a7a1e2d8",
+  "0f994477d9c0e3125eb6a8687a4f0d68",
+  "102aee89bce36fe619f99ecd157cf0e7",
+  "11cb964a58ffb9fb7abda7c811ca305f",
+  "121f0e276e5a2cb72d5b76f7f25a5d1f",
+  "12beaf3375f3ce85e04b651cf88de389",
+  "145254e9da9bd035b6a5a759d5a3b1b2",
+  "1520a3e2742249f26d997d93d0df274c",
+  "15ca9d15616dda2597a76e8f52b9bc83",
+  "171d96950d977bccf3d646e5b5591bef",
+  "17456e318203cf0a9c7ca8980aa14c32",
+  "185626deee8d46c1249ae90f50ae1028",
+  "198d509ec40adbcbf08d00a1d402c2e7",
+  "19c0631140234e6847b03bd271cb3b5e",
+  "1acbd8f036de1be33f2df252e8ebfb41",
+  "1d45010f49e42dcfb9d635ff1aa58828",
+  "1e285599fa017458dbb6e8a9abc808a8",
+  "1fdab1ca31af653b3f0803b21ac60a4d",
+  "2014ab7a9d8865f0da483817843ccbc5",
+  "20cae7fd167b5eebe3ae19c6e25ccdac",
+  "2142fe540982b1ca76ab54dd6280d831",
+  "2159ea0354a2e29e4d8449527d600681",
+  "21b7e2c4ac5982729923429bc25c780d",
+  "21f409c6576ec3af6b92fe2457cf1ddc",
+  "2270211dc2e98eb192e67e1d36ca862f",
+  "22a7f2862a4fe89164daaead579fadec",
+  "23385171a6ac25cffc85a38817fe4874",
+  "2346e3e2d47f1326ba63811a6a4d0910",
+  "247501f61a88c48fbf4eccaaf0bb4c97",
+  "265c5c317c443f5d6ca22c95a82c3c5e",
+  "267e8dd437cd5940db3b4ee5c439556b",
+  "268b10d5db2f10ed89c751d8dd851af2",
+  "27780da4d1b342caf1b83f5bdf726ba1",
+  "282e788a7f8be989ae55aa236fcd9f88",
+  "286d2d4a7872a39d284753d2f39e188e",
+  "286ea1fd32b143e4f5880cca26865741",
+  "28cb12d8cb27849de6005ccc890cd5d4",
+  "29a25e964b952d354b5dbba07e126bcb",
+  "29f5c5398af1fb18200344adfd16a4fc",
+  "2b928aa6e784bfe90bf1d98304ec68a5",
+  "2c8aa4477bde810f48760f5001ec68d1",
+  "2cca611d46dfcb9a9e4af17c7e29cbb0",
+  "2cce06fea04e6701fab68e0a1b25635b",
+  "2d11620a117cb2aec3c1ad4054dbbc8f",
+  "2f0063180b7fe7da3c326912112d6cb7",
+  "2f173f44ccdf02cf8861698819805831",
+  "2f654b3e7680051dda0345c1493d0fdd",
+  "2fadeaf6f5af1e6a10ffde01c134b2ed",
+  "300b3bd58d750cb36e637b10bb567e2c",
+  "304e1196cbe5caa7907f30d170174adc",
+  "30d77137c6c4f79bc11e18f361be0e72",
+  "30df807354da23334ea56eff3588c915",
+  "3275d15c26cbd9e850b54c99514fa919",
+  "3342a2cb06f928ea2322aecd7c58eedc",
+  "33e41e1fbee61e8b71440b5b21dcf3c3",
+  "346463ff8f2fe8a4526f8ccccbfe07f9",
+  "34de42d85191eec893b650337159ae32",
+  "34e392723b3c5e4a18ffef591999b2ca",
+  "35466fb2f5a541d07de37a4504fe81b1",
+  "354a8bee8cf473e2aba50fe1716c08aa",
+  "35b9ab1e8dc0ef2244dde26f4872d185",
+  "35cb554c59c8313f09594c0fddb8b445",
+  "369121042da390db99c77b48abd11fc7",
+  "37101607e2947481e85e8fe3597a1acf",
+  "375c7dd8697a5589ebd8b144d01291ba",
+  "38a13bdef2c57f656969c2a2869f987e",
+  "393359cdda634f9cc1afe3e0ff6629a8",
+  "3a6f1b8fa83a0dfb47cc0b2543969b49",
+  "3b22335d21170ba8dfc661926255c449",
+  "3b27921820d74d54d7114f6f7a569902",
+  "3b6768c0c7ec45fe4fb1aa6d9a4a8c8e",
+  "3decb44b98204650079838963bae22cc",
+  "3defc5cf72769c8971abc626ffd81aaf",
+  "40346f3978ae08ebb99213b99290fa90",
+  "41796b721daa453e639856fba8994e79",
+  "4248b300598106e33a9909e3d91a1aa3",
+  "43195fe0fc4d3af8a379242fb06582dd",
+  "431c77787508a87f1847dbbc11511a3f",
+  "438e816288083f1398ef459a08d240ff",
+  "4414cb81ffaf3aa7f135fa69c922d576",
+  "458add9eb24073846f7864852018af56",
+  "458c5d4af48964eb26cf49f27dcdf968",
+  "484dbbd65d250dafa61f86b40598d040",
+  "48e7e92683fe9a0e1feece4beb6f7d96",
+  "493bf76b2bd8230c55589b3c43800dc6",
+  "4942367456125379e7e5a0d3ae360341",
+  "4b21d2ae3dc5920673ec68881937653f",
+  "4b863d4f920b1e54cdebe37d6cd050b9",
+  "4d85894b4f67dec92b48bfe0d9f03540",
+  "4dfee0221452571b9508a8b0102f38d4",
+  "4f060015d211847c8970cd651943a271",
+  "4f08ae480b16ef825cf098eca6530e68",
+  "4f118b7f2841f4816f4b8d4b989e4500",
+  "503b75b4cba8e5abd656cd2512a449bb",
+  "5060922f2c0e9525177a1d251594bb9a",
+  "50ea172e8c130fae0a8fdbbf13e71c01",
+  "518014a61f0ec910cb3733e19c7e45c7",
+  "51dabf3bf5b6a7866163b8ccf780292d",
+  "51e988fb13e77892d08430e938f47864",
+  "521ac21c23b9bcd2bb4aa588195c087a",
+  "540588c49617772207aee3cc5f3f47cd",
+  "5433d7fd883062036203893c8b32e771",
+  "54927c2849dc77d31f5cdec37707a1c9",
+  "54f98e63dbdd317b1a6bf3d8f84f7bf0",
+  "566cbac70d31673e216abbe076c927ea",
+  "571bb544ee42e1d03ad809b07dbc7223",
+  "57da2255d7685c4b569011cdec5c4a95",
+  "580369b90e7f6694db0f57e584b80bd8",
+  "584f84f2ba215592e2356cbcd98240e4",
+  "58cdb8fc379445fb8e6ddc8e7adcd511",
+  "591115a0e09b5c28a0a2e9df5566babb",
+  "591e65a532772478e98b0d9a8e579cf0",
+  "5a5ff4b2b727dacb76eae6d10b15abea",
+  "5b139efb2c8c5881d782135358d5ec25",
+  "5c0b7cf263e92801542db060a513a942",
+  "5c15466f11c7b3588ad54e198a56022f",
+  "5d02069b155114c21848a27903b22fa6",
+  "5d855a41628a8bc025883ce2badb47b6",
+  "5d8d28712724b471fc891215afff4448",
+  "5db1bd1d8f3009feca602881ad150d3b",
+  "5ec7e5dbe93d45a341a648d13fb73b12",
+  "5ed718b4a79b3c7233d56ae7d1fb985b",
+  "5ee17c763b59e50153e5bb9d8c8b7f5c",
+  "5faae377aba3ff2a4d77da3d4d9c22d8",
+  "61bc9faa961acf03dd9e469f0603fe4e",
+  "61e5bd474a0a42d2248ac0fb88ce5ac3",
+  "62ae980c586068d1c735e24da18eefd4",
+  "636616fe96c980c5615f00f1c326f90a",
+  "637c1df5d0d11a9f6a8ff9ef183dfd02",
+  "6384557eb256644f65e540f9d3d5a3bb",
+  "6486d9363611a4f05b03c8041610ef64",
+  "64b00dd7c05e12a98720e3d47116124d",
+  "64cd0956e902983245ff32e92f5de6ae",
+  "64d1b286b9704b7f8d13fd8dc67b1d9e",
+  "6656f26e2d17a8bc7749020ba7129ee6",
+  "67521d535c05f9f20df83edddc3cbae6",
+  "678759b212fb0229a8de563938cd7fc0",
+  "688978f1706b8b81e54704a901457024",
+  "68ea82a57829bbb36ba708868b818a83",
+  "696a797226704ff41bd9ef444778d73e",
+  "69ce3f03e8cd876e3d6e65fb80062c47",
+  "69e4c5e898f11a8361cc128e69bb9f7d",
+  "6a1461a4f831cbf80ed23fdf8e253ceb",
+  "6a283f9cf0bbee74b98eb5709e98699c",
+  "6b8d7147e81bea94d88ffd1c7a99fb25",
+  "6b8d9731df7f17a0b1e5c9119dc68c83",
+  "6c393aec7444ed28f3db46c33459fa15",
+  "6c3ac900869912e93d445be13f7ca2bf",
+  "6c6696d2524ed63388050878da44f927",
+  "6cc5e176790b69b97e11908b40a603d8",
+  "6d7385494242595c03cdc6d2812f4a3d",
+  "6d762acc294598202a2a8532467af93a",
+  "6daac09cf85897e495539f3255bcf14c",
+  "6dc5a81a96039b3b2ac2e44c4bab9119",
+  "6df6c53605808c8939d2187243747ec9",
+  "6eec0aa68d532306ea61f809bca7c2c9",
+  "6f0bc653dc58e27b9422eb8e8c34fd0b",
+  "6f2fb5f8acd1abf5d2fe47300cffc923",
+  "704fc35c00a01020f25a210f10bd1e8e",
+  "70b6d338c5f3d475537ff276228e979b",
+  "70ddd059964a0e287332df46770e9a46",
+  "7113e3e9fa7c36ba46ddb6b6bc76d94a",
+  "7234a53f01df890f449c3dd8e9c5c2bb",
+  "724609c648dd58d4a5176d75dc23fb65",
+  "7287501c95bb4bf99928f74d77c8e8c9",
+  "728d95d7b101878e2fe2def0d4db75d9",
+  "732854175218b714e0ed4fc81bec984a",
+  "73a89ab53f56f0aade8fa8b229c125b0",
+  "74ba10a0332a386e5a36fe3c765c5789",
+  "75826cd07bfeffd48b53789dd4205f03",
+  "7758f6c90c218f63995d0340e2a4ce80",
+  "7791cf509bfaa1defdc4efaec9b29eb9",
+  "78e9b68da5c4260be91eb6698e0eba4e",
+  "79d2e7c5e03aa4949d55bf2bbd819ceb",
+  "7b0ad484ccf93f69612c2533d044c4b7",
+  "7b30b74bfdd1d0e781a5d1ff9430a6cb",
+  "7c7b94c17a575e18ab8669d2a64ae3f6",
+  "7c89332a3de133ed53ba5a4e99f03862",
+  "7d9ab07f18dec074944cdc230d366ac9",
+  "7ddaff0971d31fb1b8495587cd5b075c",
+  "7e0185d4e32080585cd03ca9ad076057",
+  "7e2f0b466ba696d1217dafe64560523d",
+  "7e56494678c6c2cb9e5ba6af14ff8170",
+  "7e885f8fa08be5f5540c0f20a5791d38",
+  "7ea425f696ec5a3e1a4fb10d50f7e263",
+  "7fefb6f5fdde9a80bdefb5d762d2c318",
+  "804cafd64fb62587fd8b1632a3dfa509",
+  "815c97141ca6bf23359012d8879c1c4f",
+  "819a2ff6b5fe93b0d30eb7fb5a15cb26",
+  "83a295db73b1bc551ed5941434655de1",
+  "842dab546eb15a13f76d2c63566d6d49",
+  "846f8c4d59d4ccbe9a14d2b20c7f175e",
+  "848194ac856a0c2286fca180bc124da1",
+  "856e608c5b92730fa9fcc8e0dea0ccac",
+  "859cd219aec1d40f93259c75ee21d3ba",
+  "85a3e2430c09452d714cd92fbd08273e",
+  "85cff5becde715a488427a2f7cd710e0",
+  "85d5c25a23936c0b1de8be3a25f41919",
+  "85e02afe2929d55de292e00d9e5cf844",
+  "862454301d0277efebf20dc0f48dbd27",
+  "86c26ce417fa42f10a2067928a814099",
+  "86fdc435479786318d4c2d0c7cc39920",
+  "874fd1c805541e26d3f9aed1d31ae99b",
+  "87b33fc3634f75b494607948dcb227ce",
+  "8806130930dcbba8864220bfe62aac78",
+  "892256e1c944089f29d5ac5c80d1ed3d",
+  "89fa33a367202e09dfe20b90cea964b5",
+  "8a4a8c84e3068dcb71ecdbd921d48075",
+  "8a82fa895edbec8941116ea2c9633bc2",
+  "8aa3306c59a4c88c77a2780bf50aa2d3",
+  "8adcd2a801b62527fc519390b70f7aa6",
+  "8c50707e96f619c4387209337a1d585d",
+  "8c85c825f5a136570e526068f0b40d07",
+  "8d0d3d8e6bfb9f5d818689734d8a3857",
+  "8dc777ec90ff6c48fb0c9575a6ef3efd",
+  "8e019a6f0b4efdbb8661b546cdcfde23",
+  "8fc810b9b1cfae60006305c59ae6c036",
+  "8ff15e203f0537239318271d60c97896",
+  "90945d27377c40a39ed5a393b8457c30",
+  "922986f9ef36c600dfca993f5febf46b",
+  "924b069395928cd26576cd3fb1aceab0",
+  "925eab45a9e25e626618be58ccda6033",
+  "926ae39b16ee45675b5bc0709fd51806",
+  "92c0fa4473c8303e6caf38dfda11336c",
+  "92c4a9cc6ae29fcd6c7cac006c4bdfa0",
+  "92fdf7f68c0562be4f4208ed66f31385",
+  "94590d286d889df73c78af2ef3fc8c3b",
+  "94e81100b5ef7fee15061235a4e22cdc",
+  "94fdd3ad2a1d4f8ad6c315b18bfbbd94",
+  "95e03c943504ff4a663f174f1bbd1ecf",
+  "968e73efa13662169407da207ecab45f",
+  "977e41cb6526f2ad9c47a1deebe25cf6",
+  "977f694d9e913f02c3cc043c3e880cf3",
+  "9840a6872697a30f20d7f116acb93d3d",
+  "98b83983179d2bfbe2b70952cfda54ea",
+  "98bca240ac32ece9028791e722cb5438",
+  "99ee8862883a4aa73b1280f82454e82f",
+  "9a0a92b2f7944d9dd91772b48e59cf28",
+  "9a160f86c59743692e46fab89aae42f2",
+  "9e281123272f846018670b16abe14f10",
+  "9eb06b084ccfda5fb49911bb1369ecc9",
+  "9ebc3fb7ab030379bbc530909c1c59ac",
+  "9edd7e399b7255607fb9c383563fd301",
+  "9fe38f530e2efbca4bd3b60ab8c618d7",
+  "a0142561e9aeadbcb5d18ab74d40eff8",
+  "a0177e18b2a459793b382283433cf7e2",
+  "a0ece82c5a4dfc8f476a574e7637f634",
+  "a2341b190c3f7e6591c26ca5a0b87b10",
+  "a2662700c0b4e67f99c6397c5e115be4",
+  "a2ab1f20471d9a27fc3d36400c5d143c",
+  "a44e1793ac6ed12630160c1386c044f0",
+  "a49ba67e6243984987c93fdb0b6cc919",
+  "a55b3f44917cff2064614165c5c8e55f",
+  "a5778c7ecdb4eeccf9d252631e18a274",
+  "a585099acf153d0f72f74c786b115a87",
+  "a59578f36b999968132fb6af5e1ecc4e",
+  "a5ae0d76d5da23eca71028bb5bf82e15",
+  "a83cb237634f092349efe9f06815e0a1",
+  "a8b554a1eb39fac4d7e4bbf3c89891b4",
+  "ab8b45389459eebfc6b31682b1f12041",
+  "abd65b66e7b500936e15da34ae06cec2",
+  "ac5cbd8aa88e6322b594a78ebf8ae74e",
+  "ac7ce5c7f6b5fb860cd2feb7f9e4a6fe",
+  "ad801f60c742a903435e315fd2d89c44",
+  "adbd492362f7fdaf8db61216df114ad4",
+  "ae1a922b7cb36444211f034c7840ab75",
+  "aed140e65843002434c2ec18d245a721",
+  "af084d2efd59a494a296318516166794",
+  "af231e9755e0717989a6bf4ac17a467f",
+  "af318472f689935b2bf0cead6ae8ec41",
+  "af76c840abe8e2890236150d7812aaa9",
+  "b079de6d5e0f373ab846b805317bf436",
+  "b14de0d6528a27139e85942f78ac8c88",
+  "b210ca9fc3caf01080f6df810ad8cbc4",
+  "b24258427538a4738c0fb8695b8e88c2",
+  "b2ca9a7335466400874603783b181252",
+  "b3aa5030453f046f0d9410bfd597a50a",
+  "b3d32c955eca9915b39e7844142e0a7c",
+  "b436aa3e35424fb868cbd87172dd7dfb",
+  "b4b7b3c3610819fe8e30da6e7265c4f2",
+  "b55c4d32a1cacd6a2c949f46cff7dd68",
+  "b5ad1d97eeccdaeba7427a4ad67e483d",
+  "b7c5baa14ffa82acccfce24a9ae0f362",
+  "b7c602e406d097649024fcd6cb66091a",
+  "b8dea8a27a3fd62dbffc67eab09d1b8f",
+  "b8fcd39ceb6161426de40c6508d742f1",
+  "b96c46ec3c96437b8e448e2cb1abe7a7",
+  "ba61acc5f41d03f6c4350fbec738c8f6",
+  "bab08061e5836026d850726cf87b2130",
+  "bb96444a828382b4f651369c3f4fed07",
+  "bddaae8902144bed80386db8885ad807",
+  "bdde297153ec143877b82dd9dd47b04f",
+  "bf0408de4ba232d7fae7fcf1582b462d",
+  "bf9e5af57ef45233ad32ab7b57e0e2e6",
+  "bfc0519bf04a9fa1c69f6e5285ffbe25",
+  "c0ac4b7f657724e74c85b782a985daf3",
+  "c1633d335487b8a56df1f7a993ce3be0",
+  "c19c2113ba68bb3c4a3e63836e31b558",
+  "c2762303277cc94b6807d83213de6add",
+  "c3d6ca3804ee1c9d04e99fa6ceaf6cfb",
+  "c3fc32bce9986b51c688e46c988116fe",
+  "c42bd4fc760487ac7b5e70fbb41a8edc",
+  "c443f1a285bc015ef677e65ea361113d",
+  "c475948e098348d5cfc532ef7c7acfc8",
+  "c53a91d92f90db374b01997e5cbd43af",
+  "c602c219ff959d78675f36ad244dc426",
+  "c603be303303141a02f00551a96c8cab",
+  "c649bfda44029bfd4c6d207925e14f54",
+  "c689f41c9e6ad066728129ba58a984d4",
+  "c6b2da2a85e39bd9b9018cf135476cf0",
+  "c70db1fcf0a0e2e2b86e19141c7ab39e",
+  "c820187649a64fca4be8aa237bd93fd6",
+  "c857f17ea00406ca5ee18a8703dc80b5",
+  "c8fb9f90d8a429d9395b4a5989082631",
+  "c8ff5c99cc87bca185aa0432259deeff",
+  "c9c5f9605db3a65dc138d75eb5ac6ab1",
+  "c9e24f50a089434f7ded3c0f07c7762e",
+  "caa25e342c53b9fbd589582c4cb3883c",
+  "cca54d5849d80c7c9af86e02163bb927",
+  "cca6694e8f419c63c49965371c8c8c69",
+  "cd132a0c7cde74c0242aa8ef3850c9b9",
+  "cd5940a3d17aee98aa6e4018b35daa98",
+  "ce29eda24c251d0cf569aa6cadea3a36",
+  "ce4a4bcdf5684ff567c457996bba5437",
+  "ce6537c28c8f5c3193e939ec29b8922c",
+  "cf4dcb33df1de7f98b4e463fba383e7a",
+  "cfe155549d2470c9f6ffaa06097f7add",
+  "cff4218fded97514c5d9894b55eead3f",
+  "d07578daa48030c376c70d3e9bd81d48",
+  "d09add4f588755d3ccddfe9a7226993d",
+  "d0bd5b1c04da6754417366ce83d3df65",
+  "d1921cdcf48f8b3b70af8dd337ba8b2d",
+  "d1937a86dbc6f208e80e817f27a693d5",
+  "d1d03f0987be0ab9164a2bf3eb2b9474",
+  "d1eb45963258aa1be3eebe5aff02ed90",
+  "d2b09530619aa5cc9c4b666573deb12e",
+  "d2b888b434515d422c0d1588d08dc0c5",
+  "d4539436ceec439fbd0ad6bb204a13c9",
+  "d52fb2405d6f6c57e1e1472bfe5be65e",
+  "d640c598200dc506ccdca8d5f84d99b6",
+  "d701c74f2d7a7a70dee79fb1bbb1f7e6",
+  "d74a4cb4742287c5b8f0b31d2c2181ed",
+  "d78e01ce39d53760b290c7327833c313",
+  "d95585f5b770c6f49957a99996ec6f88",
+  "d9ac38c81f97c2d27297576a0ead67e4",
+  "da1ff050135a76bea11878d85f219df2",
+  "da5c4103568f23612ca916bb25138b2d",
+  "da8da5dc396717b3d4da883b2d058649",
+  "dace36cafe50a814df0d5b0f1dd65a7c",
+  "dadbebd3dce1b5928cac5a44dde095d3",
+  "dbec60751876c6e24fbd07c5fab139e9",
+  "dc4f101b1b9ead76d90067debe5c7d36",
+  "dcb10a237a47639ad33ac8c24da73740",
+  "dd0457d8e0ffc31711c9f85570827d78",
+  "dd071758280fbe216b19c95ae8aadf9c",
+  "de2ec257fc67783dcbd50058a779751a",
+  "de3557da4750e38b4e875d5ede5a4dd3",
+  "de721391f646b3844d7a52fa7e4e5511",
+  "de75fdb7fb48f4c7d9144ef2a11b4d76",
+  "dedf5543d9d7e5d4db33212e68ab6937",
+  "e14d56f5d3cd13761a0e576ac7d72ce1",
+  "e14ef032fa77fe2f8f13967b5272b5d3",
+  "e156871820fef362c392aedfc8429c48",
+  "e19d20e74fd53b0d532168e929ddd13b",
+  "e1e4f0d338d41f4e2eb7e53af9bdabfb",
+  "e28be8a15b09e3998487e167ffeb62de",
+  "e2b5e0f3974a0ccebfb22e6e2247359b",
+  "e2d17058591b30e7187df009d1e25495",
+  "e339f34a3a35f3f067422b5768287f7c",
+  "e3eb6d1155ac99d74fe22f86bc529837",
+  "e459e853ccd786cb1562870b375cfcc8",
+  "e5061cf5e16c233bf9af948a713df56a",
+  "e529c3dbebd813c64db0381d151944f7",
+  "e59b9ffb8d9cf945be86485ae83825dc",
+  "e5b252720b17453c32f2bce7e2c86415",
+  "e630f382e8c32cfc1d220f24235ba00f",
+  "e722104bcec5195f824b730d3ff11590",
+  "e89adb966d8a453f5d580fcaf93ec2d4",
+  "eab7f166cf24f5e9f049bd939f8c93c8",
+  "eb08335e527f0f9ee5238355fbd8ca61",
+  "eb566f349fbbd7e9ad3011be4bfe6cd7",
+  "eb91499e6f26bd490c9eb86b6fb5e43b",
+  "eba8602cffc95990c67a76ed51230e81",
+  "ec01cbca0e677185ae31af9a89ca7bea",
+  "ed8b3ca0a4dabfd0827c17a08513a181",
+  "eec81e8363a30d53edf8ed8b55bd535c",
+  "ef04a4728fc73051e5835364024ef243",
+  "f00a97ad9c1f6f9d51f7595d2f1fb192",
+  "f03edbfec507df466d00e5eb0364eefb",
+  "f056cdb489e3636b0b51afb8fd6b3a8a",
+  "f06efa1a57f0a1b7e92c30a68d50fce3",
+  "f1fa1b4d3ae3502f2f17801bf23b2bef",
+  "f2418b4b359e762f05e72e3eaa96ecf2",
+  "f3be6c11c68c492d3ef08af1be07f547",
+  "f3c8ffa378bf114ce33d694db43d8412",
+  "f3f1182e86b37be585cfb0af4eb44ccd",
+  "f43fb7a12f9422cf517eac2d7ca5e808",
+  "f503eba0cbf774ba8a5df6ad67527721",
+  "f67e78bb923877e0114354cbbc6d1943",
+  "f73935ba6bbafaa945e13e0665d3010f",
+  "f9b2fb45780eab76111d763fa04fc852",
+  "fa30f3f57c7219130345f5c2e6d03d65",
+  "fa8bbaf7d4a2fb57f360b27d89b6bcd4",
+  "fb66c94b61f52f5e7bdf049d86ea472b",
+  "fe90fa8aecea9ecd618059ca246e149b",
+  "ff227f1cf3089a77df73966ccb24ea4c",
+  "ffbce4c57dabfd48a4e99047813723e7"
+ ]
+}

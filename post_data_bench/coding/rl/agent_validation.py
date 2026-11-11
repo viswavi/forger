@@ -91,6 +91,28 @@ FRONTIERCS_FIELDS = (
     "statement",
     "task_text",
 )
+# The clinician-chat evaluator, flattened the same way; its judge.py grades rubric
+# criteria (with the agent's judge quota there) and its evaluate_model.sh sets the
+# evaluation protocol before running the shared launcher beside it.
+HEALTHBENCH_EVALUATOR_FILES = {
+    **{
+        name: source
+        for name, source in CULTURE_EVALUATOR_FILES.items()
+        if not source.startswith("culture/")
+    },
+    "evaluate_model.sh": "healthbench/evaluate_model.sh",
+    "evaluate_model.py": "healthbench/evaluate_model.py",
+    "checkers.py": "healthbench/checkers.py",
+    "prompt_building.py": "healthbench/prompt_building.py",
+    "judge.py": "healthbench/judge.py",
+    "grader_prompt.txt": "healthbench/grader_prompt.txt",
+}
+# Fields of a validation chat that the agent sees; "id" is replaced, and the
+# dataset's labels (use case, type, difficulty, specialty) are left out.
+HEALTHBENCH_FIELDS = ("messages", "rubric_items", "physician_response")
+# The benchmark's name checked in copied chats; the general list would match
+# ordinary words there, e.g. "the next frontier of treatment".
+HEALTHBENCH_DATA_NAMES = re.compile(r"health\s*bench", re.I)
 # Agents must never learn benchmark names (contamination risk). The sandbox copy
 # renames the vendored grader package and scrubs names from code and comments,
 # e.g. LiveCodeBench/lcb_runner/lm_styles.py -> grader_lib/grader_runner/lm_styles.py.
@@ -159,7 +181,7 @@ VALIDATION_FIELDS = PUBLIC_FIELDS
 def public_row_ids(data_root):
     """Map host validation "id"s to the agent's, e.g. {1473: "val_017"}.
 
-    Used for culture and frontiercs rows, whose task key is "id".
+    Used for culture, frontiercs and healthbench rows, whose task key is "id".
     """
     with (Path(data_root) / "validation_tasks.jsonl").open() as stream:
         rows = [json.loads(line) for line in stream if line.strip()]
@@ -285,6 +307,44 @@ def copy_frontiercs_evaluator(destination, data_root):
     )
 
 
+def copy_healthbench_evaluator(destination, data_root):
+    """Copy the clinician-chat evaluator and its validation chats with opaque ids.
+
+    Rows become val_000, val_001, ... with only HEALTHBENCH_FIELDS; the copy's
+    validation_manifest.json pins them. A benchmark name in any copied row fails
+    the copy.
+    """
+    destination, data_root = Path(destination), Path(data_root)
+    verify_manifest(data_root)
+    validation = _read_rows(data_root / "validation_tasks.jsonl")
+    if not validation:
+        raise ValueError("validation dataset is empty")
+    assert_disjoint(validation, _read_rows(data_root / ".hidden/test_tasks.jsonl"))
+    ids = public_row_ids(data_root)
+    rows = [
+        {"id": ids[row["id"]], **{name: row[name] for name in HEALTHBENCH_FIELDS}}
+        for row in validation
+    ]
+    text = "".join(json.dumps(row) + "\n" for row in rows)
+    if HEALTHBENCH_DATA_NAMES.search(text):
+        raise ValueError("benchmark name in the validation rows")
+    root = Path(__file__).resolve().parents[2]
+    for name, source in HEALTHBENCH_EVALUATOR_FILES.items():
+        _write_text(destination / name, (root / source).read_text(), root / source)
+    (destination / "validation_tasks.jsonl").write_text(text)
+    (destination / "validation_manifest.json").write_text(
+        json.dumps(
+            {
+                "outputs": {
+                    "validation_tasks.jsonl": sha256(
+                        destination / "validation_tasks.jsonl"
+                    )
+                }
+            }
+        )
+    )
+
+
 def copy_validation_evaluator(source, destination, data_root=None, task="coding"):
     """Copy validation rows and their private-test blobs using evaluator filenames.
 
@@ -296,6 +356,8 @@ def copy_validation_evaluator(source, destination, data_root=None, task="coding"
         return copy_culture_evaluator(destination, data_root)
     if task == "frontiercs":
         return copy_frontiercs_evaluator(destination, data_root)
+    if task == "healthbench":
+        return copy_healthbench_evaluator(destination, data_root)
     verify_manifest(data_root)
     rows = []
     with (data_root / "validation_tasks.jsonl").open() as stream:
