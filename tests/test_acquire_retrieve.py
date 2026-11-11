@@ -9,11 +9,13 @@ from unittest.mock import patch
 import pytest
 
 from pyforger.acquire import (
+    PubMedRetrievalSource,
     RetrievalSource,
     RetrieveMode,
     retrieve,
     retrieve_from_arxiv,
     retrieve_from_hf,
+    retrieve_from_pubmed,
     retrieve_from_s2,
     retrieve_from_web,
     retrieve_from_wiki,
@@ -260,6 +262,7 @@ class TestMultiQueryRetrieve:
         (retrieve_from_hf, HFRetrievalSource, ("some/dataset",)),
         (retrieve_from_arxiv, ArxivRetrievalSource, ()),
         (retrieve_from_s2, S2RetrievalSource, ()),
+        (retrieve_from_pubmed, PubMedRetrievalSource, ()),
     ],
 )
 def test_retrieval_cache_controls(entry, source_type, args, tmp_path):
@@ -310,6 +313,11 @@ def test_retrieval_cache_controls(entry, source_type, args, tmp_path):
             "_client",
         ),
         (S2RetrievalSource(timeout=10), S2RetrievalSource(timeout=20), "_client"),
+        (
+            PubMedRetrievalSource(timeout=10),
+            PubMedRetrievalSource(timeout=20),
+            "_session",
+        ),
     ],
 )
 def test_source_cache_ignores_runtime_state(source, changed, runtime_attr):
