@@ -34,12 +34,13 @@ export JUDGE_MAX_CONSECUTIVE_FAILURES
 
 
 # Validate SLURM_SUBMIT_DIR; interactive allocations may inherit a stale path.
+# Look for this script, not train_model.sh: agent sandboxes ship rl/ without it.
 CODING_DIR="${SLURM_SUBMIT_DIR:-}"
-if [ ! -f "${CODING_DIR}/train_model.sh" ]; then
+if [ ! -f "${CODING_DIR}/rl/run_rl_training_and_evaluation.sh" ]; then
   CODING_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 fi
-[ -f "${CODING_DIR}/train_model.sh" ] || {
-  echo "!!! cannot locate post_data_bench/coding (tried '$CODING_DIR')" >&2; exit 1; }
+[ -f "${CODING_DIR}/rl/run_rl_training_and_evaluation.sh" ] || {
+  echo "!!! cannot locate the task directory that holds rl/ (tried '$CODING_DIR')" >&2; exit 1; }
 cd "$CODING_DIR"
 
 # RL runs live apart from ../agent_data_models/, which holds the SFT checkpoints,
