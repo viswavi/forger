@@ -58,6 +58,8 @@ Credentials are provided as `LITELLM_API_KEY` and `LITELLM_BASE_URL`; load them 
 
 DeepSeek-V4-Flash returns its reasoning separately from its answer, and Forger keeps it: `sample_from_LLM` and `generate_from_context` put it under each output's `thinking_trace` key. Set the effort explicitly, e.g. `Model(..., reasoning_effort="high")`: without it DeepSeek-V4-Flash does not think at all, and the setting controls how long the reasoning is.
 
+Measured on this gateway: GLM-5.3 still reasons with an effort of "none" (as at "low"); on hard prompts, DeepSeek-V4-Flash at "low" reasoned 10,000-25,000 tokens, and either model can spend all of `max_tokens` on reasoning and return no answer. Long GLM-5.3 requests can time out at the gateway.
+
 {BACKEND_STUDENT_USAGE}
 
 Web search uses `BRAVE_API_KEY`; Semantic Scholar uses `S2_API_KEY`. Web search has no fixed usage limit, but be reasonable: do not send hundreds of thousands of queries.
