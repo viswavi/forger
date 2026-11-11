@@ -108,17 +108,23 @@ def no_sleep(monkeypatch):
 
 @pytest.fixture
 def session():
-    """A mocked requests.Session for every PubMed source."""
+    """A mocked requests.Session; ``.search`` and ``.fetch`` answer each endpoint."""
     with patch("pyforger.acquire.pubmed.requests.Session") as cls:
         sess = MagicMock()
+
+        def route(url, **kwargs):
+            endpoint = sess.search if url.endswith("esearch.fcgi") else sess.fetch
+            return endpoint(url, **kwargs)
+
+        sess.post.side_effect = route
         cls.return_value = sess
         yield sess
 
 
 def test_parses_rows_in_search_order(session):
     """Rows follow esearch order, titles keep inline markup, labels lead sections."""
-    session.get.return_value = _search("222", "111", "333")
-    session.post.return_value = _resp(content=_xml(ARTICLE, BOOK, LETTER))
+    session.search.return_value = _search("222", "111", "333")
+    session.fetch.return_value = _resp(content=_xml(ARTICLE, BOOK, LETTER))
 
     rows = PubMedRetrievalSource().fetch(RetrieveMode.QUERY, query="lung", n=3)
 
@@ -145,8 +151,8 @@ def test_parses_rows_in_search_order(session):
 
 def test_pmids_pubmed_omits_are_dropped(session):
     """A PMID that efetch does not return gives no row."""
-    session.get.return_value = _search("111", "999")
-    session.post.return_value = _resp(content=_xml(ARTICLE))
+    session.search.return_value = _search("111", "999")
+    session.fetch.return_value = _resp(content=_xml(ARTICLE))
     rows = PubMedRetrievalSource().fetch(RetrieveMode.QUERY, query="lung", n=2)
     assert [r["id"] for r in rows] == ["111"]
 
@@ -154,12 +160,12 @@ def test_pmids_pubmed_omits_are_dropped(session):
 def test_search_params_and_fetch_batches(session):
     """The search asks for n by relevance; efetch POSTs 200 PMIDs at a time."""
     pmids = [str(i) for i in range(450)]
-    session.get.return_value = _search(*pmids)
-    session.post.return_value = _resp(content=_xml())
+    session.search.return_value = _search(*pmids)
+    session.fetch.return_value = _resp(content=_xml())
 
     PubMedRetrievalSource().fetch(RetrieveMode.QUERY, query="lung", n=450)
 
-    params = session.get.call_args.kwargs["params"]
+    params = session.search.call_args.kwargs["data"]
     assert (params["term"], params["retmax"], params["sort"]) == (
         "lung",
         450,
@@ -167,31 +173,43 @@ def test_search_params_and_fetch_batches(session):
     )
     assert params["tool"] == "pyforger" and "api_key" not in params
     batches = [
-        c.kwargs["data"]["id"].count(",") + 1 for c in session.post.call_args_list
+        c.kwargs["data"]["id"].count(",") + 1 for c in session.fetch.call_args_list
     ]
     assert batches == [200, 200, 50]
 
 
+def test_requests_are_posts_so_the_key_stays_out_of_urls(session, monkeypatch):
+    """Search and fetch both POST, with the key in the body, never the URL."""
+    monkeypatch.setenv("NCBI_API_KEY", "secret-key")
+    session.search.return_value = _search("111")
+    session.fetch.return_value = _resp(content=_xml(ARTICLE))
+    PubMedRetrievalSource().fetch(RetrieveMode.QUERY, query="x", n=1)
+    session.get.assert_not_called()
+    for call in session.post.call_args_list:
+        assert "secret-key" not in call.args[0] and "params" not in call.kwargs
+        assert call.kwargs["data"]["api_key"] == "secret-key"
+
+
 def test_sort_override(session):
     """``sort=`` reaches esearch."""
-    session.get.return_value = _search()
+    session.search.return_value = _search()
     PubMedRetrievalSource(sort="pub_date").fetch(RetrieveMode.QUERY, query="x", n=1)
-    assert session.get.call_args.kwargs["params"]["sort"] == "pub_date"
+    assert session.search.call_args.kwargs["data"]["sort"] == "pub_date"
 
 
 def test_api_key_from_env_is_sent_and_kept_out_of_cache_key(session, monkeypatch):
     """NCBI_API_KEY is sent, but two keys share one cache key."""
     monkeypatch.setenv("NCBI_API_KEY", "secret-key")
-    session.get.return_value = _search()
+    session.search.return_value = _search()
     source = PubMedRetrievalSource()
     source.fetch(RetrieveMode.QUERY, query="x", n=1)
-    assert session.get.call_args.kwargs["params"]["api_key"] == "secret-key"
+    assert session.search.call_args.kwargs["data"]["api_key"] == "secret-key"
     assert "secret-key" not in repr(source.cache_key())
     assert source.cache_key() == PubMedRetrievalSource(api_key="other").cache_key()
 
 
 def test_spacing_without_and_with_key(no_sleep):
-    """Keyless requests are spaced 0.4 s apart, keyed ones 0.125 s."""
+    """Keyless requests are spaced 0.4 s apart, keyed ones 0.15 s."""
     limiter = pubmed_mod._RateLimiter()
     with patch.object(pubmed_mod.time, "monotonic", return_value=100.0):
         for _ in range(3):
@@ -211,11 +229,11 @@ def test_429_pauses_every_thread():
 
 def test_429_is_retried_after_retry_after(session, no_sleep):
     """A 429 waits at least Retry-After seconds, then succeeds."""
-    session.get.side_effect = [
+    session.search.side_effect = [
         _resp(429, headers={"Retry-After": "3"}),
         _search("111"),
     ]
-    session.post.return_value = _resp(content=_xml(ARTICLE))
+    session.fetch.return_value = _resp(content=_xml(ARTICLE))
     rows = PubMedRetrievalSource().fetch(RetrieveMode.QUERY, query="x", n=1)
     assert [r["id"] for r in rows] == ["111"]
     assert 3.0 in no_sleep
@@ -224,31 +242,31 @@ def test_429_is_retried_after_retry_after(session, no_sleep):
 def test_server_errors_retry_then_raise(session, no_sleep, monkeypatch):
     """5xx responses retry 5 times (1-16 s apart), then raise."""
     monkeypatch.setattr(pubmed_mod._LIMITER, "wait", lambda interval: None)
-    session.get.return_value = _resp(503)
+    session.search.return_value = _resp(503)
     with pytest.raises(requests.HTTPError):
         PubMedRetrievalSource().fetch(RetrieveMode.QUERY, query="x", n=1)
-    assert session.get.call_count == PubMedRetrievalSource._MAX_RETRIES + 1
+    assert session.search.call_count == PubMedRetrievalSource._MAX_RETRIES + 1
     assert no_sleep == [1.0, 2.0, 4.0, 8.0, 16.0]
 
 
 def test_connection_error_is_retried(session):
     """A dropped connection is retried."""
-    session.get.side_effect = [requests.ConnectionError("reset"), _search()]
+    session.search.side_effect = [requests.ConnectionError("reset"), _search()]
     assert PubMedRetrievalSource().fetch(RetrieveMode.QUERY, query="x", n=1) == []
-    assert session.get.call_count == 2
+    assert session.search.call_count == 2
 
 
 def test_client_error_is_not_retried(session):
     """A 400 raises at once."""
-    session.get.return_value = _resp(400)
+    session.search.return_value = _resp(400)
     with pytest.raises(requests.HTTPError):
         PubMedRetrievalSource().fetch(RetrieveMode.QUERY, query="x", n=1)
-    assert session.get.call_count == 1
+    assert session.search.call_count == 1
 
 
 def test_search_error_body_raises(session):
     """An esearch error body raises with its message."""
-    session.get.return_value = _resp(json={"error": "Invalid query"})
+    session.search.return_value = _resp(json={"error": "Invalid query"})
     with pytest.raises(RuntimeError, match="Invalid query"):
         PubMedRetrievalSource().fetch(RetrieveMode.QUERY, query="x", n=1)
 
