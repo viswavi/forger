@@ -27,6 +27,11 @@ LENGTH_PENALTY_PER_CHAR = 2.94e-5
 OFFICIAL_MODEL = "openai/wine-gpt-6-luna"
 OFFICIAL_EFFORT = "high"
 ATTEMPTS = 6
+# Attempts before a criterion the provider's content filter keeps blocking counts as
+# ungraded. Azure blocks DeepSeek-V4-Flash's verdict on some chats about self-harm
+# ("Response content blocked by label 'MultiSeverity_SelfHarmScore'"): 1 of the 194
+# validation criteria, on every attempt (2026-11-11).
+FILTER_ATTEMPTS = 3
 JUDGE_MAX_TOKENS = 4096
 
 # The benchmark's grader prompt, verbatim (typos included), with <<conversation>>
@@ -61,12 +66,21 @@ def parse_verdict(text: str | None) -> bool | None:
     return value if isinstance(value, bool) else None
 
 
-def raw_score(items: list[dict], met: list[bool]) -> float:
-    """Points of the met criteria (negative ones subtract) over the positive total."""
-    possible = sum(item["points"] for item in items if item["points"] > 0)
-    if possible <= 0:
+def raw_score(items: list[dict], met: list[bool | None]) -> float:
+    """Points of the met criteria (negative ones subtract) over the positive total.
+
+    An ungraded criterion (None) is left out of both, unless it leaves no positive
+    points, e.g. the only positive criterion of a row; then the full positive
+    total stays the denominator.
+    """
+    total = sum(item["points"] for item in items if item["points"] > 0)
+    if total <= 0:
         raise ValueError("a rubric needs at least one positive criterion")
-    achieved = sum(item["points"] for item, hit in zip(items, met, strict=True) if hit)
+    graded = [
+        (item, hit) for item, hit in zip(items, met, strict=True) if hit is not None
+    ]
+    possible = sum(item["points"] for item, _ in graded if item["points"] > 0) or total
+    achieved = sum(item["points"] for item, hit in graded if hit)
     return achieved / possible
 
 
@@ -134,9 +148,12 @@ async def grade_criterion(judge: str, prompt: str, sem: asyncio.Semaphore) -> di
 
     Returns {"criteria_met", "explanation", "attempts", "usage"}. The reference
     implementation retries a bad reply until it parses; this one stops after
-    ATTEMPTS and raises, so a broken judge fails the run instead of looping.
+    ATTEMPTS and raises, so a broken judge fails the run instead of looping. A
+    criterion the provider's content filter blocks FILTER_ATTEMPTS times returns
+    "criteria_met": None (ungraded), which raw_score leaves out.
     """
     last = None
+    filtered = 0
     usage_total = {"prompt_tokens": 0, "completion_tokens": 0}
     for attempt in range(1, ATTEMPTS + 1):
         try:
@@ -146,6 +163,16 @@ async def grade_criterion(judge: str, prompt: str, sem: asyncio.Semaphore) -> di
             if type(exc).__name__ == "TokenUnitQuotaExceeded":
                 raise
             last = f"{type(exc).__name__}: {str(exc)[:200]}"
+            if "content_filter" in str(exc):
+                filtered += 1
+                if filtered >= FILTER_ATTEMPTS:
+                    return {
+                        "criteria_met": None,
+                        "explanation": "ungraded: the provider's content filter "
+                        "blocked every grader reply",
+                        "attempts": attempt,
+                        "usage": usage_total,
+                    }
             await asyncio.sleep(min(2**attempt, 30))
             continue
         for key in usage_total:

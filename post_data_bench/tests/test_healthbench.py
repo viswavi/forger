@@ -65,6 +65,12 @@ class ScoreTests(unittest.TestCase):
         self.assertAlmostEqual(judge.raw_score(self.items, [True, True]), 0.2)
         self.assertAlmostEqual(judge.raw_score(self.items, [False, True]), -0.8)
 
+    def test_ungraded_criteria_leave_the_score(self):
+        """A criterion the content filter blocked counts neither way."""
+        items = self.items + [{"points": 3, "criterion_text": "c"}]
+        self.assertAlmostEqual(judge.raw_score(items, [True, None, False]), 5 / 8)
+        self.assertAlmostEqual(judge.raw_score(items, [None, True, None]), -4 / 8)
+
     def test_length_adjustment_is_zero_at_2000_characters(self):
         """Length adjustment is zero at 2000 characters."""
         self.assertEqual(judge.length_adjusted(0.5, "x" * 2000), 0.5)

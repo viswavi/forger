@@ -273,6 +273,10 @@ def compute_metrics(graded_rows: list[dict]) -> dict:
         "n_samples": len(samples),
         "n_truncated": sum(bool(s.get("truncated")) for s in samples),
         "n_no_answer": sum(bool(s.get("no_answer")) for s in samples),
+        # Criteria the provider's content filter kept the grader from answering.
+        "n_criteria_ungraded": sum(
+            c["criteria_met"] is None for s in samples for c in s["criteria"]
+        ),
         "score": 100 * min(max(mean, 0.0), 1.0),
         # Of the unclipped mean; the clip only matters at the ends of the scale.
         "score_stderr": 100 * stderr if stderr is not None else None,
