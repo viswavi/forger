@@ -9,7 +9,7 @@ this way from start to finish; its step docstrings show what the evidence for ea
 ## Start with a small end-to-end loop
 
 Get a few dozen rows through every stage early: source, refinement, ground truth and rubrics, filters, and, for
-training data, a short training probe and an evaluation. A working loop shows what actually needs fixing, and leaves you
+training data, a short training run and an evaluation. A working loop shows what actually needs fixing, and leaves you
 with a valid dataset to improve on. Then compare alternatives at each stage, scale up, and refine. Build and compare at
 least two or three small versions before your large-scale run.
 
@@ -73,19 +73,18 @@ probes) remove what fails, rather than writing or fixing rows yourself.
 
 ## RL data
 
-- Hard-to-easy generalization usually works: find or create tasks harder than the ones you will be evaluated on, from a
-  space broader than the evaluation set, and train on those.
-- Rows that restate, re-parameterize, or vary individual evaluation or validation problems teach the student those
-  problems rather than the skill, and make validation useless for choosing checkpoints. Use validation to learn the
-  format, the scoring, and where the student fails.
+- Hard-to-easy generalization usually works: find or create tasks harder than the ones the model must eventually solve,
+  from a space broader than your target examples, and train on those.
+- Rows that copy or lightly vary your held-out examples teach the student those examples rather than the skill, and
+  make the held-out set useless for measuring progress.
 - In GRPO, a prompt whose sampled completions all get the same reward gives no learning signal.
   `filter.by_pass_at_k(rows, model=student, metric=...)` measures the student's difficulty on your rows (a metric may
   return a score); `histogram=True` prints the pass-rate histogram and counts rows whose samples all scored the same.
 - Check rubrics on real student responses before RL: `inspect.rubric_scores(rows, metric, response_fields=...)` on rows
   holding sampled responses, with `probes={name: fn(row) -> response}` adding responses that should score low (e.g. a
-  trivial valid answer, or the example output hard-coded); each column is compared row by row with the first.
+  trivial valid answer, or one that games the metric); each column is compared row by row with the first.
 - Where a response's quality can be measured exactly (e.g. running a program on tests), code criteria give a more
-  precise and less noisy reward than LLM-judged criteria, and cost no judge tokens.
+  precise and less noisy reward than LLM-judged criteria, and need no LLM calls.
 - When you train, look at sampled responses, reward variation within groups, truncation, and per-problem evaluation
-  results, not only the mean score. Short training probes are a cheap diagnostic.
+  results, not only the mean score. Short training runs are a cheap diagnostic.
 - A small seed set can bootstrap a larger one: train on it, then sample the checkpoint to calibrate or filter new rows.
