@@ -5,7 +5,7 @@ trials, letters. It has no full text; ``pmcid`` names the PubMed Central copy
 when there is one.
 
 NCBI allows 3 requests per second without an API key and 10 with one. Every
-request in the process goes through one shared limiter (2.5 or 8 per second),
+request in the process goes through one shared limiter (2.5 or 6.7 per second),
 and a rate-limited (429) or failed (5xx, connection) request is retried with
 backoff; a 429 also holds back the other threads' requests.
 """
@@ -130,10 +130,11 @@ class PubMedRetrievalSource(RetrievalSource):
     _DEFAULT_TIMEOUT = 30
     _MAX_RETRIES = 5
     # NCBI allows 3 (10 with a key) requests per second. Requests spaced at
-    # exactly 1/3 s still drew 429s in a live test (6 of 30), since network
-    # delay bunches them up on arrival; these leave a margin.
+    # exactly 1/3 s still drew 429s in a live test (6 of 30), and 8/s with a
+    # key drew 2 of 42, since network delay bunches them up on arrival; these
+    # leave a margin.
     _INTERVAL_NO_KEY = 0.4  # 2.5 requests per second
-    _INTERVAL_KEY = 0.125  # 8 requests per second
+    _INTERVAL_KEY = 0.15  # about 6.7 requests per second
 
     def cache_key(self) -> tuple:
         """Identify the configuration; the API key changes speed, not results."""
@@ -167,7 +168,8 @@ class PubMedRetrievalSource(RetrievalSource):
         """Send one rate-limited E-utilities request, retrying 429s and 5xx.
 
         Waits ``Retry-After`` when NCBI sends it, else 1, 2, 4, 8, 16 seconds.
-        efetch goes as a POST, so a long PMID list stays out of the URL.
+        Every request is a POST: the API key stays out of URLs (and so out of
+        error messages and logs), and a long PMID list fits.
         """
         params = {**params, "tool": "pyforger"}
         if self._api_key:
@@ -180,10 +182,7 @@ class PubMedRetrievalSource(RetrievalSource):
             _LIMITER.wait(interval)
             delay = float(2**attempt)
             try:
-                if endpoint == "efetch.fcgi":
-                    resp = session.post(url, data=params, timeout=timeout)
-                else:
-                    resp = session.get(url, params=params, timeout=timeout)
+                resp = session.post(url, data=params, timeout=timeout)
             except (requests.ConnectionError, requests.Timeout) as exc:
                 if attempt == self._MAX_RETRIES:
                     raise
