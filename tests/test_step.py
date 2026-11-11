@@ -22,7 +22,7 @@ from pyforger._tracking import PipelineRecord, ScoreRecord, StepRecord
 from pyforger.acquire import Model
 from pyforger.alter import dynamic
 from pyforger.inspect import inspect_step
-from pyforger.op import trace
+from pyforger.op import skip_cache_write, trace
 from pyforger.steps import (
     _NON_QUALITY_FILTERS,
     PipelineContractError,
@@ -1079,6 +1079,49 @@ def test_inspect_step_rows_after_a_cache_hit_and_when_not_cached(tmp_path):
     (tmp_path / _tracking.step_records()["first"].cache_file).unlink()
     with pytest.raises(FileNotFoundError, match="FORGER_CACHE cleared"):
         inspect_step("first", rows=True)
+
+
+def test_inspect_step_rows_of_a_run_kept_out_of_the_cache(tmp_path, caplog):
+    """A run kept out of the cache saves its rows for inspect_step, never to replay."""
+    runs: list[int] = []
+    flaky = [True]
+
+    @op(name="alter.test_maybe_skip", category="alter")
+    def maybe_skip(rows):
+        runs.append(len(rows))
+        if flaky[0]:
+            _tracking.add_op_warning("2 of 2 requests timed out", "provider_failure")
+            skip_cache_write()
+        return [{**r, "text": r["text"].upper()} for r in rows]
+
+    @step
+    def partial(rows):
+        return maybe_skip(rows)
+
+    expected = [{"text": "ALPHA"}, {"text": "BETA"}]
+    assert partial(_rows("alpha", "beta")) == expected
+    rec = _tracking.step_records()["partial"]
+    assert not rec.cache_hit
+    assert rec.cache_file.endswith(".uncached.pkl")
+    _tracking.clear_step_records()  # as in a new process
+    with caplog.at_level("WARNING", logger="pyforger.inspect.report"):
+        assert inspect_step("partial", rows=True) == expected
+    assert "step 'partial' was not cached, so its rows may be partial" in caplog.text
+    assert "2 of 2 requests timed out" in caplog.text
+
+    # The saved rows are never replayed: the step runs again, then is cached.
+    flaky[0] = False
+    assert partial(_rows("alpha", "beta")) == expected
+    assert runs == [2, 2]
+    cache_file = _tracking.step_records()["partial"].cache_file
+    assert not cache_file.endswith(".uncached.pkl")
+    assert not list(tmp_path.rglob("*.uncached.pkl"))  # the stale copy is gone
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="pyforger.inspect.report"):
+        assert inspect_step("partial", rows=True) == expected
+    assert "was not cached" not in caplog.text
+    partial(_rows("alpha", "beta"))
+    assert runs == [2, 2]  # a cache hit
 
 
 def _bins(scores):

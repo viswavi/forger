@@ -20,6 +20,7 @@ from pyforger.acquire import PromptTooLongError, sample_from_LLM
 from pyforger.acquire._model_utils import _is_row_error, _is_transient
 from pyforger.acquire.model import GenerateResult, Model
 from pyforger.alter import generate_from_context
+from pyforger.inspect import inspect_step
 from pyforger.op import skip_cache_write, trace
 from pyforger.steps import pipeline, step
 
@@ -208,8 +209,11 @@ class TestGenerateFromContext:
         )
         assert trace()[-1].cache_hit is True
 
-    def test_warning_in_step_report_and_step_not_cached(self, monkeypatch):
-        """The warning lands on the op in the step report; the step is not cached."""
+    def test_warning_in_step_report_and_step_not_cached(self, monkeypatch, caplog):
+        """The warning lands on the op in the step report; the step is not cached.
+
+        Its rows are still saved for ``inspect_step(rows=True)``, with a warning.
+        """
         monkeypatch.setenv("FORGER_STEP_REPORT", "0")
         _tracking.clear_step_records()
 
@@ -227,6 +231,11 @@ class TestGenerateFromContext:
         assert rec.ops[0].warnings == [message]
         assert message in rec.warnings
         assert rec.cache_hit is False
+        _tracking.clear_step_records()  # as in a new process
+        with caplog.at_level(logging.WARNING, logger="pyforger.inspect.report"):
+            assert inspect_step("answer", rows=True) == out
+        assert "step 'answer' was not cached" in caplog.text
+        assert message in caplog.text
 
         healthy = FlakyModel()
         out = answer(ITEMS, healthy)
