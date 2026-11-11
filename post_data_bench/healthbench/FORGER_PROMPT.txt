@@ -64,7 +64,7 @@ Measured on this gateway: GLM-5.3 still reasons with an effort of "none" (as at 
 
 {BACKEND_STUDENT_USAGE}
 
-Web search uses `BRAVE_API_KEY`; Semantic Scholar uses `S2_API_KEY`. Web search has no fixed usage limit, but be reasonable: do not send hundreds of thousands of queries.
+Web search uses `BRAVE_API_KEY`; Semantic Scholar uses `S2_API_KEY`; PubMed (NCBI E-utilities) uses `NCBI_API_KEY`. Web search has no fixed usage limit, but be reasonable: do not send hundreds of thousands of queries.
 
 # Training and Validation
 
