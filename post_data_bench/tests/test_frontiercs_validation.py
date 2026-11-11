@@ -161,6 +161,20 @@ class FrontierValidationTests(unittest.TestCase):
                 if path.suffix in (".py", ".sh"):
                     self.assertNotRegex(data.decode(), BENCHMARK_NAMES)
 
+    def test_copy_evaluates_with_the_task_protocol(self):
+        """The copy's evaluate_model.sh passes temperature 1.0 after coding's 0.6."""
+        self.copy()
+        # Stand-in launcher that prints the arguments it would pass on.
+        (self.dest / "eval_launcher.sh").write_text('shift; echo "$@"\n')
+        result = subprocess.run(
+            ["bash", str(self.dest / "evaluate_model.sh"), "--split", "val"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertIn("--temperature 1.0 --top-p 1.0 --top-k -1", result.stdout)
+        self.assertIn("--n-samples 5", result.stdout)
+
     def test_changed_problem_file_is_refused(self):
         """A validation file that differs from problem_files.json is not copied."""
         (self.data / "problems/26/testdata/1.ans").write_text("4\n")

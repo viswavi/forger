@@ -17,4 +17,7 @@ export MAX_TOKENS="${MAX_TOKENS:-28672}"
 PROTOCOL=(--temperature 1.0 --top-p 1.0 --top-k -1 --n-samples 5 --answer-extraction lenient)
 # Statements reach ~7K tokens; keep Qwen3's full 40,960 context for longer answers.
 export MAX_MODEL_LEN="${MAX_MODEL_LEN:-40960}"
-exec bash "$TASK_DIR/../coding/eval_launcher.sh" "$TASK_DIR" "${PROTOCOL[@]}" "$@"
+# The agent's copy has the shared launcher beside this file; the host's is in coding/.
+LAUNCHER="$TASK_DIR/eval_launcher.sh"
+[[ -f "$LAUNCHER" ]] || LAUNCHER="$TASK_DIR/../coding/eval_launcher.sh"
+exec bash "$LAUNCHER" "$TASK_DIR" "${PROTOCOL[@]}" "$@"
