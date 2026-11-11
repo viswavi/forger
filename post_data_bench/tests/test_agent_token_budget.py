@@ -404,6 +404,9 @@ completion(model='litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731')
             for advice in ("DECISIONS.md", "end-to-end loop", "hard-to-easy"):
                 self.assertNotIn(advice, text)
         self.assertIn("/forger/docs/AGENTS.md", forger)
+        # The Forger arm follows Forger's methodology doc; Native never sees it.
+        self.assertIn("/forger/docs/agents/methodology.md", forger)
+        self.assertNotIn("methodology", native)
         self.assertIn(framing, forger)
 
 
