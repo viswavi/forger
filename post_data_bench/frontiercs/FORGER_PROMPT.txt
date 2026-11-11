@@ -21,8 +21,8 @@ The goal is a student that is genuinely better at this kind of problem, includin
 
 How you build, check, and select your data is up to you. The dataset you submit must be:
 - valid: in the format below, passing the format check;
-- large: see the row counts under Data Format;
-- diverse: many distinct problems, not many variants of a few;
+- large: see the row counts under Data Format; we need enough data to enable learning
+- diverse: we need enough diversity in our data to enable generalization
 - correctly graded: each row's rubric rewards a response by how good it actually is.
 
 When `generate_custom_rubric` or `convert_rubric_criteria` writes code criteria, pass the sandbox rules (see Data Format) and the `judge_cpp` helper as `code_guidelines=` (a string), so the criteria it writes compile in the RL grader and judge responses through that helper.

@@ -21,8 +21,8 @@ The goal is a student that is genuinely better at this kind of problem, includin
 
 How you build, check, and select your data is up to you. The dataset you submit must be:
 - valid: in the format below, passing the format check;
-- large: see the row counts under Data Format;
-- diverse: many distinct problems, not many variants of a few;
+- large: see the row counts under Data Format; we need enough data to enable learning
+- diverse: we need enough diversity in our data to enable generalization
 - correctly graded: each row's rubric rewards a response by how good it actually is.
 
 There are two open-source libraries which you are NOT allowed to use. You are not allowed to use the Forger data generation framework (pyforger in pypi) or the Bespoke Curator library (bespokelabs.curator in pypi). If you try to download or use either of these libraries, you will instantly be terminated and fail the task. Otherwise, you are free to use any other libraries or tools that you wish.
