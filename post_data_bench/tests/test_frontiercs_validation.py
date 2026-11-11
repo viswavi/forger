@@ -12,6 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from coding.rl import decontaminate
 from coding.rl.agent_validation import (
@@ -366,6 +367,57 @@ class FrontierValidationTests(unittest.TestCase):
         )
         self.assertNotIn("Secret", json.dumps(signature))
         self.assertTrue((self.dest / "problems/val_000/chk.cc").is_file())
+
+    def test_launcher_exports_baseline_from_the_benchmark_build(self):
+        """A release's task directory has no model_outputs/; the build's is used."""
+        tree = ast.parse((ROOT / "launch_agent.py").read_text())
+        selected = [
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name in {"_copy_into", "_public_source", "_task_public_copies"}
+        ]
+        namespace = dict(
+            os=os,
+            shutil=shutil,
+            args=SimpleNamespace(
+                training_mode="sft-rl",
+                task="frontiercs",
+                backend="local",
+                model="Qwen/Qwen3-4B",
+            ),
+            TASK_PUBLIC_FILES=[],
+            VAL_OUTPUT_FILES=("predictions.jsonl", "metrics.json"),
+            SHARED_TASK_DIR=str(ROOT / "coding"),
+        )
+        exec(
+            compile(
+                ast.Module(body=selected, type_ignores=[]), "launch_agent.py", "exec"
+            ),
+            namespace,
+        )
+        from coding.eval_state import CONTRACT_VERSION
+        from coding.split_contract import sha256
+
+        val = self.data / "model_outputs/Qwen__Qwen3-4B/val"
+        val.mkdir(parents=True)
+        (val / "predictions.jsonl").write_text(
+            json.dumps({"id": "26", "score": 1.0}) + "\n"
+        )
+        (val / "metrics.json").write_text(
+            json.dumps(
+                {
+                    "evaluation_contract": CONTRACT_VERSION,
+                    "tasks_sha256": sha256(self.data / "validation_tasks.jsonl"),
+                }
+            )
+        )
+        release = self.data.parent / "release_task_dir"
+        release.mkdir()
+        with mock.patch.dict(os.environ, {"PDB_BENCHMARK_DIR": str(self.data)}):
+            namespace["_task_public_copies"](str(release), str(self.dest))
+        copied = self.dest / "model_outputs/Qwen__Qwen3-4B/val/predictions.jsonl"
+        self.assertEqual(json.loads(copied.read_text())["id"], "val_000")
 
 
 class FrontierDecontaminationTests(unittest.TestCase):
