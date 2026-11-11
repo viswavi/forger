@@ -237,9 +237,10 @@ The agent has **15 hours** for data generation, training and validation, and sub
 its chosen **final RL checkpoint** plus its dataset (prompts and rubrics; a
 ground_truth reference is optional). It may repeat training, continue RL from
 earlier checkpoints, and revise data between experiments. With `--backend local`,
-training is **RL only**, from the base model: **100 steps × 8 prompts × 8
-completions** by default (`--num-rollout` changes the length), lr 1e-6 and
-16,000-token responses (see `coding/rl/UNIFIED_TRAINING.md`). Tinker keeps SFT
+training is **RL only**, from the base model: **80 steps × 32 prompts × 8
+completions** (a submitted checkpoint has exactly 80 steps behind it), lr 3e-6 and
+responses of up to 16,384 tokens, 24,576 for the algorithmic task (see
+`coding/rl/UNIFIED_TRAINING.md`). Tinker keeps SFT
 trials and **80 steps × 32 prompts × 8 completions** (2,560 prompt draws, 20,480
 completions); its planning guidelines are roughly one hour for SFT, 40 minutes for
 evaluation on 1,500 examples, and six hours for RL.

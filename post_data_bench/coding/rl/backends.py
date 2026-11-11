@@ -9,13 +9,13 @@ MODELS = {"tinker": "Qwen/Qwen3-8B", "local": "Qwen/Qwen3-4B"}
 # Agent RL schedule when --num-rollout etc. are omitted; the local optimizer
 # settings are local_training.RECIPE.
 RL_DEFAULTS = {
-    "local": {"num_rollout": 100, "rollout_batch_size": 8, "n_samples_per_prompt": 8},
+    "local": {"num_rollout": 80, "rollout_batch_size": 32, "n_samples_per_prompt": 8},
     "tinker": {"num_rollout": 80, "rollout_batch_size": 32, "n_samples_per_prompt": 8},
 }
 # Training a submitted checkpoint may use: exactly this many RL steps in total,
 # summed over every run in its lineage (a continuation adds to the run it starts
 # from), each at the default batch shape. None: no budget.
-RL_STEP_BUDGET = {"local": 100, "tinker": None}
+RL_STEP_BUDGET = {"local": 80, "tinker": None}
 
 
 def resolve_backend(value=None):

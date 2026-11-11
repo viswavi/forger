@@ -685,25 +685,26 @@ class LocalRLOnlyTests(unittest.TestCase):
             training.sft(args)
 
     def test_recipe_and_default_schedule(self):
-        """100 steps x 8 prompts x 8 samples at lr 1.5e-6 and 16,000 tokens."""
+        """80 steps x 32 prompts x 8 samples at lr 3e-6; the wrapper sets the length."""
         from coding.rl import local_training
 
         command = local_training.rl_command("data", "ckpt", "out", "env", "deps")
         expected = {
-            "--num-rollout": "100",
-            "--rollout-batch-size": "8",
+            "--num-rollout": "80",
+            "--rollout-batch-size": "32",
             "--n-samples-per-prompt": "8",
-            "--global-batch-size": "64",
-            "--lr": "1.5e-6",
-            "--max-response-len": "16000",
-            "--eps-clip-high": "0.2",
-            "--weight-decay": "0.01",
-            "--adam-beta2": "0.999",
+            "--global-batch-size": "256",
+            "--lr": "3e-6",
+            "--eps-clip-high": "0.28",
+            "--weight-decay": "0.1",
+            "--adam-beta2": "0.98",
             "--save-interval": "10",
         }
         for flag, value in expected.items():
             with self.subTest(flag=flag):
                 self.assertEqual(last_value(command, flag), value)
+        # The wrapper picks the response length per task (24,576 for algorithmic).
+        self.assertNotIn("--max-response-len", command)
         probe = local_training.rl_command(
             "data", "ckpt", "out", "env", "deps", probe=True
         )
@@ -758,8 +759,8 @@ class LocalRLOnlyTests(unittest.TestCase):
         (command,) = commands
         self.assertEqual(starts, [root / "base"])
         self.assertEqual(last_value(command, "--checkpoint"), str(root / "base"))
-        self.assertEqual(last_value(command, "--num-rollout"), "100")
-        self.assertEqual(last_value(command, "--rollout-batch-size"), "8")
+        self.assertEqual(last_value(command, "--num-rollout"), "80")
+        self.assertEqual(last_value(command, "--rollout-batch-size"), "32")
         self.assertIn("--skip-final-eval", command)
 
 

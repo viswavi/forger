@@ -11,23 +11,22 @@ from .agent_training import CODING, JUDGE_FLAGS, run  # noqa: ABS101
 from .backends import RL_DEFAULTS  # noqa: ABS101
 
 BASE_MODEL = "Qwen/Qwen3-4B"
-# The local RL recipe, with 100 steps x 8 prompts x 8 samples (RL_DEFAULTS):
-# lr 1.5e-6 (FrontierSmith's 1e-6 x 1.5, since a submitted checkpoint gets
-# exactly 100 steps: backends.RL_STEP_BUDGET), 16,000-token responses, clip 0.2
-# on both sides, weight decay 0.01, Adam beta2 0.999, and a checkpoint every 10
-# steps. The wrapper's defaults supply the rest (KL 1e-3 low_var_kl, temperature
-# 1.0, eps-clip 0.2 below).
+# The local RL recipe, with 80 steps x 32 prompts x 8 samples (RL_DEFAULTS;
+# a submitted checkpoint gets exactly 80 steps: backends.RL_STEP_BUDGET): lr 3e-6,
+# clip 0.28 above (0.2 below), weight decay 0.1, Adam beta2 0.98, and a checkpoint
+# every 10 steps. FrontierSmith's recipe (8 x 8 at lr 1e-6 to 1.5e-6, 16,000
+# tokens) gained less on the algorithmic task (jobs 167803/167804 vs 164489/
+# 164490). The wrapper's defaults supply the rest: responses of up to 16,384
+# tokens (24,576 for the algorithmic task), KL 1e-3 low_var_kl, temperature 1.0.
 RECIPE = [
     "--lr",
-    "1.5e-6",
-    "--max-response-len",
-    "16000",
+    "3e-6",
     "--eps-clip-high",
-    "0.2",
+    "0.28",
     "--weight-decay",
-    "0.01",
+    "0.1",
     "--adam-beta2",
-    "0.999",
+    "0.98",
     "--save-interval",
     "10",
 ]
