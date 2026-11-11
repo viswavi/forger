@@ -107,8 +107,9 @@ SYNC_LOOP=$!
 # secret-test evaluation on the frozen bundle, so the agent's hours of work
 # are safe before the evaluation starts.
 FINAL_BUNDLE="$AGENT_MODEL_OUTPUT_DIR/$TASK/final_bundle_${SLURM_JOB_ID}"
-# Agent hours: 20 for frontiercs (80 RL steps take ~10 h), else 15.
-[[ "$TASK" == frontiercs ]] && AGENT_HOURS=20 || AGENT_HOURS=15
+# Agent hours: 19 for frontiercs (80 RL steps take ~6 h; the 28,672-token test
+# evaluation needs the rest of the 24-hour job), else 15.
+[[ "$TASK" == frontiercs ]] && AGENT_HOURS=19 || AGENT_HOURS=15
 AGENT_HOURS=${PDB_TIMEOUT_HOURS:-$AGENT_HOURS}
 PREPARE_ONLY=0
 for arg in "$@"; do [[ "$arg" == --prepare-final-only ]] && PREPARE_ONLY=1; done

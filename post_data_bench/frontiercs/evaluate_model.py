@@ -5,7 +5,7 @@ Write resumable predictions.jsonl and metrics.json with headline ``score``: the 
 problem score (0-100). Each problem gets --n-samples answers (default 5), each
 judged on all its tests by judge.py as the benchmark scores it, and scores their
 mean (Avg@n), since one sample per problem is too noisy at low scores. The
-default protocol: 16,000-token answers at temperature 1.0, top-p 1.0 and no
+default protocol: 28,672-token answers at temperature 1.0, top-p 1.0 and no
 top-k, 5 per problem, with code also read from a reasoning trace the token limit
 cut off (--answer-extraction lenient). Secondary
 metrics appear under context. A row's ``id`` names its problem directory,
@@ -62,7 +62,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional cap on rows, applied before sharding.",
     )
-    p.add_argument("--max-tokens", type=int, default=16000)
+    p.add_argument("--max-tokens", type=int, default=28672)
     p.add_argument("--temperature", type=float, default=1.0)
     p.add_argument("--top-p", type=float, default=1.0)
     p.add_argument("--top-k", type=int, default=-1, help="-1: no top-k.")
