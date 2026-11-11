@@ -343,6 +343,9 @@ _STEP_META_SUFFIX = ".step.json"
 _SCORES_SUFFIX = ".scores.json"
 # What the call added to the pipeline's retrieval check (see _tracking.ReachLog).
 _REACH_SUFFIX = ".reach.json"
+# The output of a step run kept out of the cache (e.g. provider errors), for
+# ``inspect_step(name, rows=True)`` only: a rerun never reads it, so it reruns.
+_UNCACHED_STEP_SUFFIX = ".uncached.pkl"
 
 # Set on every @op / tracked wrapper, e.g. {"name": "filter.by_length", "kind":
 # "op", "cache": True}; scripts/gen_op_docs.py reads it to mark cached ops.
@@ -373,6 +376,9 @@ class _RequestScope:
         self._next_slot: dict[str, int] = {}
         self.reused = 0
         self.total = 0
+        # Set once this call warned about rows asked again under a new prompt,
+        # so a later batch_size chunk does not warn again.
+        self.resent_warned = False
 
     @property
     def key(self) -> str:
@@ -781,6 +787,7 @@ def op(
             meta_path = cache_path.with_name(input_hash + _STEP_META_SUFFIX)
             scores_path = cache_path.with_name(input_hash + _SCORES_SUFFIX)
             reach_path = cache_path.with_name(input_hash + _REACH_SUFFIX)
+            uncached_path = cache_path.with_name(input_hash + _UNCACHED_STEP_SUFFIX)
 
             if use_cache and cache_path.exists():
                 try:
@@ -859,6 +866,12 @@ def op(
                             "not cached: an op in a worker thread kept its result "
                             "out of the cache (e.g. provider errors)",
                         )
+                    if is_step:
+                        # E.g. 357 rows of which 10 hit timeouts: still readable
+                        # with inspect_step(rows=True) after the process dies.
+                        uncached_path.parent.mkdir(parents=True, exist_ok=True)
+                        _write_result(uncached_path, result, cache_root)
+                        _note_step_file(uncached_path, cache_root)
                 elif use_cache:
                     cache_path.parent.mkdir(parents=True, exist_ok=True)
                     if meta is not None:
@@ -880,6 +893,7 @@ def op(
                     _write_result(cache_path, result, cache_root)
                     if is_step:
                         _note_step_file(cache_path, cache_root)
+                        uncached_path.unlink(missing_ok=True)
 
             duration = time.perf_counter() - start
             # If tracing is enabled, record this call on the in-memory trace.

@@ -15,15 +15,22 @@ threads and processes need no lock, and a slot written twice at once keeps the
 last write. The 256 shard directories keep each directory small (a million
 completions is ~4,000 files per directory). JSON, unlike the op cache's pickle,
 cannot execute code when read.
+
+Beside the slots, ``requests/rows/<id[:2]>/<id>.json`` remembers, for each
+(op, step, row), the key of the last request that answered it and what that
+cost. The id leaves out the prompt, so a batch can see that a row is asked
+again only because its prompt changed (see ``resent_warning``).
 """
 
 from __future__ import annotations
 
 import json
 import os
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+from pyforger._render import fmt_cost, fmt_units
 from pyforger.op import _atomic_write, _cache_dir, _hash
 from pyforger.utils import get_formatted_logger
 
@@ -116,3 +123,83 @@ def write_slot(key: str, slot: int, entry: dict[str, Any]) -> None:
     path = _slot_path(key, slot)
     path.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write(path, json.dumps(entry).encode())
+
+
+# Rows asked again under a changed prompt warn only when there are this many,
+# and at least this share of the batch: editing a few rows' prompts is routine.
+MIN_RESENT_ROWS = 20
+MIN_RESENT_SHARE = 0.5
+
+
+def row_id(op_name: str, step: str | None, row: str) -> str:
+    """Hex id of a row's "answered before" entry: op, step, and row, no prompt.
+
+    e.g. ("alter.generate_from_context", "write_answers", <row hash>) stays the
+    same when the step's template changes, while the request key does not.
+    """
+    key, _ = _hash([_KEY_VERSION, "row", op_name, step, row])
+    return key
+
+
+def _row_path(row_id: str) -> Path:
+    return _cache_dir() / "requests" / "rows" / row_id[:2] / f"{row_id}.json"
+
+
+def read_row(row_id: str) -> dict[str, Any] | None:
+    """The row's entry, e.g. {"key": ..., "run": ..., "units": 5e4}, or None."""
+    try:
+        with _row_path(row_id).open("rb") as f:
+            if hasattr(os, "getuid") and os.fstat(f.fileno()).st_uid != os.getuid():
+                return None
+            entry = json.loads(f.read())
+    except Exception:  # absent or unreadable: nothing to warn about
+        return None
+    if not isinstance(entry, dict) or not isinstance(entry.get("key"), str):
+        return None
+    return entry
+
+
+def write_row(row_id: str, entry: dict[str, Any]) -> None:
+    """Replace the row's entry atomically (the last answer wins)."""
+    path = _row_path(row_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write(path, json.dumps(entry).encode())
+
+
+def resent_warning(
+    op_name: str, earlier: list[dict[str, Any]], total: int
+) -> str | None:
+    """The warning for rows answered before under another prompt, or None.
+
+    `earlier` holds the row entries of the batch's rows that will be asked
+    again; `total` is the batch's row count. e.g. 249 of 498 rows give
+    "alter.generate_from_context: 249 of 498 rows were answered before under a
+    different prompt or settings and will be asked again (the request cache
+    keys on the exact prompt); ~12.45M token units at the earlier cost per
+    row". Under MIN_RESENT_ROWS rows or MIN_RESENT_SHARE of the batch: None.
+    """
+    count = len(earlier)
+    if count < MIN_RESENT_ROWS or count < MIN_RESENT_SHARE * total:
+        return None
+    text = (
+        f"{op_name}: {count} of {total} rows were answered before under a "
+        "different prompt or settings and will be asked again (the request "
+        "cache keys on the exact prompt)"
+    )
+    units = _total(e.get("units") for e in earlier)
+    cost = _total(e.get("cost_usd") for e in earlier)
+    if units:
+        text += f"; ~{fmt_units(units)} token units at the earlier cost per row"
+    elif cost:
+        text += f"; ~{fmt_cost(cost)} at the earlier cost per row"
+    return text
+
+
+def _total(values: Iterable[Any]) -> float | None:
+    """Sum of `values`; None when any is unknown (not a number)."""
+    total = 0.0
+    for value in values:
+        if not isinstance(value, (int, float)):
+            return None
+        total += value
+    return total

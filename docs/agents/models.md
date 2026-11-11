@@ -53,6 +53,9 @@ ops. It is not part of the cache key.
   (see [pipelines.md](pipelines.md)). Ctrl-C cancels requests not yet sent.
 - `model.generate_batch(prompts, return_exceptions=True)` keeps finished results: a failed prompt's slot holds its
   exception. The default raises the first failure.
+- Forger's LLM ops treat a prompt the used-up token-unit quota did not send like a failed request: cached prompts
+  still replay, the rest drop out with a warning ("2 prompts not sent: the token-unit quota is used up"), and the op
+  is not cached; with nothing to return, the op raises `TokenUnitQuotaExceeded`.
 
 Progress output is on by default for every model call, `LocalModel` (one count across its GPU engines) and
 embeddings included: a bar in a terminal, else `<model>: 120/500 done, 1m 31s, ~4m 48s left` every 30 seconds.
@@ -84,7 +87,8 @@ ask for `n=1` per call instead.
 - Concurrency: all instances share `TINKER_MAX_CONCURRENT_SAMPLES` (default 600) in flight; `max_concurrent` caps one
   instance lower. `max_concurrency` and `timeout` do not apply.
 - The request cache keys on the checkpoint and sampling settings, so a new checkpoint never reuses old samples;
-  turn it off with `request_cache=False` or `FORGER_REQUEST_CACHE=0`.
+  turn it off with `request_cache=False` or `FORGER_REQUEST_CACHE=0`. It does not warn about rows answered before
+  under another prompt.
 - Retries are not bounded by `num_retries + 1`: the Tinker SDK retries until no request progresses for 2 hours, so a
   stuck request can wait `2 h × (num_retries + 1)`.
 - A prompt that does not fit the context window raises `pyforger.PromptTooLongError` before any request is sent (or

@@ -17,6 +17,7 @@ from pyforger.acquire.model import (
     Prompt,
     _is_row_error,
     _is_transient,
+    _quota_spent,
     _row_error_reason,
 )
 from pyforger.op import skip_cache_write
@@ -160,11 +161,14 @@ def _accepts_kwarg(fn: Callable[..., Any] | None, name: str) -> bool:
 _ROW_ERROR_PHRASES = {
     "content filter": "blocked by the provider's content filter",
     "context window": "longer than the model's context window",
+    "token-unit quota": "not sent: the token-unit quota is used up",
 }
 
 
 def _failure_label(exc: BaseException) -> str:
     """A failed request's label in a warning: its row-error reason, else its type."""
+    if _quota_spent(exc):
+        return "token-unit quota"
     return _row_error_reason(exc) or type(exc).__name__
 
 
@@ -177,18 +181,22 @@ def _count_text(label: str, count: int) -> str:
 
 
 def _raise_if_systemic(results: list[Any], total: int) -> None:
-    """Raise the first row error if all ``total`` (at least 2) prompts hit one.
+    """Raise when every one of ``total`` prompts failed the same way, not per row.
 
     One prompt blocked by the content filter is that row's problem; all of
-    them blocked points at the template or the model (e.g. a system prompt
-    that trips the filter), so the op fails instead of returning only Nones.
-    Only the row errors in ``results`` count.
+    them blocked (at least 2) points at the template or the model (e.g. a
+    system prompt that trips the filter), so the op fails instead of returning
+    only Nones. Likewise, prompts refused by a used-up token-unit quota are
+    dropped while others replay from the request cache, but an op with nothing
+    to return raises the quota error. Only those errors in ``results`` count.
     """
-    row_errors = [
-        r for r in results if isinstance(r, BaseException) and _is_row_error(r)
-    ]
+    errors = [r for r in results if isinstance(r, BaseException)]
+    row_errors = [r for r in errors if _is_row_error(r)]
     if total >= 2 and len(row_errors) >= total:
         raise row_errors[0]
+    unsent = [r for r in errors if _quota_spent(r)]
+    if total >= 1 and len(unsent) >= total:
+        raise unsent[0]
 
 
 def _report_provider_failures(
@@ -240,8 +248,9 @@ class _RequestFailures:
     ``failed(result)`` is True for a transient error (a 504, a timeout) or a
     row error (a content-filter block, an over-long prompt) left in a
     ``generate_batch`` slot by ``return_exceptions=True``; the filter then
-    treats it as a missing vote or sample. Any other error (a bad key, a
-    spending cap, a token-unit quota) is raised.
+    treats it as a missing vote or sample. So is a request not sent because
+    the token-unit quota is used up. Any other error (a bad key, a spending
+    cap) is raised.
     """
 
     def __init__(self) -> None:
@@ -249,6 +258,7 @@ class _RequestFailures:
         self.types: list[str] = []
         self.last: BaseException | None = None
         self.row_errors: list[BaseException] = []
+        self.unsent: list[BaseException] = []
 
     def __len__(self) -> int:
         """Number of failed requests (or missing completions) so far."""
@@ -260,6 +270,8 @@ class _RequestFailures:
             return False
         if _is_row_error(result):
             self.row_errors.append(result)
+        elif _quota_spent(result):
+            self.unsent.append(result)
         elif not _is_transient(result):
             raise result
         self.types.append(_failure_label(result))
@@ -267,8 +279,8 @@ class _RequestFailures:
         return True
 
     def raise_if_systemic(self, total: int) -> None:
-        """Raise the first row error if all ``total`` (at least 2) requests hit one."""
-        _raise_if_systemic(self.row_errors, total)
+        """Raise if all ``total`` requests hit a row error or the used-up quota."""
+        _raise_if_systemic(self.row_errors + self.unsent, total)
 
     def missing(self, count: int) -> None:
         """Count completions that partly failed requests did not return."""

@@ -15,6 +15,7 @@ from pyforger.acquire._model_utils import (
     _is_row_error,
     _is_transient,
     _parse_output,
+    _quota_spent,
     _reasoning_for,
     _report_provider_failures,
 )
@@ -35,6 +36,7 @@ def _generation_loop(
     batch_size: int | None,
     errors: list[str] | None = None,
     row_errors: list[BaseException] | None = None,
+    unsent: list[BaseException] | None = None,
 ) -> Generator[dict[str, Any], None, None]:
     """Yield accepted samples until ``n`` collected or retries exhausted.
 
@@ -42,9 +44,11 @@ def _generation_loop(
     after the model's own retries, or with a row error (a content-filter
     block, an over-long prompt), is not sent again: the samples it would have
     returned drop out of the target, its label (`_failure_label`) is appended
-    to ``errors``, and a row error itself to ``row_errors``. Later rounds
-    re-ask only for replies that did not parse (or that a duck-typed model did
-    not return). Other errors (a bad key, a 400) raise.
+    to ``errors``, and a row error itself to ``row_errors``. So does a request
+    not sent because the token-unit quota is used up (its error goes to
+    ``unsent``). Later rounds re-ask only for replies that did not parse (or
+    that a duck-typed model did not return). Other errors (a bad key, a 400)
+    raise.
     """
     # Only Model.generate_batch can hand back an error instead of raising it;
     # duck-typed fakes and models with their own generate keep calling generate.
@@ -96,6 +100,9 @@ def _generation_loop(
             if _is_row_error(raw_responses):
                 if row_errors is not None:
                     row_errors.append(raw_responses)
+            elif _quota_spent(raw_responses):
+                if unsent is not None:
+                    unsent.append(raw_responses)
             elif not _is_transient(raw_responses):
                 raise raw_responses
             logger.warning("sample_from_LLM request failed: %s", raw_responses)
@@ -203,6 +210,7 @@ def sample_from_LLM(
         raise ValueError("n must be positive")
     errors: list[str] = []
     row_errors: list[BaseException] = []
+    unsent: list[BaseException] = []
     samples = list(
         _generation_loop(
             prompt=prompt,
@@ -214,12 +222,16 @@ def sample_from_LLM(
             batch_size=batch_size,
             errors=errors,
             row_errors=row_errors,
+            unsent=unsent,
         )
     )
     # The one prompt is the template, not a row: if every request hit a row
     # error and nothing arrived, the template itself is the problem.
     if not samples and row_errors and len(row_errors) == len(errors):
         raise row_errors[0]
+    # Nothing replayed and the quota refused the rest: stop the pipeline here.
+    if not samples and unsent and len(unsent) == len(errors):
+        raise unsent[0]
     # Short because requests failed: not cached, so a rerun asks again (the
     # request cache replays the completions that arrived).
     if errors and len(samples) < n:
