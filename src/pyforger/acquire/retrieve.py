@@ -296,7 +296,7 @@ def retrieve_from_pubmed(
 
     The API key comes from ``api_key=`` or ``NCBI_API_KEY`` and is optional.
     Without one NCBI allows 3 requests per second, with one 10. Requests are
-    spaced to stay under that limit (2.5 or 8 per second, across threads),
+    spaced to stay under that limit (2.5 or 6.7 per second, across threads),
     and a rate-limited or failed request is retried up to 5 times (1 to 16
     seconds apart). A query takes 2 requests, plus 1 per 200 results past
     the first 200.
