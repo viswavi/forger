@@ -465,6 +465,7 @@ class Tee:
             litellm_parent_key,
             brave_api_key,
             s2_api_key,
+            os.environ.get("NCBI_API_KEY"),
             os.environ.get("LLM_API_KEY"),
             os.environ.get("LITELLM_JUDGE_API_KEY"),
             # The host's test grader key; never forwarded to the sandbox.
@@ -1210,6 +1211,8 @@ try:
                 "DEBUG",
                 "BRAVE_API_KEY",
                 "S2_API_KEY",
+                # PubMed (NCBI E-utilities): 6.7 requests/s with a key, 3 without.
+                "NCBI_API_KEY",
                 "HF_HUB_DISABLE_IMPLICIT_TOKEN",
                 "LITELLM_API_KEY",
                 "LITELLM_BASE_URL",
