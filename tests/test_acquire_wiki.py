@@ -364,6 +364,77 @@ class TestWikiRetrievalSourceFetch:
 
         assert not any(rec.levelno == logging.WARNING for rec in caplog.records)
 
+    @staticmethod
+    def _session_for(search: dict, extracts: list[dict]) -> MagicMock:
+        """A mocked Session whose get() answers the search, then each extracts call."""
+        session = MagicMock()
+        responses = []
+        for body in [search, *extracts]:
+            resp = MagicMock()
+            resp.json.return_value = body
+            responses.append(resp)
+        session.get.side_effect = responses
+        return session
+
+    @patch("pyforger.acquire.sources.requests.Session")
+    def test_intro_is_default_and_batched(self, mock_session_cls: MagicMock) -> None:
+        """By default one extracts request covers every title, with exintro set."""
+        hits = [(f"T{i}", i) for i in (1, 2, 3)]
+        pages = [{"pageid": i, "title": t, "extract": "intro"} for t, i in hits]
+        session = self._session_for(
+            _make_search_response(hits),
+            [_make_extracts_response(pages)],
+        )
+        mock_session_cls.return_value = session
+
+        items = WikiRetrievalSource().fetch(RetrieveMode.QUERY, query="q", n=3)
+
+        assert [i["title"] for i in items] == ["T1", "T2", "T3"]
+        extract_calls = session.get.call_args_list[1:]
+        assert len(extract_calls) == 1
+        assert extract_calls[0][1]["params"]["exintro"] == "true"
+
+    @pytest.mark.parametrize("where", ["constructor", "fetch"])
+    @patch("pyforger.acquire.sources.requests.Session")
+    def test_full_text_fetches_one_whole_article_per_request(
+        self, mock_session_cls: MagicMock, where: str
+    ) -> None:
+        """full_text=True drops exintro and sends one extracts request per title.
+
+        Wikipedia returns only one whole-article extract per request.
+        """
+        hits = [(f"T{i}", i) for i in (1, 2, 3)]
+        pages = [{"pageid": i, "title": t, "extract": f"whole {i}"} for t, i in hits]
+        session = self._session_for(
+            _make_search_response(hits),
+            [_make_extracts_response([p]) for p in pages],
+        )
+        mock_session_cls.return_value = session
+
+        if where == "constructor":
+            source = WikiRetrievalSource(full_text=True)
+            items = source.fetch(RetrieveMode.QUERY, query="q", n=3)
+        else:
+            source = WikiRetrievalSource()
+            items = source.fetch(RetrieveMode.QUERY, query="q", n=3, full_text=True)
+
+        assert [i["text"] for i in items] == ["whole 1", "whole 2", "whole 3"]
+        extract_calls = session.get.call_args_list[1:]
+        assert [c[1]["params"]["titles"] for c in extract_calls] == ["T1", "T2", "T3"]
+        assert all("exintro" not in c[1]["params"] for c in extract_calls)
+        assert all(c[1]["params"]["exlimit"] == "1" for c in extract_calls)
+
+    def test_full_text_changes_source_cache_key(self) -> None:
+        """Whole articles and intros never share a cache entry.
+
+        The default key is unchanged: no ``full_text`` in it.
+        """
+        assert (
+            WikiRetrievalSource().cache_key()
+            != WikiRetrievalSource(full_text=True).cache_key()
+        )
+        assert WikiRetrievalSource().cache_key()[-1] == {}
+
     @pytest.mark.skipif(
         not os.environ.get("PYFORGER_WIKI_LIVE"),
         reason="Set PYFORGER_WIKI_LIVE=1 to run live Wikipedia API test",

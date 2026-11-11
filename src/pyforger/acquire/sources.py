@@ -258,6 +258,10 @@ class WikiRetrievalSource(RetrievalSource):
     "id" (page ID), "title" (article title), "text" (intro extract), and
     "summary" (same as text, for arXiv schema compatibility).
 
+    ``full_text=True`` returns the whole article as plain text instead of the
+    intro. Wikipedia sends whole articles one page per request (intros come 20
+    at a time), so it takes about one request per result.
+
     Note: RANDOM mode is inherently non-deterministic because the MediaWiki
     ``list=random`` endpoint does not support a seed parameter. The ``seed``
     argument is accepted for interface compatibility but ignored.
@@ -342,7 +346,7 @@ class WikiRetrievalSource(RetrievalSource):
                 "title", and optionally "extract".
 
         Returns:
-            Dict with "text" (intro extract only), "id" (page ID as string),
+            Dict with "text" (intro, or whole article), "id" (page ID as string),
             "title", and "summary" (mirrors text).
         """
         title = page.get("title", "")
@@ -359,7 +363,10 @@ class WikiRetrievalSource(RetrievalSource):
         titles: list[str],
         merged: dict[str, Any],
     ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
-        """Fetch intro extracts for a list of page titles, batched by 20.
+        """Fetch extracts for a list of page titles: intros 20 per request.
+
+        With ``merged["full_text"]``, whole articles, one per request: the
+        MediaWiki extracts API returns only one whole-article extract per request.
 
         Args:
             titles: Wikipedia page titles to fetch extracts for.
@@ -376,22 +383,22 @@ class WikiRetrievalSource(RetrievalSource):
         title_map: dict[str, dict[str, Any]] = {}
         id_map: dict[str, dict[str, Any]] = {}
 
-        for i in range(0, len(titles), self._EXTRACT_BATCH_SIZE):
-            batch = titles[i : i + self._EXTRACT_BATCH_SIZE]
-            resp = session.get(
-                base_url,
-                params={
-                    "action": "query",
-                    "format": "json",
-                    "prop": "extracts",
-                    "exintro": "true",
-                    "explaintext": "true",
-                    "redirects": "true",
-                    "titles": "|".join(batch),
-                    "exlimit": str(len(batch)),
-                },
-                **timeout_kw,
-            )
+        full_text = bool(merged.get("full_text", False))
+        batch_size = 1 if full_text else self._EXTRACT_BATCH_SIZE
+        for i in range(0, len(titles), batch_size):
+            batch = titles[i : i + batch_size]
+            params = {
+                "action": "query",
+                "format": "json",
+                "prop": "extracts",
+                "explaintext": "true",
+                "redirects": "true",
+                "titles": "|".join(batch),
+                "exlimit": str(len(batch)),
+            }
+            if not full_text:
+                params["exintro"] = "true"
+            resp = session.get(base_url, params=params, **timeout_kw)
             resp.raise_for_status()
             query = resp.json().get("query", {})
             pages = query.get("pages", {})
@@ -431,18 +438,19 @@ class WikiRetrievalSource(RetrievalSource):
 
         Mode behavior:
         - QUERY: Searches Wikipedia with srsearch={query} and srlimit={n},
-          then fetches intro extracts for each result. Empty or None query
+          then fetches extracts (intros, or whole articles with
+          ``full_text=True``) for each result. Empty or None query
           defaults to "Wikipedia". Redirects are resolved so search titles
           still match extracts.
         - RANDOM: Fetches n random articles from the main namespace via
-          ``list=random`` and returns their intro extracts. The server
+          ``list=random`` and returns their extracts. The server
           controls randomness; seed is ignored (see class docstring).
 
         Per-call **kwargs are merged with constructor kwargs (e.g. timeout for
-        requests.get on every HTTP call).
+        requests.get on every HTTP call, ``full_text=True`` for whole articles).
 
         Returns:
-            List of dicts in DPR/BEIR format; each has "text" (intro extract),
+            List of dicts in DPR/BEIR format; each has "text" (intro or whole article),
             "id" (page ID), "title", "summary" (same as text).
         """
         # Per-call kwargs override constructor kwargs (e.g. timeout).
