@@ -400,10 +400,8 @@ completion(model='litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731')
             self.assertIn("The dataset you submit must be:", text)
             # How to work (comparing alternatives, small loops first) belongs
             # in Forger's docs, not in either arm's prompt.
-            for advice in ("DECISIONS.md", "end-to-end loop"):
+            for advice in ("DECISIONS.md", "end-to-end loop", "hard-to-easy"):
                 self.assertNotIn(advice, text)
-        # The Forger arm's own paragraph names hard-to-easy generalization.
-        self.assertNotIn("hard-to-easy", native)
         self.assertIn("/forger/docs/AGENTS.md", forger)
         # The Forger arm follows Forger's methodology doc; Native never sees it.
         self.assertIn("/forger/docs/agents/methodology.md", forger)
