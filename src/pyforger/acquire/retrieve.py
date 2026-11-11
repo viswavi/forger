@@ -1,7 +1,8 @@
 """Retrieval wrappers: call a RetrievalSource and return a flat list of dicts.
 
 ``retrieve()`` is the generic entry point; the convenience wrappers
-construct the appropriate source for a backend (web, wiki, HF, arXiv, S2).
+construct the appropriate source for a backend (web, wiki, HF, arXiv, S2,
+PubMed).
 All entry points cache results on disk by default, including RANDOM mode.
 Pass ``_no_cache=True`` to skip cache reads and writes, or ``_cache_only=True``
 to read an existing result without fetching.
@@ -12,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from pyforger import _tracking
+from pyforger.acquire.pubmed import PubMedRetrievalSource
 from pyforger.acquire.sources import (
     ArxivRetrievalSource,
     HFRetrievalSource,
@@ -31,6 +33,7 @@ _WRAPPER_OF = {
     HFRetrievalSource: "acquire.retrieve_from_hf",
     ArxivRetrievalSource: "acquire.retrieve_from_arxiv",
     S2RetrievalSource: "acquire.retrieve_from_s2",
+    PubMedRetrievalSource: "acquire.retrieve_from_pubmed",
 }
 
 
@@ -269,3 +272,42 @@ def retrieve_from_s2(
         all_rows = [row for rows in pool.map(fetch, resolved) for row in rows]
     _register(source, all_rows)
     return all_rows
+
+
+# The API key changes how fast requests may go, not what they return, so it
+# stays out of the cache key (and out of the cache files).
+@op(name="acquire.retrieve_from_pubmed", unkeyed=("api_key",), smoke=("queries", "n"))
+def retrieve_from_pubmed(
+    queries: str | list[str] | None = None,
+    *,
+    n: int = 10,
+    api_key: str | None = None,
+    sort: str = "relevance",
+    **kwargs: Any,
+) -> list[dict]:
+    """Search PubMed: articles, case reports, reviews, trials and more.
+
+    A query uses PubMed's own search, so plain words work ("lung cancer case
+    reports" finds records of the Case Reports publication type) and so do
+    field tags (``'"lung neoplasms"[MeSH] AND case reports[pt]'``). PubMed has
+    abstracts, not full text; ``pmcid`` names the free PubMed Central copy
+    when there is one. ``sort`` is ``"relevance"``, ``"pub_date"``,
+    ``"first_author"`` or ``"journal"``.
+
+    The API key comes from ``api_key=`` or ``NCBI_API_KEY`` and is optional.
+    Without one NCBI allows 3 requests per second, with one 10. Requests are
+    spaced to stay under that limit (2.5 or 8 per second, across threads),
+    and a rate-limited or failed request is retried up to 5 times (1 to 16
+    seconds apart). A query takes 2 requests, plus 1 per 200 results past
+    the first 200.
+
+    Returns:
+        Rows with ``text`` (title and abstract), ``id`` (the PMID), ``title``,
+        ``summary`` (the abstract), ``authors``, ``journal``, ``year``,
+        ``publication_types``, ``mesh_terms``, ``doi``, ``pmcid``, ``url``
+        and ``query``.
+    """
+    source = PubMedRetrievalSource(api_key=api_key, sort=sort, **kwargs)
+    return retrieve.__wrapped__(
+        source, mode=RetrieveMode.QUERY, queries=queries, n=n, **kwargs
+    )

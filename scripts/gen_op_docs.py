@@ -57,6 +57,7 @@ ENTRY_POINT_CLASSES = {
     "HFRetrievalSource",
     "ArxivRetrievalSource",
     "S2RetrievalSource",
+    "PubMedRetrievalSource",
 }
 
 MAX_WIDTH = 120
