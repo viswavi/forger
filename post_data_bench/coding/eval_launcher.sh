@@ -134,8 +134,9 @@ run_shard() {
   else
     command=(vllm serve "$MODEL_PATH" --host 127.0.0.1 --port "$port" --max-model-len "${MAX_MODEL_LEN:-32768}" --max-num-seqs "${MAX_NUM_SEQS:-128}" --gpu-memory-utilization "$GPU_MEM")
   fi
-  # Each shard compiles into its own cache. Eight servers sharing PyTorch's
-  # /tmp/torchinductor_<user> raced at startup (IsADirectoryError) and lost a shard.
+  # Each shard compiles into its own cache. Servers sometimes die at startup with
+  # IsADirectoryError inside Triton's cache (final evals 166636, 168221); the cause is
+  # unclear (it also hit a single-user cache), so the restart below is what recovers.
   shard_cache="$(mktemp -d "${TMPDIR:-/tmp}/pdb-eval-compile.XXXXXX")"
   # A server that dies at startup (compile race, port taken) is started again.
   local ready=0 start starts="${EVAL_SERVER_STARTS:-3}"
