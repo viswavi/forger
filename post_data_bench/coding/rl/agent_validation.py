@@ -70,12 +70,16 @@ CULTURE_FIELDS = (
     "gold_label",
 )
 # The C++ problem evaluator, flattened the same way; judge.py is rl/cpp_judge.py.
+# Its own evaluate_model.sh sets the evaluation protocol (temperature 1.0, top-p
+# 1.0, no top-k, 5 samples) before the shared launcher, whose defaults are coding's
+# (temperature 0.6, top-p 0.95, top-k 20); coding's wrapper would apply those.
 FRONTIERCS_EVALUATOR_FILES = {
     **{
         name: source
         for name, source in CULTURE_EVALUATOR_FILES.items()
         if not source.startswith("culture/")
     },
+    "evaluate_model.sh": "frontiercs/evaluate_model.sh",
     "evaluate_model.py": "frontiercs/evaluate_model.py",
     "checkers.py": "frontiercs/checkers.py",
     "prompt_building.py": "frontiercs/prompt_building.py",
