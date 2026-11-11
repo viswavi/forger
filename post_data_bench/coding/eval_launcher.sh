@@ -102,9 +102,10 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 run_shard() {
   local gpu="$1" port="$2" k="$3" position="$4" lock
-  server_pid=; client_pid=
+  server_pid=; client_pid=; shard_cache=
   cleanup_shard() {
     trap - EXIT INT TERM
+    [[ -z "$shard_cache" ]] || rm -rf "$shard_cache"
     for pid in "$server_pid" "$client_pid"; do [[ -z "$pid" ]] || kill -TERM -- "-$pid" 2>/dev/null || true; done
     sleep 1
     for pid in "$server_pid" "$client_pid"; do [[ -z "$pid" ]] || kill -KILL -- "-$pid" 2>/dev/null || true; done
@@ -130,16 +131,32 @@ run_shard() {
   else
     command=(vllm serve "$MODEL_PATH" --host 127.0.0.1 --port "$port" --max-model-len "${MAX_MODEL_LEN:-32768}" --max-num-seqs "${MAX_NUM_SEQS:-128}" --gpu-memory-utilization "$GPU_MEM")
   fi
-  CUDA_VISIBLE_DEVICES="$gpu" VLLM_DISABLE_COMPILE_CACHE=1 OMP_NUM_THREADS="$THREADS" MKL_NUM_THREADS="$THREADS" OPENBLAS_NUM_THREADS="$THREADS" TOKENIZERS_PARALLELISM=false \
-    setsid "${command[@]}" > "$dir/server.log" 2>&1 < /dev/null &
-  server_pid=$!
-  local ready=0
-  for ((attempt=0; attempt<${EVAL_STARTUP_POLLS:-600}; attempt++)); do
-    kill -0 "$server_pid" 2>/dev/null || { echo "Server exited; see $dir/server.log" >&2; return 1; }
-    if python "$HELPER_DIR/eval_server.py" ready "$port" "$MODEL_PATH"; then ready=1; break; fi
-    sleep 5
+  # Each shard compiles into its own cache. Eight servers sharing PyTorch's
+  # /tmp/torchinductor_<user> raced at startup (IsADirectoryError) and lost a shard.
+  shard_cache="$(mktemp -d "${TMPDIR:-/tmp}/pdb-eval-compile.XXXXXX")"
+  # A server that dies at startup (compile race, port taken) is started again.
+  local ready=0 start starts="${EVAL_SERVER_STARTS:-3}"
+  for ((start=1; start<=starts; start++)); do
+    CUDA_VISIBLE_DEVICES="$gpu" VLLM_DISABLE_COMPILE_CACHE=1 TORCHINDUCTOR_CACHE_DIR="$shard_cache/inductor" TRITON_CACHE_DIR="$shard_cache/triton" \
+      OMP_NUM_THREADS="$THREADS" MKL_NUM_THREADS="$THREADS" OPENBLAS_NUM_THREADS="$THREADS" TOKENIZERS_PARALLELISM=false \
+      setsid "${command[@]}" > "$dir/server.log" 2>&1 < /dev/null &
+    server_pid=$!
+    for ((attempt=0; attempt<${EVAL_STARTUP_POLLS:-600}; attempt++)); do
+      kill -0 "$server_pid" 2>/dev/null || break
+      if python "$HELPER_DIR/eval_server.py" ready "$port" "$MODEL_PATH"; then ready=1; break; fi
+      sleep 5
+    done
+    ((ready == 0)) || break
+    kill -0 "$server_pid" 2>/dev/null && { echo "Server readiness timed out; see $dir/server.log" >&2; return 1; }
+    wait "$server_pid" 2>/dev/null || true
+    server_pid=
+    mv "$dir/server.log" "$dir/server.log.$start"
+    echo "Shard $k: server exited at startup (start $start of $starts); see $dir/server.log.$start" >&2
+    ((start < starts)) || return 1
+    rm -rf "$shard_cache" && mkdir -p "$shard_cache"
+    python "$HELPER_DIR/eval_server.py" free "$port"
+    sleep "$((5 + RANDOM % 10))"
   done
-  ((ready)) || { echo "Server readiness timed out; see $dir/server.log" >&2; return 1; }
   VLLM_BASE_URL="http://127.0.0.1:$port/v1" setsid python evaluate_model.py "${DEFAULT_ARGS[@]}" "${EXTRA[@]}" --num-shards "$NUM_SHARDS" --shard-index "$k" --log-dir "$dir" --json-output-file "$dir/metrics.json" >> "$dir/console.log" 2>&1 &
   client_pid=$!
   wait "$client_pid"
