@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-# The Tinker RL recipe draws this many prompts (80 steps x 32 prompts), from
-# the 90% of rows the harness keeps for training; local runs draw 100 x 8.
+# Both RL recipes draw this many prompts (80 steps x 32 prompts), from the
+# 90% of rows the harness keeps for training.
 RL_PROMPT_DRAWS = 80 * 32
 TRAIN_SHARE = 0.9
 # Adding rows means regenerating data and retraining; with less time left, a

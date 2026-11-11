@@ -18,16 +18,16 @@ TINKER_TRAINING = """Your sandbox has {GPU_DESCRIPTION}. Do not train or serve L
 
 TINKER_BUDGET = """- Tinker usage is billed in dollars from Tinker's own token counts. SFT trials and validation evaluations share ${TINKER_SFT_USD_LIMIT} ({TINKER_SFT_USAGE_PATH}). All RL runs and probes share ${TINKER_RL_USD_LIMIT} ({TINKER_RL_USAGE_PATH}); training stops when that budget runs out. Prices per million tokens: train $0.44, sampled $0.60, prompt $0.195 ($0.039 when prefix-cached); one SFT epoch costs about (training tokens) x $0.44/1M. Read cost_usd and remaining_usd in those files. Every Tinker call checks its ledger first and is refused if it would exceed the limit. Use only these commands and the Tinker access described under LLM API Usage; do not call the Tinker API (TINKER_API_KEY) directly."""
 
-LOCAL_FORGER_STUDENT = """To query the student model ({STUDENT_MODEL}, or a local RL checkpoint directory), use the local GPUs through `pyforger.acquire.LocalModel` (vLLM, no API cost; see acquire.md); it keeps the student's thinking trace and the exact chat template used by the evaluator. Its engines hold the GPUs until `student.close()` or the process exits, so sample in a separate script that finishes before RL, validation evaluation, or an RL probe. RL samples with temperature=1.0, top_p=1.0, top_k=-1 and max_tokens=16000, and grades whole responses (thinking included) as `rl.solution_runner.rubric_verifier()` does."""
+LOCAL_FORGER_STUDENT = """To query the student model ({STUDENT_MODEL}, or a local RL checkpoint directory), use the local GPUs through `pyforger.acquire.LocalModel` (vLLM, no API cost; see acquire.md); it keeps the student's thinking trace and the exact chat template used by the evaluator. Its engines hold the GPUs until `student.close()` or the process exits, so sample in a separate script that finishes before RL, validation evaluation, or an RL probe. RL samples with temperature=1.0, top_p=1.0, top_k=-1 and max_tokens=16384, and grades whole responses (thinking included) as `rl.solution_runner.rubric_verifier()` does."""
 
-LOCAL_STUDENT = """To query the student model ({STUDENT_MODEL}, or a local RL checkpoint), use the local GPUs. You can use vLLM for sampling; preserve the student's thinking trace and the exact chat template used by the evaluator. Stop any sampling server before RL, validation evaluation, or an RL probe so it releases its GPUs. RL samples with temperature=1.0, top_p=1.0, top_k=-1 and max_tokens=16000, and grades whole responses (thinking included) as `rl.solution_runner.rubric_verifier()` does."""
+LOCAL_STUDENT = """To query the student model ({STUDENT_MODEL}, or a local RL checkpoint), use the local GPUs. You can use vLLM for sampling; preserve the student's thinking trace and the exact chat template used by the evaluator. Stop any sampling server before RL, validation evaluation, or an RL probe so it releases its GPUs. RL samples with temperature=1.0, top_p=1.0, top_k=-1 and max_tokens=16384, and grades whole responses (thinking included) as `rl.solution_runner.rubric_verifier()` does."""
 
 LOCAL_TRAINING = """Your sandbox has {GPU_DESCRIPTION}. RL, validation and short RL probes use these GPUs. Training is RL only: there is no SFT step, and RL starts from the base model. Run one GPU job at a time and stop sampling servers before training. Run these commands from {TASK_DIR}:
 
 - Validation evaluation:
   bash {TASK_DIR}/evaluate_model.sh --split val --server-backend vllm --model-path <checkpoint directory> --out-dir {AGENT_DATA_DIR}/validation/rl_trial_1
   Read metrics.json and predictions.jsonl. Use a fresh output directory when weights or settings change. --model-path {STUDENT_MODEL} evaluates the base model.
-- Short RL probe (2 steps, 8 prompts x 8 samples each, from the base model unless --checkpoint names an RL checkpoint):
+- Short RL probe (2 steps, 32 prompts x 8 samples each, from the base model unless --checkpoint names an RL checkpoint):
   python -m rl.agent_training probe --data {RAW_DATA_PATH} --output-dir {AGENT_DATA_DIR}/rl_probe_1
   This uses the separate Slime stack and your rubric reward. Its rewards are in logs/reward_dump.jsonl and its rollouts in logs/rollouts/; rl_result.json records the resulting checkpoint. Probes do not evaluate secret test tasks."""
 
@@ -41,9 +41,8 @@ TINKER_TIMING = "For planning, allow roughly 1 hour for SFT, 40 minutes to evalu
 # Measured on Orchard 8x H100 with Qwen3-4B (2026-10-26/27): validation 137
 # tasks ~7 min, the 1,232-task test ~17 min, RL steps of 32 prompts x 8 at
 # 16,384 tokens 3.0-3.5 min each; LocalModel pass@4 on 60 rows 7.1 min on 8
-# GPUs, 22.7 min on one (jobs 162596, 162605). Steps of 8 prompts x 8 at 16,000
-# tokens are not yet measured on this task (2.75 min on the algorithmic task).
-LOCAL_TIMING = "For planning on this hardware, allow roughly 10 minutes for a validation evaluation and a few hours for a 100-step RL run (steps of 32 prompts took 3-4 minutes each; the default steps of 8 prompts take less). Sampling the student yourself on all 8 GPUs writes and grades about 240 thinking responses of up to 16,384 tokens (60 prompts, 4 samples each) in about 7 minutes, engine start-up included; one GPU takes about 20 minutes."
+# GPUs, 22.7 min on one (jobs 162596, 162605).
+LOCAL_TIMING = "For planning on this hardware, allow roughly 10 minutes for a validation evaluation and 4-5 hours for an 80-step RL run (steps of 32 prompts took 3-4 minutes each). Sampling the student yourself on all 8 GPUs writes and grades about 240 thinking responses of up to 16,384 tokens (60 prompts, 4 samples each) in about 7 minutes, engine start-up included; one GPU takes about 20 minutes."
 
 
 RL_COMMAND = """
@@ -54,27 +53,28 @@ RL_COMMAND = """
 
 
 LOCAL_RL_COMMAND = """
-- RL training (100 steps × 8 prompts × 8 completions per optimizer step):
+- RL training (80 steps × 32 prompts × 8 completions per optimizer step):
   python -m rl.agent_training rl --data {RAW_DATA_PATH} --output-dir {AGENT_DATA_DIR}/rl_trial_1
-  It starts from the base model; --checkpoint <RL checkpoint directory> continues from an earlier RL checkpoint instead. The submitted checkpoint must have exactly 100 RL steps behind it in total, counting the runs it continues from: one 100-step run from the base model, or for example 60 steps and then a 40-step run (--num-rollout 40) continuing from the 60-step checkpoint, perhaps on revised data. The rl command refuses a run that would take its checkpoints past 100 steps, and validate rejects a submission with any other total. The recipe is fixed: learning rate 1.5e-6, responses of up to 16,000 tokens, sampling temperature 1.0, 64 sampled completions per optimizer step, and a checkpoint every 10 steps (hf_rollout9, hf_rollout19, ...). All agent training commands evaluate only your generated holdout or public validation data; secret-test evaluation is host-only.
+  It starts from the base model; --checkpoint <RL checkpoint directory> continues from an earlier RL checkpoint instead. The submitted checkpoint must have exactly 80 RL steps behind it in total, counting the runs it continues from: one 80-step run from the base model, or for example 60 steps and then a 20-step run (--num-rollout 20) continuing from the 60-step checkpoint, perhaps on revised data. The rl command refuses a run that would take its checkpoints past 80 steps, and validate rejects a submission with any other total. The recipe is fixed: learning rate 3e-6, responses of up to 16,384 tokens, sampling temperature 1.0, 256 sampled completions per optimizer step, and a checkpoint every 10 steps (hf_rollout9, hf_rollout19, ...). All agent training commands evaluate only your generated holdout or public validation data; secret-test evaluation is host-only.
 """
 
 # Per-task edits to the backend sections, as (old text, new text). The algorithmic
-# (C++) task has a smaller dataset and longer validation answers. Its RL steps
-# with the local recipe (100 x 8 x 8, 16,000 tokens) averaged ~2.75 min on
-# Orchard 8x H100 (jobs 164619, 165011-165013); a 1-sample validation run took
-# ~6 min (job 163561). Sampling 240 responses at 24,576 tokens took ~12 min.
+# (C++) task has a smaller dataset and longer answers. Its RL steps with the local
+# recipe (80 x 32 x 8, 24,576 tokens) averaged ~4.5 min on Orchard 8x H100 (job
+# 167807: 80 steps in ~6 h); a 1-sample validation run at 16,000 tokens took ~6
+# min (job 163561), and 5 samples ~25 min; 28,672-token answers are estimated at
+# ~35 min (not yet measured). Sampling 240 responses at 24,576 tokens took ~12 min.
 TASK_EDITS = {
     "frontiercs": [
         (
             "10 minutes for a validation evaluation",
-            "25 minutes for a validation evaluation (5 sampled answers per problem)",
+            "35 minutes for a validation evaluation (5 sampled answers per problem)",
         ),
         (
-            "a few hours for a 100-step RL run (steps of 32 prompts took 3-4 minutes "
-            "each; the default steps of 8 prompts take less)",
-            "about 5 hours for a 100-step RL run (about 3 minutes per step, measured "
-            "on this task)",
+            "4-5 hours for an 80-step RL run (steps of 32 prompts took 3-4 minutes "
+            "each)",
+            "about 6 hours for an 80-step RL run (about 4.5 minutes per step, "
+            "measured on this task)",
         ),
         (
             "about 240 thinking responses of up to 16,384 tokens (60 prompts, 4 "
@@ -83,6 +83,9 @@ TASK_EDITS = {
             "samples each) in roughly 12 minutes",
         ),
         ("one GPU takes about 20 minutes", "one GPU takes roughly 30 minutes"),
+        # RL's response length on this task (the wrapper's algorithmic default).
+        ("max_tokens=16384", "max_tokens=24576"),
+        ("responses of up to 16,384 tokens", "responses of up to 24,576 tokens"),
     ],
 }
 
@@ -115,9 +118,9 @@ def prompt_sections(backend, hide_forger, values, task=None):
             "BACKEND_TRAINING": LOCAL_TRAINING + LOCAL_RL_COMMAND,
             "BACKEND_SUBMISSION": "For local training, select the HF directory named by rl_trial_1/rl_result.json (usually an hf_rollout* directory). It contains the model weights and rl_submission.json. Use that same directory for validation evaluation.",
             "BACKEND_BUDGET": "- Local training and sampling have no Tinker dollar budget. GPU experiments must fit within your agent deadline; all RL must finish within that deadline.",
-            "RL_SCHEDULE": "100 x 8",
-            "RL_PROMPT_DRAWS": "100 × 8 = 800",
-            "RL_COMPLETIONS": "6,400",
+            "RL_SCHEDULE": "80 x 32",
+            "RL_PROMPT_DRAWS": "80 × 32 = 2,560",
+            "RL_COMPLETIONS": "20,480",
             "BACKEND_RL_START": LOCAL_RL_START,
             "PROBE_BUDGET": "Probes consume your agent time and shared judge quota; leave time for final submission.",
             "BACKEND_TIMING": LOCAL_TIMING,

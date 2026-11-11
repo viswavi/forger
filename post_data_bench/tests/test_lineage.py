@@ -140,39 +140,39 @@ class StepBudgetTests(unittest.TestCase):
         return checkpoint
 
     def test_steps_add_up_over_continuations(self):
-        """60 steps, then 40 more from that checkpoint: 100, submittable."""
+        """60 steps, then 20 more from that checkpoint: 80, submittable."""
         first = self.local_run("rl_trial_1", 60, self.base)
-        second = self.local_run("rl_trial_2", 40, first)
-        self.assertEqual(lineage.rl_steps(second), 100)
+        second = self.local_run("rl_trial_2", 20, first)
+        self.assertEqual(lineage.rl_steps(second), 80)
         self.assertEqual(len(lineage.check(second, self.final_path)), 2)
 
     def test_other_totals_are_rejected(self):
-        """119 steps (100 + 19) and 90 steps both fail; the message gives the total."""
-        first = self.local_run("rl_trial_1", 100, self.base)
+        """99 steps (80 + 19) and 70 steps both fail; the message gives the total."""
+        first = self.local_run("rl_trial_1", 80, self.base)
         over = self.local_run("rl_trial_2", 19, first)
-        with self.assertRaisesRegex(ValueError, "has 119 RL steps .* exactly 100"):
+        with self.assertRaisesRegex(ValueError, "has 99 RL steps .* exactly 80"):
             lineage.check(over, self.final_path)
-        under = self.local_run("rl_trial_3", 90, self.base)
-        with self.assertRaisesRegex(ValueError, "has 90 RL steps"):
+        under = self.local_run("rl_trial_3", 70, self.base)
+        with self.assertRaisesRegex(ValueError, "has 70 RL steps"):
             lineage.check(under, self.final_path)
 
     def test_rl_refuses_a_run_past_the_budget(self):
-        """From 60 steps, --num-rollout 50 is refused and 40 allowed."""
+        """From 60 steps, --num-rollout 30 is refused and 20 allowed."""
         first = self.local_run("rl_trial_1", 60, self.base)
         args = SimpleNamespace(
-            num_rollout=50, rollout_batch_size=8, n_samples_per_prompt=8
+            num_rollout=30, rollout_batch_size=32, n_samples_per_prompt=8
         )
-        with self.assertRaisesRegex(ValueError, "--num-rollout may be at most 40"):
+        with self.assertRaisesRegex(ValueError, "--num-rollout may be at most 20"):
             agent_training.check_rl_budget("local", first, args)
-        args.num_rollout = 40
+        args.num_rollout = 20
         agent_training.check_rl_budget("local", first, args)
 
     def test_rl_refuses_another_batch_shape(self):
-        """More prompts per step would be more training in the same 100 steps."""
+        """More prompts per step would be more training in the same 80 steps."""
         args = SimpleNamespace(
-            num_rollout=100, rollout_batch_size=32, n_samples_per_prompt=8
+            num_rollout=80, rollout_batch_size=64, n_samples_per_prompt=8
         )
-        with self.assertRaisesRegex(ValueError, "--rollout-batch-size is fixed at 8"):
+        with self.assertRaisesRegex(ValueError, "--rollout-batch-size is fixed at 32"):
             agent_training.check_rl_budget("local", self.base, args)
 
     def test_tinker_has_no_budget(self):
