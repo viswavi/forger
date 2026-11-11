@@ -67,7 +67,8 @@ result is still returned, and the next call runs again. An op in a worker thread
 is left uncached instead, and a step that is skipped this way gets the warning `not cached: an op in a worker thread
 kept its result out of the cache`. Submit with `contextvars.copy_context().run` to limit it to the enclosing calls.
 `my_step.submit(...)` already runs the step in a copy of the context, so a failure in it or elsewhere in the
-pipeline leaves the other submitted steps cached.
+pipeline leaves the other submitted steps cached. A step kept out of the cache still saves its output beside its key
+(`<key>.uncached.pkl`), never replayed, only so `inspect_step(name, rows=True)` can read it.
 
 Built-in retrieval sources provide stable configuration keys that exclude runtime clients and sessions.
 Custom `RetrievalSource` implementations with mutable state should define `cache_key()` using their
