@@ -792,7 +792,12 @@ def _task_public_copies(task_dir: str, dest_task_dir: str) -> None:
         (Path(dest_task_dir) / "validation_tasks_de_obfuscated.jsonl").write_text(
             "".join(json.dumps(row) + "\n" for row in rows)
         )
-    model_outputs_dir = os.path.join(task_dir, "model_outputs")
+    # Baselines live with the benchmark build (PDB_BENCHMARK_DIR), e.g.
+    # <build>/model_outputs/Qwen__Qwen3-4B/val/; a release's own task directory
+    # has none, so looking only there never exported them on Orchard.
+    model_outputs_dir = os.path.join(data_root, "model_outputs")
+    if not os.path.isdir(model_outputs_dir):
+        model_outputs_dir = os.path.join(task_dir, "model_outputs")
     if os.path.isdir(model_outputs_dir):
         for model_name in [
             args.model.replace("/", "__")
