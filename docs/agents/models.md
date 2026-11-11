@@ -131,7 +131,7 @@ requests come back short too, or a response has more than `n`, it raises a `Valu
   strings) and the chat-template kwargs. A rerun asks Tinker only for the missing samples, still one request per
   prompt; when every sample is cached, no Tinker client is opened. A new `tinker://` checkpoint is another model id,
   so it never reuses an old checkpoint's samples. Turn it off with `TinkerModel(..., request_cache=False)` or
-  `FORGER_REQUEST_CACHE=0`.
+  `FORGER_REQUEST_CACHE=0`. Unlike `Model`, it does not warn about rows answered before under another prompt.
 - Retries: `Model`'s bound of `num_retries + 1` attempts does not hold. The Tinker SDK retries inside each attempt,
   with no attempt limit: a lost connection, a timeout, or a 408/409/429/5xx is sent again 0.5 s to 10 s later until
   it succeeds, or until no request has made progress for 2 hours (then it raises `APIConnectionError`). On top of

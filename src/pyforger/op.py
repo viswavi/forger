@@ -376,6 +376,9 @@ class _RequestScope:
         self._next_slot: dict[str, int] = {}
         self.reused = 0
         self.total = 0
+        # Set once this call warned about rows asked again under a new prompt,
+        # so a later batch_size chunk does not warn again.
+        self.resent_warned = False
 
     @property
     def key(self) -> str:

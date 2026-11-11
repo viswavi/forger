@@ -1951,9 +1951,19 @@ class Model:
         keys: list[str | None] = [None] * len(prompts)
         slot_ranges: list[range] = [range(n)] * len(prompts)
         hits: list[dict[int, dict[str, Any]]] = [{} for _ in prompts]
+        # Each row's "answered before" entry, keyed on the op and the enclosing
+        # step but not the prompt (see _request_cache.row_id). `run` tells this
+        # run of the step from earlier ones: the step's cache key changes when
+        # its code, a global prompt, or its arguments do, and two ops of one
+        # step run (the same rows judged twice) share it.
+        row_ids: list[str | None] = [None] * len(prompts)
+        step = _tracking.active_step()
+        run = None
         if caching:
             assert scope is not None  # mypy hint
+            run = step.cache_key if step is not None and step.cache_key else scope.key
             read = not _NO_CACHE_SCOPE.get()  # an enclosing op got _no_cache=True
+            earlier: list[dict[str, Any]] = []
             for i, messages in enumerate(conversations):
                 row = None if cache_rows is None else cache_rows[i]
                 row_key = _hash(row)[0] if row is not None else scope.rows_key
@@ -1962,11 +1972,32 @@ class Model:
                 )
                 first = scope.take_slots(key, n)
                 keys[i], slot_ranges[i] = key, range(first, first + n)
+                if row is not None:
+                    row_ids[i] = _request_cache.row_id(
+                        scope.op_name, step.name if step is not None else None, row_key
+                    )
                 if read:
                     for slot in slot_ranges[i]:
                         entry = _request_cache.read_slot(key, slot)
                         if entry is not None:
                             hits[i][slot] = entry
+                    row_id = row_ids[i]
+                    before = (
+                        _request_cache.read_row(row_id)
+                        if row_id is not None and len(hits[i]) < n
+                        else None
+                    )
+                    if before and before["key"] != key and before.get("run") != run:
+                        earlier.append(before)
+            # Warn before sending: e.g. a template edited for every row misses
+            # the cache for every row, and the batch costs as much as the first.
+            message = _request_cache.resent_warning(
+                scope.op_name, earlier, len(prompts)
+            )
+            if message and not scope.resent_warned:
+                scope.resent_warned = True
+                _logger.warning(message)
+                _tracking.add_op_warning(message, "request_cache_resent")
 
         # Request only the missing slots. Models that ignore or reject n > 1
         # get one n=1 request per slot, e.g. prompts [A, B] with n=2 send
@@ -1999,6 +2030,11 @@ class Model:
                 self._model_id,
             )
 
+        # What each row's fresh requests cost so far, for its row entry:
+        # [token units, USD], None once unknown.
+        spent: dict[int, list[float | None]] = {}
+        spent_lock = threading.Lock()
+
         def store(j: int, response: Any) -> None:
             """Cache request j's completions as soon as it succeeds."""
             i, asked = owners[j]
@@ -2009,12 +2045,41 @@ class Model:
                 if len(response.choices) > len(asked):
                     return  # the count check reports it; slots would be guesses
                 reasoning = _extract_reasoning(response, self._model_id)
+                stored = False
                 for slot, choice, thinking in zip(asked, response.choices, reasoning):
                     entry = _cache_entry(choice, thinking)
                     if entry is not None:
                         _request_cache.write_slot(key, slot, entry)
+                        stored = True
+                row_id = row_ids[i]
+                if stored and row_id is not None:
+                    remember(i, row_id, key, response)
             except Exception as exc:  # a full disk must not fail the request
                 _logger.warning("request cache write failed: %s", exc)
+
+        def remember(i: int, row_id: str, key: str, response: Any) -> None:
+            """Point row i's entry at `key`, with what its requests cost so far."""
+            try:
+                units: float | None = self._calculate_token_units(
+                    *response_token_counts(response)
+                )
+            except ValueError:  # missing usage
+                units = None
+            cost = response_cost_usd(response, self._model_id)
+            # Under the lock, so two requests of one row (n=1 fan-out) leave
+            # their sum, not whichever wrote last.
+            with spent_lock:
+                total = spent.setdefault(i, [0.0, 0.0])
+                for k, value in enumerate((units, cost)):
+                    old = total[k]
+                    if old is None or value is None or not math.isfinite(value):
+                        total[k] = None
+                    else:
+                        total[k] = old + value
+                _request_cache.write_row(
+                    row_id,
+                    {"key": key, "run": run, "units": total[0], "cost_usd": total[1]},
+                )
 
         progress = _progress_mode(
             self._show_progress if show_progress is None else show_progress
