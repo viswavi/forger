@@ -8,10 +8,12 @@ from pyforger.acquire.model import (
     TargetLogprobs,
     split_reasoning,
 )
+from pyforger.acquire.pubmed import PubMedRetrievalSource
 from pyforger.acquire.retrieve import (
     retrieve,
     retrieve_from_arxiv,
     retrieve_from_hf,
+    retrieve_from_pubmed,
     retrieve_from_s2,
     retrieve_from_web,
     retrieve_from_wiki,
@@ -49,6 +51,7 @@ __all__ = [
     "retrieve_from_hf",
     "retrieve_from_arxiv",
     "retrieve_from_s2",
+    "retrieve_from_pubmed",
     "sample_from_LLM",
     "generate_custom_rubric",
     "convert_rubric_criteria",
@@ -58,6 +61,7 @@ __all__ = [
     "WebRetrievalSource",
     "WikiRetrievalSource",
     "HFRetrievalSource",
+    "PubMedRetrievalSource",
     "ArxivRetrievalSource",
     "S2RetrievalSource",
 ]

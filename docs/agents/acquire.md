@@ -14,9 +14,10 @@ Generate or retrieve new rows.
 | `retrieve_from_hf` | yes | Hugging Face datasets backend. |
 | `retrieve_from_arxiv` | yes | arXiv backend. |
 | `retrieve_from_s2` | yes | Semantic Scholar backend; `max_workers` runs queries concurrently. |
+| `retrieve_from_pubmed` | yes | PubMed backend (QUERY only): articles, case reports, reviews; abstracts, no full text. |
 | `RetrievalSource`, `RetrieveMode` |   | Abstract base class and mode enum (`QUERY`, `RANDOM`). |
 | `WebRetrievalSource`, `WikiRetrievalSource`, `HFRetrievalSource`, ... |   | Per-backend source classes. |
-| `ArxivRetrievalSource`, `S2RetrievalSource` |   |Per-backend source classes. |
+| `ArxivRetrievalSource`, `S2RetrievalSource`, `PubMedRetrievalSource` |   |Per-backend source classes. |
 | `Model` |   | LLM wrapper (initialized by user). Otherwise, LLM generation should be called with `sample_from_LLM`. |
 | `LocalModel` |   | On-GPU vLLM model with `Model`'s interface (needs the `vllm` extra). Zero cost, `<think>` inline. |
 | `TinkerModel` |   | Base model or `tinker://` checkpoint sampled on Tinker; `Model`'s interface, `<think>` inline. |
@@ -85,16 +86,21 @@ solved = sum(s.rstrip().endswith("ANSWER: 25") for s in samples) / len(samples) 
 
 The retrieval functions take one query string or a list of queries as their first argument and return a flat list of
 rows, each stamped with its `query`. `mode` is keyword-only (`mode=RetrieveMode.RANDOM` for random sampling where
-supported). Web search reads `BRAVE_API_KEY` and Semantic Scholar reads `S2_API_KEY` from the environment unless
-`api_key=` is passed; web search raises without a key.
+supported). Web search reads `BRAVE_API_KEY`, Semantic Scholar `S2_API_KEY` and PubMed `NCBI_API_KEY` from the
+environment unless `api_key=` is passed; web search raises without a key. PubMed works without one, at 3 requests per
+second instead of 10; Forger spaces its requests and retries rate-limited ones either way.
 
 ```python
-from pyforger.acquire import retrieve_from_web, retrieve_from_wiki
+from pyforger.acquire import retrieve_from_pubmed, retrieve_from_web, retrieve_from_wiki
 
 pages = retrieve_from_web(["interval scheduling greedy proof", "monotonic stack patterns"], n=5)
 # pages[i] has "text" (extracted page content), "title", "url", and "query".
 articles = retrieve_from_wiki("Segment tree", n=2)
 # articles[i]["text"] is the intro; full_text=True returns whole articles, one request each.
+reports = retrieve_from_pubmed("lung cancer case reports", n=20)
+# reports[i] has "text" (title and abstract), "publication_types" (e.g. ["Case Reports", ...]), "mesh_terms",
+# "authors", "journal", "year", "doi", "pmcid" and "url". PubMed search syntax works too:
+# '"lung neoplasms"[MeSH] AND case reports[pt]'.
 ```
 
 `n` is per query, so three queries with `n=5` return up to 15 rows. A Semantic Scholar query asks the API for only `n`
