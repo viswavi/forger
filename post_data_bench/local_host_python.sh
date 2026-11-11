@@ -18,7 +18,10 @@ export APPTAINERENV_TVM_FFI_CACHE_DIR=/tmp/tvm_ffi
 export APPTAINERENV_FLASHINFER_WORKSPACE_BASE=/tmp/flashinfer
 export APPTAINERENV_PDB_BENCHMARK_DIR="$PDB_BENCHMARK_DIR"
 # --compat clears inherited environment; forward the small host reward allowlist.
+# LITELLM_OFFICIAL_JUDGE_*: the host's test grader for the clinical task (the
+# agent never gets it); LITELLM_WORKER_BASE_URL is its default gateway.
 for name in LITELLM_JUDGE_API_KEY LITELLM_JUDGE_BASE_URL LITELLM_BASE_URL \
+    LITELLM_OFFICIAL_JUDGE_KEY LITELLM_OFFICIAL_JUDGE_BASE_URL LITELLM_WORKER_BASE_URL \
     JUDGE_MODEL JUDGE_REASONING_EFFORT JUDGE_TOKEN_UNIT_LIMIT JUDGE_TOKEN_USAGE_FILE \
     JUDGE_MAX_CONSECUTIVE_FAILURES PDB_TASK PDB_RUN_TAG; do
   if [[ -v "$name" ]]; then export "APPTAINERENV_${name}=${!name}"; fi
