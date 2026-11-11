@@ -109,6 +109,12 @@ reruns cheap. A completion is keyed on three things, never on the prompt text al
   duplicate row, a retry, a later `batch_size` chunk) gets new samples, and a rerun of the same op with the same rows
   and arguments replays them in order, as the op cache would.
 
+So editing a template for every row re-sends every row. When at least 20 rows and half of a batch were answered before
+by the same op in the same `@step` under another prompt or settings, `Model.generate_batch` logs a warning before
+sending (also in the step report), e.g. `alter.generate_from_context: 249 of 498 rows were answered before under a
+different prompt or settings and will be asked again (the request cache keys on the exact prompt); ~12.45M token units
+at the earlier cost per row`. It never blocks the batch; to keep the old answers, run the old template on the old rows.
+
 Your own `@op` that builds one prompt per row can pass `cache_rows=rows` (aligned with the prompts) to
 `generate_batch`, and `@op(samples_arg="n")` names its sample-count argument. Outside an `@op` / `@step` (or from a
 thread that did not copy the context) the request cache is off: direct `model.generate` calls always send their

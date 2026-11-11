@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 import pytest
 
-from pyforger import _tracking, filter, op
+from pyforger import _tracking, filter, op, step
 from pyforger.acquire import _request_cache, sample_from_LLM
 from pyforger.acquire.model import Model, _cache_kwargs
 from pyforger.alter import generate_from_context
@@ -728,6 +728,120 @@ class TestOpScope:
         assert _cache_kwargs(gpt().generate_batch, cache_rows=[1], cache_salt=None) == {
             "cache_rows": [1]
         }
+
+
+DEEPSEEK = "litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731"  # fixed unit weights
+
+
+def resent_warnings(caplog) -> list[str]:
+    """The "answered before" warnings logged so far."""
+    return [r.message for r in caplog.records if "answered before" in r.message]
+
+
+class TestResentWarning:
+    """A batch whose rows were answered before under another prompt warns first."""
+
+    @pytest.fixture(autouse=True)
+    def no_quota(self, monkeypatch):
+        """DEEPSEEK requests must not touch a shared token-unit ledger."""
+        monkeypatch.delenv("FORGER_TOKEN_USAGE_FILE", raising=False)
+        monkeypatch.delenv("FORGER_TOKEN_UNIT_LIMIT", raising=False)
+
+    def test_edited_step_template_warns_once_with_earlier_cost(self, fake, caplog):
+        """30 rows answered under "Solve", rerun as 60 under "Solve now": 30 warn.
+
+        Each fake answer is 10 prompt + 20 completion tokens, 70 units.
+        """
+        model = Model(DEEPSEEK, show_progress=False)
+        rows = [{"q": f"q{i}"} for i in range(60)]
+
+        @step(name="answer")
+        def answer(rows):
+            return generate_from_context(rows, "Solve {q}", model)
+
+        answer(rows[:30])
+
+        @step(name="answer")
+        def answer(rows):  # noqa: F811 - the template edited for every row
+            return generate_from_context(rows, "Solve now {q}", model, batch_size=40)
+
+        fake.reset()
+        with caplog.at_level(logging.WARNING):
+            answer(rows)
+        message = (
+            "alter.generate_from_context: 30 of 40 rows were answered before under "
+            "a different prompt or settings and will be asked again (the request "
+            "cache keys on the exact prompt); ~2,100 token units at the earlier "
+            "cost per row"
+        )
+        assert resent_warnings(caplog) == [message]  # once, not per chunk
+        assert len(fake.calls) == 60  # a warning, never a block
+        rec = _tracking.step_records()["answer"]
+        assert message in rec.warnings
+
+    def test_bare_op_warns_with_earlier_dollar_cost(self, fake, caplog):
+        """Outside a step the op call is the run; no unit weights: dollars."""
+        model = gpt()
+        rows = [{"q": f"q{i}"} for i in range(20)]
+        generate_from_context(rows, "Solve {q}", model)
+        with caplog.at_level(logging.WARNING):
+            generate_from_context(rows, "Solve: {q}", model)
+        assert resent_warnings(caplog) == [
+            "alter.generate_from_context: 20 of 20 rows were answered before under "
+            "a different prompt or settings and will be asked again (the request "
+            "cache keys on the exact prompt); ~$0.02 at the earlier cost per row"
+        ]
+
+    def test_new_rows_and_replays_do_not_warn(self, fake, caplog, tmp_path):
+        """Rows never answered, or answered under this prompt, are not re-asked."""
+        model = gpt()
+        rows = [{"q": f"q{i}"} for i in range(60)]
+        with caplog.at_level(logging.WARNING):
+            generate_from_context(rows[:30], "Solve {q}", model)
+            generate_from_context(rows, "Solve {q}", model)
+            drop_op_cache(tmp_path)
+            generate_from_context(rows, "Solve {q}", model)
+        assert resent_warnings(caplog) == []
+
+    def test_few_or_a_minority_of_rows_do_not_warn(self, fake, caplog):
+        """19 re-asked rows, or 25 of 60, are under the thresholds."""
+        model = gpt()
+        few = [{"q": f"few{i}"} for i in range(19)]
+        many = [{"q": f"many{i}"} for i in range(60)]
+        generate_from_context(few, "Solve {q}", model)
+        generate_from_context(many[:25], "Solve {q}", model)
+        with caplog.at_level(logging.WARNING):
+            generate_from_context(few, "Solve: {q}", model)
+            generate_from_context(many, "Solve: {q}", model)
+        assert resent_warnings(caplog) == []
+
+    def test_two_ops_on_the_same_rows_in_one_step_do_not_warn(self, fake, caplog):
+        """Two templates over the same rows in one step run are not an edit."""
+        model = gpt()
+        rows = [{"q": f"q{i}"} for i in range(30)]
+
+        @step(name="two_views")
+        def two_views(rows):
+            hints = generate_from_context(rows, "Hint for {q}", model)
+            answers = generate_from_context(rows, "Answer {q}", model)
+            return [
+                dict(r, hint=h["text"], answer=a["text"])
+                for r, h, a in zip(rows, hints, answers)
+            ]
+
+        with caplog.at_level(logging.WARNING):
+            two_views(rows)
+        assert resent_warnings(caplog) == []
+        assert len(fake.calls) == 60
+
+    def test_no_cache_does_not_warn(self, fake, caplog):
+        """_no_cache=True asks for fresh answers on purpose."""
+        model = gpt()
+        rows = [{"q": f"q{i}"} for i in range(20)]
+        generate_from_context(rows, "Solve {q}", model)
+        with caplog.at_level(logging.WARNING):
+            generate_from_context(rows, "Solve: {q}", model, _no_cache=True)
+        assert resent_warnings(caplog) == []
 
 
 class TestNotCached:
