@@ -459,6 +459,34 @@ class TestFailures:
         ask(model, prompts)
         assert fake.calls == [("SLOW", 1)]
 
+    def test_used_up_quota_replays_cached_prompts(self, fake, monkeypatch, caplog):
+        """With the quota used up, cached prompts replay and the others drop out.
+
+        Nothing is sent, the warning names the unsent prompts, and the op is not
+        cached; an op with nothing to replay raises the quota error.
+        """
+        from pyforger.op import trace
+        from pyforger.token_units import TokenUnitQuotaExceeded
+
+        rows = [{"q": "A"}, {"q": "B"}, {"q": "C"}]
+        first = generate_from_context(rows[:2], "{q}", gpt(num_retries=0))
+
+        def used_up(self):
+            raise TokenUnitQuotaExceeded("Token-unit quota exhausted")
+
+        # The check Model makes before sending each request (not on a cache hit).
+        monkeypatch.setattr(Model, "_before_request", used_up)
+        fake.reset()
+        with caplog.at_level(logging.WARNING):
+            again = generate_from_context(rows, "{q}", gpt(num_retries=0))
+        assert fake.calls == []
+        assert again == [*first, None]
+        assert "1 prompt not sent: the token-unit quota is used up" in caplog.text
+        assert trace()[-1].cache_hit is False
+        with pytest.raises(TokenUnitQuotaExceeded):
+            generate_from_context(rows[2:], "{q}", gpt(num_retries=0))
+        assert fake.calls == []
+
     def test_partial_fan_out_with_hits(self, fake):
         """Hits plus a failed top-up request: the hits come back, fewer than n."""
         model = Model("xai/grok-4", show_progress=False, num_retries=0)

@@ -17,11 +17,17 @@ from fixtures import MockModel
 
 from pyforger import _tracking, op
 from pyforger.acquire import PromptTooLongError, sample_from_LLM
-from pyforger.acquire._model_utils import _is_row_error, _is_transient
+from pyforger.acquire._model_utils import _is_row_error, _is_transient, _RequestFailures
 from pyforger.acquire.model import GenerateResult, Model
 from pyforger.alter import generate_from_context
 from pyforger.op import skip_cache_write, trace
 from pyforger.steps import pipeline, step
+from pyforger.token_units import TokenUnitQuotaExceeded
+
+
+def _unsent(prompt: str) -> TokenUnitQuotaExceeded:
+    """What Model leaves in a slot it did not send: the quota is used up."""
+    return TokenUnitQuotaExceeded(f"Token-unit quota exhausted ({prompt})")
 
 
 class InternalServerError(Exception):
@@ -553,6 +559,36 @@ class TestFatalErrors:
         with pytest.raises(litellm.RateLimitError):
             generate_from_context(ITEMS, "{q}", model, max_retries=3)
         assert [c[0] for c in model.calls] == ["A", "B", "C"]
+
+    def test_generate_from_context_drops_prompts_the_quota_refused(self, caplog):
+        """A prompt Forger's used-up quota did not send is None; the rest return."""
+        model = FlakyModel(fail={"B": 9}, error=_unsent)
+        with caplog.at_level(logging.WARNING):
+            rows = generate_from_context(ITEMS, "{q}", model, max_retries=3)
+        assert rows == [{"text": "A#0"}, None, {"text": "C#0"}]
+        assert [c[0] for c in model.calls] == ["A", "B", "C"]
+        assert "1 prompt not sent: the token-unit quota is used up" in caplog.text
+        assert trace()[-1].cache_hit is False
+
+    def test_generate_from_context_raises_when_the_quota_refused_all(self):
+        """With nothing returned, the quota error stops the op."""
+        model = FlakyModel(fail={"A": 9, "B": 9, "C": 9}, error=_unsent)
+        with pytest.raises(TokenUnitQuotaExceeded):
+            generate_from_context(ITEMS, "{q}", model, max_retries=3)
+
+    def test_sample_from_llm_raises_when_the_quota_refused_all(self):
+        """sample_from_LLM with no sample and only unsent requests raises."""
+        model = FlakyModel(fail={"Hi": 9}, error=_unsent)
+        with pytest.raises(TokenUnitQuotaExceeded):
+            sample_from_LLM("Hi", model, n=2, max_retries=2)
+
+    def test_filters_count_unsent_requests_as_failures(self):
+        """_RequestFailures tolerates unsent requests, and raises if all were."""
+        failures = _RequestFailures()
+        assert failures.failed(_unsent("A")) and not failures.failed(["ok"])
+        failures.raise_if_systemic(2)  # one of two returned
+        with pytest.raises(TokenUnitQuotaExceeded):
+            failures.raise_if_systemic(1)
 
     def test_sample_from_llm_raises_on_unknown_model(self):
         """A NotFoundError (e.g. a typo in the model id) raises."""

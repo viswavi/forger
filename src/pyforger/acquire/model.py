@@ -38,6 +38,7 @@ from pyforger.acquire import _local_dp, _request_cache
 from pyforger.op import _NO_CACHE_SCOPE, _REQUEST_SCOPE, _hash
 from pyforger.token_units import (
     TokenUnitBudget,
+    TokenUnitQuotaExceeded,
     held_units,
     response_cost_usd,
     response_token_counts,
@@ -165,6 +166,16 @@ def _is_row_error(exc: BaseException) -> bool:
     message or body says content_filter or content_policy (Azure's filter 400).
     """
     return _row_error_reason(exc) is not None
+
+
+def _quota_spent(exc: BaseException) -> bool:
+    """True for a request Forger did not send because the token-unit quota is used up.
+
+    Nothing was sent or charged, so an op can drop the prompt and keep the rest
+    of its batch, e.g. completions the request cache replays. A provider's own
+    out-of-quota 429 is not this: it raises (see `_is_transient`).
+    """
+    return isinstance(exc, TokenUnitQuotaExceeded)
 
 
 def _is_transient(exc: BaseException) -> bool:

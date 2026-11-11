@@ -84,6 +84,10 @@ Importing `pyforger.acquire` sets `litellm.suppress_debug_info = True`, so provi
 exception, and a prompt where only some fan-out copies failed holds the completions that arrived (fewer than `n`)
 when those failures were transient. A spending cap, the token-unit quota, or a bad request puts its exception in the
 prompt's slot even so (what arrived is charged and request-cached, so a rerun replays it).
+Forger's LLM ops (`generate_from_context`, `sample_from_LLM`, the LLM filters) treat a prompt the used-up token-unit
+quota did not send like a failed request: cached prompts still replay, the rest drop out with a warning ("2 prompts
+not sent: the token-unit quota is used up"), and the op is not cached; with nothing to return, the op raises
+`TokenUnitQuotaExceeded`.
 Usage of finished requests is recorded. The default (`False`) raises the first failure. On `LocalModel` an engine
 error fills every slot, since vLLM runs the batch as one call.
 
