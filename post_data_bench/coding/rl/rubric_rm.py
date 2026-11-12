@@ -258,11 +258,29 @@ def final_answer(text):
     return text.strip()
 
 
+def content_filtered(exc=None, result=None):
+    """Whether the provider's content filter blocked the judge's reply.
+
+    Azure returns HTTP 400 with finish_reason "content_filter" (e.g. "Response
+    content blocked by label 'MultiSeverity_SelfHarmScore'") for medical chats
+    about self-harm; the same chat and answer are blocked again on a retry.
+    """
+    if exc is not None:
+        return "content_filter" in str(exc).lower()
+    try:
+        return result.choices[0].finish_reason == "content_filter"
+    except (AttributeError, IndexError, TypeError):
+        return False
+
+
 async def prompt_score(criterion, prompt, response, ground_truth, answer_only=False):
     """Score one prompt criterion with the separately budgeted LM judge.
 
     With ``answer_only``, the judge sees only the final answers of ``response``
     and ``ground_truth`` (see ``final_answer``); ``prompt`` is always sent whole.
+    Returns None, without retrying or counting a failure, when the provider's
+    content filter blocks the judge's reply (``content_filtered``): retrying the
+    same blocked call forever stopped RL at the end of a step (jobs 168621/168622).
     """
     if answer_only:
         response, ground_truth = final_answer(response), final_answer(ground_truth)
@@ -343,6 +361,8 @@ async def prompt_score(criterion, prompt, response, ground_truth, answer_only=Fa
                         num_retries=0,
                     )
             except Exception as exc:
+                if content_filtered(exc=exc):
+                    return None
                 quota = quota_error(exc)
             else:
                 try:
@@ -365,6 +385,8 @@ async def prompt_score(criterion, prompt, response, ground_truth, answer_only=Fa
                     state["open"] = state["quota"] = True
                     record_quota_stop()
                     raise JudgeQuotaExhausted("Judge token-unit quota exhausted")
+                if content_filtered(result=result):
+                    return None
                 # Parsing errors originate in untrusted model text and are never quota
                 # errors.
                 quota = False
@@ -406,12 +428,17 @@ async def prompt_score(criterion, prompt, response, ground_truth, answer_only=Fa
 
 
 async def custom_rm(args, sample, **kwargs):
-    """Compute the weighted reward using the fixed rubric executor."""
+    """Compute the weighted reward using the fixed rubric executor.
+
+    A prompt criterion the content filter blocked (prompt_score returns None)
+    leaves the weighted mean, so the other criteria decide the reward; an answer
+    whose criteria are all blocked gets 0.
+    """
     metadata = sample.metadata
     rubric = validate_rubric(metadata["rubric"])
     prompt = metadata["original_prompt"]  # Pre-template prompt, exactly as in SFT.
     response = sample.response or ""
-    total = 0.0
+    total = scored = 0.0
     for criterion, weight in rubric:
         if weight == 0:
             continue
@@ -428,5 +455,8 @@ async def custom_rm(args, sample, **kwargs):
                     sample.label,
                     answer_only=criterion.get("answer_only", False),
                 )
+        if value is None:  # blocked by the provider's content filter
+            continue
         total += weight * value
-    return total / sum(weight for _, weight in rubric)
+        scored += weight
+    return total / scored if scored else 0.0

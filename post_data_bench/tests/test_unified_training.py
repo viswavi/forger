@@ -465,6 +465,67 @@ class RewardTests(unittest.IsolatedAsyncioTestCase):
                 await rm.prompt_score("criterion", [], "response", "gold")
             self.assertEqual(completion.await_count, 9)
 
+    async def test_content_filter_block_is_unscored_without_retry(self):
+        """A content-filter 400 returns None at once and leaves the counter alone."""
+        blocked = RuntimeError(
+            'Error code: 400 - {"finish_reason":"content_filter","message":'
+            '"Response content blocked by label MultiSeverity_SelfHarmScore"}'
+        )
+        with patch.dict(
+            os.environ,
+            {
+                "LITELLM_JUDGE_API_KEY": "test",
+                "LITELLM_BASE_URL": "https://example.test",
+                "JUDGE_MAX_CONSECUTIVE_FAILURES": "1",
+            },
+        ), patch(
+            "litellm.acompletion", new=AsyncMock(side_effect=blocked)
+        ) as completion, patch.object(
+            rm.asyncio, "sleep", new=AsyncMock()
+        ):
+            for _ in range(3):  # a threshold of 1 would have opened on a failure
+                self.assertIsNone(await rm.prompt_score("c", [], "r", "g"))
+            self.assertEqual(completion.await_count, 3)
+
+    async def test_content_filter_finish_reason_is_unscored(self):
+        """A reply with finish_reason content_filter is unscored, not retried."""
+        filtered = SimpleNamespace(
+            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=2),
+            choices=[
+                SimpleNamespace(
+                    finish_reason="content_filter",
+                    message=SimpleNamespace(content=""),
+                )
+            ],
+        )
+        with patch.dict(
+            os.environ,
+            {
+                "LITELLM_JUDGE_API_KEY": "test",
+                "LITELLM_BASE_URL": "https://example.test",
+            },
+        ), patch(
+            "litellm.acompletion", new=AsyncMock(return_value=filtered)
+        ) as completion:
+            self.assertIsNone(await rm.prompt_score("c", [], "r", "g"))
+            self.assertEqual(completion.await_count, 1)
+
+    async def test_blocked_criteria_leave_the_weighted_mean(self):
+        """Blocked criteria drop out; an answer with all of them blocked gets 0."""
+        sample = SimpleNamespace(
+            response="answer",
+            label="gold",
+            prompt="templated",
+            metadata={
+                "original_prompt": [{"role": "user", "content": "original"}],
+                "rubric": [[{"prompt": "a"}, 1], [{"prompt": "b"}, 3]],
+            },
+        )
+        with patch.object(rm, "prompt_score", new=AsyncMock(side_effect=[0.5, None])):
+            self.assertEqual(await rm.custom_rm(None, sample), 0.5)
+        with patch.object(rm, "prompt_score", new=AsyncMock(return_value=None)):
+            self.assertEqual(await rm.custom_rm(None, sample), 0.0)
+
     async def test_success_resets_failures(self):
         """Verify success resets failures."""
         success = SimpleNamespace(
