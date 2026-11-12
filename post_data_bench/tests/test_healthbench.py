@@ -8,6 +8,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "healthbench"))
+# Other task folders have modules of the same names (e.g. frontiercs/checkers.py);
+# drop any another test imported so these come from healthbench/.
+for _name in ("checkers", "judge", "make_splits", "language_filter", "split_contract"):
+    sys.modules.pop(_name, None)
 
 import checkers  # noqa: E402
 import judge  # noqa: E402
