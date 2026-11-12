@@ -502,6 +502,111 @@ class RewardTests(unittest.IsolatedAsyncioTestCase):
                 await rm.prompt_score("criterion", [], "response", "gold")
             self.assertEqual(completion.await_count, 9)
 
+    async def test_judge_sees_and_instructions_shape_the_request(self):
+        """judge_sees limits the payload; instructions extend the system message."""
+        result = SimpleNamespace(
+            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=2),
+            choices=[SimpleNamespace(message=SimpleNamespace(content='{"score": 1}'))],
+        )
+        with patch.dict(
+            os.environ,
+            {
+                "LITELLM_JUDGE_API_KEY": "test",
+                "LITELLM_BASE_URL": "https://example.test",
+            },
+        ), patch(
+            "litellm.acompletion", new=AsyncMock(return_value=result)
+        ) as completion:
+            await rm.prompt_score(
+                "mentions apixaban",
+                [{"role": "user", "content": "a long pasted note"}],
+                "<think>t</think>Start apixaban.",
+                "gold",
+                answer_only=True,
+                judge_sees=("response",),
+                instructions="Brand names count.",
+            )
+            messages = completion.call_args.kwargs["messages"]
+            self.assertEqual(
+                json.loads(messages[1]["content"]),
+                {"criterion": "mentions apixaban", "response": "Start apixaban."},
+            )
+            self.assertTrue(messages[0]["content"].endswith("Brand names count."))
+            await rm.prompt_score("c", [], "r", "g")
+            sent = json.loads(completion.call_args.kwargs["messages"][1]["content"])
+            self.assertEqual(
+                sorted(sent), ["criterion", "ground_truth", "prompt", "response"]
+            )
+            self.assertNotIn(
+                "Instructions", completion.call_args.kwargs["messages"][0]["content"]
+            )
+
+    async def test_custom_rm_passes_judge_options(self):
+        """Each prompt criterion's judge_sees and instructions reach prompt_score."""
+        sample = SimpleNamespace(
+            response="answer",
+            label="gold",
+            prompt="templated",
+            metadata={
+                "original_prompt": [{"role": "user", "content": "original"}],
+                "rubric": [
+                    [
+                        {
+                            "prompt": "a",
+                            "judge_sees": ["response"],
+                            "instructions": "x",
+                        },
+                        1,
+                    ],
+                    [{"prompt": "b"}, 1],
+                ],
+            },
+        )
+        with patch.object(rm, "prompt_score", new=AsyncMock(return_value=1)) as judge:
+            await rm.custom_rm(None, sample)
+        first, second = judge.call_args_list
+        self.assertEqual(
+            (first.kwargs["judge_sees"], first.kwargs["instructions"]),
+            (("response",), "x"),
+        )
+        self.assertEqual(
+            (second.kwargs["judge_sees"], second.kwargs["instructions"]),
+            (("prompt", "response", "ground_truth"), ""),
+        )
+
+    def test_judge_options_are_validated(self):
+        """judge_sees needs "response" and known fields; options are prompt-only."""
+        from coding.rl.rubric_data import validate_rubric
+
+        ok = [
+            [
+                {
+                    "prompt": "c",
+                    "judge_sees": ["response", "ground_truth"],
+                    "instructions": "i",
+                },
+                1,
+            ]
+        ]
+        self.assertIs(validate_rubric(ok), ok)
+        for bad, message in [
+            ({"prompt": "c", "judge_sees": ["prompt"]}, "judge_sees"),
+            ({"prompt": "c", "judge_sees": ["response", "answer"]}, "judge_sees"),
+            ({"prompt": "c", "judge_sees": ["response", "response"]}, "judge_sees"),
+            ({"prompt": "c", "instructions": 3}, "instructions"),
+            ({"prompt": "c", "instructions": "x" * 4001}, "instructions"),
+            (
+                {
+                    "code": "def grade(p, r, g):\n    return 1.0",
+                    "judge_sees": ["response"],
+                },
+                "applies only",
+            ),
+            ({"prompt": "c", "other": 1}, "exactly one"),
+        ]:
+            with self.assertRaisesRegex(ValueError, message):
+                validate_rubric([[bad, 1]])
+
     async def test_content_filter_block_is_unscored_without_retry(self):
         """A content-filter 400 returns None at once and leaves the counter alone."""
         blocked = RuntimeError(

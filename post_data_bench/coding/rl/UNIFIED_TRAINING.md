@@ -96,7 +96,7 @@ old unfrozen agent runs should use the launcher version that created them.
 ## Rubric execution and token-unit quotas
 
 A rubric is a nonempty list of `[criterion, weight]` pairs. A criterion contains
-exactly one of `code` or `prompt` (a prompt criterion may also set `answer_only`).
+exactly one of `code` or `prompt` (a prompt criterion may also set `answer_only`, `judge_sees` and `instructions`: `rubric_data.PROMPT_OPTIONS`).
 Weights must be finite and nonnegative, with a positive sum. Reward is
 `sum(weight * score) / sum(weight)`.
 

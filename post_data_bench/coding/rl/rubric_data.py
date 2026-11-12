@@ -99,6 +99,15 @@ def validate_code(source):
         ) from exc
 
 
+# Optional keys of a "prompt" criterion: answer_only strips thinking from the
+# response and ground truth; judge_sees picks which of JUDGE_FIELDS the judge gets
+# (default all, e.g. ["response"] for "mentions anticoagulation"); instructions
+# are added to the judge's system message for this criterion only.
+PROMPT_OPTIONS = ("answer_only", "judge_sees", "instructions")
+JUDGE_FIELDS = ("prompt", "response", "ground_truth")
+MAX_INSTRUCTIONS = 4000
+
+
 def validate_rubric(rubric):
     """Validate criterion variants, code signatures and positive total weight."""
     if not isinstance(rubric, list) or not rubric:
@@ -108,12 +117,15 @@ def validate_rubric(rubric):
         if not isinstance(pair, list) or len(pair) != 2:
             raise ValueError("each rubric entry must be [criterion, weight]")
         criterion, weight = pair
-        if isinstance(criterion, dict) and {"code", "answer_only"} <= set(criterion):
-            raise ValueError('"answer_only" applies only to "prompt" criteria')
-        if not isinstance(criterion, dict) or set(criterion) not in (
-            {"code"},
-            {"prompt"},
-            {"prompt", "answer_only"},
+        if isinstance(criterion, dict) and "code" in criterion:
+            extra = set(criterion) & set(PROMPT_OPTIONS)
+            if extra:
+                raise ValueError(
+                    f'"{sorted(extra)[0]}" applies only to "prompt" criteria'
+                )
+        if not isinstance(criterion, dict) or not (
+            set(criterion) == {"code"}
+            or ("prompt" in criterion and set(criterion) <= {"prompt", *PROMPT_OPTIONS})
         ):
             raise ValueError('criterion must contain exactly one of "code" or "prompt"')
         source = criterion.get("code", criterion.get("prompt"))
@@ -121,6 +133,22 @@ def validate_rubric(rubric):
             raise ValueError("criterion source must be nonempty text")
         if not isinstance(criterion.get("answer_only", False), bool):
             raise ValueError('"answer_only" must be true or false')
+        sees = criterion.get("judge_sees", JUDGE_FIELDS)
+        if (
+            not isinstance(sees, (list, tuple))
+            or "response" not in sees
+            or len(set(sees)) != len(sees)
+            or not set(sees) <= set(JUDGE_FIELDS)
+        ):
+            raise ValueError(
+                '"judge_sees" must list distinct fields from "prompt", "response" '
+                'and "ground_truth", including "response"'
+            )
+        instructions = criterion.get("instructions", "")
+        if not isinstance(instructions, str) or len(instructions) > MAX_INSTRUCTIONS:
+            raise ValueError(
+                f'"instructions" must be text of at most {MAX_INSTRUCTIONS} characters'
+            )
         if (
             isinstance(weight, bool)
             or not isinstance(weight, (int, float))
