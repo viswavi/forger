@@ -199,18 +199,27 @@ def _raise_if_systemic(results: list[Any], total: int) -> None:
         raise unsent[0]
 
 
+# Row errors (`_failure_label`) that alone leave an op cached: the request
+# cache replays them too (see Model.generate_batch), so a rerun gets the rows
+# the first run got.
+_CACHED_FAILURES = frozenset({"content filter", "context window"})
+
+
 def _report_provider_failures(
     message: str, error_types: list[str], last_error: BaseException | None = None
 ) -> None:
-    """Warn about requests that failed at the provider; keep the op out of the cache.
+    """Warn about requests that failed at the provider; maybe keep the op uncached.
 
     ``error_types`` has one label per failure (`_failure_label`): an exception
     type name, e.g. three 504s give "...: InternalServerError ×3", or a row
     error's reason, e.g. "...: 2 prompts blocked by the provider's content
     filter". ``last_error`` adds the last one's message. The warning is logged
-    and shown in the step report, and the op (and its step) is not cached, so
-    a rerun asks again; the request cache replays the completions that did
-    arrive.
+    and shown in the step report. With any failure a retry could fix (a 504,
+    a timeout, missing completions, the used-up quota), the op (and its step)
+    is not cached, so a rerun asks again; the request cache replays the
+    completions that did arrive. Row errors alone (a content-filter block, an
+    over-long prompt) are cached, so a rerun gives the same rows instead of
+    asking again and maybe getting an answer that changes every later step.
     """
     counts = Counter(error_types)
     summary = ", ".join(_count_text(name, n) for name, n in counts.most_common())
@@ -219,7 +228,14 @@ def _report_provider_failures(
         if len(detail) > 200:
             detail = detail[:199] + "…"
         summary += f"; last error: {type(last_error).__name__}: {detail}"
-    text = f"{message}: {summary} (result not cached)"
+    cached = set(counts) <= _CACHED_FAILURES
+    outcome = (
+        "result cached, so a rerun gives the same rows; pass _no_cache=True to ask "
+        "again"
+        if cached
+        else "result not cached"
+    )
+    text = f"{message}: {summary} ({outcome})"
     if counts["RateLimitError"] * 2 >= len(error_types):
         # Mostly rate limits: they outlasted minutes of retries (see Model).
         text += (
@@ -229,7 +245,8 @@ def _report_provider_failures(
         )
     logger.warning(text)
     _tracking.add_op_warning(text, "provider_failure")
-    skip_cache_write()
+    if not cached:
+        skip_cache_write()
 
 
 def _catch_kwargs(model: Any) -> dict[str, Any]:
@@ -240,6 +257,26 @@ def _catch_kwargs(model: Any) -> dict[str, Any]:
     if _accepts_kwarg(getattr(model, "generate_batch", None), "return_exceptions"):
         return {"return_exceptions": True}
     return {}
+
+
+def _chunk_size(model: Any, batch_size: int | None, total: int) -> int:
+    """Prompts per ``model.generate_batch()`` call for an op's ``batch_size``.
+
+    A model whose generate_batch sends every request at once through its own
+    pool (``Model``: up to its max_concurrency) gets all ``total`` prompts in
+    one call, whatever ``batch_size`` says: chunks sent one after another each
+    wait for their slowest request, e.g. 1,856 rows in chunks of 10 took 1h
+    12m. A model that runs one call at a time (``LocalModel``, a duck-typed
+    fake) gets ``batch_size`` (None: all of them). The class that defines
+    ``generate_batch`` says which, with ``_pools_requests = True``.
+    """
+    everything = max(total, 1)
+    for klass in type(model).__mro__:
+        if "generate_batch" in vars(klass):
+            if vars(klass).get("_pools_requests", False):
+                return everything
+            break
+    return batch_size or everything
 
 
 class _RequestFailures:

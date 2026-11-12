@@ -179,6 +179,9 @@ class TinkerModel(Model):
         ['<think>...</think>4', '<think>...</think>4']
     """
 
+    # generate_batch runs every prompt at once, up to max_concurrent.
+    _pools_requests = True
+
     def __init__(
         self,
         model_id: str,

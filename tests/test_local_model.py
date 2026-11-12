@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import subprocess
@@ -588,6 +589,182 @@ class TestDataParallel:
         assert len(engines) == 1 and not isinstance(
             model._llm, _local_dp.DataParallelEngine
         )
+
+
+class FakePopen:
+    """Stands in for the worker process: records its env, holds its pipe end."""
+
+    started: list = []
+
+    def __init__(self, args, pass_fds, env):
+        """Keep the worker's pipe end open, as the real worker would."""
+        self.env = env
+        self.fd = os.dup(pass_fds[0])
+        FakePopen.started.append(self)
+
+    def poll(self):
+        """Still running until waited on."""
+        return None if self.fd is not None else 0
+
+    def wait(self, timeout=None):
+        """Exit: close the pipe end."""
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+        return 0
+
+
+class TestCompileCaches:
+    """Each engine gets its own Triton and Inductor caches and no forked child.
+
+    Eight workers sharing /tmp/torchinductor_root failed with IsADirectoryError
+    on a Triton temp file, and vLLM's forked engine-core child failed with
+    "CUDA driver initialization failed" in an apptainer container.
+    """
+
+    CACHES = ("TRITON_CACHE_DIR", "TORCHINDUCTOR_CACHE_DIR")
+
+    def test_fresh_directories_unless_set(self):
+        """Both variables get one new directory; set ones are kept."""
+        caches, scratch = _local_dp.own_compile_caches({})
+        try:
+            assert sorted(caches) == sorted(self.CACHES)
+            assert os.path.isdir(scratch)
+            assert all(os.path.dirname(d) == scratch for d in caches.values())
+            assert caches["TRITON_CACHE_DIR"] != caches["TORCHINDUCTOR_CACHE_DIR"]
+        finally:
+            os.rmdir(scratch)
+        assert _local_dp.own_compile_caches(
+            {"TRITON_CACHE_DIR": "/mine", "TORCHINDUCTOR_CACHE_DIR": "/also"}
+        ) == ({}, None)
+        caches, scratch = _local_dp.own_compile_caches({"TRITON_CACHE_DIR": "/mine"})
+        os.rmdir(scratch)
+        assert list(caches) == ["TORCHINDUCTOR_CACHE_DIR"]
+
+    def test_torch_default_inductor_dir_counts_as_unset(self):
+        """Torch writes its default back to os.environ; that is not the user's."""
+        default = _local_dp._torch_default_cache_dir()
+        caches, scratch = _local_dp.own_compile_caches(
+            {"TRITON_CACHE_DIR": "/mine", "TORCHINDUCTOR_CACHE_DIR": default}
+        )
+        os.rmdir(scratch)
+        assert list(caches) == ["TORCHINDUCTOR_CACHE_DIR"]
+        assert caches["TORCHINDUCTOR_CACHE_DIR"] != default
+
+    def test_prefers_dev_shm_and_falls_back(self, monkeypatch, tmp_path):
+        """/dev/shm when writable; the temp dir when /dev/shm cannot be used."""
+        asked = []
+
+        def mkdtemp(prefix, dir):
+            asked.append(dir)
+            if dir == "/dev/shm" and len(asked) > 1:
+                raise OSError("No space left on device")
+            return str(tmp_path / f"scratch{len(asked)}")
+
+        monkeypatch.setattr(_local_dp.os.path, "isdir", lambda p: True)
+        monkeypatch.setattr(_local_dp.os, "access", lambda p, mode: True)
+        monkeypatch.setattr(_local_dp.tempfile, "mkdtemp", mkdtemp)
+        _, first = _local_dp.own_compile_caches({})
+        assert asked == ["/dev/shm"] and first == str(tmp_path / "scratch1")
+        _, second = _local_dp.own_compile_caches({})
+        assert asked == ["/dev/shm", "/dev/shm", None]
+        assert second == str(tmp_path / "scratch3")
+
+    def test_each_worker_gets_its_own_caches(self, monkeypatch):
+        """Two workers: distinct cache dirs, no forked engine core, removed on close."""
+        for name in (*self.CACHES, "VLLM_ENABLE_V1_MULTIPROCESSING"):
+            monkeypatch.delenv(name, raising=False)
+        FakePopen.started = []
+        monkeypatch.setattr(_local_dp.subprocess, "Popen", FakePopen)
+        workers = [_local_dp.EngineProcess([gpu], {}) for gpu in ("0", "1")]
+        envs = [p.env for p in FakePopen.started]
+        assert [e["CUDA_VISIBLE_DEVICES"] for e in envs] == ["0", "1"]
+        assert all(e["VLLM_ENABLE_V1_MULTIPROCESSING"] == "0" for e in envs)
+        dirs = [e[name] for e in envs for name in self.CACHES]
+        assert len(set(dirs)) == 4
+        scratches = {os.path.dirname(d) for d in dirs}
+        assert all(os.path.isdir(d) for d in scratches)
+        for worker in workers:
+            worker.close()
+        assert not any(os.path.exists(d) for d in scratches)
+
+    def test_user_settings_reach_workers(self, monkeypatch):
+        """Variables the user set are passed through unchanged."""
+        monkeypatch.setenv("TRITON_CACHE_DIR", "/fast/triton")
+        monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", "/fast/inductor")
+        monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
+        FakePopen.started = []
+        monkeypatch.setattr(_local_dp.subprocess, "Popen", FakePopen)
+        worker = _local_dp.EngineProcess(["0"], {})
+        [env] = [p.env for p in FakePopen.started]
+        assert env["TRITON_CACHE_DIR"] == "/fast/triton"
+        assert env["TORCHINDUCTOR_CACHE_DIR"] == "/fast/inductor"
+        assert env["VLLM_ENABLE_V1_MULTIPROCESSING"] == "1"
+        worker.close()
+
+    def test_in_process_engine_is_set_up_like_a_worker(self, engines):
+        """One GPU: the engine core stays in this process, with its own caches."""
+        with patch.dict(os.environ):
+            for name in (*self.CACHES, "VLLM_ENABLE_V1_MULTIPROCESSING"):
+                os.environ.pop(name, None)
+            LocalModel("Qwen/Qwen3-4B").generate("a")
+            assert os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] == "0"
+            dirs = [os.environ[name] for name in self.CACHES]
+            assert len(set(dirs)) == 2
+            assert os.path.isdir(os.path.dirname(dirs[0]))
+            # A second model in the same process keeps the same directories.
+            LocalModel("Qwen/Qwen3-4B", seed=1).generate("a")
+            assert [os.environ[name] for name in self.CACHES] == dirs
+        assert len(engines) == 2
+
+    def test_real_workers_get_distinct_caches(self, tmp_path):
+        """Real worker processes (fake vllm): each sees its own cache directories.
+
+        They are gone once the model is closed.
+        """
+        fake = tmp_path / "vllm"
+        fake.mkdir()
+        (fake / "__init__.py").write_text(
+            "import os\n"
+            "from types import SimpleNamespace as N\n"
+            "class SamplingParams:\n"
+            "    def __init__(self, **kw): self.kw = kw\n"
+            "class LLM:\n"
+            "    def __init__(self, **kw):\n"
+            "        self.dirs = '|'.join(os.environ[n] for n in (\n"
+            "            'TRITON_CACHE_DIR', 'TORCHINDUCTOR_CACHE_DIR'))\n"
+            "    def chat(self, messages, sp, **kw):\n"
+            "        return [N(prompt_token_ids=[1], outputs=[N(\n"
+            "            text=self.dirs, token_ids=[1],\n"
+            "            finish_reason='stop')]) for m in messages]\n"
+        )
+        script = tmp_path / "workers.py"
+        script.write_text(
+            "import json, os\n"
+            "from pyforger.acquire.model import LocalModel\n"
+            "m = LocalModel('x')\n"
+            "dirs = [r[0].split('|') for r in m.generate_batch(['a', 'b'])]\n"
+            "m.close()\n"
+            "gone = not any(os.path.exists(d) for pair in dirs for d in pair)\n"
+            "print(json.dumps({'dirs': dirs, 'gone': gone}))\n"
+        )
+        src = str(Path(__file__).resolve().parents[1] / "src")
+        env = dict(
+            os.environ, CUDA_VISIBLE_DEVICES="4,5", PYTHONPATH=f"{tmp_path}:{src}"
+        )
+        for name in self.CACHES:
+            env.pop(name, None)
+        done = subprocess.run(
+            [sys.executable, str(script)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert done.returncode == 0, done.stderr[-2000:]
+        report = json.loads(done.stdout.strip().splitlines()[-1])
+        flat = [d for pair in report["dirs"] for d in pair]
+        assert len(set(flat)) == 4 and report["gone"]
 
 
 class TestSplitReasoning:

@@ -28,11 +28,26 @@ def record_start(data_directory, checkpoint):
     )
 
 
+def is_base_snapshot(checkpoint):
+    """Whether `checkpoint` is a Hugging Face cache snapshot of a base model.
+
+    e.g. .../hub/models--Qwen--Qwen3-4B/snapshots/1cfa9a72..., where local RL
+    starts. It is the only checkpoint allowed to have no receipt.
+    """
+    checkpoint = Path(checkpoint).resolve()
+    return (
+        checkpoint.parent.name == "snapshots"
+        and checkpoint.parent.parent.name.startswith("models--")
+    )
+
+
 def stages(checkpoint):
     """The training runs behind `checkpoint`, newest first.
 
     e.g. [{"stage": "rl", ...rl_trial_2}, {"stage": "rl", ...rl_trial_1},
-    {"stage": "sft", ...sft_trial_3}]; empty for the base model.
+    {"stage": "sft", ...sft_trial_3}]; empty for the base model. Any other
+    checkpoint without a receipt, e.g. rl_trial_1/hf_rollout19 with no
+    rl_submission.json, raises: its steps and data cannot be counted.
     """
     found = []
     checkpoint = Path(checkpoint).resolve()
@@ -65,8 +80,14 @@ def stages(checkpoint):
                 }
             )
             return found
+        elif is_base_snapshot(checkpoint):
+            return found
         else:
-            return found  # the base model
+            raise ValueError(
+                f"{checkpoint} has no rl_submission.json, so the RL steps and data "
+                "behind it cannot be counted; only the base model's Hugging Face "
+                "snapshot may have none"
+            )
     raise ValueError(f"{checkpoint}: more than 64 training runs in its lineage")
 
 

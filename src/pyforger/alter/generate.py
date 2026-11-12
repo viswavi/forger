@@ -13,6 +13,7 @@ from pyforger.acquire._model_utils import (
     _accepts_kwarg,
     _build_prompt,
     _catch_kwargs,
+    _chunk_size,
     _failure_label,
     _is_row_error,
     _is_transient,
@@ -129,9 +130,12 @@ def generate_from_context(
             fails to parse because it stopped at the model's max_tokens is not
             retried unless ``retry_truncated=True``: at the same max_tokens a
             retry usually stops there again. The step report counts such samples.
-        batch_size: Number of prompts per ``model.generate_batch()`` call. None
-            (default) sends all prompts in one call; the model's
-            ``max_concurrency`` bounds how many requests run at once.
+        batch_size: Number of prompts per ``model.generate_batch()`` call for
+            a model that runs one call at a time (``LocalModel``, a duck-typed
+            model). None (default) sends all prompts in one call. A ``Model``
+            or ``TinkerModel`` always gets all prompts in one call, so a slow
+            request never holds up the next batch; its ``max_concurrency``
+            bounds how many requests run at once.
         merge: Return the input rows with the output attached instead of the
             bare outputs: ``{**item, **parsed}`` per output (the output wins
             when keys clash; a warning names them), plus ``sample_idx`` when
@@ -220,7 +224,7 @@ def generate_from_context(
             by_count.setdefault(len(entry[1]), []).append(entry)
 
         for n, group in by_count.items():
-            chunk = batch_size or len(group)
+            chunk = _chunk_size(model, batch_size, len(group))
             for start in range(0, len(group), chunk):
                 batch = group[start : start + chunk]
                 # Each prompt is keyed on its row, so editing one row re-asks
@@ -605,8 +609,9 @@ def self_taught_reasoner(
             uses the model's own default (1.0 for ``Model``, Qwen3's 0.6 for
             ``TinkerModel``).
         max_tokens: Max tokens per response (model default when None).
-        batch_size: Number of items per ``model.generate_batch()`` call. None
-            (default) sends all items in one call.
+        batch_size: Number of items per ``model.generate_batch()`` call for
+            a model that runs one call at a time (``LocalModel``). None
+            (default) sends all items in one call, as a ``Model`` always does.
 
     Returns:
         Output rows, in item order, one per accepted response.
@@ -812,7 +817,7 @@ def _star_samples(
             for prompt, item in zip(prompts, items)
         ]
     sampled: list[tuple[list[str], list[str | None]]] = []
-    chunk = batch_size or len(prompts)
+    chunk = _chunk_size(model, batch_size, len(prompts))
     for start in range(0, len(prompts), chunk):
         batch = prompts[start : start + chunk]
         batch_results = model.generate_batch(

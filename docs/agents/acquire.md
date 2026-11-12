@@ -23,6 +23,8 @@ Prefer it over calling `Model` directly: it batches, parallelizes, parses, valid
   leave `<think>` inline in the text (`thinking_trace` is `None`); use `split_reasoning` to separate it.
 - Requests that keep failing with a transient provider error are dropped: the op returns fewer than `n` samples
   with a warning and is not cached.
+- A row error (a content-filter block or an over-long prompt; see [alter.md](alter.md)) is not sent again and is
+  cached, so a rerun returns the same samples. If every request hit one and no sample arrived, the op raises.
 
 `output_schema` (here and in `alter.generate_from_context`), e.g. `{"question": str, "answer": str}`, asks the model
 to end with a JSON object with those keys. Only the keys are checked:
@@ -49,6 +51,11 @@ Use one for the student's own outputs (STaR traces, pass@k difficulty checks); b
 - The engines hold their GPUs until `model.close()` or process exit: **call `close()` before training on the same
   GPUs.**
 - It defaults to `temperature=0.7` with vLLM's `top_p=1` and no `top_k`; pass `temperature=1.0` to match RL sampling.
+- Each engine, a single in-process one too, gets its own Triton and torch.compile cache directories (under
+  `/dev/shm` when writable, deleted on close) unless you set `TRITON_CACHE_DIR` / `TORCHINDUCTOR_CACHE_DIR`, so
+  8 engines compiling at once don't collide in `/tmp` (`IsADirectoryError: .../triton_.cubin`).
+- The engine core runs in the engine's own process, not a child vLLM forks (its CUDA init fails in some containers:
+  `CUDA driver initialization failed`); `VLLM_ENABLE_V1_MULTIPROCESSING=1` keeps vLLM's child.
 - `target_logprobs(prompts, targets)` scores given responses instead of sampling; `inspect.student_log_likelihood`
   reports them for a dataset (see [inspect.md](inspect.md)).
 
@@ -119,8 +126,19 @@ rubrics = generate_custom_rubric(
 # rubrics[i] is [[{"code": "def grade(prompt, response, ground_truth): ..."}, 100.0], ...]
 ```
 
+`prompt_criterion_options` merges your judge's per-criterion options into every `{"prompt": ...}` criterion (code
+criteria are unchanged; it may not set `prompt` or `code`), so you don't edit the rows afterwards. It is applied
+after the cached conversion: changing it makes no model calls.
+
+```python
+rubrics = generate_custom_rubric(tasks, model=model, prompt_criterion_options={"answer_only": True})
+# [[{"code": "def grade(...): ..."}, 100.0], [{"prompt": "Is the explanation correct?", "answer_only": True}, 75.0]]
+```
+
 To run the stages separately, `generate_custom_rubric_criteria(inputs, model=...)` returns textual
 `[(criterion, weight), ...]` per input (weights in `[0, 100]`, not summing to 100), e.g. for creative writing.
 Optional `meta_description` adds shared context, and `candidate_responses` help find failure modes. Then
-`convert_rubric_criteria(text_rubrics, model, inputs=tasks)` turns them into code/prompt criteria. Textual rubrics
-are not valid RL rubrics until converted or wrapped as `{"prompt": text}`.
+`convert_rubric_criteria(text_rubrics, model, inputs=tasks)` turns them into code/prompt criteria (it takes
+`prompt_criterion_options` too). Textual rubrics are not valid RL rubrics until converted or wrapped as
+`{"prompt": text}`. The rubric ops' `batch_size` (default 10) chunks prompts only for a `LocalModel`; a `Model` or
+`TinkerModel` sends every prompt at once, up to its `max_concurrency`.

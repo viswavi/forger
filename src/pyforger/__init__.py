@@ -19,7 +19,7 @@ import pyforger.filter as filter  # noqa: A001
 import pyforger.inspect as inspect
 import pyforger.token_units as token_units
 from pyforger._tracking import BudgetExceededError, SpendProjectionError
-from pyforger.acquire.model import PromptTooLongError
+from pyforger.acquire.model import PromptTooLongError, ReplayedRowError
 from pyforger.op import op
 from pyforger.pipeline import optimize, run
 
@@ -30,6 +30,7 @@ from pyforger.steps import pipeline, step
 __all__ = [
     "BudgetExceededError",
     "PromptTooLongError",
+    "ReplayedRowError",
     "SpendProjectionError",
     "acquire",
     "alter",

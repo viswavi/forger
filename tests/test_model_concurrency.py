@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextvars
 import copy
+import json
 import logging
 import pickle
 import sys
@@ -18,7 +19,8 @@ from fixtures import MockModel, RecordingMockModel
 
 import pyforger.acquire.model as model_module
 from pyforger import op
-from pyforger.acquire import sample_from_LLM
+from pyforger.acquire import convert_rubric_criteria, sample_from_LLM
+from pyforger.acquire._model_utils import _chunk_size
 from pyforger.acquire.model import GenerateResult, LocalModel, Model, _progress_mode
 from pyforger.alter import generate_from_context, self_taught_reasoner
 from pyforger.op import trace
@@ -451,6 +453,50 @@ class TestOneBatchByDefault:
         model = RecordingMockModel(responses=["ok"] * 25)
         generate_from_context(items, "p: {text}", model, batch_size=10)
         assert [len(batch) for batch in model.recorded_prompts] == [10, 10, 5]
+
+    def test_model_batch_size_does_not_serialize_requests(self, mock_litellm):
+        """A Model gets every prompt at once: batch_size=2 still has 6 in flight.
+
+        Chunks sent one after another would cap in-flight requests at 2, and
+        each chunk would wait for its slowest request.
+        """
+        fake = InFlight(delay=0.1)
+        mock_litellm.completion.side_effect = fake
+        model = Model("gpt-4o", max_concurrency=6, show_progress=False)
+        items = [{"text": f"Q{i}"} for i in range(12)]
+        with patch.object(
+            model, "generate_batch", wraps=model.generate_batch
+        ) as generate_batch:
+            out = generate_from_context(items, "{text}", model, batch_size=2)
+        assert out == [{"text": f"Q{i}"} for i in range(12)]  # input order
+        assert generate_batch.call_count == 1
+        assert fake.calls == 12
+        assert fake.max == 6  # the Model's cap, not batch_size
+
+    def test_rubric_conversion_is_not_chunked(self, mock_litellm):
+        """convert_rubric_criteria's batch_size=10 does not cap a Model at 10."""
+        fake = InFlight(delay=0.1)
+
+        def complete(messages, **kwargs):
+            # The row as JSON, then the output-schema message.
+            criterion = json.loads(messages[-2]["content"])["criterion"]
+            fake(messages)  # counts this request in flight
+            return make_response(json.dumps({"kind": "prompt", "source": criterion}))
+
+        mock_litellm.completion.side_effect = complete
+        model = Model("gpt-4o", max_concurrency=30, show_progress=False)
+        rubrics = [[(f"criterion {i}", 1.0)] for i in range(30)]
+        out = convert_rubric_criteria(rubrics, model)
+        assert out == [[[{"prompt": f"criterion {i}"}, 1.0]] for i in range(30)]
+        assert fake.max > 10
+
+    def test_local_model_keeps_batch_size_chunks(self):
+        """A model that runs one call at a time still gets batch_size chunks."""
+        local = LocalModel.__new__(LocalModel)
+        assert _chunk_size(local, 10, 25) == 10
+        assert _chunk_size(local, None, 25) == 25
+        assert _chunk_size(Model("gpt-4o"), 10, 25) == 25
+        assert _chunk_size(MockModel(responses=["ok"]), 10, 25) == 10
 
     def test_self_taught_reasoner_one_call(self):
         """All items go out in one generate_batch call."""

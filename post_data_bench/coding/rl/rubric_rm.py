@@ -149,12 +149,19 @@ def judge_configuration(default_usage_file=None, task=None, overrides=None):
 
 
 class JudgeState(TypedDict):
-    """Track consecutive judge failures and the terminal circuit state."""
+    """Track consecutive judge failures and the terminal circuit state.
+
+    ``recent`` holds the last failed attempts as ``failure_reason`` strings,
+    e.g. "RateLimitError HTTP 429 rate_limit"; ``noted`` is True once the
+    current failure streak has printed its stderr line.
+    """
 
     failures: int
     quota_failures: int
     open: bool
     quota: bool
+    recent: list[str]
+    noted: bool
 
 
 # Per-event-loop semaphore, shared across all rollout samples in this process.
@@ -196,6 +203,81 @@ def quota_error(exc):
             "credit balance is too low",
         )
     )
+
+
+_RECENT_FAILURES = 5  # failed attempts named in the JudgeUnavailable message
+_FAILURE_HINTS = {
+    "rate_limit": "the provider is throttling; lower RUBRIC_SCORE_CONCURRENCY",
+    "timeout": "judge calls ran past their 120 s timeout",
+    "budget": "judge credits are exhausted",
+    "auth": "LITELLM_JUDGE_API_KEY was refused",
+    "connection": "the judge endpoint could not be reached",
+    "server_error": "the provider failed; retry later",
+    "bad_request": "the provider rejected the request (HTTP 4xx)",
+    "bad_json": 'the judge replied without a parseable {"score": x}',
+    "truncated": "the judge used all max_tokens before answering",
+}
+
+
+def failure_reason(exc=None, result=None):
+    """A secret-free description of one failed judge attempt.
+
+    Class name, HTTP status when present, and a category; never the message,
+    which can hold provider bodies or keys. E.g. "RateLimitError HTTP 429
+    rate_limit", "Timeout timeout", or "reply bad_json" for a reply that is
+    not {"score": x} (``result``; "reply truncated" when it hit max_tokens).
+    """
+    if exc is None:
+        try:
+            finish = result.choices[0].finish_reason
+        except (AttributeError, IndexError, TypeError):
+            finish = None
+        return "reply " + ("truncated" if finish == "length" else "bad_json")
+    name = type(exc).__name__
+    status = getattr(exc, "status_code", None)
+    if not isinstance(status, int):
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    status = status if isinstance(status, int) else None
+    lowered = name.lower()
+    # Read internally only, as quota_error does; the message is never reported.
+    message = str(exc).lower()
+    if content_filtered(exc=exc):
+        category = "content_filter"
+    elif quota_error(exc):
+        category = "budget"
+    elif status == 429 or "ratelimit" in lowered or "rate limit" in message:
+        category = "rate_limit"
+    elif (
+        status in (408, 504)
+        or "timeout" in lowered
+        or isinstance(exc, (TimeoutError, asyncio.TimeoutError))
+    ):
+        category = "timeout"
+    elif status in (401, 403) or "authentication" in lowered or "permission" in lowered:
+        category = "auth"
+    elif "connection" in lowered:
+        category = "connection"
+    elif status is not None and status >= 500:
+        category = "server_error"
+    elif status is not None and 400 <= status < 500:
+        category = "bad_request"
+    else:
+        category = "other"
+    status_text = f" HTTP {status}" if status is not None else ""
+    return f"{name[:60]}{status_text} {category}"
+
+
+def _note_failure(state, reason, threshold):
+    """Remember one failed attempt; print a line at the start of each streak."""
+    state["recent"] = (state["recent"] + [reason])[-_RECENT_FAILURES:]
+    if not state["noted"]:
+        state["noted"] = True
+        print(
+            f"JUDGE_FAILURE: judge call failed ({reason}); retrying, and "
+            f"stopping after {threshold} consecutive failed calls",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def record_quota_stop():
@@ -421,7 +503,14 @@ async def prompt_score(
         raise ValueError("JUDGE_MAX_CONSECUTIVE_FAILURES must be positive")
     state = _JUDGE_STATE.setdefault(
         asyncio.get_running_loop(),
-        {"failures": 0, "quota_failures": 0, "open": False, "quota": False},
+        {
+            "failures": 0,
+            "quota_failures": 0,
+            "open": False,
+            "quota": False,
+            "recent": [],
+            "noted": False,
+        },
     )
     # A success resets the shared consecutive-failure counter in this reward
     # worker. Any worker opening its circuit raises through Slime, failing the
@@ -493,6 +582,7 @@ async def prompt_score(
                     _note_content_filter()
                     return None
                 quota = quota_error(exc)
+                _note_failure(state, failure_reason(exc=exc), threshold)
             else:
                 try:
                     prompt_tokens, completion_tokens = response_token_counts(result)
@@ -526,11 +616,12 @@ async def prompt_score(
                         content = content[7:-3].strip()
                     value = score(json.loads(content)["score"])
                 except (ValueError, TypeError, KeyError, AttributeError):
-                    pass
+                    _note_failure(state, failure_reason(result=result), threshold)
                 else:
                     if state["open"]:
                         break
                     state["failures"] = state["quota_failures"] = 0
+                    state["noted"] = False
                     return value
             if attempt < 2:
                 await asyncio.sleep(2 ** (attempt + 1))
@@ -547,27 +638,45 @@ async def prompt_score(
             await asyncio.sleep(min(2 ** state["failures"], 30))
 
     error = JudgeQuotaExhausted if state["quota"] else JudgeUnavailable
+    recent = state["recent"]
+    category = recent[-1].rsplit(" ", 1)[-1] if recent else ""
+    hint = f" Latest: {_FAILURE_HINTS[category]}." if category in _FAILURE_HINTS else ""
     raise error(
         (
             "Judge stopped after "
             f"{threshold}"
-            " consecutive failed calls (each with 3 attempts). Check judge "
-            "credits, connectivity, and provider availability before resuming."
+            " consecutive failed calls (each with 3 attempts). Last failed "
+            f"attempts, oldest first: {'; '.join(recent) or 'none recorded'}."
+            f"{hint} Check judge credits, connectivity, and provider "
+            "availability before resuming."
         )
     ) from None
 
 
 async def custom_rm(args, sample, **kwargs):
-    """Compute the weighted reward using the fixed rubric executor.
-
-    A prompt criterion the content filter blocked (prompt_score returns None)
-    leaves the weighted mean, so the other criteria decide the reward; an answer
-    whose criteria are all blocked gets 0.
-    """
+    """Compute the weighted reward using the fixed rubric executor (rubric_reward)."""
     metadata = sample.metadata
-    rubric = validate_rubric(metadata["rubric"])
-    prompt = metadata["original_prompt"]  # Pre-template prompt, exactly as submitted.
-    response = without_stop_tokens(sample.response)  # as the evaluator sees it
+    reward = await rubric_reward(
+        metadata["rubric"],
+        metadata["original_prompt"],  # Pre-template prompt, exactly as submitted.
+        without_stop_tokens(sample.response),  # as the evaluator sees it
+        sample.label,
+    )
+    _log_rollout(sample, reward)
+    return reward
+
+
+async def rubric_reward(rubric, prompt, response, ground_truth):
+    """The RL reward of one response: the weighted mean over code and prompt criteria.
+
+    Code criteria run in the sandbox (code_score), prompt criteria through the
+    judge (prompt_score). A prompt criterion the content filter blocked
+    (prompt_score returns None) leaves the weighted mean, so the other criteria
+    decide the reward; an answer whose criteria are all blocked gets 0. E.g.
+    rubric [[{"code": ...}, 1], [{"prompt": "Cites a dose?"}, 3]] scoring 0 and
+    1 gives 0.75.
+    """
+    rubric = validate_rubric(rubric)
     total = scored = 0.0
     for criterion, weight in rubric:
         if weight == 0:
@@ -575,14 +684,14 @@ async def custom_rm(args, sample, **kwargs):
         async with _limit():
             if "code" in criterion:
                 value = await asyncio.to_thread(
-                    code_score, criterion["code"], prompt, response, sample.label
+                    code_score, criterion["code"], prompt, response, ground_truth
                 )
             else:
                 value = await prompt_score(
                     criterion["prompt"],
                     prompt,
                     response,
-                    sample.label,
+                    ground_truth,
                     answer_only=criterion.get("answer_only", answer_only_default()),
                     judge_sees=tuple(criterion.get("judge_sees", judge_sees_default())),
                     instructions=criterion.get("instructions", ""),
@@ -591,6 +700,4 @@ async def custom_rm(args, sample, **kwargs):
             continue
         total += weight * value
         scored += weight
-    reward = total / scored if scored else 0.0
-    _log_rollout(sample, reward)
-    return reward
+    return total / scored if scored else 0.0
