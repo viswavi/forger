@@ -258,6 +258,15 @@ def final_answer(text):
     return text.strip()
 
 
+def _note_content_filter():
+    """One stderr line per blocked criterion, so RL logs count them (no bodies)."""
+    print(
+        "JUDGE_CONTENT_FILTER: criterion left unscored (provider blocked the reply)",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 def content_filtered(exc=None, result=None):
     """Whether the provider's content filter blocked the judge's reply.
 
@@ -362,6 +371,7 @@ async def prompt_score(criterion, prompt, response, ground_truth, answer_only=Fa
                     )
             except Exception as exc:
                 if content_filtered(exc=exc):
+                    _note_content_filter()
                     return None
                 quota = quota_error(exc)
             else:
@@ -386,6 +396,7 @@ async def prompt_score(criterion, prompt, response, ground_truth, answer_only=Fa
                     record_quota_stop()
                     raise JudgeQuotaExhausted("Judge token-unit quota exhausted")
                 if content_filtered(result=result):
+                    _note_content_filter()
                     return None
                 # Parsing errors originate in untrusted model text and are never quota
                 # errors.
