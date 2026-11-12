@@ -89,7 +89,7 @@ class LineageTests(unittest.TestCase):
 
 
 class StepBudgetTests(unittest.TestCase):
-    """Local checkpoints: exactly RL_STEP_BUDGET steps over the whole lineage."""
+    """Local checkpoints: at most RL_STEP_BUDGET steps over the whole lineage."""
 
     def setUp(self):
         """A final dataset and a base model directory."""
@@ -127,15 +127,18 @@ class StepBudgetTests(unittest.TestCase):
         self.assertEqual(lineage.rl_steps(second), 80)
         self.assertEqual(len(lineage.check(second, self.final_path)), 2)
 
-    def test_other_totals_are_rejected(self):
-        """99 steps (80 + 19) and 70 steps both fail; the message gives the total."""
+    def test_more_than_the_budget_is_rejected(self):
+        """99 steps (80 + 19) fail; the message gives the total."""
         first = self.local_run("rl_trial_1", 80, self.base)
         over = self.local_run("rl_trial_2", 19, first)
-        with self.assertRaisesRegex(ValueError, "has 99 RL steps .* exactly 80"):
+        with self.assertRaisesRegex(ValueError, "has 99 RL steps .* at most 80"):
             lineage.check(over, self.final_path)
+
+    def test_fewer_steps_are_submittable(self):
+        """70 steps, e.g. a run the judge quota stopped early, can be submitted."""
         under = self.local_run("rl_trial_3", 70, self.base)
-        with self.assertRaisesRegex(ValueError, "has 70 RL steps"):
-            lineage.check(under, self.final_path)
+        self.assertEqual(lineage.rl_steps(under), 70)
+        self.assertEqual(len(lineage.check(under, self.final_path)), 1)
 
     def test_rl_refuses_a_run_past_the_budget(self):
         """From 60 steps, --num-rollout 30 is refused and 20 allowed."""

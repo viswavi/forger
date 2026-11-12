@@ -17,10 +17,10 @@ contract. Both prompts render backend-specific commands from `backend_prompts.py
   algorithmic task), clip 0.2 / 0.28, weight decay 0.1, Adam β2 0.98, KL 1e-3
   (low_var_kl), temperature 1.0, a checkpoint every 10 steps. There is no local
   SFT command.
-- Local: a submitted checkpoint has exactly 80 RL steps behind it in total
+- Local: a submitted checkpoint has at most 80 RL steps behind it in total
   (`backends.RL_STEP_BUDGET`), counting the runs it continues from, at 32 prompts ×
   8 completions; `rl` refuses runs that would exceed it, and `validate` and
-  `finalize` reject other totals. Agents may repeat runs, continue RL from an
+  `finalize` reject larger totals. Agents may repeat runs, continue RL from an
   earlier checkpoint in a fresh output directory, and vary probes freely.
 - Tinker: agents may change the number of steps or batch shape, repeat runs, and
   continue RL from an earlier checkpoint in a fresh output directory.
