@@ -15,6 +15,7 @@ from typing import TypedDict
 from .rubric_data import (  # noqa: ABS101
     JUDGE_FIELDS,
     answer_only_default,
+    judge_sees_default,
     score,
     validate_rubric,
 )
@@ -583,7 +584,7 @@ async def custom_rm(args, sample, **kwargs):
                     response,
                     sample.label,
                     answer_only=criterion.get("answer_only", answer_only_default()),
-                    judge_sees=tuple(criterion.get("judge_sees", JUDGE_FIELDS)),
+                    judge_sees=tuple(criterion.get("judge_sees", judge_sees_default())),
                     instructions=criterion.get("instructions", ""),
                 )
         if value is None:  # blocked by the provider's content filter

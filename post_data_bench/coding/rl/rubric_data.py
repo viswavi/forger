@@ -126,15 +126,28 @@ def validate_code(source):
 # (default all, e.g. ["response"] for "mentions anticoagulation"); instructions
 # are added to the judge's system message for this criterion only.
 PROMPT_OPTIONS = ("answer_only", "judge_sees", "instructions")
-# Tasks whose prompt criteria default to answer_only (by the launcher's public task
-# name, $PDB_TASK): clinical answers are graded on their final text only.
+# Tasks whose prompt criteria default to the judge seeing only the criterion and
+# the final answer (by the launcher's public task name, $PDB_TASK): answer_only
+# on and judge_sees ["response"], unless a criterion sets either itself.
 ANSWER_ONLY_TASKS = ("clinical",)
+
+
+def _task(task):
+    return str(task if task is not None else os.environ.get("PDB_TASK", "")).strip()
 
 
 def answer_only_default(task=None):
     """Whether a prompt criterion without "answer_only" grades final answers only."""
-    task = task if task is not None else os.environ.get("PDB_TASK", "")
-    return str(task).strip().lower() in ANSWER_ONLY_TASKS
+    return _task(task).lower() in ANSWER_ONLY_TASKS
+
+
+def judge_sees_default(task=None):
+    """The fields a prompt criterion without "judge_sees" sends the judge.
+
+    E.g. ("response",) for the clinical task, so "mentions apixaban" is judged on
+    the final answer alone; all of JUDGE_FIELDS elsewhere.
+    """
+    return ("response",) if answer_only_default(task) else JUDGE_FIELDS
 
 
 JUDGE_FIELDS = ("prompt", "response", "ground_truth")
