@@ -139,7 +139,8 @@ Weights must be finite and nonnegative, with a positive sum. Reward is
   `time` (CPU seconds), `stdout` (the first 64 KiB of the program's output)
   and `message` (the checker's or interactor's message, or the failed run's
   stderr). Every call shares the criterion's 20-second budget and runs at most
-  4 tests at once.
+  4 tests at once. `final_answer(response)` returns the text after the last
+  `</think>` ("" while a `<think>` is open), as `rubric_rm.final_answer` does.
   This is the original sandbox's guardrail model, not a hardened security boundary.
 - **Prompt:** trusted reward code calls LiteLLM outside RestrictedPython with
   `litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731`, temperature 1, low reasoning,

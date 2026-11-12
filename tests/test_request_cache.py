@@ -14,11 +14,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import litellm
 import pytest
 
 from pyforger import _tracking, filter, op, step
 from pyforger.acquire import _request_cache, sample_from_LLM
-from pyforger.acquire.model import Model, _cache_kwargs
+from pyforger.acquire.model import Model, ReplayedRowError, _cache_kwargs, _is_row_error
 from pyforger.alter import generate_from_context
 from pyforger.inspect import cluster
 from pyforger.inspect.cluster import _assign_topics, _chat
@@ -39,7 +40,9 @@ class Completions:
 
     The k-th completion overall for content "Q" is "Q#k", so a test can tell a
     replayed completion from a new one. Contents in `fail` raise a 504 the
-    first time they are asked; contents in `kill` raise Killed after `delay`.
+    first time they are asked; contents in `kill` raise Killed after `delay`;
+    contents in `block` raise a content-filter 400 every time they are asked,
+    and contents in `filtered` get "" with finish_reason "content_filter".
     `script[content]` lists texts to answer with instead, one per completion;
     `tool_calls=True` adds a tool call to every choice.
     """
@@ -48,6 +51,8 @@ class Completions:
         """Answer every request unless its content is in `fail` or `kill`."""
         self.fail = set(fail)
         self.kill = set(kill)
+        self.block: set[str] = set()
+        self.filtered: set[str] = set()  # replies the content filter cuts off
         self.delay = delay
         self.script: dict[str, list[str]] = {}
         self.tool_calls = False
@@ -77,14 +82,20 @@ class Completions:
             raise Killed(text)
         if failing:
             raise GatewayTimeout(f"504 for {text}")
+        if text in self.block:
+            raise litellm.BadRequestError(
+                message=f"{{'code': 'content_filter'}} blocked {text}",
+                llm_provider="azure",
+                model="m",
+            )
         choices = [
             SimpleNamespace(
                 message=SimpleNamespace(
-                    content=texts[j],
+                    content="" if text in self.filtered else texts[j],
                     reasoning_content=f"thinking {first + j}",
                     tool_calls=[{"id": "call_1"}] if self.tool_calls else None,
                 ),
-                finish_reason="stop",
+                finish_reason="content_filter" if text in self.filtered else "stop",
             )
             for j in range(n)
         ]
@@ -496,6 +507,114 @@ class TestFailures:
         assert list(result) == list(two)
 
 
+class TestRowErrors:
+    """A content-filter block is cached as one, so a rerun gives the same rows.
+
+    The filter does not block a prompt every time: asking again could answer
+    it, and that one new row would change every later step's input.
+    """
+
+    def test_blocked_prompt_is_replayed_not_asked_again(self, fake, tmp_path):
+        """The rerun gets the block back without a request, though B would pass."""
+        fake.block = {"B"}
+        model = gpt(num_retries=0)
+        first = ask(model, ["A", "B", "C"], return_exceptions=True)
+        assert isinstance(first[1], litellm.BadRequestError)
+        assert len(slot_files(tmp_path)) == 3  # A, C, and B's block
+        fake.block = set()
+        fake.reset()
+        again = ask(model, ["A", "B", "C"], return_exceptions=True)
+        assert fake.calls == []
+        assert again[0] == first[0] and again[2] == first[2]
+        assert isinstance(again[1], ReplayedRowError)
+        assert again[1].reason == "content filter" and _is_row_error(again[1])
+        assert "_no_cache=True" in str(again[1])
+
+    def test_no_cache_asks_again(self, fake):
+        """_no_cache=True sends the blocked prompt again and keeps its answer."""
+        fake.block = {"B"}
+        model = gpt(num_retries=0)
+        ask(model, ["B"], return_exceptions=True)
+        fake.block = set()
+        fake.reset()
+        [answer] = _ask(["B"], model, return_exceptions=True, _no_cache=True)
+        assert fake.calls == [("B", 1)]
+        assert isinstance(answer, list) and answer[0].startswith("B#")
+        fake.reset()
+        [replay] = ask(model, ["B"], return_exceptions=True)
+        assert list(replay) == list(answer)  # the answer replaced the block
+        assert fake.calls == []
+
+    def test_replay_raises_without_return_exceptions(self, fake):
+        """Without return_exceptions, the replayed block raises as the first did."""
+        fake.block = {"B"}
+        model = gpt(num_retries=0)
+        with pytest.raises(litellm.BadRequestError):
+            ask(model, ["A", "B"])
+        fake.block = set()
+        fake.reset()
+        with pytest.raises(ReplayedRowError, match="content_filter"):
+            ask(model, ["A", "B"])
+        assert fake.calls == []
+
+    def test_blocked_slot_of_a_fanned_out_prompt_replays_the_block(self, fake):
+        """One blocked copy of n fails the whole prompt, on the rerun too."""
+        model = Model("xai/grok-4", show_progress=False, num_retries=0)
+        ask1(model, "Q", n=1)  # slot 0 answered
+        fake.block = {"Q"}
+        [first] = ask(model, ["Q"], n=2, return_exceptions=True)  # slot 1 blocked
+        assert isinstance(first, litellm.BadRequestError)
+        fake.block = set()
+        fake.reset()
+        [again] = ask(model, ["Q"], n=2, return_exceptions=True)
+        assert isinstance(again, ReplayedRowError)
+        assert fake.calls == []
+
+    def test_reply_cut_by_the_filter_is_replayed(self, fake):
+        """An empty reply the filter stopped replays as is, not asked again."""
+        fake.filtered = {"B"}
+        model = gpt(num_retries=0)
+        first = ask(model, ["B"])[0]
+        assert list(first) == [""] and first.finish_reasons == ["content_filter"]
+        fake.filtered = set()
+        fake.reset()
+        again = ask(model, ["B"])[0]
+        assert fake.calls == []
+        assert list(again) == [""] and again.finish_reasons == ["content_filter"]
+
+    def test_op_with_only_blocked_rows_is_cached(self, fake, caplog):
+        """generate_from_context caches its result; a 504 still keeps it uncached."""
+        from pyforger.op import trace
+
+        rows = [{"q": "A"}, {"q": "B"}, {"q": "C"}]
+        fake.block = {"B"}
+        with caplog.at_level(logging.WARNING):
+            first = generate_from_context(rows, "{q}", gpt(num_retries=0))
+        assert first[1] is None
+        assert "(result cached, so a rerun gives the same rows" in caplog.text
+        fake.block = set()
+        fake.reset()
+        assert generate_from_context(rows, "{q}", gpt(num_retries=0)) == first
+        assert trace()[-1].cache_hit is True
+        assert fake.calls == []
+
+    def test_block_and_504_rerun_sends_only_the_504(self, fake):
+        """With a 504 too the op is not cached; its rerun re-sends only that row."""
+        from pyforger.op import trace
+
+        rows = [{"q": "A"}, {"q": "B"}, {"q": "C"}]
+        fake.block, fake.fail = {"A"}, {"B"}
+        first = generate_from_context(rows, "{q}", gpt(num_retries=0))
+        assert first[0] is None and first[1] is None
+        fake.block = set()
+        fake.reset()
+        again = generate_from_context(rows, "{q}", gpt(num_retries=0))
+        assert trace()[-1].cache_hit is False
+        assert fake.calls == [("B", 1)]
+        assert again[0] is None and again[1]["text"].startswith("B#")
+        assert again[2] == first[2]
+
+
 class TestKey:
     """What goes into the key."""
 
@@ -796,8 +915,9 @@ class TestResentWarning:
         fake.reset()
         with caplog.at_level(logging.WARNING):
             answer(rows)
+        # A Model gets all 60 prompts in one call whatever batch_size says.
         message = (
-            "alter.generate_from_context: 30 of 40 rows were answered before under "
+            "alter.generate_from_context: 30 of 60 rows were answered before under "
             "a different prompt or settings and will be asked again (the request "
             "cache keys on the exact prompt); ~2,100 token units at the earlier "
             "cost per row"

@@ -24,6 +24,10 @@ Two different ops never share samples. Each op logs
 (e.g. a row holding `id(row)` or a timestamp). Not request-cached: direct `model.generate` calls outside an `@op` /
 `@step`, `LocalModel`, and requests with tools or logprobs. Your own `@op` that builds one prompt per row should pass
 `cache_rows=rows` to `generate_batch`.
+Row errors (a content-filter block, a prompt over the context window) are stored too: a rerun replays them as
+`ReplayedRowError` with the same reason instead of asking again, so it gives the same rows (`_no_cache=True` asks
+again). A reply the filter cut off (`finish_reason="content_filter"`) is cached as it came. Other errors and empty
+replies are never cached.
 A completion is keyed on the exact prompt, so editing a template re-sends every row. When at least 20 rows and half of
 a batch were answered before by the same op in the same `@step` under another prompt or settings, the batch warns
 before sending, with the earlier cost (`249 of 498 rows were answered before under a different prompt or settings and
@@ -61,7 +65,7 @@ and the arguments, callables included. It does not cover:
 **Other tools.**
 
 - `pyforger.op.skip_cache_write()`, called inside an op, keeps its result (and every enclosing op's and step's) out
-  of the cache, e.g. one holding `None`s for failed requests. From a worker thread, submit with
+  of the cache, e.g. one holding `None`s for requests that failed transiently. From a worker thread, submit with
   `contextvars.copy_context().run`, or every op and step running at that moment is left uncached. A step kept out of
   the cache still saves its output (`<key>.uncached.pkl`), never replayed, so `inspect_step(name, rows=True)` can
   read it.

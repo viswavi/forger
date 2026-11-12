@@ -16,7 +16,7 @@ from rich.padding import Padding
 from rich.text import Text
 
 from pyforger._render import WIDTH, _clean, _console, _emit, _fit_table, _plain, _rule
-from pyforger.filter.model_difficulty import _field_prompt, _predictions
+from pyforger.filter.model_difficulty import _field_prompt, _samples
 from pyforger.op import op, skip_cache_write, tracked
 
 Grade = Callable[[str, dict], "float | bool | None"]
@@ -385,7 +385,7 @@ def rubric_scores(
         )[:120]
         report.k = k
         prompts = [_field_prompt(r, prompt_field) for r in sample]
-        completions = _predictions(
+        completions, _ = _samples(
             prompts,
             model=model,
             n=k,

@@ -6,6 +6,7 @@ limits cannot compile or run C++ here. Run without arguments, as in
 ``python rl/rubric_worker.py < criterion.json``, it starts itself that way, as
 the RL reward does, and prints the result. judge_cpp(..., details=True) returns
 each test's status, ratio, time, stdout and checker message instead of statuses.
+grade() can also call final_answer(response) for the text after the last </think>.
 """
 import contextlib
 import importlib
@@ -83,8 +84,24 @@ def _detail(item):
     )
 
 
+def final_answer(text):
+    """The text after the last ``</think>``, stripped; "" while a ``<think>`` is open.
+
+    rubric_rm.final_answer's rule, for grade(): final_answer("<think>a</think> 42")
+    is "42". LLM-written criteria should call it rather than spell the tags: a
+    gateway can rewrite a literal "</think>" in model output (e.g. to " response").
+    """
+    if not isinstance(text, str):
+        return ""
+    if "</think>" in text:
+        text = text.rsplit("</think>", 1)[1]
+    if "<think>" in text:
+        return ""
+    return text.strip()
+
+
 def solution_helpers(judge=None):
-    """Functions grade() can call to execute code from the response.
+    """Functions grade() can call to execute code from the response, and final_answer.
 
     The response's code runs in its own RestrictedPython namespace with captured
     stdin/stdout and competitive-programming imports, so it cannot reach this
@@ -163,6 +180,7 @@ def solution_helpers(judge=None):
         "run_program": run_program,
         "call_method": call_method,
         "judge_cpp": judge_cpp,
+        "final_answer": final_answer,
     }
 
 

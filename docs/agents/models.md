@@ -34,9 +34,11 @@ hitting `max_tokens`. `Model` sends it in the form each model reads, overriding 
 ### Concurrency
 
 `max_concurrency` caps the requests one `Model` has in flight, across all ops and threads (each `n` copy counts).
-`None` allows up to 100 per `generate_batch` call. Ops such as `generate_from_context` and `sample_from_LLM` send
-all their prompts in one batch, so set it to your provider's rate limit; never write your own thread pool around
-ops. It is not part of the cache key.
+`None` allows up to 100 per `generate_batch` call. Forger's LLM ops send a `Model` (or `TinkerModel`) all their
+prompts in one batch, so set `max_concurrency` to your provider's rate limit; never write your own thread pool around
+ops. It is not part of the cache key. An int `batch_size` in `generate_from_context`, `self_taught_reasoner`, the
+rubric ops, or the difficulty filters splits prompts into calls sent one after another only for a `LocalModel` (or a
+duck-typed model); a `Model` still gets them all at once, so one slow request never holds up the rest.
 
 ### Retries, timeouts, and rate limits
 

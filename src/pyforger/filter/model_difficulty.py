@@ -16,9 +16,11 @@ model (``"model"``, or ``"weak"`` and ``"strong"``) with one grade per sample,
 where ``None`` is a grade that could not be made (an empty answer, a
 ``<think>`` block that never closes, ``extract_answer`` returning ``None``, or a
 verifier returning ``None``) and is excluded, not failed. A truncated
-completion (an opening ``<think>`` and no ``</think>``: cut off at
-``max_tokens``) is the exception when ``truncated="fail"``, the default for
-``by_pass_at_k``: it grades ``False`` without being extracted or verified.
+completion (an opening ``<think>`` and no ``</think>``, or an empty answer
+that stopped at ``max_tokens``, e.g. a model returning its reasoning
+separately that spent every token on it) is the exception when
+``truncated="fail"``, the default for ``by_pass_at_k``: it grades ``False``
+without being extracted or verified.
 Completions are
 stored in the same shape. Predictions and grades are cached in separate inner
 ops, so changing only the rate bounds makes no model calls, and changing only
@@ -34,7 +36,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Literal, Union
 
 from pyforger import _tracking
-from pyforger.acquire._model_utils import _catch_kwargs, _RequestFailures
+from pyforger.acquire._model_utils import _catch_kwargs, _chunk_size, _RequestFailures
 from pyforger.acquire.model import Model, Prompt, _cache_kwargs
 from pyforger.alter.generate import PromptTemplate, _normalized_equal, _resolve_prompt
 from pyforger.filter._rouge import rouge_l
@@ -78,18 +80,92 @@ def _is_truncated(completion: str | None) -> bool:
     )
 
 
+# Per sample: True when its answer is empty and it stopped at max_tokens.
+Stopped = list[list[bool]]
+
+
+def _cut_off(
+    completions: list[list[str | None]], stopped: Stopped | None
+) -> list[list[bool]]:
+    """Per sample: truncated, by an unclosed ``<think>`` or ``stopped``.
+
+    E.g. a model that returns its reasoning separately and spends max_tokens
+    on it gives an empty answer with finish_reason "length".
+    """
+    return [
+        [_is_truncated(c) or bool(stopped and stopped[i][j]) for j, c in enumerate(row)]
+        for i, row in enumerate(completions)
+    ]
+
+
 def _truncation_note(
-    completions: list[list[str | None]], truncated: Literal["fail", "exclude"]
+    completions: list[list[str | None]],
+    truncated: Literal["fail", "exclude"],
+    stopped: Stopped | None = None,
 ) -> str | None:
-    """Say how many samples were cut off mid-thought, e.g. for the step report."""
+    """Say how many samples were cut off, e.g. for the step report.
+
+    E.g. "34 of 47 samples truncated (stopped at max_tokens before any
+    answer), graded failed; raise max_tokens if that is too many", or with
+    both kinds "(3 with <think> never closed, 2 stopped at ...)".
+    """
     total = sum(len(row) for row in completions)
-    cut = sum(_is_truncated(c) for row in completions for c in row)
-    if not cut:
+    unclosed = sum(_is_truncated(c) for row in completions for c in row)
+    empty = sum(
+        cut and not _is_truncated(c)
+        for row, cuts in zip(completions, _cut_off(completions, stopped))
+        for c, cut in zip(row, cuts)
+    )
+    if not unclosed + empty:
         return None
+    unclosed_why, empty_why = (
+        "<think> never closed",
+        "stopped at max_tokens before any answer",
+    )
+    if unclosed and empty:
+        why = f"{unclosed} with {unclosed_why}, {empty} {empty_why}"
+    else:
+        why = unclosed_why if unclosed else empty_why
     graded = "graded failed" if truncated == "fail" else "excluded"
     return (
-        f"{cut} of {total} samples truncated (<think> never closed), {graded}; "
+        f"{unclosed + empty} of {total} samples truncated ({why}), {graded}; "
         "raise max_tokens if that is too many"
+    )
+
+
+def _unscored_note(
+    rates: list[float | None],
+    grades: list[list[bool | float | None]],
+    cuts: list[list[bool]],
+) -> str | None:
+    """Split the rows without a pass rate ("unparsed" in the histogram) by cause.
+
+    E.g. "30 of 47 rows have no pass rate (unparsed in the histogram): 28
+    lost samples to truncation (excluded by truncated="exclude"), 2 had
+    answers that did not grade (empty, extract_answer gave None, or the
+    verifier gave None)". A truncated sample graded failed is not ``None``, so
+    by default every such row is the second kind.
+    """
+    unscored = [i for i, rate in enumerate(rates) if rate is None]
+    if not unscored:
+        return None
+    cut_rows = sum(
+        any(g is None and cut for g, cut in zip(grades[i], cuts[i])) for i in unscored
+    )
+    parts = []
+    if cut_rows:
+        parts.append(
+            f"{cut_rows} lost samples to truncation (excluded by "
+            'truncated="exclude")'
+        )
+    if len(unscored) - cut_rows:
+        parts.append(
+            f"{len(unscored) - cut_rows} had answers that did not grade (empty, "
+            "extract_answer gave None, or the verifier gave None)"
+        )
+    return (
+        f"{len(unscored)} of {len(rates)} rows have no pass rate (unparsed in "
+        f"the histogram): {', '.join(parts)}"
     )
 
 
@@ -160,8 +236,10 @@ def by_comparative_difficulty(
             ``ANSWER: ...`` line.
         temperature: Sampling temperature (each model's default when None).
         max_tokens: Max tokens per completion (each model's default when None).
-        batch_size: Prompts per ``model.generate_batch()`` call; None (default)
-            sends all of them in one call, up to the model's concurrency cap.
+        batch_size: Prompts per ``model.generate_batch()`` call for a model
+            that runs one call at a time (``LocalModel``); None (default) sends
+            all of them in one call, as a ``Model`` always does (up to its
+            concurrency cap).
         outcomes_field: When set, kept rows carry
             ``{"weak": [bool], "strong": [bool]}`` under this key, replacing any
             value already there.
@@ -170,8 +248,9 @@ def by_comparative_difficulty(
             under this key (``None`` for an empty completion).
         verifier_workers: Verifier calls run at a time when ``metric`` is a
             verifier; 1 runs them one by one.
-        truncated: What a completion whose ``<think>`` block never closes
-            (cut off at ``max_tokens``) grades: ``"exclude"`` (default)
+        truncated: What a completion cut off at ``max_tokens`` (its
+            ``<think>`` block never closes, or its answer is empty and it
+            stopped at ``max_tokens``) grades: ``"exclude"`` (default)
             grades it ``None``, so the row is dropped; ``"fail"`` grades it
             ``False`` without calling ``extract_answer`` or the verifier.
 
@@ -191,8 +270,9 @@ def by_comparative_difficulty(
     prompts = _prompts(items, input_field, prompt_template)
     grades: dict[str, list[list[bool | float | None]]] = {}
     completions: dict[str, list[list[str | None]]] = {}
+    stopped: dict[str, Stopped] = {}
     for group, model in (("weak", weak_model), ("strong", strong_model)):
-        completions[group] = _predictions(
+        completions[group], stopped[group] = _samples(
             prompts,
             model=model,
             n=1,
@@ -209,6 +289,7 @@ def by_comparative_difficulty(
             extract_answer=extract_answer,
             verifier_workers=verifier_workers,
             truncated=truncated,
+            stopped=stopped[group],
         )
 
     kept: list[dict] = []
@@ -243,7 +324,7 @@ def by_comparative_difficulty(
     notes = [
         f"{group}: {note}"
         for group in ("weak", "strong")
-        if (note := _truncation_note(completions[group], truncated))
+        if (note := _truncation_note(completions[group], truncated, stopped[group]))
     ]
     _tracking.record_scores(
         "strong - weak",
@@ -298,14 +379,18 @@ def by_pass_at_k(
     E.g. with ``k=4``, grades ``[True, False, None, False]`` are dropped by
     default, and kept with ``min_valid=3`` (rate 1/3).
 
-    A sample whose ``<think>`` block never closes (cut off at ``max_tokens``)
-    grades ``False`` by default: a task the model thinks itself to death on is
-    hard, not ungradable. This changed: such samples used to grade ``None``
+    A sample cut off at ``max_tokens`` grades ``False`` by default: a task the
+    model thinks itself to death on is hard, not ungradable. That is a
+    ``<think>`` block that never closes, or an empty answer that stopped at
+    ``max_tokens`` (a model returning its reasoning separately that spent
+    every token on it). This changed: such samples used to grade ``None``
     (excluded), which ``truncated="exclude"`` restores.
 
     In a ``@step`` report the per-row score is the pass rate, or ``None`` when
     too few grades are valid; ``histogram=True`` prints the same histogram
-    outside a step. Lines under it count the truncated samples and the rows
+    outside a step. Lines under it count the truncated samples, split the
+    rows with no pass rate ("unparsed") into those that lost samples to
+    truncation and those whose answers did not grade, and count the rows
     whose samples all got the same grade (all 0, all 1, or one partial score),
     which give GRPO-style RL no gradient, e.g. "31 of 120 rows gave every
     sample the same grade (22 all 0, 9 all 1)". The bounds can keep such
@@ -354,8 +439,10 @@ def by_pass_at_k(
             (default) uses the model's own default (1.0 for ``Model``, Qwen3's
             0.6 for ``TinkerModel``, which matches the evaluator).
         max_tokens: Max tokens per completion (the model's default when None).
-        batch_size: Prompts per ``model.generate_batch()`` call; None (default)
-            sends all of them in one call, up to the model's concurrency cap.
+        batch_size: Prompts per ``model.generate_batch()`` call for a model
+            that runs one call at a time (``LocalModel``); None (default) sends
+            all of them in one call, as a ``Model`` always does (up to its
+            concurrency cap).
         outcomes_field: When set, kept rows carry
             ``{"model": [bool | float | None] * k}`` under this key, replacing
             any value already there, so a later filter can re-select them
@@ -365,10 +452,11 @@ def by_pass_at_k(
             order as the grades (``None`` for an empty completion).
         verifier_workers: Verifier calls run at a time when ``metric`` is a
             verifier; 1 runs them one by one.
-        truncated: What a sample whose ``<think>`` block never closes grades:
-            ``"fail"`` (default) grades it ``False`` without calling
-            ``extract_answer`` or the verifier; ``"exclude"`` grades it
-            ``None``, like an empty answer.
+        truncated: What a sample cut off at ``max_tokens`` (its ``<think>``
+            block never closes, or its answer is empty and it stopped at
+            ``max_tokens``) grades: ``"fail"`` (default) grades it ``False``
+            without calling ``extract_answer`` or the verifier; ``"exclude"``
+            grades it ``None``, like an empty answer.
         histogram: Print the pass-rate histogram when the filter returns, on a
             cache hit too. Not part of the cache key.
 
@@ -406,7 +494,7 @@ def by_pass_at_k(
         )
 
     prompts = _prompts(items, input_field, prompt_template)
-    completions = _predictions(
+    completions, stopped = _samples(
         prompts,
         model=model,
         n=k,
@@ -423,6 +511,7 @@ def by_pass_at_k(
         extract_answer=extract_answer,
         verifier_workers=verifier_workers,
         truncated=truncated,
+        stopped=stopped,
     )
 
     kept: list[dict] = []
@@ -447,7 +536,8 @@ def by_pass_at_k(
         _logger().warning(kept_warning)
         _tracking.add_op_warning(kept_warning, "kept_same_grade")
     notes = [
-        _truncation_note(completions, truncated),
+        _truncation_note(completions, truncated, stopped),
+        _unscored_note(rates, grades, _cut_off(completions, stopped)),
         _spread_note(grades),
         _grade_note(grades),
         kept_note,
@@ -577,7 +667,7 @@ def _kept_spread(
 
 # A sampler, not a filter: its first argument is prompts, and it drops nothing.
 @op(name="filter.model_difficulty.predictions", samples_arg="n", category="other")
-def _predictions(
+def _samples(
     prompts: list[Prompt],
     *,
     model: Model,
@@ -585,8 +675,12 @@ def _predictions(
     temperature: float | None,
     max_tokens: int | None,
     batch_size: int | None,
-) -> list[list[str | None]]:
-    """Return ``n`` completions per prompt, ``None`` for empty ones.
+) -> tuple[list[list[str | None]], Stopped]:
+    """Return ``n`` completions per prompt (``None`` for empty ones) and stops.
+
+    The second list is True for an empty completion whose finish_reason is
+    "length": it ran out of tokens before answering, e.g. a model that
+    returns its reasoning separately and spent max_tokens on it.
 
     Raises ``ValueError`` when the model returns a different number of results
     than prompts, or of completions than ``n`` (e.g. a provider that ignores
@@ -602,7 +696,8 @@ def _predictions(
     failures = _RequestFailures()
     lost = 0  # samples missing because their requests failed
     completions: list[list[str | None]] = []
-    size = batch_size or max(len(prompts), 1)
+    stopped: Stopped = []
+    size = _chunk_size(model, batch_size, len(prompts))
     for start in range(0, len(prompts), size):
         batch = prompts[start : start + size]
         # Each prompt is its own row: changing one task re-asks only its samples.
@@ -622,9 +717,11 @@ def _predictions(
         for i, result in enumerate(results):
             if failures.failed(result):
                 completions.append([None] * n)
+                stopped.append([False] * n)
                 lost += n
                 continue
             samples: list[str | None] = list(result)
+            reasons = list(getattr(result, "finish_reasons", None) or [])
             if catch and len(samples) < n:
                 # Some of the prompt's n requests failed (n fan-out or n > 16);
                 # return_exceptions keeps the completions that arrived.
@@ -636,15 +733,20 @@ def _predictions(
                     f"{model!r} returned {len(samples)} completions for prompt "
                     f"{start + i}, but n={n} were requested"
                 )
-            completions.append(
-                [c if isinstance(c, str) and c.strip() else None for c in samples]
+            row = [c if isinstance(c, str) and c.strip() else None for c in samples]
+            completions.append(row)
+            stopped.append(
+                [
+                    c is None and j < len(reasons) and reasons[j] == "length"
+                    for j, c in enumerate(row)
+                ]
             )
     failures.raise_if_systemic(len(prompts))
     failures.report(
         f"difficulty filter: {lost} of {len(prompts) * n} samples from {model!r} "
         "are missing (requests failed after retries); they grade None (excluded)"
     )
-    return completions
+    return completions, stopped
 
 
 @op(name="filter.model_difficulty.grades")
@@ -658,15 +760,18 @@ def _grades(
     extract_answer: Callable[[str], str | None],
     verifier_workers: int = 1,
     truncated: Literal["fail", "exclude"] = "exclude",
+    stopped: Stopped | None = None,
 ) -> list[list[bool | float | None]]:
     """Grade each row's completions against its ground truth or a verifier.
 
     A completion grades ``None`` when ``extract_answer`` returns ``None`` for
     it, e.g. by default a reasoning model cut off mid-thought, unless
-    ``truncated="fail"``, which grades such a completion ``False`` first.
+    ``truncated="fail"``, which grades such a completion ``False`` first;
+    so does an empty one that ``stopped`` at max_tokens (see ``_samples``).
     """
     cut = [
-        [truncated == "fail" and _is_truncated(c) for c in row] for row in completions
+        [truncated == "fail" and is_cut for is_cut in row]
+        for row in _cut_off(completions, stopped)
     ]
     predictions = [
         [

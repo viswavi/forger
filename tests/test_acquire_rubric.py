@@ -327,3 +327,83 @@ def test_non_string_code_guidelines_raise_type_error(call, bad):
     with pytest.raises(TypeError, match="code_guidelines"):
         call(model, {"code_guidelines": bad})
     assert model._call_count == 0
+
+
+OPTIONS = {"answer_only": True, "judge_sees": ["response"]}
+
+
+def test_prompt_criterion_options_reach_prompt_criteria_only():
+    """Options are merged into prompt criteria; code criteria stay single-key."""
+    model = ScriptedModel(
+        [
+            [[encoded(["Is the answer 42?", 100], ["Is it kind?", 50])]],
+            [[converted("code", CODE)], [converted("prompt", "Is it kind?")]],
+        ]
+    )
+    result = generate_custom_rubric(
+        ["What is 6 * 7?"], model, prompt_criterion_options=OPTIONS
+    )
+    assert result == [
+        [
+            [{"code": CODE}, 100.0],
+            [
+                {
+                    "prompt": "Is it kind?",
+                    "answer_only": True,
+                    "judge_sees": ["response"],
+                },
+                50.0,
+            ],
+        ]
+    ]
+    # Options are judge settings, not instructions to the rubric writer.
+    assert all(
+        "answer_only" not in message["content"]
+        for batch in model.recorded_prompts
+        for prompt in batch
+        for message in prompt
+    )
+
+
+def test_prompt_criterion_options_are_copied_per_criterion():
+    """Editing one criterion's options leaves the other criteria alone."""
+    model = ScriptedModel([[[converted("prompt", "A?")], [converted("prompt", "B?")]]])
+    result = convert_rubric_criteria(
+        [[("A?", 1.0), ("B?", 1.0)]], model, prompt_criterion_options=OPTIONS
+    )
+    result[0][0][0]["judge_sees"].append("ground_truth")
+    assert result[0][1][0]["judge_sees"] == ["response"]
+    assert OPTIONS["judge_sees"] == ["response"]
+
+
+def test_changing_prompt_criterion_options_reuses_cached_conversion():
+    """New options never return stale rows and never ask the model again."""
+    model = ScriptedModel([[[converted("prompt", "A?")]]])
+    rubrics = [[("A?", 1.0)]]
+    assert convert_rubric_criteria(rubrics, model) == [[[{"prompt": "A?"}, 1.0]]]
+    assert convert_rubric_criteria(
+        rubrics, model, prompt_criterion_options={"answer_only": True}
+    ) == [[[{"prompt": "A?", "answer_only": True}, 1.0]]]
+    assert convert_rubric_criteria(rubrics, model, _cache_only=True) == [
+        [[{"prompt": "A?"}, 1.0]]
+    ]
+    assert model._call_count == 1
+
+
+@pytest.mark.parametrize(
+    "bad, error",
+    [
+        (["answer_only"], TypeError),
+        ({1: True}, TypeError),
+        ({"prompt": "other"}, ValueError),
+        ({"code": CODE}, ValueError),
+    ],
+)
+def test_invalid_prompt_criterion_options_fail_before_generation(bad, error):
+    """Reject options that are not extra keys before any model request."""
+    model = RecordingMockModel(responses=[])
+    with pytest.raises(error, match="prompt_criterion_options"):
+        generate_custom_rubric(["x"], model, prompt_criterion_options=bad)
+    with pytest.raises(error, match="prompt_criterion_options"):
+        convert_rubric_criteria([[("x?", 1.0)]], model, prompt_criterion_options=bad)
+    assert model._call_count == 0
