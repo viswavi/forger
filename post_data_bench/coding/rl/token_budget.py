@@ -82,7 +82,6 @@ def _prepare(budget, kwargs):
         raise ValueError(
             "Token-budget helpers count one attempt per call; retry yourself"
         )
-    kwargs.setdefault("max_tokens", 4096)
     ledger.check()
     return ledger
 
