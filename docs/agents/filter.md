@@ -232,19 +232,23 @@ By default the whole answer segment is compared, so for `exact_match` the task o
 bare answer, or pass your own `extract_answer(completion) -> str | None`. It replaces the default and sees the raw
 completion, thinking included; e.g. `lambda t: t.rsplit("ANSWER:", 1)[-1].strip()` keeps what follows the last
 `ANSWER:`. An empty answer segment grades `None`, as does `extract_answer` or a verifier returning `None`: excluded,
-not failed. A truncated completion (an opening `<think>` and no `</think>`: the model hit `max_tokens`) grades as
+not failed. A truncated completion (an opening `<think>` and no `</think>`, or an empty answer whose finish reason is
+`"length"`, e.g. a model returning its reasoning separately that spent all of `max_tokens` on it) grades as
 `truncated` says. `by_pass_at_k` defaults to `truncated="fail"`: such a sample grades `False` without calling
 `extract_answer` or the verifier, since a task the model thinks itself to death on is hard, not ungradable. (Before,
 it graded `None`; `truncated="exclude"` restores that.) `by_comparative_difficulty` defaults to `"exclude"`: a weak
 model that ran out of tokens has not shown the row is hard. The step report counts truncated samples under the
-filter's histogram, e.g. `5 of 12 samples truncated (<think> never closed), graded failed`; if that is most of them,
-raise `max_tokens`. The op's warning about completions that stopped at `max_tokens` counts them too, since a bare op's
-note is never shown, e.g. `78 of 264 completions ... hit max_tokens=16384 (72 mid-thought)`; so `strict=True` fails
-on them. A sample whose request failed has no text, so it grades `None` (excluded),
-never truncated; with a `Model` or `TinkerModel` (any model whose `generate_batch` takes `return_exceptions`) this
-includes fan-out copies that failed, so a prompt that came back short is padded with `None`. Otherwise, a model that
-returns a number of completions other than `n` for a prompt raises `ValueError`: a sample missing for any reason other
-than a failed request is never padded.
+filter's histogram, e.g. `5 of 12 samples truncated (<think> never closed), graded failed` or `34 of 47 samples
+truncated (stopped at max_tokens before any answer)`; if that is most of them, raise `max_tokens` (or lower
+`reasoning_effort`). Rows with no pass rate show as `unparsed` in the histogram; a line under it splits them, e.g.
+`30 of 47 rows have no pass rate (unparsed in the histogram): 28 lost samples to truncation (excluded by
+truncated="exclude"), 2 had answers that did not grade (...)`. The op's warning about completions that stopped at
+`max_tokens` counts them too, since a bare op's note is never shown, e.g. `78 of 264 completions ... hit
+max_tokens=16384 (72 mid-thought)`; so `strict=True` fails on them. A sample whose request failed has no text, so
+it grades `None` (excluded), never truncated; with a `Model` or `TinkerModel` (any model whose `generate_batch` takes
+`return_exceptions`) this includes fan-out copies that failed, so a prompt that came back short is padded with `None`.
+Otherwise, a model that returns a number of completions other than `n` for a prompt raises `ValueError`: a sample
+missing for any reason other than a failed request is never padded.
 `by_pass_at_k` needs all `k` grades valid unless `min_valid` allows fewer, and a row needs both comparative grades.
 With `outcomes_field` set, kept rows carry their grades as `{group: [True | False | None, ...]}`, one grade per
 sample: `{"model": [...]}` for `by_pass_at_k`, `{"weak": [...], "strong": [...]}` for `by_comparative_difficulty`.
