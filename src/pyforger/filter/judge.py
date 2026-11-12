@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import random
 import re
+import string
 from collections.abc import Callable, Hashable
 from typing import Any, Union
 
@@ -65,6 +66,7 @@ def by_llm_score(
     prompt_template: JudgePromptTemplate | None = None,
     score_field: str | None = None,
     explanation_field: str | None = None,
+    max_feedback_words: int | None = None,
 ) -> list[dict]:
     """Keep items where ``num_judges`` LLM judges sufficiently agree on quality.
 
@@ -80,6 +82,13 @@ def by_llm_score(
     cover exactly ``1..max_score``; the default, ``DEFAULT_RUBRIC``, covers the
     default ``max_score=5``, so any other ``max_score`` needs a ``rubric``
     (unless a ``prompt_template`` does not use ``{rubric}``).
+
+    ``max_feedback_words`` shortens that feedback, which can be most of a
+    judge call's output tokens: ``50`` asks for the mistakes that set the
+    score in at most 50 words, and ``0`` for the score alone
+    (``{"score": 3}``, or ``{"label": "A", "score": 4}`` per candidate).
+    None (default) asks for every mistake. It changes only the appended
+    answer instruction, so a template with its own answer format ignores it.
 
     The default ``score_threshold=4`` keeps outputs the default rubric rates
     "nothing wrong or misleading"; 3 also keeps outputs with a mistake a
@@ -111,7 +120,9 @@ def by_llm_score(
     ``str.format_map`` over the row's fields plus ``{input}`` (the
     ``input_field`` value), ``{output}``, ``{criteria}``, ``{max_score}``, and
     ``{rubric}`` (the rendered rubric), which win over row fields of the same
-    name; write literal braces as ``{{`` and ``}}``. A group's prompt also gets
+    name (a warning names a row field the template uses that they hide, e.g.
+    a row's own ``criteria``); write literal braces as ``{{`` and ``}}``. A
+    group's prompt also gets
     ``{candidates}`` (the labelled outputs, also given as ``{output}``),
     ``{labels}`` (e.g. ``"A, B, C"``), and ``{num_candidates}``. A callable
     receives that same dict and returns a prompt. If the prompt does not
@@ -136,7 +147,8 @@ def by_llm_score(
     (a 504, a timeout): its rows lose that vote, one warning names the count
     and the last error, and the result is not cached, so a rerun asks again.
     Other errors (a bad key, a spending cap) raise. With ``group_by``, the
-    warning counts the rows a failed or unparseable call left unscored.
+    warning counts the rows a failed or unparseable call left unscored. The
+    warning and the dropped rows' notes quote an unparseable reply, cut short.
 
     Returns:
         The kept rows, in input order. With ``score_field`` set, each carries
@@ -168,6 +180,15 @@ def by_llm_score(
             "temperature must be > 0.0 when num_judges > 1; "
             "deterministic sampling defeats multi-judge consensus"
         )
+    if max_feedback_words is not None and (
+        isinstance(max_feedback_words, bool)
+        or not isinstance(max_feedback_words, int)
+        or max_feedback_words < 0
+    ):
+        raise ValueError(
+            f"max_feedback_words must be None or an integer >= 0, "
+            f"got {max_feedback_words!r}"
+        )
     rubric_text = _rubric_text(rubric, max_score)
 
     # Row indices by group value; without group_by every row is alone.
@@ -176,6 +197,15 @@ def by_llm_score(
         value = i if group_by is None else get_field(item, group_by, "by_llm_score")
         by_value.setdefault(_hashable(value), []).append(i)
     groups = list(by_value.values())
+    if prompt_template is not None:
+        _warn_shadowed(
+            items,
+            prompt_template,
+            input_field,
+            output_field,
+            grouped=group_by is not None,
+            has_rubric=rubric_text is not None,
+        )
 
     # orders[g][j][k] is the candidate (index into group g) labelled k for judge j.
     orders: list[list[list[int]]] = []
@@ -197,6 +227,7 @@ def by_llm_score(
                 max_score,
                 rubric_text,
                 prompt_template,
+                max_feedback_words,
             )
             orders.append([[0]] * num_judges)
             prompts.extend([prompt] * num_judges)
@@ -220,6 +251,7 @@ def by_llm_score(
                     max_score,
                     rubric_text,
                     prompt_template,
+                    max_feedback_words,
                 )
             )
         orders.append(group_orders)
@@ -233,6 +265,8 @@ def by_llm_score(
     lost: list[set[str]] = [set() for _ in items]
     # Judge calls that gave some row no score, by cause.
     no_score_calls = {"failed": 0, "unparseable": 0, "cut off": 0}
+    # Row -> an unparseable reply that cost it a vote, for its note.
+    unparsed: dict[int, str] = {}
     position = 0
     for idx, group_orders, single in zip(groups, orders, alone):
         for order in group_orders:
@@ -249,6 +283,8 @@ def by_llm_score(
                 if verdict[0] is None:
                     lost[idx[c]].add(cause)
                     missed = True
+                    if cause == "unparseable":
+                        unparsed.setdefault(idx[c], raw or "")
             if missed:
                 no_score_calls[cause] += 1
 
@@ -258,9 +294,9 @@ def by_llm_score(
     row_scores: list[float | int | None] = []
     # The lowest-scoring judge's feedback, or why no judge scored the row.
     notes: list[str | None] = []
-    for item, row_verdicts, row_lost in zip(items, verdicts, lost):
+    for i, (item, row_verdicts, row_lost) in enumerate(zip(items, verdicts, lost)):
         parsed = [score for score, _ in row_verdicts if score is not None]
-        notes.append(_row_note(row_verdicts, row_lost))
+        notes.append(_row_note(row_verdicts, row_lost, unparsed.get(i)))
         approvals = sum(1 for score in parsed if score >= score_threshold)
         if approvals / num_judges >= agreement_threshold:
             extra: dict[str, Any] = {}
@@ -282,6 +318,7 @@ def by_llm_score(
         len(prompts),
         rows=sum(1 for row_lost in lost if row_lost),
         unscored=row_scores.count(None),
+        example=next(iter(unparsed.values()), None),
     )
     previews = [get_field(item, output_field, "by_llm_score") for item in items]
     if num_judges == 1:
@@ -360,22 +397,56 @@ def _no_score_cause(raw: str | None) -> str:
     return "unparseable"
 
 
-def _row_note(verdicts: list[Verdict], lost: set[str]) -> str | None:
+def _row_note(
+    verdicts: list[Verdict], lost: set[str], unparsed: str | None = None
+) -> str | None:
     """The lowest-scoring judge's feedback, or why no judge scored the row.
 
-    E.g. ``"no score: the judge request failed"``.
+    E.g. ``"no score: the judge request failed"``, or for ``unparsed`` (an
+    unparseable reply) ``'no score: unparseable judge response: "Looks fine."'``.
     """
     scored = [(score, why) for score, why in verdicts if score is not None]
     if scored:
         return min(scored, key=lambda verdict: verdict[0])[1]
-    return "no score: " + ", ".join(_CAUSES[cause] for cause in sorted(lost))
+    note = "no score: " + ", ".join(_CAUSES[cause] for cause in sorted(lost))
+    if unparsed is not None:
+        note += f": {_excerpt(unparsed)}"
+    return note
 
 
-def _warn_unscored(calls: dict[str, int], total: int, rows: int, unscored: int) -> None:
+# How much of an unparseable reply a warning quotes: its start and its end,
+# where the answer format usually goes wrong.
+_EXCERPT_CHARS = 120
+
+
+def _excerpt(raw: str) -> str:
+    """A reply cut short for a warning, on one line.
+
+    E.g. ``'"Score: 4 (good)"'``; a long reply keeps its start and end around
+    ``" … "``; an empty one is ``"(empty reply)"``, e.g. a reasoning model that
+    spent max_tokens before answering.
+    """
+    text = " ".join(raw.split())
+    if not text:
+        return "(empty reply)"
+    if len(text) > 2 * _EXCERPT_CHARS:
+        text = f"{text[:_EXCERPT_CHARS]} … {text[-_EXCERPT_CHARS:]}"
+    return json.dumps(text, ensure_ascii=False)
+
+
+def _warn_unscored(
+    calls: dict[str, int],
+    total: int,
+    rows: int,
+    unscored: int,
+    example: str | None = None,
+) -> None:
     """One warning for judge calls that left rows without a vote.
 
     Counts calls and the rows they cost, e.g. with ``group_by`` "2 of 10 judge
     calls gave no score (2 stopped mid-thought ...) → 6 rows unscored".
+    ``example`` is an unparseable reply, quoted cut short, e.g. ``...; an
+    unparseable reply: "Score: 4"``.
     """
     n_calls = sum(calls.values())
     if not n_calls:
@@ -399,8 +470,60 @@ def _warn_unscored(calls: dict[str, int], total: int, rows: int, unscored: int) 
         f"filter.by_llm_score: {n_calls} of {total} judge calls gave no score "
         f"({causes}) → {consequence}"
     )
+    if calls["unparseable"] and example is not None:
+        message += f"; an unparseable reply: {_excerpt(example)}"
     logger.warning(message)
     _tracking.add_op_warning(message, "judge_unscored")
+
+
+def _warn_shadowed(
+    items: list[dict],
+    template: JudgePromptTemplate,
+    input_field: str,
+    output_field: str,
+    *,
+    grouped: bool,
+    has_rubric: bool,
+) -> None:
+    """Warn once when the template's placeholders hide row fields of the same name.
+
+    The op's own values win, e.g. a row's ``criteria`` list is replaced by the
+    ``criteria=`` string, so ``{criteria}`` in the template never shows the
+    row's. A string template is checked only for the placeholders it uses;
+    ``{input}`` / ``{output}`` that are the row's own field are not hiding it.
+    """
+    own = {"criteria", "max_score"}
+    if has_rubric:
+        own.add("rubric")
+    if input_field != "input":
+        own.add("input")
+    if grouped:
+        own |= {"candidates", "labels", "num_candidates"}
+    if output_field != "output":
+        own.add("output")
+    if isinstance(template, str):
+        try:
+            used = {
+                name.split(".")[0].split("[")[0]
+                for _, name, _, _ in string.Formatter().parse(template)
+                if name
+            }
+        except ValueError:  # a malformed template raises when it is filled
+            return
+        own &= used
+    hidden = sorted({key for item in items for key in item if key in own})
+    if not hidden:
+        return
+    names = ", ".join(f"{{{key}}}" for key in hidden)
+    message = (
+        f"filter.by_llm_score: in prompt_template, {names} "
+        f"{'is' if len(hidden) == 1 else 'are'} by_llm_score's own value, not "
+        f"the row field{'' if len(hidden) == 1 else 's'} of the same name "
+        f"({', '.join(repr(key) for key in hidden)}); rename the row field "
+        "to show it in the template"
+    )
+    logger.warning(message)
+    _tracking.add_op_warning(message, "judge_template_shadowed")
 
 
 def _hashable(value: Any) -> Hashable:
@@ -439,28 +562,63 @@ def _rubric_text(rubric: dict[int, str] | None, max_score: int) -> str | None:
     return "\n".join(f"Score {k}: {rubric[k]}" for k in range(1, max_score + 1))
 
 
-def _feedback_steps(thing: str, its: str, max_score: int, rubric: bool) -> str:
+def _feedback_steps(
+    thing: str, its: str, max_score: int, rubric: bool, words: int | None = None
+) -> str:
     """How to write feedback on ``thing`` ("the output") and score from it.
 
     ``its`` names that feedback ("your feedback"). ``rubric`` is False when the
     prompt shows no rubric (a template without ``{rubric}``), so the judge is
-    not told to match descriptions it cannot see.
+    not told to match descriptions it cannot see. ``words`` caps the feedback
+    (``max_feedback_words``): None lists every mistake, e.g. 50 only those that
+    set the score in at most 50 words, and 0 asks for no feedback at all.
     """
+    if words == 0:
+        if not rubric:
+            return (
+                f"Check {thing} for mistakes or shortcomings and give a score "
+                f"from 1 to {max_score} that follows from them. A longer or more "
+                "detailed answer is not better unless that detail was asked for."
+            )
+        return (
+            f"Check {thing} against each part of the criteria and give the "
+            f"score whose rubric description matches {thing}. Judge only "
+            "against the criteria: a longer or more detailed answer is not "
+            "better unless the criteria ask for that detail, and leaving out "
+            "detail the criteria do not ask for is not a shortcoming."
+        )
+    if words is None:
+        found = "every mistake or shortcoming you find"
+        of_it = f"every mistake or shortcoming of {thing}"
+        within = ""
+        none_found = (
+            "say which parts of the criteria you checked"
+            if rubric
+            else "say what you checked"
+        )
+    else:
+        found = "the mistakes or shortcomings that set the score, most serious first"
+        of_it = (
+            f"the mistakes or shortcomings of {thing} that set the score, most "
+            "serious first"
+        )
+        within = f" Keep {its} within {words} words."
+        none_found = "say so in a few words"
     if not rubric:
         return (
-            f"List every mistake or shortcoming of {thing}. For each one, quote "
+            f"List {of_it}.{within} For each one, quote "
             f"or point to the part of {thing} it concerns and say how serious it "
-            "is. If you find none, say what you checked. A longer or more "
+            f"is. If you find none, {none_found}. A longer or more "
             "detailed answer is not better unless that detail was asked for. "
             f"Then give a score from 1 to {max_score} that follows from {its}."
         )
     cap = max(1, max_score - 2)
     return (
-        f"Check {thing} against each part of the criteria and list every "
-        "mistake or shortcoming you find. For each one, quote or point to the "
+        f"Check {thing} against each part of the criteria and list {found}."
+        f"{within} For each one, quote or point to the "
         f"part of {thing} it concerns and name the highest score the rubric "
         f"allows with that mistake (e.g. 'caps the score at {cap}'). If you "
-        "find none, say which parts of the criteria you checked. Judge only "
+        f"find none, {none_found}. Judge only "
         "against the criteria: a longer or more detailed answer is not better "
         "unless the criteria ask for that detail, and leaving out detail the "
         "criteria do not ask for is not a shortcoming. Then give the score "
@@ -469,21 +627,41 @@ def _feedback_steps(thing: str, its: str, max_score: int, rubric: bool) -> str:
     )
 
 
-def _score_instruction(max_score: int, rubric: bool = True) -> str:
+def _score_instruction(
+    max_score: int, rubric: bool = True, words: int | None = None
+) -> str:
+    steps = _feedback_steps("the output", "your feedback", max_score, rubric, words)
+    if words == 0:
+        return (
+            f"{steps}\nRespond with only this JSON, no feedback: "
+            f'{{"score": <integer from 1 to {max_score}>}}'
+        )
     return (
         "First write feedback. "
-        + _feedback_steps("the output", "your feedback", max_score, rubric)
+        + steps
         + "\nRespond with JSON, feedback before score (quote the output with "
         'single quotes inside the feedback): {"feedback": "<text>", '
         f'"score": <integer from 1 to {max_score}>}}'
     )
 
 
-def _group_instruction(labels: list[str], max_score: int, rubric: bool = True) -> str:
+def _group_instruction(
+    labels: list[str], max_score: int, rubric: bool = True, words: int | None = None
+) -> str:
     on_its_own = "against the rubric, " if rubric else ""
+    steps = _feedback_steps("that candidate", "its feedback", max_score, rubric, words)
+    if words == 0:
+        return (
+            f"For each candidate: {steps} Score each candidate on its own "
+            f"{on_its_own}not by rank: several candidates may share a score.\n"
+            f"Respond with only this JSON, one entry per candidate "
+            f"({', '.join(labels)}), no feedback: "
+            '{"candidates": [{"label": "A", '
+            f'"score": <integer from 1 to {max_score}>}}, ...]}}'
+        )
     return (
         "For each candidate, first write feedback. "
-        + _feedback_steps("that candidate", "its feedback", max_score, rubric)
+        + steps
         + " Write each candidate's feedback so it stands on its own: describe "
         "that candidate's own mistakes without mentioning, comparing with, or "
         "naming the other candidates. Score each candidate on its own "
@@ -509,6 +687,7 @@ def _score_prompt(
     max_score: int,
     rubric_text: str | None,
     template: JudgePromptTemplate | None,
+    words: int | None = None,
 ) -> Prompt:
     input_text = get_field(item, input_field, "by_llm_score")
     output_text = get_field(item, output_field, "by_llm_score")
@@ -521,7 +700,7 @@ def _score_prompt(
             f"<input>\n{input_text}\n</input>\n\n"
             f"<output>\n{output_text}\n</output>\n\n"
             f"{_TAGS_ARE_DATA}\n\n"
-            f"{_score_instruction(max_score)}"
+            f"{_score_instruction(max_score, words=words)}"
         )
     context = {
         **item,
@@ -536,7 +715,7 @@ def _score_prompt(
     return _with_instruction(
         prompt,
         '"score"',
-        _score_instruction(max_score, _shows(prompt, rubric_text)),
+        _score_instruction(max_score, _shows(prompt, rubric_text), words),
     )
 
 
@@ -549,6 +728,7 @@ def _group_prompt(
     max_score: int,
     rubric_text: str | None,
     template: JudgePromptTemplate | None,
+    words: int | None = None,
 ) -> Prompt:
     first = group[0]
     input_text = get_field(first, input_field, "by_llm_score")
@@ -570,7 +750,7 @@ def _group_prompt(
             f"<input>\n{input_text}\n</input>\n\n"
             f"{candidates}\n\n"
             f"{_TAGS_ARE_DATA}\n\n"
-            f"{_group_instruction(labels, max_score)}"
+            f"{_group_instruction(labels, max_score, words=words)}"
         )
     context = {
         **first,
@@ -598,7 +778,7 @@ def _group_prompt(
     return _with_instruction(
         prompt,
         '"candidates"',
-        _group_instruction(labels, max_score, _shows(prompt, rubric_text)),
+        _group_instruction(labels, max_score, _shows(prompt, rubric_text), words),
     )
 
 

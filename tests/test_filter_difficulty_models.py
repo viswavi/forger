@@ -94,6 +94,36 @@ class ScriptedModel(Model):
         return out
 
 
+class StoppingModel(ScriptedModel):
+    """ScriptedModel whose ``"<length>"`` completions come back empty and cut off.
+
+    Like a model that returns its reasoning separately and spent max_tokens
+    on it: the answer is "" with finish_reason "length"; others are "stop".
+    """
+
+    def generate_batch(  # type: ignore[override]
+        self, prompts: list[Any], *, n: int = 1, **kwargs: Any
+    ) -> list[GenerateResult]:
+        """Empty the "<length>" completions and give every one a finish reason."""
+        out = []
+        for result in super().generate_batch(prompts, n=n, **kwargs):
+            reasons: list[str | None] = [
+                "length" if c == "<length>" else "stop" for c in result
+            ]
+            texts = ["" if c == "<length>" else c for c in result]
+            out.append(
+                GenerateResult(
+                    texts,
+                    usage={},
+                    reasoning=[None] * len(texts),
+                    model_id=self._model_id,
+                    raw=None,
+                    finish_reasons=reasons,
+                )
+            )
+        return out
+
+
 ROWS = [
     {"id": "hard", "task": "t1", "answer": "1"},
     {"id": "easy", "task": "t2", "answer": "2"},
@@ -539,6 +569,113 @@ class TestPassAtK:
         notes = [line.strip() for line in text.splitlines() if "truncated" in line]
         assert notes[0].startswith("1 of 2 samples truncated")
         assert notes[1].startswith("2 of 2 samples truncated")
+
+    def test_empty_answer_at_max_tokens_is_truncated(self):
+        """An empty answer that stopped at max_tokens grades False, not None.
+
+        E.g. GLM returning its reasoning separately spent max_tokens=10,000 on
+        it: by default the row is hard, not unparsed.
+        """
+        model = StoppingModel("m", {"t": ["1", "<length>", "<length>", "0"]})
+        rows = [{"task": "t", "answer": "1"}]
+        kept = _pass_at_k(rows, model, min_rate=0.0, outcomes_field="ev")
+        assert kept[0]["ev"] == {"model": [True, False, False, False]}
+        # truncated="exclude" excludes them, like an unclosed <think>.
+        kept = _pass_at_k(
+            rows, model, truncated="exclude", min_valid=2, outcomes_field="ev"
+        )
+        assert kept[0]["ev"] == {"model": [True, None, None, False]}
+
+    def test_empty_answer_that_stopped_normally_is_unparsed(self):
+        """An empty answer with finish_reason "stop" still grades None."""
+        model = StoppingModel("m", {"t": ["1", ""]})
+        rows = [{"task": "t", "answer": "1"}]
+        kept = _pass_at_k(rows, model, k=2, min_valid=1, outcomes_field="ev")
+        assert kept == []  # rate 1.0 > max_rate 0.9
+        kept = _pass_at_k(
+            rows, model, k=2, min_valid=1, max_rate=1.0, outcomes_field="ev"
+        )
+        assert kept[0]["ev"] == {"model": [True, None]}
+
+    def test_note_splits_truncated_from_unparsed_rows(self, monkeypatch):
+        """Rows without a pass rate are split by cause in the step report."""
+        monkeypatch.setenv("FORGER_STEP_REPORT", "0")
+        model = StoppingModel(
+            "m",
+            {
+                "cut": ["<length>", "<length>"],
+                "half": ["<length>", "1"],
+                "blank": ["", ""],
+                "ok": ["1", "0"],
+            },
+        )
+        rows = [{"task": t, "answer": "1"} for t in ("cut", "half", "blank", "ok")]
+
+        @step
+        def hard(rows):
+            return _pass_at_k(rows, model, k=2, truncated="exclude", min_rate=0.0)
+
+        hard(rows)
+        scores = _tracking.step_records()["hard"].ops[0].scores
+        assert scores is not None and scores.values == [None, None, None, 0.5]
+        lines = scores.note.splitlines()
+        assert lines[0] == (
+            "3 of 8 samples truncated (stopped at max_tokens before any answer), "
+            "excluded; raise max_tokens if that is too many"
+        )
+        assert lines[1] == (
+            "3 of 4 rows have no pass rate (unparsed in the histogram): 2 lost "
+            'samples to truncation (excluded by truncated="exclude"), 1 had answers '
+            "that did not grade (empty, extract_answer gave None, or the verifier "
+            "gave None)"
+        )
+
+    def test_default_grades_truncated_rows(self, monkeypatch):
+        """By default the cut-off rows get a rate; only the blank one is unparsed."""
+        monkeypatch.setenv("FORGER_STEP_REPORT", "0")
+        model = StoppingModel("m", {"cut": ["<length>", "<length>"], "blank": ["", ""]})
+        rows = [{"task": t, "answer": "1"} for t in ("cut", "blank")]
+
+        @step
+        def hard(rows):
+            return _pass_at_k(rows, model, k=2, min_rate=0.0, max_rate=0.0)
+
+        assert hard(rows) == rows[:1]
+        scores = _tracking.step_records()["hard"].ops[0].scores
+        assert scores is not None and scores.values == [0.0, None]
+        assert (
+            "2 of 4 samples truncated (stopped at max_tokens before any answer), "
+            "graded failed" in scores.note
+        )
+        assert (
+            "1 of 2 rows have no pass rate (unparsed in the histogram): 1 had "
+            "answers that did not grade" in scores.note
+        )
+
+    def test_both_kinds_of_truncation_are_counted(self, monkeypatch):
+        """Unclosed <think> and empty-at-max_tokens are named apart."""
+        monkeypatch.setenv("FORGER_STEP_REPORT", "0")
+        model = StoppingModel("m", {"t": ["<think>still", "<length>", "1"]})
+
+        @step
+        def hard(rows):
+            return _pass_at_k(rows, model, k=3, min_rate=0.0)
+
+        hard([{"task": "t", "answer": "1"}])
+        scores = _tracking.step_records()["hard"].ops[0].scores
+        assert scores is not None
+        assert scores.note.startswith(
+            "2 of 3 samples truncated (1 with <think> never closed, 1 stopped at "
+            "max_tokens before any answer), graded failed"
+        )
+
+    def test_comparative_weak_empty_at_max_tokens(self):
+        """by_comparative_difficulty treats an empty cut-off answer the same way."""
+        rows = [{"task": "t", "answer": "1"}]
+        weak = StoppingModel("weak", {"t": ["<length>"]})
+        strong = ScriptedModel("strong", {"t": ["1"]})
+        assert _comparative(rows, weak, strong) == []  # excluded by default
+        assert _comparative(rows, weak, strong, truncated="fail") == rows
 
     def test_no_truncation_note_without_truncation(self, monkeypatch):
         """No note when every sample closed its thinking."""

@@ -964,6 +964,7 @@ by_llm_score(
     prompt_template: JudgePromptTemplate | None = None,
     score_field: str | None = None,
     explanation_field: str | None = None,
+    max_feedback_words: int | None = None,
 ) -> list[dict]
 ```
 

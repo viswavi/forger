@@ -1525,3 +1525,194 @@ class TestGroupPrompt:
         judge = _BadJudge(['{"feedback": "ok", "score": 5}'])
         kwargs = dict(input_field="q", output_field="a", prompt_template=template)
         assert by_llm_score([row], model=judge, **kwargs) == [row]
+
+
+class TestUnparseableExample:
+    """The unscored warning and the dropped rows' notes quote a bad reply."""
+
+    def test_warning_quotes_an_unparseable_reply(self, caplog):
+        """'3 unparseable' comes with what the judge actually wrote, cut short."""
+        reply = "The output is fine. Score: 4 out of 5. " + "x" * 400
+        judge = _BadJudge([reply])
+        rows = [{"q": f"q{i}", "a": "a"} for i in range(3)]
+        with caplog.at_level("WARNING"):
+            by_llm_score(rows, model=judge, input_field="q", output_field="a")
+        message = next(
+            r.getMessage() for r in caplog.records if "gave no score" in r.getMessage()
+        )
+        assert "3 of 3 judge calls gave no score (3 unparseable)" in message
+        assert '; an unparseable reply: "The output is fine. Score: 4' in message
+        assert " … " in message and len(message) < 400
+
+    def test_empty_reply_is_named(self, caplog):
+        """A reasoning model that spent max_tokens leaves an empty reply."""
+        judge = _BadJudge([""])
+        with caplog.at_level("WARNING"):
+            by_llm_score(
+                [{"q": "q", "a": "a"}], model=judge, input_field="q", output_field="a"
+            )
+        assert "an unparseable reply: (empty reply)" in caplog.text
+
+    def test_dropped_row_note_quotes_the_reply(self, monkeypatch):
+        """The step report's dropped-row note shows the reply, not only the cause."""
+        monkeypatch.setenv("FORGER_STEP_REPORT", "0")
+        judge = _BadJudge(["Score: 4"])
+
+        @step
+        def judged(rows):
+            return by_llm_score(rows, model=judge, input_field="q", output_field="a")
+
+        judged([{"q": "q", "a": "a"}])
+        scores = _tracking.step_records()["judged"].ops[0].scores
+        assert [row.note for row in scores.dropped] == [
+            'no score: unparseable judge response: "Score: 4"'
+        ]
+
+    def test_parsed_replies_add_no_example(self, caplog):
+        """Replies that parse leave the warning, if any, without an example."""
+        judge = _BadJudge([json.dumps({"feedback": "ok", "score": 5})])
+        with caplog.at_level("WARNING"):
+            by_llm_score(
+                [{"q": "q", "a": "a"}], model=judge, input_field="q", output_field="a"
+            )
+        assert "unparseable reply" not in caplog.text
+
+
+class TestShadowedRowFields:
+    """A template placeholder that hides a row field of the same name warns."""
+
+    ROWS = [{"q": "Q", "a": "A", "criteria": ["cites a source", "is short"]}]
+
+    def _judge(self, caplog, template, **kwargs):
+        judge = _BadJudge([json.dumps({"score": 5})])
+        with caplog.at_level("WARNING"):
+            by_llm_score(
+                self.ROWS,
+                model=judge,
+                input_field="q",
+                output_field="a",
+                prompt_template=template,
+                criteria="the reply meets every listed criterion",
+                **kwargs,
+            )
+        return judge.prompts[0], [
+            r.getMessage()
+            for r in caplog.records
+            if "prompt_template" in r.getMessage()
+        ]
+
+    def test_row_criteria_hidden_by_op_criteria_warns(self, caplog):
+        """{criteria} shows the criteria= string; the warning names the row field."""
+        prompt, warnings = self._judge(caplog, "Criteria: {criteria}\n{output}")
+        assert prompt.startswith("Criteria: the reply meets every listed criterion")
+        assert warnings == [
+            "filter.by_llm_score: in prompt_template, {criteria} is by_llm_score's "
+            "own value, not the row field of the same name ('criteria'); rename the "
+            "row field to show it in the template"
+        ]
+
+    def test_unused_placeholder_does_not_warn(self, caplog):
+        """A string template that never uses {criteria} hides nothing."""
+        _, warnings = self._judge(caplog, "Grade {output} for {input}")
+        assert warnings == []
+
+    def test_input_field_named_input_is_not_hidden(self, caplog):
+        """{input} from input_field="input" is the row's own value."""
+        judge = _BadJudge([json.dumps({"score": 5})])
+        with caplog.at_level("WARNING"):
+            by_llm_score(
+                [{"input": "Q", "output": "A"}],
+                model=judge,
+                input_field="input",
+                output_field="output",
+                prompt_template="{input} {output}",
+            )
+        assert "prompt_template" not in caplog.text
+
+    def test_callable_template_warns_for_any_collision(self, caplog):
+        """A callable gets the whole dict, so any hidden field may matter."""
+        _, warnings = self._judge(caplog, lambda row: f"Grade {row['output']}")
+        assert len(warnings) == 1 and "{criteria}" in warnings[0]
+
+
+class TestMaxFeedbackWords:
+    """max_feedback_words shortens or drops the feedback the judge is asked for."""
+
+    def test_default_asks_for_every_mistake(self):
+        """None (default) keeps the full feedback instruction."""
+        judge = _BadJudge([json.dumps({"feedback": "ok", "score": 5})])
+        by_llm_score(
+            [{"q": "Q", "a": "A"}], model=judge, input_field="q", output_field="a"
+        )
+        assert "list every mistake or shortcoming you find" in judge.prompts[0]
+
+    def test_zero_asks_for_the_score_only(self):
+        """0 asks for {"score": N} and no feedback; the score still filters."""
+        judge = _BadJudge([json.dumps({"score": 4})])
+        kept = by_llm_score(
+            [{"q": "Q", "a": "A"}],
+            model=judge,
+            input_field="q",
+            output_field="a",
+            max_feedback_words=0,
+            score_field="s",
+            explanation_field="why",
+        )
+        prompt = judge.prompts[0]
+        assert prompt.endswith(
+            'Respond with only this JSON, no feedback: {"score": <integer from 1 to 5>}'
+        )
+        assert "First write feedback" not in prompt
+        assert kept == [{"q": "Q", "a": "A", "s": 4, "why": []}]
+
+    def test_cap_names_the_word_limit(self):
+        """A positive cap asks only for the mistakes that set the score."""
+        judge = _BadJudge([json.dumps({"feedback": "ok", "score": 5})])
+        by_llm_score(
+            [{"q": "Q", "a": "A"}],
+            model=judge,
+            input_field="q",
+            output_field="a",
+            max_feedback_words=40,
+        )
+        assert (
+            "list the mistakes or shortcomings that set the score, most serious "
+            "first. Keep your feedback within 40 words." in judge.prompts[0]
+        )
+
+    def test_group_score_only(self):
+        """Grouped candidates answer {"label", "score"} entries with no feedback."""
+        judge = _GroupJudge()
+        kept = _grouped(_GROUPED, judge, score_threshold=3, max_feedback_words=0)
+        group_prompt = next(p for p in judge.prompts if "<candidate" in p)
+        assert (
+            'no feedback: {"candidates": [{"label": "A", "score": <integer from 1 '
+            "to 5>}, ...]}" in group_prompt
+        )
+        assert "first write feedback" not in group_prompt
+        assert kept == _grouped(_GROUPED, _GroupJudge(), score_threshold=3)
+
+    def test_template_with_own_format_is_left_alone(self):
+        """A template that shows "score" keeps its own answer format."""
+        judge = _BadJudge([json.dumps({"score": 5})])
+        by_llm_score(
+            [{"q": "Q", "a": "A"}],
+            model=judge,
+            input_field="q",
+            output_field="a",
+            prompt_template='Grade {output}. Answer {{"score": N}}.',
+            max_feedback_words=0,
+        )
+        assert judge.prompts == ['Grade A. Answer {"score": N}.']
+
+    @pytest.mark.parametrize("bad", [-1, 2.5, True, "50"])
+    def test_invalid_values_raise(self, bad):
+        """Only None or an integer >= 0 is accepted."""
+        with pytest.raises(ValueError, match="max_feedback_words"):
+            by_llm_score(
+                [{"q": "Q", "a": "A"}],
+                model=_BadJudge(["{}"]),
+                input_field="q",
+                output_field="a",
+                max_feedback_words=bad,
+            )

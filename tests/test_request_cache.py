@@ -796,8 +796,9 @@ class TestResentWarning:
         fake.reset()
         with caplog.at_level(logging.WARNING):
             answer(rows)
+        # A Model gets all 60 prompts in one call whatever batch_size says.
         message = (
-            "alter.generate_from_context: 30 of 40 rows were answered before under "
+            "alter.generate_from_context: 30 of 60 rows were answered before under "
             "a different prompt or settings and will be asked again (the request "
             "cache keys on the exact prompt); ~2,100 token units at the earlier "
             "cost per row"
