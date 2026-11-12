@@ -798,8 +798,15 @@ def train_rl(args, short=False):
     ):
         raise ValueError("RL steps and batch sizes must be positive")
     args.output_dir = str(Path(args.output_dir).resolve())
-    if Path(args.output_dir).exists():
-        raise ValueError("Use a new output directory for each RL experiment")
+    # The compiled data goes to <output-dir>.data, e.g. rl_trial_1.data, which
+    # outlives a deleted rl_trial_1; check both before any slow work.
+    for path in (Path(args.output_dir), Path(args.output_dir + ".data")):
+        if path.exists():
+            raise ValueError(
+                f"Use a new output directory for each RL experiment: {path} exists "
+                f"(an RL run writes {args.output_dir} and its compiled data "
+                f"{args.output_dir}.data)"
+            )
     judge_config = judge_configuration(
         Path(args.data).resolve().parent / "judge_token_usage.json",
         task=getattr(args, "task", None),

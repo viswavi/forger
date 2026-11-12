@@ -1,4 +1,5 @@
 """Local RL harness: receipts on every exit, probe evaluation, output directories."""
+import argparse
 import json
 import subprocess
 import tempfile
@@ -6,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from coding.rl import local_training
+from coding.rl import agent_training, local_training
 
 QWEN3_4B = {
     "model_type": "qwen3",
@@ -152,6 +153,31 @@ class ProbeEvaluationTests(unittest.TestCase):
         self.assertIn("--eval-interval 10", full)
         self.assertIn("--eval-prompt-data generated_val", full)
         self.assertIn("--n-samples-per-eval-prompt 4", full)
+
+
+class OutputDirectoryTests(unittest.TestCase):
+    """Rl refuses a reused name before compiling data or loading the judge."""
+
+    def test_leftover_data_directory_is_refused_up_front(self):
+        """rl_trial_1 deleted, rl_trial_1.data kept: both paths are named."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            (root / "rl_trial_1.data").mkdir()
+            args = argparse.Namespace(
+                data=str(root / "rows.jsonl"),
+                output_dir=str(root / "rl_trial_1"),
+                backend="local",
+                num_rollout=None,
+                rollout_batch_size=None,
+                n_samples_per_prompt=None,
+            )
+            with patch.object(
+                agent_training, "judge_configuration"
+            ) as judge, self.assertRaisesRegex(
+                ValueError, "rl_trial_1.data exists .* writes .*rl_trial_1 and"
+            ):
+                agent_training.train_rl(args)
+            judge.assert_not_called()
 
 
 if __name__ == "__main__":
