@@ -293,6 +293,16 @@ else
     /usr/bin/python3 -c "import RestrictedPython"
     echo ">>> copied RestrictedPython from the TRL env into Slime's Python"
   fi
+  if [[ "$SLIME_ENV" == /usr && "$DRY_RUN" -eq 0 && "$RUBRIC_REWARDS" -eq 1 ]] && ! /usr/bin/python3 -c "import litellm" 2>/dev/null; then
+    # Prompt criteria call the judge through litellm in Slime's reward workers,
+    # which the image installs only in the TRL env: every RL run with a prompt
+    # criterion stopped at its first reward (job 168462). Copy it and whichever
+    # of its requirements Slime's Python lacks (rl/slime_deps.py).
+    /home/vijayv/miniconda3/envs/trl/bin/python "$CODING_DIR/rl/slime_deps.py" \
+      /usr/local/lib/python3.12/dist-packages /usr/bin/python3 | tail -3
+    /usr/bin/python3 -c "import litellm"
+    echo ">>> copied litellm from the TRL env into Slime's Python"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
