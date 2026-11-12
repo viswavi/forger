@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import sys
+import threading
 from pathlib import Path
 
 from .agent_training import CODING, JUDGE_FLAGS, run  # noqa: ABS101
@@ -186,6 +187,45 @@ def freeze_checkpoint(checkpoint, destination, agent_dir):
     checkpoint_files(destination)
 
 
+def write_receipts(data, output):
+    """Write rl_submission.json into each usable hf_rollout<N> under `output`.
+
+    e.g. rl_trial_1/hf_rollout19 gets {"stage": "rl", "backend": "local",
+    "completed_steps": 20, "data_directory": "/.../rl_trial_1.data", ...}.
+    Partly written checkpoints (rl_result.usable_checkpoint) are skipped.
+    """
+    from .rl_result import usable_checkpoint  # noqa: ABS101
+
+    for candidate in Path(output).glob("hf_rollout*"):
+        suffix = candidate.name.removeprefix("hf_rollout")
+        if not candidate.is_dir() or not suffix.isdigit():
+            continue
+        try:
+            if not usable_checkpoint(candidate):
+                continue
+            checkpoint_files(candidate)
+            receipt = candidate / "rl_submission.json"
+            text = (
+                json.dumps(
+                    {
+                        "stage": "rl",
+                        "backend": "local",
+                        "base_model": BASE_MODEL,
+                        "completed_steps": int(suffix) + 1,
+                        "data_directory": str(Path(data).resolve()),
+                    },
+                    indent=2,
+                )
+                + "\n"
+            )
+            if not receipt.is_file() or receipt.read_text() != text:
+                partial = receipt.with_suffix(".tmp")
+                partial.write_text(text)
+                partial.replace(receipt)
+        except (OSError, ValueError) as exc:
+            print(f"no RL receipt for {candidate}: {exc}", file=sys.stderr)
+
+
 def execute_rl(
     data,
     checkpoint,
@@ -198,50 +238,48 @@ def execute_rl(
     rollout_batch_size=RL_DEFAULTS["local"]["rollout_batch_size"],
     n_samples_per_prompt=RL_DEFAULTS["local"]["n_samples_per_prompt"],
     evaluate=False,
+    receipt_interval=30,
 ):
-    """Run Slime then evaluate the resulting checkpoint with local vLLM."""
+    """Run Slime then evaluate the resulting checkpoint with local vLLM.
+
+    Checkpoints get their receipts (write_receipts) every `receipt_interval`
+    seconds while Slime runs and again on any exit, so a run that crashes or is
+    stopped after saving hf_rollout29 leaves it submittable.
+    """
     from .agent_training import final_evaluation  # noqa: ABS101
-    from .rl_result import usable_checkpoint  # noqa: ABS101
 
     env = dict(os.environ)
     env["PATH"] = os.pathsep.join(
         [str(Path(sys.executable).parent), env.get("PATH", "")]
     )
-    run(
-        rl_command(
-            data,
-            checkpoint,
-            output,
-            slime_env or os.environ.get("SLIME_ENV", "/usr"),
-            slime_deps or os.environ.get("SLIME_DEPS", "/opt"),
-            probe=probe,
-            judge_config=judge_config,
-            num_rollout=num_rollout,
-            rollout_batch_size=rollout_batch_size,
-            n_samples_per_prompt=n_samples_per_prompt,
-        ),
-        env=env,
-    )
-    for candidate in Path(output).glob("hf_rollout*"):
-        suffix = candidate.name.removeprefix("hf_rollout")
-        if not candidate.is_dir() or not suffix.isdigit():
-            continue
-        if not usable_checkpoint(candidate):
-            continue
-        checkpoint_files(candidate)
-        (candidate / "rl_submission.json").write_text(
-            json.dumps(
-                {
-                    "stage": "rl",
-                    "backend": "local",
-                    "base_model": BASE_MODEL,
-                    "completed_steps": int(suffix) + 1,
-                    "data_directory": str(Path(data).resolve()),
-                },
-                indent=2,
-            )
-            + "\n"
+    stop = threading.Event()
+
+    def watch():
+        while not stop.wait(receipt_interval):
+            write_receipts(data, output)
+
+    watcher = threading.Thread(target=watch, daemon=True)
+    watcher.start()
+    try:
+        run(
+            rl_command(
+                data,
+                checkpoint,
+                output,
+                slime_env or os.environ.get("SLIME_ENV", "/usr"),
+                slime_deps or os.environ.get("SLIME_DEPS", "/opt"),
+                probe=probe,
+                judge_config=judge_config,
+                num_rollout=num_rollout,
+                rollout_batch_size=rollout_batch_size,
+                n_samples_per_prompt=n_samples_per_prompt,
+            ),
+            env=env,
         )
+    finally:
+        stop.set()
+        watcher.join()
+        write_receipts(data, output)
     if evaluate and not probe:
         result = json.loads((Path(output) / "rl_result.json").read_text())
         final_evaluation(
