@@ -149,7 +149,7 @@ class ClinicalDefaultsTests(unittest.IsolatedAsyncioTestCase):
     """The clinical task's judge defaults: answer_only on, effort none."""
 
     async def test_prompt_criteria_default_to_answer_only(self):
-        """Without "answer_only", clinical criteria grade final answers only."""
+        """Clinical criteria default to the final answer alone."""
         from types import SimpleNamespace
         from unittest.mock import AsyncMock, patch
 
@@ -167,17 +167,18 @@ class ClinicalDefaultsTests(unittest.IsolatedAsyncioTestCase):
                 ],
             },
         )
-        for task, expected in (
-            ("clinical", [True, False]),
-            ("algorithmic", [False, False]),
+        everything = ("prompt", "response", "ground_truth")
+        for task, only, sees in (
+            ("clinical", [True, False], [("response",), ("response",)]),
+            ("algorithmic", [False, False], [everything, everything]),
         ):
             with patch.dict("os.environ", {"PDB_TASK": task}), patch.object(
                 rm, "prompt_score", new=AsyncMock(return_value=1)
             ) as judge:
                 await rm.custom_rm(None, sample)
-            self.assertEqual(
-                [c.kwargs["answer_only"] for c in judge.call_args_list], expected
-            )
+            calls = judge.call_args_list
+            self.assertEqual([c.kwargs["answer_only"] for c in calls], only)
+            self.assertEqual([c.kwargs["judge_sees"] for c in calls], sees)
 
     def test_judge_effort_and_quotas(self):
         """Clinical: effort none, 200M generation and 300M judge units."""
