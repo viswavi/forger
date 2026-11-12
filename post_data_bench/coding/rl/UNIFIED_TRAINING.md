@@ -29,7 +29,12 @@ to the policy's prompt.
 A prompt criterion may add `"answer_only": true` (a JSON boolean; not allowed on
 code criteria). The judge then sees only the final answers: the text after the
 last `</think>` of the response and of the ground truth, or `""` when the
-response's thinking is never closed. The prompt is always sent whole.
+response's thinking is never closed. The prompt, when sent, is always whole.
+It may also add `"judge_sees"`, a list of the fields the judge receives (from
+`"prompt"`, `"response"` and `"ground_truth"`; it must include `"response"`;
+default all three), and `"instructions"`, up to 4,000 characters added to the
+judge's system message for that criterion only. Neither is allowed on code
+criteria (`rubric_data.PROMPT_OPTIONS`).
 
 Submit at least 10 unique prompts. The harness sorts by prompt hash, shuffles
 with seed 0, and holds out `floor(N / 10)` rows for RL reward monitoring. The
