@@ -5,7 +5,7 @@ They begin from the base model or, on Tinker, from an SFT trial.
 The final submission allows any number of experiments, but the selected checkpoint's
 own training (every RL run on the way to it, and its SFT trial if any) must use at
 most max_rows() rows per run (2,000; 800 for algorithmic), all with prompts from the
-final dataset, and on a backend with an RL_STEP_BUDGET exactly that many RL steps in
+final dataset, and on a backend with an RL_STEP_BUDGET at most that many RL steps in
 total. Each RL run records the checkpoint it started from in `lineage.json`, inside
 its compiled data directory (`<run>.data/`); SFT and RL receipts name that directory.
 """
@@ -85,7 +85,11 @@ def rl_steps(checkpoint):
 
 
 def check_step_budget(checkpoint):
-    """Raise unless a checkpoint has exactly its backend's RL step budget behind it."""
+    """Raise if a checkpoint has more than its backend's RL step budget behind it.
+
+    Fewer steps are allowed, e.g. hf_rollout49 of an 80-step run, or the last
+    checkpoint of a run the judge quota stopped early.
+    """
     receipt = Path(checkpoint).resolve() / "rl_submission.json"
     if not receipt.is_file():
         return
@@ -93,10 +97,10 @@ def check_step_budget(checkpoint):
     if budget is None:
         return
     steps = rl_steps(checkpoint)
-    if steps != budget:
+    if steps > budget:
         raise ValueError(
             f"{checkpoint} has {steps} RL steps in total (counting the runs it "
-            f"continues from); a submitted checkpoint must have exactly {budget}"
+            f"continues from); a submitted checkpoint may have at most {budget}"
         )
 
 

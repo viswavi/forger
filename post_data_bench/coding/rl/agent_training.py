@@ -699,7 +699,7 @@ def probe(args):
 def check_rl_budget(backend, checkpoint, args):
     """Refuse an RL run its checkpoints could not be submitted from.
 
-    A submitted checkpoint has exactly RL_STEP_BUDGET steps behind it at the
+    A submitted checkpoint has at most RL_STEP_BUDGET steps behind it at the
     default batch shape, so a run continuing from 60 steps may add at most 40.
     """
     budget = RL_STEP_BUDGET[backend]
@@ -718,7 +718,7 @@ def check_rl_budget(backend, checkpoint, args):
     done = rl_steps(checkpoint)
     if done + args.num_rollout > budget:
         raise ValueError(
-            f"A submitted checkpoint has exactly {budget} RL steps in total, counting "
+            f"A submitted checkpoint has at most {budget} RL steps in total, counting "
             f"the runs it continues from. This run starts from {done}, so "
             f"--num-rollout may be at most {budget - done}"
         )
