@@ -114,6 +114,10 @@ With several samples per input, `group_by` separates candidates best.
 A strong reasoning judge can cost more than the generation it judges: in one trial GLM-5.3 at
 `reasoning_effort="low"` wrote about 7K output tokens per judge call (about 92K token units), more than writing the
 problems did. Judge a few rows first and check the units column of the step report before judging the whole set.
+Feedback can be most of a judge call's output: `max_feedback_words=50` asks only for the mistakes that set the score,
+in at most 50 words, and `max_feedback_words=0` for the score alone (`{"score": 3}`; per candidate
+`{"label": "A", "score": 4}`), so `explanation_field` lists and dropped-row notes stay empty. The default (None) asks
+for every mistake. It changes only the appended answer instruction: a template with its own `"score"` format keeps it.
 
 The default rubric, `pyforger.filter.judge.DEFAULT_RUBRIC`, describes the five levels of the default `max_score=5` by
 how serious the output's mistakes are (1: fails the task; 3: a mistake makes part of it wrong, misleading, or
@@ -162,7 +166,9 @@ is 4). Unparseable answers count as no vote, and so does a request that still fa
 transient error (a 504, a timeout): one warning in the step report names the count and the last error, and the result
 is not cached, so a rerun asks again. Another warning counts the judge calls that gave no score by cause (failed,
 unparseable, or stopped mid-thought in an unclosed `<think>`) and the rows they left unscored, e.g. with `group_by`
-`2 of 10 judge calls gave no score (...) → 6 rows unscored`; calls cut off mid-thought are not counted again in the
+`2 of 10 judge calls gave no score (...) → 6 rows unscored`, and quotes an unparseable reply cut short
+(`; an unparseable reply: "Score: 4 out of 5 …"`, or `(empty reply)`), as do the dropped rows' notes in the step
+report; calls cut off mid-thought are not counted again in the
 op's warning about completions that stopped at `max_tokens`. A row error (a content-filter block or an over-long
 prompt; see `generate_from_context` in [alter.md](alter.md)) counts as a failed request too, and the warning names its
 reason, e.g. `1 prompt longer than the model's context window`; a row error on every prompt (at least 2) raises. Other
@@ -176,7 +182,9 @@ label request gives its document the fallback topic, and a failed codebook reque
 `prompt_template` replaces the prompt: a format string or a callable taking a dict. The placeholders are the row's
 fields (for a group, its first row's) plus `{input}`, `{output}`, `{criteria}`, `{max_score}`, and `{rubric}` (the
 rendered levels); with `group_by` every prompt, one-row groups included, also gets `{candidates}` (the tagged outputs,
-also as `{output}`), `{labels}` (`"A, B, C"`), and `{num_candidates}`. Write literal braces as `{{ }}`. If the prompt
+also as `{output}`), `{labels}` (`"A, B, C"`), and `{num_candidates}`. These win over row fields of the same name: a
+row's own `criteria` list never reaches `{criteria}`, which is the `criteria=` string, and a warning names each row
+field the template hides that way (rename the field to show it). Write literal braces as `{{ }}`. If the prompt
 does not contain the JSON key in double quotes (`"score"`, or `"candidates"` for a group), the feedback-then-score
 answer instruction is appended for you; it mentions the rubric only if the prompt shows `{rubric}`. With `group_by`, a
 template whose own answer format has `"score"` but not `"candidates"` raises `ValueError`. The feedback is read from
