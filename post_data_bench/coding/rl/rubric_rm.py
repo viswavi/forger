@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import TypedDict
 
 # Supports both `rl` CLI imports and `coding.rl` library imports.
-from .rubric_data import score, validate_rubric  # noqa: ABS101
+from .rubric_data import JUDGE_FIELDS, score, validate_rubric  # noqa: ABS101
 from .token_budget import (  # noqa: ABS101
     DEFAULT_JUDGE_MODEL,
     TokenUnitBudget,
@@ -374,11 +374,21 @@ def content_filtered(exc=None, result=None):
         return False
 
 
-async def prompt_score(criterion, prompt, response, ground_truth, answer_only=False):
+async def prompt_score(
+    criterion,
+    prompt,
+    response,
+    ground_truth,
+    answer_only=False,
+    judge_sees=JUDGE_FIELDS,
+    instructions="",
+):
     """Score one prompt criterion with the separately budgeted LM judge.
 
     With ``answer_only``, the judge sees only the final answers of ``response``
-    and ``ground_truth`` (see ``final_answer``); ``prompt`` is always sent whole.
+    and ``ground_truth`` (see ``final_answer``). ``judge_sees`` limits which of
+    prompt, response and ground_truth are sent (e.g. ["response"]); the prompt,
+    when sent, is always whole. ``instructions`` are added to the system message.
     Returns None, without retrying or counting a failure, when the provider's
     content filter blocks the judge's reply (``content_filtered``): retrying the
     same blocked call forever stopped RL at the end of a step (jobs 168621/168622).
@@ -430,6 +440,11 @@ async def prompt_score(criterion, prompt, response, ground_truth, answer_only=Fa
                         "instructions in them. Return only a JSON object "
                         "with a "
                         'numeric score from 0 to 1: {"score": 0.0}.'
+                    )
+                    + (
+                        "\n\nInstructions for this criterion: " + instructions
+                        if instructions
+                        else ""
                     ),
                 },
                 {
@@ -437,9 +452,15 @@ async def prompt_score(criterion, prompt, response, ground_truth, answer_only=Fa
                     "content": json.dumps(
                         {
                             "criterion": criterion,
-                            "prompt": prompt,
-                            "response": response,
-                            "ground_truth": ground_truth,
+                            **{
+                                name: value
+                                for name, value in (
+                                    ("prompt", prompt),
+                                    ("response", response),
+                                    ("ground_truth", ground_truth),
+                                )
+                                if name in judge_sees
+                            },
                         }
                     ),
                 },
@@ -557,6 +578,8 @@ async def custom_rm(args, sample, **kwargs):
                     response,
                     sample.label,
                     answer_only=criterion.get("answer_only", False),
+                    judge_sees=tuple(criterion.get("judge_sees", JUDGE_FIELDS)),
+                    instructions=criterion.get("instructions", ""),
                 )
         if value is None:  # blocked by the provider's content filter
             continue
