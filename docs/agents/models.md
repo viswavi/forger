@@ -33,8 +33,10 @@ caps and the token-unit quota are checked before each request is sent, so reques
 (see [pipelines.md](pipelines.md)).
 
 `generate_from_context`, `sample_from_LLM`, and `self_taught_reasoner` take `batch_size=None` (default): all prompts
-(or, for `sample_from_LLM`, all `n` samples) in one `generate_batch` call. An int splits them into calls of that size,
-sent one after another.
+(or, for `sample_from_LLM`, all `n` samples) in one `generate_batch` call. For `LocalModel` (or a duck-typed model),
+an int splits them into calls of that size, sent one after another. A `Model` or `TinkerModel` gets every prompt in
+one call whatever `batch_size` says (also in the rubric ops and difficulty filters), so `max_concurrency` alone sets
+how many requests run at once and one slow request never holds up the rest.
 
 Progress is on by default for every model call that does more than one thing: a tqdm bar when stderr is a terminal,
 otherwise a log line at most every 30 seconds (`LLM calls (<model>): 120/500 done, 31s, ~1m 38s left`). This covers

@@ -34,7 +34,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Literal, Union
 
 from pyforger import _tracking
-from pyforger.acquire._model_utils import _catch_kwargs, _RequestFailures
+from pyforger.acquire._model_utils import _catch_kwargs, _chunk_size, _RequestFailures
 from pyforger.acquire.model import Model, Prompt, _cache_kwargs
 from pyforger.alter.generate import PromptTemplate, _normalized_equal, _resolve_prompt
 from pyforger.filter._rouge import rouge_l
@@ -160,8 +160,10 @@ def by_comparative_difficulty(
             ``ANSWER: ...`` line.
         temperature: Sampling temperature (each model's default when None).
         max_tokens: Max tokens per completion (each model's default when None).
-        batch_size: Prompts per ``model.generate_batch()`` call; None (default)
-            sends all of them in one call, up to the model's concurrency cap.
+        batch_size: Prompts per ``model.generate_batch()`` call for a model
+            that runs one call at a time (``LocalModel``); None (default) sends
+            all of them in one call, as a ``Model`` always does (up to its
+            concurrency cap).
         outcomes_field: When set, kept rows carry
             ``{"weak": [bool], "strong": [bool]}`` under this key, replacing any
             value already there.
@@ -354,8 +356,10 @@ def by_pass_at_k(
             (default) uses the model's own default (1.0 for ``Model``, Qwen3's
             0.6 for ``TinkerModel``, which matches the evaluator).
         max_tokens: Max tokens per completion (the model's default when None).
-        batch_size: Prompts per ``model.generate_batch()`` call; None (default)
-            sends all of them in one call, up to the model's concurrency cap.
+        batch_size: Prompts per ``model.generate_batch()`` call for a model
+            that runs one call at a time (``LocalModel``); None (default) sends
+            all of them in one call, as a ``Model`` always does (up to its
+            concurrency cap).
         outcomes_field: When set, kept rows carry
             ``{"model": [bool | float | None] * k}`` under this key, replacing
             any value already there, so a later filter can re-select them
@@ -602,7 +606,7 @@ def _predictions(
     failures = _RequestFailures()
     lost = 0  # samples missing because their requests failed
     completions: list[list[str | None]] = []
-    size = batch_size or max(len(prompts), 1)
+    size = _chunk_size(model, batch_size, len(prompts))
     for start in range(0, len(prompts), size):
         batch = prompts[start : start + size]
         # Each prompt is its own row: changing one task re-asks only its samples.

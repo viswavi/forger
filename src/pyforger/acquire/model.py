@@ -1437,6 +1437,10 @@ class Model:
         ["4"]
     """
 
+    # generate_batch sends every request at once, up to max_concurrency, so
+    # ops send all their prompts in one call (see _model_utils._chunk_size).
+    _pools_requests = True
+
     def __init__(
         self,
         model_id: str,

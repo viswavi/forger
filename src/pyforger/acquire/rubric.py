@@ -158,8 +158,10 @@ def generate_custom_rubric_criteria(
     ``code_guidelines`` says what grading code can check in your environment,
     e.g. "grade() may call run_program(code, stdin), which returns (True, stdout)".
 
-    ``batch_size`` limits prompts per model batch; ``temperature`` controls
-    sampling. Invalid outputs receive up to ``max_retries`` additional attempts.
+    ``batch_size`` limits prompts per model batch for a ``LocalModel`` (a
+    ``Model`` gets every prompt at once, up to its max_concurrency);
+    ``temperature`` controls sampling. Invalid outputs receive up to
+    ``max_retries`` additional attempts.
     Exhaustion raises ValueError with zero-based input indices, rather than
     dropping inputs or disguising generation failures as empty rubrics.
     Provider errors propagate. Successful results are cached by ``@op``; pass

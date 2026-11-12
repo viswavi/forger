@@ -242,6 +242,26 @@ def _catch_kwargs(model: Any) -> dict[str, Any]:
     return {}
 
 
+def _chunk_size(model: Any, batch_size: int | None, total: int) -> int:
+    """Prompts per ``model.generate_batch()`` call for an op's ``batch_size``.
+
+    A model whose generate_batch sends every request at once through its own
+    pool (``Model``: up to its max_concurrency) gets all ``total`` prompts in
+    one call, whatever ``batch_size`` says: chunks sent one after another each
+    wait for their slowest request, e.g. 1,856 rows in chunks of 10 took 1h
+    12m. A model that runs one call at a time (``LocalModel``, a duck-typed
+    fake) gets ``batch_size`` (None: all of them). The class that defines
+    ``generate_batch`` says which, with ``_pools_requests = True``.
+    """
+    everything = max(total, 1)
+    for klass in type(model).__mro__:
+        if "generate_batch" in vars(klass):
+            if vars(klass).get("_pools_requests", False):
+                return everything
+            break
+    return batch_size or everything
+
+
 class _RequestFailures:
     """The failed requests an LLM filter tolerates, reported in one warning.
 
