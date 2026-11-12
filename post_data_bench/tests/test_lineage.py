@@ -12,6 +12,13 @@ from coding.rl import rubric_data as data
 from tests.test_unified_training import rows, write_rows
 
 
+def base_snapshot(root):
+    """The base model as the Hugging Face cache holds it."""
+    base = root / "hub/models--Qwen--Qwen3-4B/snapshots/1cfa9a72"
+    base.mkdir(parents=True)
+    return base
+
+
 class LineageTests(unittest.TestCase):
     """sft_trial -> rl_trial_1 -> rl_trial_2, each with its own compiled data."""
 
@@ -51,10 +58,15 @@ class LineageTests(unittest.TestCase):
         )
 
     def test_base_model_has_no_runs(self):
-        """A checkpoint without receipts is the base model: nothing to check."""
-        base = self.root / "Qwen3-4B"
-        base.mkdir()
-        self.assertEqual(lineage.check(base, self.final_path), [])
+        """The base model's HF snapshot has no receipts: nothing to check."""
+        self.assertEqual(lineage.check(base_snapshot(self.root), self.final_path), [])
+
+    def test_other_checkpoint_without_a_receipt_is_rejected(self):
+        """A receipt-less directory is not taken for the base model."""
+        copy = self.root / "my_model"
+        copy.mkdir()
+        with self.assertRaisesRegex(ValueError, "has no rl_submission.json"):
+            lineage.check(copy, self.final_path)
 
     def test_sft_prompts_outside_the_final_dataset_are_rejected(self):
         """A STaR or seed set with other prompts cannot be behind the submission."""
@@ -116,8 +128,7 @@ class StepBudgetTests(unittest.TestCase):
         self.final = rows()
         self.final_path = self.root / "generated_raw.jsonl"
         write_rows(self.final_path, self.final)
-        self.base = self.root / "Qwen3-4B"
-        self.base.mkdir()
+        self.base = base_snapshot(self.root)
 
     def local_run(self, name, steps, start):
         """A local RL checkpoint after `steps` steps, continuing from `start`."""
@@ -169,6 +180,36 @@ class StepBudgetTests(unittest.TestCase):
             agent_training.check_rl_budget("local", first, args)
         args.num_rollout = 20
         agent_training.check_rl_budget("local", first, args)
+
+    def test_continuing_from_a_checkpoint_without_its_receipt_is_rejected(self):
+        """20 steps from a receipt-less hf_rollout79 would count only 20."""
+        first = self.local_run("rl_trial_1", 80, self.base)
+        (first / "rl_submission.json").unlink()
+        second = self.local_run("rl_trial_2", 20, first)
+        with self.assertRaisesRegex(ValueError, "hf_rollout79 has no rl_submission"):
+            lineage.check(second, self.final_path)
+        args = SimpleNamespace(
+            num_rollout=20, rollout_batch_size=32, n_samples_per_prompt=8
+        )
+        with self.assertRaisesRegex(ValueError, "has no rl_submission"):
+            agent_training.check_rl_budget("local", first, args)
+
+    def test_validate_applies_the_freeze_receipt_checks(self):
+        """Validate --checkpoint refuses what freeze refuses and passes the rest."""
+        run = self.local_run("rl_trial_1", 10, self.base)
+        receipt = json.loads((run / "rl_submission.json").read_text())
+        receipt["base_model"] = "Qwen/Qwen3-4B"
+        (run / "rl_submission.json").write_text(json.dumps(receipt))
+        args = SimpleNamespace(data=str(self.final_path), checkpoint=str(run))
+        with patch.dict("os.environ", {"PDB_TRAIN_BACKEND": "local"}), patch.object(
+            agent_training, "checkpoint_files"
+        ):
+            agent_training.validate(args)
+            for checkpoint in (self.base, self.local_run("rl_trial_2", 10, self.base)):
+                with self.subTest(checkpoint=checkpoint.name):
+                    args.checkpoint = str(checkpoint)
+                    with self.assertRaisesRegex(ValueError, "at least one completed"):
+                        agent_training.validate(args)
 
     def test_rl_refuses_another_batch_shape(self):
         """More prompts per step would be more training in the same 80 steps."""

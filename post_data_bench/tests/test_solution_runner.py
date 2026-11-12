@@ -1,9 +1,18 @@
 """rl.solution_runner runs solutions as grade()'s run_program/call_method do."""
+import asyncio
 import importlib.util
+import json
+import os
+import tempfile
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
+from coding.rl import rubric_rm
 from coding.rl.solution_runner import (
     RLSandboxRunner,
+    _messages,
     rubric_score,
     rubric_verifier,
     run_solution,
@@ -215,6 +224,114 @@ class RubricScoreTests(unittest.TestCase):
             self.assertEqual(report.column(name).counts[0], 3)
         # Every row is the same task, so another row's target solves it too.
         self.assertEqual([f.split()[0] for f in report.flags], ["other_row"])
+
+
+def judge_reply(score):
+    """A LiteLLM judge reply giving ``score``, with token usage for the ledger."""
+    return SimpleNamespace(
+        usage=SimpleNamespace(prompt_tokens=10, completion_tokens=2),
+        choices=[
+            SimpleNamespace(
+                finish_reason="stop",
+                message=SimpleNamespace(content=json.dumps({"score": score})),
+            )
+        ],
+    )
+
+
+class JudgedRubricScoreTests(unittest.TestCase):
+    """rubric_score(judge=True) is the RL reward, prompt criteria included."""
+
+    ROW = {
+        **RubricVerifierTests.ROW,
+        "rubric": [[{"code": GRADE}, 1.0], [{"prompt": "Explains it?"}, 3.0]],
+    }
+
+    def setUp(self):
+        """A private judge ledger and credentials; no real judge calls."""
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.ledger = Path(temporary.name) / "judge_usage.json"
+        environment = patch.dict(
+            os.environ,
+            {
+                "JUDGE_TOKEN_USAGE_FILE": str(self.ledger),
+                "JUDGE_TOKEN_UNIT_LIMIT": "75000000",
+                "JUDGE_MODEL": rubric_rm.JUDGE_MODEL,
+                "JUDGE_REASONING_EFFORT": "low",
+                "PDB_TASK": "coding",
+                "LITELLM_JUDGE_API_KEY": "test",
+                "LITELLM_BASE_URL": "https://example.test",
+            },
+        )
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    def judge(self, **kwargs):
+        """Patch the judge call; kwargs as for AsyncMock."""
+        return patch("litellm.acompletion", new=AsyncMock(**kwargs))
+
+    def test_weights_code_and_judged_criteria_as_rl_does(self):
+        """Code 1 x weight 1 and judge 0.5 x weight 3 give 0.625; default skips it."""
+        with self.judge(return_value=judge_reply(0.5)) as completion:
+            self.assertEqual(rubric_score(judge=True)(target(DOUBLE), self.ROW), 0.625)
+            self.assertEqual(rubric_score()(target(DOUBLE), self.ROW), 1.0)
+        self.assertEqual(completion.await_count, 1)
+        sent = json.loads(completion.call_args.kwargs["messages"][1]["content"])
+        self.assertEqual(sent["prompt"], self.ROW["prompt"])
+        self.assertEqual(sent["response"], target(DOUBLE))
+        self.assertEqual(json.loads(self.ledger.read_text())["calls"], 1)
+
+    def test_matches_custom_rm(self):
+        """The same rubric, prompt, response and label give custom_rm's reward."""
+        row = {**self.ROW, "prompt": "Double it"}  # a string prompt becomes a message
+        sample = SimpleNamespace(
+            response=target("print(5)"),
+            label=row["ground_truth"],
+            metadata={"rubric": row["rubric"], "original_prompt": _messages(row)},
+        )
+        with self.judge(return_value=judge_reply(1)):
+            expected = asyncio.run(rubric_rm.custom_rm(None, sample))
+            self.assertEqual(expected, 0.75)
+            self.assertEqual(
+                rubric_score(judge=True)(target("print(5)"), row), expected
+            )
+
+    def test_content_filter_blocks_leave_the_mean(self):
+        """A blocked prompt criterion is unscored: the code criterion decides."""
+        blocked = RuntimeError('Error code: 400 {"finish_reason":"content_filter"}')
+        only_judged = {**self.ROW, "rubric": [[{"prompt": "Explains it?"}, 1.0]]}
+        with self.judge(side_effect=blocked), patch("sys.stderr"):
+            self.assertEqual(rubric_score(judge=True)(target(DOUBLE), self.ROW), 1.0)
+            self.assertEqual(rubric_score(judge=True)(target(DOUBLE), only_judged), 0.0)
+            self.assertIsNone(rubric_score()(target(DOUBLE), only_judged))
+
+    def test_judge_failures_raise_instead_of_scoring_zero(self):
+        """An unavailable judge is an error to report, never a 0 reward."""
+        with self.judge(side_effect=RuntimeError("down")), patch.dict(
+            os.environ, {"JUDGE_MAX_CONSECUTIVE_FAILURES": "1"}
+        ), patch.object(rubric_rm.asyncio, "sleep", new=AsyncMock()), patch(
+            "sys.stderr"
+        ):
+            with self.assertRaises(rubric_rm.JudgeUnavailable):
+                rubric_score(judge=True)(target(DOUBLE), self.ROW)
+
+    def test_works_inside_a_running_event_loop(self):
+        """E.g. from a notebook cell: the reward runs on a loop of its own."""
+
+        async def caller():
+            return rubric_score(judge=True)(target(DOUBLE), self.ROW)
+
+        with self.judge(return_value=judge_reply(1)):
+            self.assertEqual(asyncio.run(caller()), 1.0)
+
+    def test_cache_key_and_repr_name_the_judge(self):
+        """Judged scores never share cache entries with code-only ones."""
+        judged = rubric_score(judge=True)
+        self.assertEqual(judged.cache_key(), rubric_score(judge=True).cache_key())
+        self.assertNotEqual(judged.cache_key(), rubric_score().cache_key())
+        self.assertIn(rubric_rm.JUDGE_MODEL, judged.cache_key())
+        self.assertEqual(repr(judged), "rubric_score(judge=True)")
 
 
 if __name__ == "__main__":

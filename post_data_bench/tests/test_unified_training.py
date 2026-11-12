@@ -1,5 +1,6 @@
 """Regression tests for unified training."""
 import argparse
+import io
 import json
 import os
 import subprocess
@@ -12,6 +13,7 @@ from unittest.mock import AsyncMock, patch
 from coding.rl import agent_training as training
 from coding.rl import rubric_data as data
 from coding.rl import rubric_rm as rm
+from coding.rl import rubric_worker as worker
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -182,6 +184,25 @@ class CodeTests(unittest.TestCase):
         )
         self.assertEqual(rm.code_score(source, [], "a", "a"), 1)
         self.assertEqual(rm.code_score(source, [], "a", "b"), 0)
+
+    def test_grade_can_call_final_answer(self):
+        """final_answer in grade() follows rubric_rm.final_answer's rule."""
+        source = (
+            "def grade(prompt, response, ground_truth):\n"
+            "    answer = final_answer(response)\n"
+            "    return 1.0 if answer == final_answer(ground_truth) else 0.0\n"
+        )
+        gold = "<think>work</think> 42 "
+        for response, expected in (
+            ("<think>a</think>b</think> 42", 1.0),
+            ("<think>a</think> 41", 0.0),
+            ("<think>cut off before 42", 0.0),
+        ):
+            with self.subTest(response=response):
+                self.assertEqual(rm.code_score(source, [], response, gold), expected)
+        for text in ("<think>a</think>b</think> c ", "<think>open", " plain ", None):
+            with self.subTest(text=text):
+                self.assertEqual(worker.final_answer(text), rm.final_answer(text))
 
     def test_forbidden_access_and_invalid_score(self):
         """Verify forbidden access and invalid score."""
@@ -501,6 +522,101 @@ class RewardTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(rm.JudgeUnavailable):
                 await rm.prompt_score("criterion", [], "response", "gold")
             self.assertEqual(completion.await_count, 9)
+
+    async def test_circuit_error_names_the_cause_without_secrets(self):
+        """The error and one stderr line per streak give class, status, category."""
+
+        class RateLimitError(Exception):
+            status_code = 429
+
+        failure = RateLimitError("sk-live-123 private provider body")
+        with patch.dict(
+            os.environ,
+            {
+                "LITELLM_JUDGE_API_KEY": "sk-live-123",
+                "LITELLM_BASE_URL": "https://example.test",
+                "JUDGE_MAX_CONSECUTIVE_FAILURES": "2",
+            },
+        ), patch(
+            "litellm.acompletion", new=AsyncMock(side_effect=failure)
+        ), patch.object(
+            rm.asyncio, "sleep", new=AsyncMock()
+        ), patch(
+            "sys.stderr", new_callable=io.StringIO
+        ) as stderr:
+            with self.assertRaises(rm.JudgeUnavailable) as error:
+                await rm.prompt_score("criterion", [], "response", "gold")
+        message = str(error.exception)
+        self.assertIn("RateLimitError HTTP 429 rate_limit", message)
+        self.assertIn("throttling", message)
+        lines = stderr.getvalue().splitlines()
+        self.assertEqual(len(lines), 1)  # 6 failed attempts, one streak
+        self.assertIn("JUDGE_FAILURE", lines[0])
+        self.assertIn("RateLimitError HTTP 429 rate_limit", lines[0])
+        for text in (message, stderr.getvalue()):
+            self.assertNotIn("sk-", text)
+            self.assertNotIn("private", text)
+
+    async def test_each_failure_streak_prints_once(self):
+        """A success ends the streak, so the next failure prints again."""
+        success = SimpleNamespace(
+            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=2),
+            choices=[SimpleNamespace(message=SimpleNamespace(content='{"score": 1}'))],
+        )
+        not_json = SimpleNamespace(
+            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=2),
+            choices=[
+                SimpleNamespace(
+                    finish_reason="length", message=SimpleNamespace(content="")
+                )
+            ],
+        )
+        with patch.dict(
+            os.environ,
+            {
+                "LITELLM_JUDGE_API_KEY": "test",
+                "LITELLM_BASE_URL": "https://example.test",
+            },
+        ), patch(
+            "litellm.acompletion",
+            new=AsyncMock(
+                side_effect=[TimeoutError(), TimeoutError(), success, not_json, success]
+            ),
+        ), patch.object(
+            rm.asyncio, "sleep", new=AsyncMock()
+        ), patch(
+            "sys.stderr", new_callable=io.StringIO
+        ) as stderr:
+            self.assertEqual(await rm.prompt_score("c", [], "r", "g"), 1)
+            self.assertEqual(await rm.prompt_score("c", [], "r", "g"), 1)
+        lines = stderr.getvalue().splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertIn("(TimeoutError timeout)", lines[0])
+        self.assertIn("(reply truncated)", lines[1])
+
+    def test_failure_reason_categories(self):
+        """Status codes and class names map to categories; messages stay out."""
+
+        class Error(Exception):
+            def __init__(self, message, status_code=None):
+                super().__init__(message)
+                self.status_code = status_code
+
+        cases = [
+            (Error("x", 401), "Error HTTP 401 auth"),
+            (Error("x", 503), "Error HTTP 503 server_error"),
+            (Error("x", 400), "Error HTTP 400 bad_request"),
+            (Error("Budget has been exceeded! sk-abc", 400), "Error HTTP 400 budget"),
+            (ConnectionError("refused"), "ConnectionError connection"),
+            (ValueError("sk-abc"), "ValueError other"),
+        ]
+        for exc, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertEqual(rm.failure_reason(exc=exc), expected)
+        reply = SimpleNamespace(
+            choices=[SimpleNamespace(finish_reason="stop", message=None)]
+        )
+        self.assertEqual(rm.failure_reason(result=reply), "reply bad_json")
 
     async def test_judge_sees_and_instructions_shape_the_request(self):
         """judge_sees limits the payload; instructions extend the system message."""
@@ -896,6 +1012,7 @@ class LocalRLOnlyTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            base = root / "hub/models--Qwen--Qwen3-4B/snapshots/1cfa9a72"
             write_rows(root / "rows.jsonl", rows())
             args = argparse.Namespace(
                 data=str(root / "rows.jsonl"),
@@ -919,12 +1036,12 @@ class LocalRLOnlyTests(unittest.TestCase):
             ), patch.object(
                 training, "run", side_effect=commands.append
             ), patch.object(
-                local_training, "start_checkpoint", return_value=root / "base"
+                local_training, "start_checkpoint", return_value=base
             ):
                 training.train_rl(args)
         (command,) = commands
-        self.assertEqual(starts, [root / "base"])
-        self.assertEqual(last_value(command, "--checkpoint"), str(root / "base"))
+        self.assertEqual(starts, [base])
+        self.assertEqual(last_value(command, "--checkpoint"), str(base))
         self.assertEqual(last_value(command, "--num-rollout"), "80")
         self.assertEqual(last_value(command, "--rollout-batch-size"), "32")
         self.assertIn("--skip-final-eval", command)

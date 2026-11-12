@@ -5,6 +5,7 @@ from pyforger.acquire.model import (
     LocalModel,
     Model,
     PromptTooLongError,
+    ReplayedRowError,
     TargetLogprobs,
     split_reasoning,
 )
@@ -43,6 +44,7 @@ __all__ = [
     "TinkerModel",
     "TinkerBudgetExceeded",
     "PromptTooLongError",
+    "ReplayedRowError",
     "TargetLogprobs",
     "split_reasoning",
     "retrieve",

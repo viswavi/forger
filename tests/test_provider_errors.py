@@ -838,17 +838,55 @@ class TestRowErrors:
         ],
     )
     def test_generate_from_context_leaves_row_none(self, error, reason, caplog):
-        """The op returns, the row's slot is None, and the warning names why."""
-        model = FlakyModel(fail={"B": 9}, error=error)
+        """The op returns, the row's slot is None, and the warning names why.
+
+        The result is cached: a rerun gives the same rows, even though asking
+        again might pass the filter (here B would now be answered).
+        """
+        model = FlakyModel(fail={"B": 1}, error=error)
         with caplog.at_level(logging.WARNING):
             rows = generate_from_context(ITEMS, "{q}", model, max_retries=3)
         assert rows == [{"text": "A#0"}, None, {"text": "C#0"}]
         assert [c[0] for c in model.calls] == ["A", "B", "C"]  # B not asked again
         assert (
             "alter.generate_from_context: 1 of 3 prompts failed after the model's "
-            f"retries; their slots are None: {reason} (result not cached)"
+            f"retries; their slots are None: {reason} (result cached, so a rerun "
+            "gives the same rows; pass _no_cache=True to ask again)"
         ) in caplog.text
         assert trace()[-1].cache_hit is False
+        assert generate_from_context(ITEMS, "{q}", model, max_retries=3) == rows
+        assert trace()[-1].cache_hit is True
+        assert len(model.calls) == 3
+
+    def test_step_with_a_blocked_row_is_cached(self, monkeypatch):
+        """Editing a later step reruns only that step, not one with a blocked row.
+
+        Before, the blocked row kept the first step uncached, so every rerun
+        asked again; once the filter let it through, the new row changed every
+        later step's input and cache key.
+        """
+        monkeypatch.setenv("FORGER_STEP_REPORT", "0")
+        _tracking.clear_step_records()
+        model = FlakyModel(fail={"B": 1}, error=_content_filter)
+
+        @step
+        def seeds(rows, model):
+            return filter_none(generate_from_context(rows, "{q}", model))
+
+        @step
+        def assemble(rows):
+            return filter_none([{"seed": row["text"]} for row in rows])
+
+        assert assemble(seeds(ITEMS, model)) == [{"seed": "A#0"}, {"seed": "C#0"}]
+
+        @step(name="assemble")
+        def assemble_edited(rows):
+            return filter_none([{"seed": row["text"], "v": 2} for row in rows])
+
+        assert len(assemble_edited(seeds(ITEMS, model))) == 2
+        assert _tracking.step_records()["seeds"].cache_hit is True
+        assert _tracking.step_records()["assemble"].cache_hit is False
+        assert len(model.calls) == 3
 
     def test_reasons_and_types_are_counted_together(self, monkeypatch):
         """The step report counts row errors by reason next to other failures."""
@@ -933,7 +971,8 @@ class TestRowErrors:
         assert len(rows) == 2
         assert (
             "acquire.sample_from_LLM: 2 of 3 samples; 1 request(s) failed: "
-            "1 prompt blocked by the provider's content filter (result not cached)"
+            "1 prompt blocked by the provider's content filter (result cached, so "
+            "a rerun gives the same rows; pass _no_cache=True to ask again)"
         ) in caplog.text
 
 

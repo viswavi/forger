@@ -356,6 +356,13 @@ else
   echo ">>> bf16 (default); pass --fp16 to train and roll out in fp16 instead"
 fi
 
+# Slime evaluates val.jsonl (4 samples per prompt) before the first step and
+# after every EVAL_INTERVAL-th step; --eval-interval 0 (probes) skips it.
+EVAL_ARGS=""
+if [ "$EVAL_INTERVAL" -gt 0 ]; then
+  EVAL_ARGS="--eval-interval $EVAL_INTERVAL --eval-prompt-data generated_val '$RL_DATA_DIR/val.jsonl' --n-samples-per-eval-prompt 4 --eval-max-response-len $MAX_RESPONSE_LEN"
+fi
+
 RM_WORKERS="${LCB_RM_WORKERS:-$(( $(nproc) / 2 ))}"
 [ "$RM_WORKERS" -ge 4 ] || RM_WORKERS=4
 
@@ -449,10 +456,7 @@ ray job submit --address=http://127.0.0.1:8265 --submission-id=\"\$RAY_JOB_ID\" 
   --global-batch-size $GLOBAL_BATCH_SIZE \
   --balance-data \
   $DYNAMIC_FILTER_ARGS \
-  --eval-interval $EVAL_INTERVAL \
-  --eval-prompt-data generated_val '$RL_DATA_DIR/val.jsonl' \
-  --n-samples-per-eval-prompt 4 \
-  --eval-max-response-len $MAX_RESPONSE_LEN \
+  $EVAL_ARGS \
   --advantage-estimator grpo \
   --use-kl-loss \
   --kl-loss-coef $KL_LOSS_COEF \
@@ -504,7 +508,8 @@ export LCB_RM_LOG_DIR="$ROLLOUT_LOG_DIR"
 export LCB_RM_DOUBT_REWARD="$DOUBT_REWARD"
 export LCB_RM_DOUBT_MIN="$DOUBT_MIN"
 # A unique marker directory per attempt prevents stale quota stops on resume.
-JUDGE_STOP_DIR="$(mktemp -d "$OUTPUT_DIR/logs/judge-stop.XXXXXX")"
+# It stays empty unless the judge quota stops the run (then it holds quota.json).
+JUDGE_STOP_DIR="$(mktemp -d "$OUTPUT_DIR/logs/judge_quota.XXXXXX")"
 export JUDGE_QUOTA_STOP_FILE="$JUDGE_STOP_DIR/quota.json"
 set +e
 run_in_slime "$TRAIN_SCRIPT"

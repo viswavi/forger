@@ -31,8 +31,11 @@ Failures that do not raise (the first three below) leave that prompt's slots `No
   (`ContextWindowExceededError` or `pyforger.PromptTooLongError`). Never retried. If every prompt of a call (at
   least 2) hits one, the op raises instead: fix the template or model.
 - Other errors (bad API key, unknown model, other 400s, exhausted quota, spending cap) raise at once.
-- Provider failures produce one warning in the step report and leave the op and step uncached; a rerun re-sends
-  only the failed prompts.
+- Provider failures produce one warning in the step report. A transient failure leaves the op and step uncached; a
+  rerun re-sends only those prompts.
+- Row errors are cached, in the op cache and the request cache: a rerun gives the same `None` rows instead of asking
+  again (the filter does not block a prompt every time, and one prompt answered on a rerun would change every later
+  step's input). `_no_cache=True` asks blocked prompts again.
 
 Reasoning traces go under `thinking_trace`. `LocalModel` leaves `<think>` blocks inline; separate them with
 `acquire.split_reasoning`.

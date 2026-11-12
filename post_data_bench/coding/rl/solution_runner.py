@@ -16,10 +16,13 @@ and rubrics that disagree (a solution using ``__slots__``, a grade() that
 crashes) show up before training. ``rubric_verifier`` scores a sampled response
 the same way, e.g. to measure with ``filter.by_pass_at_k`` how often a
 checkpoint already earns full reward on a row, and ``rubric_score`` returns the
-score itself, e.g. as the ``grade`` of ``pyforger.inspect.rubric_scores``.
+score itself, e.g. as the ``grade`` of ``pyforger.inspect.rubric_scores``. These
+run only code criteria; ``rubric_score(judge=True)`` also runs prompt criteria
+through the RL judge, giving the full RL reward.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
@@ -31,7 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from .rubric_data import validate_rubric  # noqa: ABS101
-from .rubric_rm import _WORKER_ENV, code_score  # noqa: ABS101
+from .rubric_rm import _WORKER_ENV, code_score, rubric_reward  # noqa: ABS101
 from .rubric_worker import RUN_TIMEOUT_S  # noqa: ABS101
 
 _WORKER = Path(__file__).with_name("solution_worker.py")
@@ -146,12 +149,18 @@ def run_solution(code: str, tests: list[dict]) -> list[dict[str, Any]]:
     return results
 
 
-def _code_jobs(row: dict, response: str) -> list[tuple[int, str, list, str, str]]:
-    """The row's weighted code criteria as (index, code, prompt, response, target)."""
-    rubric = validate_rubric(row["rubric"])
+def _messages(row: dict) -> list:
+    """The row's prompt as chat messages; a string becomes one user message."""
     prompt = row["prompt"]
     if isinstance(prompt, str):
         prompt = [{"role": "user", "content": prompt}]
+    return prompt
+
+
+def _code_jobs(row: dict, response: str) -> list[tuple[int, str, list, str, str]]:
+    """The row's weighted code criteria as (index, code, prompt, response, target)."""
+    rubric = validate_rubric(row["rubric"])
+    prompt = _messages(row)
     return [
         (j, criterion["code"], prompt, response, row["ground_truth"])
         for j, (criterion, weight) in enumerate(rubric)
@@ -236,35 +245,70 @@ def _response_score(response: str, row: dict) -> float | None:
     return _weighted(row, criteria)["score"]
 
 
+def _run_sync(coroutine: Any) -> Any:
+    """Run a coroutine to completion, also from code inside a running event loop."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coroutine)
+    with ThreadPoolExecutor(max_workers=1) as pool:  # e.g. a notebook's loop
+        return pool.submit(asyncio.run, coroutine).result()
+
+
 class RubricScore:
     """``(response, row) -> float | None``: see ``rubric_score``."""
 
+    def __init__(self, judge: bool = False) -> None:
+        """Code criteria only, or with ``judge`` every criterion as RL scores it."""
+        self.judge = judge
+
     def cache_key(self) -> tuple:
-        """Stable key for Forger's op cache: the grader's sources."""
-        return ("RubricScore",) + _grader_sources()
+        """Stable key for Forger's op cache: the grader's sources (and judge)."""
+        if not self.judge:
+            return ("RubricScore",) + _grader_sources()
+        judge = (
+            os.environ.get("JUDGE_MODEL", ""),
+            os.environ.get("JUDGE_REASONING_EFFORT", ""),
+        )
+        return ("RubricScore", "judge") + judge + _grader_sources()
 
     def __repr__(self) -> str:
         """Short name for error messages and reports."""
-        return "rubric_score()"
+        return "rubric_score(judge=True)" if self.judge else "rubric_score()"
 
     def __call__(self, response: str, row: dict) -> float | None:
-        """Score ``response`` with the row's code criteria in the RL sandbox."""
+        """Score ``response`` with the row's rubric (see ``rubric_score``)."""
         _check_call(response, row)
-        return _response_score(response, row)
+        if not self.judge:
+            return _response_score(response, row)
+        return _run_sync(
+            rubric_reward(row["rubric"], _messages(row), response, row["ground_truth"])
+        )
 
 
-def rubric_score() -> RubricScore:
-    """Forger grade function: a response's weighted code score on its row's rubric.
+def rubric_score(judge: bool = False) -> RubricScore:
+    """Forger grade function: a response's weighted score on its row's rubric.
 
-    ``grade(response, row)`` scores ``response`` as ``score_targets`` scores a
-    target (the RL reward's sandbox, timeouts and weights, over the code
-    criteria; prompt criteria need the judge and are not run). None when the
-    row has no weighted code criteria; an invalid rubric raises. For
-    ``pyforger.inspect.rubric_scores(rows, rubric_score(),
+    By default ``grade(response, row)`` runs only the code criteria, as
+    ``score_targets`` scores a target (the RL reward's sandbox, timeouts and
+    weights); prompt criteria are skipped. None when the row has no weighted
+    code criteria; an invalid rubric raises.
+
+    ``judge=True`` scores every criterion exactly as the RL reward does
+    (``rubric_rm.rubric_reward``, the code ``custom_rm`` runs): prompt criteria
+    go to the RL judge, charged to the shared judge ledger
+    (JUDGE_TOKEN_USAGE_FILE), and a criterion the content filter blocks drops
+    out of the mean (0 when all are blocked). E.g. a rubric of one code
+    criterion (weight 1) and one prompt criterion (weight 3) scores 0.25 for a
+    response that passes only the code one, where the default gives 1.0. Judge
+    failures raise ``JudgeUnavailable``; never a silent 0.
+
+    For ``pyforger.inspect.rubric_scores(rows, rubric_score(),
     response_fields="ground_truth", model=...)``, which bins the scores of
-    targets, samples, and control responses before RL.
+    targets, samples, and control responses before RL, or as the ``metric`` of
+    ``filter.by_pass_at_k`` (the pass rate becomes the mean score).
     """
-    return RubricScore()
+    return RubricScore(judge)
 
 
 class RubricVerifier:

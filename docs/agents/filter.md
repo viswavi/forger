@@ -68,6 +68,10 @@ tend to score nearly everything at the top:
   (`explanation_field`, or the dropped rows in the step report) before trusting a threshold.
 - Cost trap: a reasoning judge can cost more than the generation (GLM-5.3 at `reasoning_effort="low"`: about 7K
   output tokens, 92K token units, per call). Judge a few rows first and check the step report's units column.
+- Feedback can be most of a judge call's output. `max_feedback_words=50` asks only for the mistakes that set the
+  score, in at most 50 words; `0` asks for the score alone (`{"score": 3}`), leaving `explanation_field` and
+  dropped-row notes empty. The default (None) asks for every mistake. It changes only the appended answer
+  instruction: a template with its own `"score"` format keeps it.
 - Judge scores are cached separately from `score_threshold` and `agreement_threshold`, so re-thresholding makes no
   new judge calls.
 - `num_judges > 1` needs `temperature > 0`; `agreement_threshold` is compared with the fraction of judges scoring at
@@ -102,11 +106,16 @@ kept = filter.by_llm_score(
 Failures and parsing (the first holds for every LLM filter):
 
 - An unparseable answer, a request that still fails after retries (504, timeout), or a row error (content filter,
-  prompt over the context window) is no vote. The step report warns, and the result is not cached, so a rerun asks
-  again. Errors a retry cannot fix (bad key, other 400s, spending cap, quota) raise.
+  prompt over the context window) is no vote, and the step report warns. After a transient failure the result is not
+  cached, so a rerun asks again; a row error is cached like an answer, so a rerun gives the same votes. Errors a
+  retry cannot fix (bad key, other 400s, spending cap, quota) raise.
+- The no-score warning and the dropped rows' notes quote an unparseable reply, cut short
+  (`an unparseable reply: "Score: 4 out of 5 …"`, or `(empty reply)` for a judge that spent `max_tokens` thinking).
 - Answers are read after a closed `</think>`; a judge cut off inside `<think>` gives no score.
 - `prompt_template` replaces the prompt; placeholders are the row's fields plus `{input}`, `{output}`,
-  `{criteria}`, `{max_score}`, `{rubric}`. Write literal braces as `{{ }}`.
+  `{criteria}`, `{max_score}`, `{rubric}`. Write literal braces as `{{ }}`. The named placeholders win over row
+  fields: a row's own `criteria` list never reaches `{criteria}` (the `criteria=` string), and a warning names each
+  row field hidden that way.
 
 ## Difficulty filters
 
@@ -136,10 +145,14 @@ Grading guardrails for `by_comparative_difficulty` and `by_pass_at_k`:
   bare answer or pass `extract_answer`, e.g. `lambda t: t.rsplit("ANSWER:", 1)[-1].strip()`.
 - `metric` is `"exact_match"`, `"rouge_l"` (both need `ground_truth_field`), or a verifier
   `(prediction, row) -> bool | None` such as `filter.program_verifier("tests")`. Verifiers must be thread-safe.
-- A `None` grade (empty answer, failed request, verifier returning `None`) is excluded, not failed. `by_pass_at_k`
-  needs all `k` grades valid unless `min_valid` allows fewer.
-- Truncated samples (`<think>` never closed): `by_pass_at_k` grades them failed (`truncated="fail"`),
-  `by_comparative_difficulty` excludes them. The step report counts them; if most are truncated, raise `max_tokens`.
+- A `None` grade (empty answer not cut off, failed request, verifier returning `None`) is excluded, not failed.
+  `by_pass_at_k` needs all `k` grades valid unless `min_valid` allows fewer.
+- Truncated samples (`<think>` never closed, or an empty answer that stopped at `max_tokens`, e.g. a model returning
+  its reasoning separately): `by_pass_at_k` grades them failed (`truncated="fail"`), `by_comparative_difficulty`
+  excludes them. The step report counts both kinds (`34 of 47 samples truncated (stopped at max_tokens before any
+  answer)`) and splits rows with no pass rate (`unparsed` in the histogram) into those that lost samples to
+  truncation and those whose answers did not grade. If most are truncated, raise `max_tokens` or lower
+  `reasoning_effort`.
 - Predictions are cached apart from grades: changing the bounds or metric makes no model calls, and adding tasks or
   raising `k` samples only what is new.
 
