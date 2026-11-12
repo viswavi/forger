@@ -1012,6 +1012,7 @@ class LocalRLOnlyTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            base = root / "hub/models--Qwen--Qwen3-4B/snapshots/1cfa9a72"
             write_rows(root / "rows.jsonl", rows())
             args = argparse.Namespace(
                 data=str(root / "rows.jsonl"),
@@ -1035,12 +1036,12 @@ class LocalRLOnlyTests(unittest.TestCase):
             ), patch.object(
                 training, "run", side_effect=commands.append
             ), patch.object(
-                local_training, "start_checkpoint", return_value=root / "base"
+                local_training, "start_checkpoint", return_value=base
             ):
                 training.train_rl(args)
         (command,) = commands
-        self.assertEqual(starts, [root / "base"])
-        self.assertEqual(last_value(command, "--checkpoint"), str(root / "base"))
+        self.assertEqual(starts, [base])
+        self.assertEqual(last_value(command, "--checkpoint"), str(base))
         self.assertEqual(last_value(command, "--num-rollout"), "80")
         self.assertEqual(last_value(command, "--rollout-batch-size"), "32")
         self.assertIn("--skip-final-eval", command)

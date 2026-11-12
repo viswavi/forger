@@ -989,13 +989,24 @@ DEADLINE_TEXT = (
     f"({AGENT_DEADLINE.astimezone(timezone.utc):%H:%M} UTC; check with `date`)"
 )
 
+# What a turn is, and how to wait without spending them: forger_pair1 (2026-11-12)
+# spent ~400 of its turns on 189 "soft timeout" returns of `sleep 290; tail log`.
+TURNS_TEXT = (
+    f"The session ends at {args.max_iterations} turns. Each of your actions "
+    "(usually one tool call and its result) is one turn, including a terminal "
+    'call that returns "Process still running (soft timeout)": the terminal tool '
+    "returns after 30 seconds without new output unless the call sets its "
+    "`timeout` parameter (in seconds, at most 3600). For example, "
+    "`sleep 1700; tail -5 run.log` with timeout=1800 waits 30 minutes in one turn."
+)
+
 INSTRUCTIONS = (
     "\nYou have "
     f"{TIMEOUT:g}"
     f" hours, ending at {DEADLINE_TEXT}, and a target budget of "
     f"{AGENT_TURN_BUDGET}"
     " agent turns -- plan your approach so you can finish "
-    "comfortably within that many turns. You are running "
+    f"comfortably within that many turns. {TURNS_TEXT} You are running "
     "inside a sandbox with a full coding "
     "environment, "
     f"{AGENT_GPU_DESC}"
@@ -1030,7 +1041,7 @@ if args.training_mode == "sft-rl":
     # coding/minimal_scaffold_prompt.txt keep it identical across scaffolds.
     INSTRUCTIONS = (
         f"\nYou have {TIMEOUT:g} hours, ending at {DEADLINE_TEXT}, and a target "
-        f"budget of {AGENT_TURN_BUDGET} turns.\n\n"
+        f"budget of {AGENT_TURN_BUDGET} turns. {TURNS_TEXT}\n\n"
         f"{prompt_content}\n"
     )
 
