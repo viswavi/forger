@@ -250,9 +250,9 @@ def configure_run_token_budgets(directory, task):
     from coding.rl.tinker_budget import DEFAULT_LIMITS_USD, TinkerBudget
     from coding.rl.token_budget import (
         DEFAULT_JUDGE_MODEL,
-        DEFAULT_REASONING_EFFORT,
         TokenUnitBudget,
         default_generation_limit,
+        default_judge_reasoning_effort,
         default_rl_limit,
         validate_judge_model,
         validate_reasoning_effort,
@@ -279,7 +279,7 @@ def configure_run_token_budgets(directory, task):
             **policy,
             "judge_model": os.environ.get("JUDGE_MODEL", DEFAULT_JUDGE_MODEL),
             "judge_reasoning_effort": os.environ.get(
-                "JUDGE_REASONING_EFFORT", DEFAULT_REASONING_EFFORT
+                "JUDGE_REASONING_EFFORT", default_judge_reasoning_effort(task)
             ),
         }
         new_config = True

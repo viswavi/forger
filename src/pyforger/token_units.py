@@ -157,8 +157,21 @@ def default_generation_limit(task):
     if normalized == "clinical":
         # Mostly DeepSeek-V4-Flash: a 3-call example (question, reference answer,
         # criteria) took ~8,500 units; GLM-5.3 at low effort ~244,000 (2026-11-11).
-        return 230_000_000
+        # 30M moved to the judge (2026-11-12): agents used ~120-160M of 230M.
+        return 200_000_000
     raise ValueError("Unknown task for the generation token-unit quota")
+
+
+def default_judge_reasoning_effort(task):
+    """The judge's reasoning effort when JUDGE_REASONING_EFFORT is not set.
+
+    "none" for the clinical task: on its gold and weak answers it separated them
+    nearly as well as "low" (0.958 vs 0.475, against 0.992 vs 0.398) at about half
+    the units per call (2026-11-12 run); "low" elsewhere.
+    """
+    if str(task).strip().lower() == "clinical":
+        return "none"
+    return DEFAULT_REASONING_EFFORT
 
 
 def default_rl_limit(task):
@@ -174,10 +187,10 @@ def default_rl_limit(task):
         # Responses run ~15K tokens, so judging them costs more per rollout.
         return 150_000_000
     if normalized == "clinical":
-        # Every answer is judged per criterion: 230M covers one 80 x 32 x 8 run at
-        # ~3-5 criteria per prompt, plus 40M for validation evaluations, which
-        # use this judge quota too.
-        return 270_000_000
+        # Every answer is judged per criterion, and validation evaluations use this
+        # quota too. In the first runs (2026-11-12) one judge call cost ~3,200 units
+        # at low effort with answer_only, so 80 steps at ~3.7 criteria needed ~240M.
+        return 300_000_000
     raise ValueError("Unknown task for RL token-unit quota")
 
 

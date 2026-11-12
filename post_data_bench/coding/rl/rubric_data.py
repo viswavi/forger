@@ -126,6 +126,17 @@ def validate_code(source):
 # (default all, e.g. ["response"] for "mentions anticoagulation"); instructions
 # are added to the judge's system message for this criterion only.
 PROMPT_OPTIONS = ("answer_only", "judge_sees", "instructions")
+# Tasks whose prompt criteria default to answer_only (by the launcher's public task
+# name, $PDB_TASK): clinical answers are graded on their final text only.
+ANSWER_ONLY_TASKS = ("clinical",)
+
+
+def answer_only_default(task=None):
+    """Whether a prompt criterion without "answer_only" grades final answers only."""
+    task = task if task is not None else os.environ.get("PDB_TASK", "")
+    return str(task).strip().lower() in ANSWER_ONLY_TASKS
+
+
 JUDGE_FIELDS = ("prompt", "response", "ground_truth")
 MAX_INSTRUCTIONS = 4000
 

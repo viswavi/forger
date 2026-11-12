@@ -143,3 +143,50 @@ class AgentCopyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClinicalDefaultsTests(unittest.IsolatedAsyncioTestCase):
+    """The clinical task's judge defaults: answer_only on, effort none."""
+
+    async def test_prompt_criteria_default_to_answer_only(self):
+        """Without "answer_only", clinical criteria grade final answers only."""
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, patch
+
+        from coding.rl import rubric_rm as rm
+
+        sample = SimpleNamespace(
+            response="<think>t</think>answer",
+            label="",
+            prompt="templated",
+            metadata={
+                "original_prompt": [{"role": "user", "content": "q"}],
+                "rubric": [
+                    [{"prompt": "a"}, 1],
+                    [{"prompt": "b", "answer_only": False}, 1],
+                ],
+            },
+        )
+        for task, expected in (
+            ("clinical", [True, False]),
+            ("algorithmic", [False, False]),
+        ):
+            with patch.dict("os.environ", {"PDB_TASK": task}), patch.object(
+                rm, "prompt_score", new=AsyncMock(return_value=1)
+            ) as judge:
+                await rm.custom_rm(None, sample)
+            self.assertEqual(
+                [c.kwargs["answer_only"] for c in judge.call_args_list], expected
+            )
+
+    def test_judge_effort_and_quotas(self):
+        """Clinical: effort none, 200M generation and 300M judge units."""
+        sys.path.insert(0, str(ROOT.parent / "src"))
+        from pyforger import token_units
+
+        self.assertEqual(token_units.default_judge_reasoning_effort("clinical"), "none")
+        self.assertEqual(
+            token_units.default_judge_reasoning_effort("algorithmic"), "low"
+        )
+        self.assertEqual(token_units.default_generation_limit("clinical"), 200_000_000)
+        self.assertEqual(token_units.default_rl_limit("clinical"), 300_000_000)

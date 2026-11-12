@@ -12,7 +12,12 @@ from pathlib import Path
 from typing import TypedDict
 
 # Supports both `rl` CLI imports and `coding.rl` library imports.
-from .rubric_data import JUDGE_FIELDS, score, validate_rubric  # noqa: ABS101
+from .rubric_data import (  # noqa: ABS101
+    JUDGE_FIELDS,
+    answer_only_default,
+    score,
+    validate_rubric,
+)
 from .token_budget import (  # noqa: ABS101
     DEFAULT_JUDGE_MODEL,
     TokenUnitBudget,
@@ -577,7 +582,7 @@ async def custom_rm(args, sample, **kwargs):
                     prompt,
                     response,
                     sample.label,
-                    answer_only=criterion.get("answer_only", False),
+                    answer_only=criterion.get("answer_only", answer_only_default()),
                     judge_sees=tuple(criterion.get("judge_sees", JUDGE_FIELDS)),
                     instructions=criterion.get("instructions", ""),
                 )
