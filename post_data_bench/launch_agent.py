@@ -682,6 +682,7 @@ if args.training_mode == "sft-rl":
             for name in (
                 "run_rl_training_and_evaluation.sh",
                 "rubric_runtime_env.py",
+                "slime_deps.py",
                 "rl_result.py",
                 "ray_job_status.py",
             )
