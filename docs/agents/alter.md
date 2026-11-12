@@ -28,8 +28,12 @@ that trips the filter).
 Other provider errors (a bad API key, an unknown model, any other 400, an exhausted quota, a spending cap) raise at
 once, since retrying cannot fix them. When any slot failed at the provider, the op logs one warning that counts the
 failures by type or reason (`3 of 64 prompts failed after the model's retries; their slots are None: 2 prompts blocked
-by the provider's content filter, InternalServerError ×1`), shows it in the step report, and is not cached (nor is its
-step). Successful requests are cached one by one in the request cache, so a rerun re-sends only the failed prompts.
+by the provider's content filter, InternalServerError ×1`) and shows it in the step report. With a transient failure
+among them the op is not cached (nor is its step). Successful requests are cached one by one in the request cache, so a
+rerun re-sends only the prompts that failed transiently. A row error is cached as one, in the op cache and the request
+cache: a rerun gives the same `None` rows instead of asking again (the content filter does not block a prompt every
+time, and one prompt answered on a rerun would change every later step's input). Pass `_no_cache=True` to the op to
+ask blocked prompts again.
 Parse-failure `None`s are cached. `inspect.topic_based_clustering` does not ask a failed request again either (see
 [LLM judges](filter.md#llm-judges)).
 As with `sample_from_LLM`, reasoning traces are included under a `thinking_trace` key. Inline traces are not extracted:
