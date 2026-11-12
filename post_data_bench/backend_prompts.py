@@ -29,7 +29,7 @@ LOCAL_TRAINING = """Your sandbox has {GPU_DESCRIPTION}. RL, validation and short
   Read metrics.json and predictions.jsonl. Use a fresh output directory when weights or settings change. --model-path {STUDENT_MODEL} evaluates the base model.
 - Short RL probe (2 steps, 32 prompts x 8 samples each, from the base model unless --checkpoint names an RL checkpoint; no holdout evaluation):
   python -m rl.agent_training probe --data {RAW_DATA_PATH} --output-dir {AGENT_DATA_DIR}/rl_probe_1
-  This uses the separate Slime stack and your rubric reward. Its rewards are in logs/reward_dump.jsonl and its rollouts in logs/rollouts/; rl_result.json records the resulting checkpoint. Probes do not evaluate secret test tasks."""
+  This uses the separate Slime stack and your rubric reward. Each graded sample is one line of logs/rollouts/rollouts_*.jsonl with step, prompt_id (`rl.rubric_data.prompt_id(row)` gives it for your rows), reward, truncated, response_tokens, answer (the first 300 characters of the final answer) and, on tasks with an abstention answer, gold_abstains and abstained; in an rl run these files also hold the holdout samples. logs/judge_quota.*/ stays empty unless the judge quota stops the run, which writes quota.json there. rl_result.json records the resulting checkpoint. Probes do not evaluate secret test tasks."""
 
 
 TINKER_RL_START = "You may continue RL from an earlier RL checkpoint or start another RL run from any SFT trial; SFT always starts from the base model."

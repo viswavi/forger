@@ -501,7 +501,8 @@ export LCB_RM_LOG_DIR="$ROLLOUT_LOG_DIR"
 export LCB_RM_DOUBT_REWARD="$DOUBT_REWARD"
 export LCB_RM_DOUBT_MIN="$DOUBT_MIN"
 # A unique marker directory per attempt prevents stale quota stops on resume.
-JUDGE_STOP_DIR="$(mktemp -d "$OUTPUT_DIR/logs/judge-stop.XXXXXX")"
+# It stays empty unless the judge quota stops the run (then it holds quota.json).
+JUDGE_STOP_DIR="$(mktemp -d "$OUTPUT_DIR/logs/judge_quota.XXXXXX")"
 export JUDGE_QUOTA_STOP_FILE="$JUDGE_STOP_DIR/quota.json"
 set +e
 run_in_slime "$TRAIN_SCRIPT"
