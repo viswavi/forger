@@ -556,16 +556,27 @@ async def prompt_score(
 
 
 async def custom_rm(args, sample, **kwargs):
-    """Compute the weighted reward using the fixed rubric executor.
-
-    A prompt criterion the content filter blocked (prompt_score returns None)
-    leaves the weighted mean, so the other criteria decide the reward; an answer
-    whose criteria are all blocked gets 0.
-    """
+    """Compute the weighted reward using the fixed rubric executor (rubric_reward)."""
     metadata = sample.metadata
-    rubric = validate_rubric(metadata["rubric"])
-    prompt = metadata["original_prompt"]  # Pre-template prompt, exactly as in SFT.
-    response = sample.response or ""
+    return await rubric_reward(
+        metadata["rubric"],
+        metadata["original_prompt"],  # Pre-template prompt, exactly as in SFT.
+        sample.response or "",
+        sample.label,
+    )
+
+
+async def rubric_reward(rubric, prompt, response, ground_truth):
+    """The RL reward of one response: the weighted mean over code and prompt criteria.
+
+    Code criteria run in the sandbox (code_score), prompt criteria through the
+    judge (prompt_score). A prompt criterion the content filter blocked
+    (prompt_score returns None) leaves the weighted mean, so the other criteria
+    decide the reward; an answer whose criteria are all blocked gets 0. E.g.
+    rubric [[{"code": ...}, 1], [{"prompt": "Cites a dose?"}, 3]] scoring 0 and
+    1 gives 0.75.
+    """
+    rubric = validate_rubric(rubric)
     total = scored = 0.0
     for criterion, weight in rubric:
         if weight == 0:
@@ -573,14 +584,14 @@ async def custom_rm(args, sample, **kwargs):
         async with _limit():
             if "code" in criterion:
                 value = await asyncio.to_thread(
-                    code_score, criterion["code"], prompt, response, sample.label
+                    code_score, criterion["code"], prompt, response, ground_truth
                 )
             else:
                 value = await prompt_score(
                     criterion["prompt"],
                     prompt,
                     response,
-                    sample.label,
+                    ground_truth,
                     answer_only=criterion.get("answer_only", False),
                     judge_sees=tuple(criterion.get("judge_sees", JUDGE_FIELDS)),
                     instructions=criterion.get("instructions", ""),
