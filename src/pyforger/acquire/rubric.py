@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 import functools
 import json
 import math
@@ -59,6 +60,44 @@ def _prompt_builder(build: Any, code_criteria_only: bool, code_guidelines: str |
     if code_guidelines is not None:
         options["code_guidelines"] = code_guidelines
     return functools.partial(build, **options) if options else build
+
+
+def _check_prompt_criterion_options(options: dict[str, Any] | None) -> None:
+    """Reject options that are not a dict of extra keys for a prompt criterion."""
+    if options is None:
+        return
+    if not isinstance(options, dict) or any(not isinstance(k, str) for k in options):
+        raise TypeError("prompt_criterion_options must be a dict with string keys")
+    clash = sorted({"prompt", "code"} & set(options))
+    if clash:
+        raise ValueError(
+            f"prompt_criterion_options must not set {clash}: the op writes the "
+            "criterion itself"
+        )
+
+
+def _with_options(
+    rubrics: list[list[list[Any]]], options: dict[str, Any] | None
+) -> list[list[list[Any]]]:
+    """``rubrics`` with ``options`` merged into every prompt criterion.
+
+    E.g. ``{"prompt": "Is it kind?", "answer_only": True}``. Each criterion
+    gets its own copy, so editing one row's options leaves the others alone.
+    """
+    if not options:
+        return rubrics
+    return [
+        [
+            [
+                {**criterion, **copy.deepcopy(options)}
+                if "prompt" in criterion
+                else criterion,
+                weight,
+            ]
+            for criterion, weight in rubric
+        ]
+        for rubric in rubrics
+    ]
 
 
 def _rubric_prompt(
@@ -364,7 +403,7 @@ def _validate_generated_code(source: str) -> None:
 
 
 @op(name="acquire.convert_rubric_criteria")
-def convert_rubric_criteria(
+def _convert_rubric_criteria(
     rubrics: list[list[tuple[str, float]]],
     model: Model,
     *,
@@ -376,28 +415,7 @@ def convert_rubric_criteria(
     code_criteria_only: bool = False,
     code_guidelines: str | None = None,
 ) -> list[list[list[dict[str, str] | float]]]:
-    """Convert text rubrics to RL-format ``[{code|prompt: source}, weight]`` pairs.
-
-    Preserve criterion order, weights, and exact text for prompted judges.
-    ``inputs`` optionally supplies aligned task context. Prefer code for exact
-    deterministic checks; keep semantic or ambiguous criteria as prompt judges.
-    Empty rubrics are preserved. Generation does not execute code: signature,
-    allowlisted top-level/inner imports and RestrictedPython compilation are
-    checked, but semantic correctness still requires task-specific execution
-    tests before training.
-    Malformed outputs receive ``max_retries`` additional fresh attempts, then
-    raise with (rubric, criterion) indices. Provider errors propagate.
-    Use ``_no_cache=True`` for fresh conversion or ``_cache_only=True`` for reads.
-
-    ``code_criteria_only=True`` never keeps a prompted judge: criteria that
-    cannot be checked faithfully in code are dropped, so rubrics may shrink or
-    become empty.
-
-    ``code_guidelines`` adds your grading environment's rules to the system prompt,
-    e.g. "grade() may call run_program(code, stdin), which returns (True, stdout)
-    or (False, error type); code it runs cannot use names starting with '_' or
-    str.format." They cannot widen the import allowlist or the banned builtins.
-    """
+    """The cached conversion; ``convert_rubric_criteria`` adds criterion options."""
     from pyforger.alter.generate import generate_from_context
 
     if not isinstance(rubrics, list):
@@ -492,6 +510,66 @@ def convert_rubric_criteria(
     ]
 
 
+def convert_rubric_criteria(
+    rubrics: list[list[tuple[str, float]]],
+    model: Model,
+    *,
+    inputs: list[str] | None = None,
+    meta_description: str | None = None,
+    temperature: float = 1.0,
+    max_retries: int = 3,
+    batch_size: int = 10,
+    code_criteria_only: bool = False,
+    code_guidelines: str | None = None,
+    prompt_criterion_options: dict[str, Any] | None = None,
+    _no_cache: bool = False,
+    _cache_only: bool = False,
+) -> list[list[list[dict[str, Any] | float]]]:
+    """Convert text rubrics to RL-format ``[{code|prompt: source}, weight]`` pairs.
+
+    Preserve criterion order, weights, and exact text for prompted judges.
+    ``inputs`` optionally supplies aligned task context. Prefer code for exact
+    deterministic checks; keep semantic or ambiguous criteria as prompt judges.
+    Empty rubrics are preserved. Generation does not execute code: signature,
+    allowlisted top-level/inner imports and RestrictedPython compilation are
+    checked, but semantic correctness still requires task-specific execution
+    tests before training.
+    Malformed outputs receive ``max_retries`` additional fresh attempts, then
+    raise with (rubric, criterion) indices. Provider errors propagate.
+    Use ``_no_cache=True`` for fresh conversion or ``_cache_only=True`` for reads.
+
+    ``code_criteria_only=True`` never keeps a prompted judge: criteria that
+    cannot be checked faithfully in code are dropped, so rubrics may shrink or
+    become empty.
+
+    ``code_guidelines`` adds your grading environment's rules to the system prompt,
+    e.g. "grade() may call run_program(code, stdin), which returns (True, stdout)
+    or (False, error type); code it runs cannot use names starting with '_' or
+    str.format." They cannot widen the import allowlist or the banned builtins.
+
+    ``prompt_criterion_options`` is merged into every ``{"prompt": ...}``
+    criterion returned, e.g. ``{"answer_only": True}`` gives
+    ``{"prompt": "Is it kind?", "answer_only": True}``; code criteria are left
+    alone. It may not set "prompt" or "code". It is added after the cached
+    conversion, so changing it never asks the model again.
+    """
+    _check_prompt_criterion_options(prompt_criterion_options)
+    converted = _convert_rubric_criteria(
+        rubrics,
+        model,
+        inputs=inputs,
+        meta_description=meta_description,
+        temperature=temperature,
+        max_retries=max_retries,
+        batch_size=batch_size,
+        code_criteria_only=code_criteria_only,
+        code_guidelines=code_guidelines,
+        _no_cache=_no_cache,
+        _cache_only=_cache_only,
+    )
+    return _with_options(converted, prompt_criterion_options)
+
+
 def generate_custom_rubric(
     inputs: list[str],
     model: Model,
@@ -503,9 +581,10 @@ def generate_custom_rubric(
     batch_size: int = 10,
     code_criteria_only: bool = False,
     code_guidelines: str | None = None,
+    prompt_criterion_options: dict[str, Any] | None = None,
     _no_cache: bool = False,
     _cache_only: bool = False,
-) -> list[list[list[dict[str, str] | float]]]:
+) -> list[list[list[dict[str, Any] | float]]]:
     """Generate mixed prompt/code rubrics in one call (recommended entry point).
 
     Composes cached text generation and conversion. Cache controls propagate to
@@ -520,7 +599,14 @@ def generate_custom_rubric(
     input left without a positive-weight code criterion raises ValueError.
 
     ``code_guidelines`` reaches both stages; see ``convert_rubric_criteria``.
+
+    ``prompt_criterion_options`` adds judge options to every prompt criterion,
+    e.g. ``{"answer_only": True, "judge_sees": ["response"]}`` gives
+    ``{"prompt": "Is it kind?", "answer_only": True, "judge_sees":
+    ["response"]}``; see ``convert_rubric_criteria``.
     """
+    # Checked before the criteria stage spends any model calls.
+    _check_prompt_criterion_options(prompt_criterion_options)
     rubrics = generate_custom_rubric_criteria(
         inputs,
         model,
@@ -539,7 +625,8 @@ def generate_custom_rubric(
             raise ValueError(
                 f"RL rubric at input index {i} must have positive total weight"
             )
-    converted = convert_rubric_criteria(
+    # The cached op, not convert_rubric_criteria: options are added at the end.
+    converted = _convert_rubric_criteria(
         rubrics,
         model,
         inputs=inputs,
@@ -562,4 +649,4 @@ def generate_custom_rubric(
             f"Rubrics at input indices {empty} have no code-checkable criteria "
             "with positive weight"
         )
-    return converted
+    return _with_options(converted, prompt_criterion_options)

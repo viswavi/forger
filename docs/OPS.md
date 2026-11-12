@@ -388,9 +388,10 @@ generate_custom_rubric(
     batch_size: int = 10,
     code_criteria_only: bool = False,
     code_guidelines: str | None = None,
+    prompt_criterion_options: dict[str, Any] | None = None,
     _no_cache: bool = False,
     _cache_only: bool = False,
-) -> list[list[list[dict[str, str] | float]]]
+) -> list[list[list[dict[str, Any] | float]]]
 ```
 
 Generate mixed prompt/code rubrics in one call (recommended entry point).
@@ -413,7 +414,10 @@ convert_rubric_criteria(
     batch_size: int = 10,
     code_criteria_only: bool = False,
     code_guidelines: str | None = None,
-) -> list[list[list[dict[str, str] | float]]]
+    prompt_criterion_options: dict[str, Any] | None = None,
+    _no_cache: bool = False,
+    _cache_only: bool = False,
+) -> list[list[list[dict[str, Any] | float]]]
 ```
 
 Convert text rubrics to RL-format `[{code|prompt: source}, weight]` pairs.

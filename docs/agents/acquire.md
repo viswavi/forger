@@ -127,8 +127,8 @@ rubrics = generate_custom_rubric(
 #                [{"prompt": "Is the story suitable for ages 6–8?"}, 75.0], ...]
 ```
 
-The result uses JSON lists and single-key `code`/`prompt` objects accepted by
-`rl.rubric_data.validate_rubric`. Each code criterion defines a synchronous
+The result uses JSON lists and single-key `code`/`prompt` objects (plus any
+`prompt_criterion_options`, below) accepted by `rl.rubric_data.validate_rubric`. Each code criterion defines a synchronous
 `grade(prompt, response, ground_truth)` returning a numeric score in `[0, 1]`.
 Weights and criterion order are preserved; prompted criteria keep their exact
 text. Ambiguous requirements and combined objective/subjective criteria stay
@@ -160,6 +160,19 @@ rubrics = generate_custom_rubric(
         "(e.g. __slots__, self._x), annotated assignments, str.format, or open()."
     ),
 )
+```
+
+Pass `prompt_criterion_options` to give every prompted criterion your judge's per-criterion options, instead of
+editing the rows afterwards. Its keys are merged into each `{"prompt": ...}` criterion; code criteria are unchanged,
+and it may not set `prompt` or `code`. It is applied after the cached conversion, so changing it reruns no model calls.
+`convert_rubric_criteria` takes it too.
+
+```python
+rubrics = generate_custom_rubric(
+    tasks, model=model, prompt_criterion_options={"answer_only": True, "judge_sees": ["response"]}
+)
+# [[{"code": "def grade(...): ..."}, 100.0],
+#  [{"prompt": "Is the explanation correct?", "answer_only": True, "judge_sees": ["response"]}, 75.0]]
 ```
 
 To inspect or reuse stages independently, keep using the textual generator below
