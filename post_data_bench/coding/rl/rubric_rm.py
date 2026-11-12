@@ -23,6 +23,7 @@ from .token_budget import (  # noqa: ABS101
     DEFAULT_JUDGE_MODEL,
     TokenUnitBudget,
     TokenUnitQuotaExceeded,
+    default_judge_reasoning_effort,
     default_rl_limit,
     held_units,
     response_cost_usd,
@@ -132,7 +133,9 @@ def judge_configuration(default_usage_file=None, task=None, overrides=None):
     env = {**os.environ, **(overrides or {})}
     task = task or env.get("PDB_TASK", "coding")
     model = validate_judge_model(env.get("JUDGE_MODEL", JUDGE_MODEL))
-    effort = validate_reasoning_effort(env.get("JUDGE_REASONING_EFFORT", "low"))
+    effort = validate_reasoning_effort(
+        env.get("JUDGE_REASONING_EFFORT", default_judge_reasoning_effort(task))
+    )
     limit = float(env.get("JUDGE_TOKEN_UNIT_LIMIT", default_rl_limit(task)))
     filename = env.get("JUDGE_TOKEN_USAGE_FILE") or default_usage_file
     if not filename:

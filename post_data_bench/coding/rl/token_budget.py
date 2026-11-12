@@ -55,7 +55,8 @@ def _prepare(budget, kwargs):
             "reasoning",
             {
                 "effort": os.environ.get(
-                    "JUDGE_REASONING_EFFORT", DEFAULT_REASONING_EFFORT
+                    "JUDGE_REASONING_EFFORT",
+                    default_judge_reasoning_effort(os.environ.get("PDB_TASK")),
                 )
             },
         )

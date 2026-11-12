@@ -195,3 +195,22 @@ class ClinicalDefaultsTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(token_units.default_generation_limit("clinical"), 200_000_000)
         self.assertEqual(token_units.default_rl_limit("clinical"), 300_000_000)
+
+    def test_unset_effort_follows_the_task(self):
+        """Without JUDGE_REASONING_EFFORT, RL and the helpers use the task's default."""
+        import os
+        from unittest.mock import patch
+
+        from coding.rl import rubric_rm, token_budget
+
+        env = {k: v for k, v in os.environ.items() if k != "JUDGE_REASONING_EFFORT"}
+        env.update(JUDGE_TOKEN_USAGE_FILE=tempfile.mktemp(), JUDGE_TOKEN_UNIT_LIMIT="1")
+        env["LITELLM_JUDGE_API_KEY"] = "test"
+        for task, effort in (("clinical", "none"), ("algorithmic", "low")):
+            env["PDB_TASK"] = task
+            with patch.dict(os.environ, env, clear=True):
+                config = rubric_rm.judge_configuration(task=task)
+                kwargs = {"messages": []}
+                token_budget._prepare("judge", kwargs)
+            self.assertEqual(config["JUDGE_REASONING_EFFORT"], effort)
+            self.assertEqual(kwargs["reasoning"], {"effort": effort})

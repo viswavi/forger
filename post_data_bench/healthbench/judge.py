@@ -8,9 +8,10 @@ the final answer only, never the reasoning.
 Two judges:
 - "official": the host's grader, gpt-6-luna at high reasoning effort with the host
   key `LITELLM_OFFICIAL_JUDGE_KEY`. It scores the secret test set.
-- "agent": DeepSeek-V4-Flash at JUDGE_REASONING_EFFORT (default low), through the
-  judge token-unit ledger (`rl.token_budget`, budget="judge") and
-  `LITELLM_JUDGE_API_KEY`. Validation runs in the agent's workspace use this one.
+- "agent": DeepSeek-V4-Flash at JUDGE_REASONING_EFFORT (default "none" for the
+  clinical task, as in RL), through the judge token-unit ledger (`rl.token_budget`,
+  budget="judge") and `LITELLM_JUDGE_API_KEY`. Validation runs in the agent's
+  workspace use this one.
 """
 from __future__ import annotations
 
