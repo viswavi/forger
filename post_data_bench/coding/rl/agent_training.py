@@ -351,11 +351,71 @@ def reward_preflight(directory, judge_config=None):
             )
 
 
+def quota_stopped_checkpoints(agent_dir):
+    """Final checkpoints of RL runs the judge quota stopped, newest run first.
+
+    Each run's rl_result.json (written by rl_result.py) names the last usable
+    checkpoint it saved, e.g. ".../rl_trial_2/hf_rollout59" for a run stopped
+    at step 63.
+    """
+    found = []
+    for path in Path(agent_dir).rglob("rl_result.json"):
+        try:
+            result = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if (
+            isinstance(result, dict)
+            and result.get("termination_reason") == "judge_quota_exhausted"
+            and not result.get("initial_checkpoint_fallback")
+            and result.get("checkpoint")
+        ):
+            found.append((path.stat().st_mtime, str(result["checkpoint"])))
+    return [checkpoint for _, checkpoint in sorted(found, reverse=True)]
+
+
+def freeze_or_quota_fallback(data, submission, agent_dir, output, backend):
+    """Freeze the agent's submission, or else its last judge-quota-stopped checkpoint.
+
+    When submission.json is missing or names a checkpoint that fails validation,
+    the newest quota-stopped run's final checkpoint is submitted instead, if it
+    passes the same checks (inside the agent directory, final-dataset lineage, at
+    most the RL step budget). Returns (data, checkpoint, fallback record or None).
+    """
+    try:
+        return (*freeze(data, submission, agent_dir, output, backend), None)
+    except (OSError, ValueError) as exc:
+        error = f"{type(exc).__name__}: {exc}"
+    for candidate in quota_stopped_checkpoints(agent_dir):
+        selection = Path(agent_dir) / "auto_submission.json"
+        selection.write_text(json.dumps({"checkpoint": candidate}) + "\n")
+        try:
+            frozen = freeze(data, selection, agent_dir, output, backend)
+        except (OSError, ValueError):
+            continue
+        return (
+            *frozen,
+            {
+                "checkpoint": candidate,
+                "reason": "judge_quota_exhausted",
+                "agent_submission_error": error[:500],
+            },
+        )
+    raise ValueError(
+        f"No valid submission ({error}) and no judge-quota-stopped RL run with a "
+        "submittable checkpoint"
+    )
+
+
 def finalize(args):
-    """Freeze the selected final RL checkpoint, then run only secret evaluation."""
+    """Freeze the selected final RL checkpoint, then run only secret evaluation.
+
+    Without a valid submission, the last checkpoint of the newest RL run the judge
+    quota stopped is submitted instead (freeze_or_quota_fallback).
+    """
     args.output_dir = str(Path(args.output_dir).resolve())
     backend = saved_backend(args.agent_dir, args.backend)
-    data, checkpoint = freeze(
+    data, checkpoint, fallback = freeze_or_quota_fallback(
         args.data, args.submission, args.agent_dir, args.output_dir, backend
     )
     manifest_path = Path(args.output_dir) / "submission_manifest.json"
@@ -363,6 +423,8 @@ def finalize(args):
     manifest["agent_termination_reason"] = getattr(
         args, "agent_termination_reason", "manual_recovery"
     )
+    if fallback is not None:
+        manifest["auto_submission"] = fallback
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
     command = [
         sys.executable,
