@@ -165,7 +165,8 @@ unparseable, or stopped mid-thought in an unclosed `<think>`) and the rows they 
 `2 of 10 judge calls gave no score (...) → 6 rows unscored`; calls cut off mid-thought are not counted again in the
 op's warning about completions that stopped at `max_tokens`. A row error (a content-filter block or an over-long
 prompt; see `generate_from_context` in [alter.md](alter.md)) counts as a failed request too, and the warning names its
-reason, e.g. `1 prompt longer than the model's context window`; a row error on every prompt (at least 2) raises. Other
+reason, e.g. `1 prompt longer than the model's context window`, but is cached like an answer, so a rerun gives the same
+votes; a row error on every prompt (at least 2) raises. Other
 errors a retry cannot fix (a bad key, another 400, a spending cap or token-unit quota) still raise. The same holds for
 every LLM filter: `by_judged_difficulty` leaves a row whose request failed unrated, `by_pass_at_k` and
 `by_comparative_difficulty` grade a failed sample `None` (excluded), and `inspect.topic_based_clustering` does not ask

@@ -10,6 +10,9 @@ the row the prompt was built from, the messages, every output-changing request
 param, and an optional salt; ``slot`` numbers the completions of that request
 in the op call (n=4 uses slots 0..3; asking again takes 4..7).
 
+A slot whose request hit a row error (a content-filter block, an over-long
+prompt) stores that error instead (``row_error_entry``), so a rerun replays it.
+
 One small JSON file per slot: writes are a temp file plus ``os.replace``, so
 threads and processes need no lock, and a slot written twice at once keeps the
 last write. The 256 shard directories keep each directory small (a million
@@ -113,9 +116,27 @@ def read_slot(key: str, slot: int) -> dict[str, Any] | None:
     except Exception as exc:  # unreadable entry: request the completion again
         logger.debug("request cache read failed for %s: %s", path, exc)
         return None
-    if not isinstance(entry, dict) or not isinstance(entry.get("text"), str):
+    if not isinstance(entry, dict) or not (
+        isinstance(entry.get("text"), str) or is_row_error(entry)
+    ):
         return None
     return entry
+
+
+def row_error_entry(reason: str, error: BaseException) -> dict[str, Any]:
+    """What a slot stores for a request that hit a row error.
+
+    E.g. ``{"row_error": "content filter", "error": "BadRequestError: ..."}``.
+    The error repeats, or may not, on a rerun; either way the rerun should get
+    the rows the first run got, so it replays the error (see Model).
+    """
+    text = " ".join(f"{type(error).__name__}: {error}".split())
+    return {"row_error": reason, "error": text[:500]}
+
+
+def is_row_error(entry: dict[str, Any]) -> bool:
+    """True for a slot that stores a row error, not a completion."""
+    return isinstance(entry.get("row_error"), str)
 
 
 def write_slot(key: str, slot: int, entry: dict[str, Any]) -> None:

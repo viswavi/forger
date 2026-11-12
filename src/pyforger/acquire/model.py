@@ -135,6 +135,25 @@ class PromptTooLongError(ValueError):
     """
 
 
+class ReplayedRowError(Exception):
+    """A row error replayed from the request cache instead of asking again.
+
+    A row error (see `_is_row_error`) is stored in the slots it failed, so a
+    rerun gives the prompt the same error, and so the same rows, instead of
+    asking again and maybe getting an answer this time. ``reason`` is the
+    original's, e.g. "content filter". Pass ``_no_cache=True`` to the op to
+    ask again.
+    """
+
+    def __init__(self, reason: str, error: str) -> None:
+        """``error`` is the original, e.g. "BadRequestError: ... content_filter"."""
+        super().__init__(
+            f"{error} (replayed from the request cache; pass _no_cache=True to "
+            "the op to ask again)"
+        )
+        self.reason = reason
+
+
 # Words in a 400's message or body that mean the provider's content filter
 # blocked the prompt or the reply, e.g. Azure's '"code":"content_filter"'.
 _CONTENT_FILTER_MARKERS = ("content_filter", "content_policy")
@@ -147,6 +166,8 @@ def _row_error_reason(exc: BaseException) -> str | None:
     model, or the account, so neither Model nor the ops retry them, and an op
     gives that prompt's slots None instead of raising.
     """
+    if isinstance(exc, ReplayedRowError):
+        return exc.reason
     if isinstance(exc, (PromptTooLongError, ContextWindowExceededError)):
         return "context window"
     if isinstance(exc, ContentPolicyViolationError):
@@ -1177,22 +1198,21 @@ def _finish_reason(choice: Any) -> str | None:
 def _cache_entry(choice: Any, reasoning: Any) -> dict[str, Any] | None:
     """What the request cache stores for one choice, or None to not cache it.
 
-    Only plain text is cached. Empty or missing text (often a transient glitch),
-    a content-filter stop, and choices carrying tool calls, a function call, or
-    a refusal are not: a replay could not rebuild them, so they are asked again.
-    Empty text that stopped at max_tokens is cached: a reasoning model that
-    spent the whole budget thinking does the same again at that budget.
+    Only plain text is cached. Empty or missing text (often a transient glitch)
+    and choices carrying tool calls, a function call, or a refusal are not: a
+    replay could not rebuild them, so they are asked again. Empty text that
+    stopped at max_tokens is cached: a reasoning model that spent the whole
+    budget thinking does the same again at that budget. So is a reply the
+    content filter cut off, e.g. "" with finish_reason "content_filter": asked
+    again it might pass, and a rerun must give the rows the first run got.
     """
     message = choice.message
     text = message.content
     finish_reason = _finish_reason(choice)
-    if text is None and finish_reason == "length":
+    stopped = finish_reason in ("length", "content_filter")
+    if text is None and stopped:
         text = ""
-    if (
-        not isinstance(text, str)
-        or (not text and finish_reason != "length")
-        or finish_reason == "content_filter"
-    ):
+    if not isinstance(text, str) or (not text and not stopped):
         return None
     for extra in ("tool_calls", "function_call", "refusal"):
         if getattr(message, extra, None):
@@ -1867,7 +1887,10 @@ class Model:
                 (timeouts, 429, 5xx). A non-transient one (a spending cap, the
                 token-unit quota, a bad request) puts that exception in the
                 prompt's slot even so; the completions that arrived are
-                charged and request-cached.
+                charged and request-cached. A row error (a content-filter
+                block, an over-long prompt) is request-cached too: a rerun
+                gets a `ReplayedRowError` with the same reason instead of
+                asking again.
                 When False (default), the first failure is raised.
             cache_salt: Part of the request-cache key. Pass a new value to get
                 fresh completions for a prompt asked before on purpose, e.g.
@@ -1951,6 +1974,9 @@ class Model:
         keys: list[str | None] = [None] * len(prompts)
         slot_ranges: list[range] = [range(n)] * len(prompts)
         hits: list[dict[int, dict[str, Any]]] = [{} for _ in prompts]
+        # Prompts whose cached slots hold a row error, e.g. a content-filter
+        # block: replayed as that error, and not asked again.
+        refused: dict[int, dict[str, Any]] = {}
         # Each row's "answered before" entry, keyed on the op and the enclosing
         # step but not the prompt (see _request_cache.row_id). `run` tells this
         # run of the step from earlier ones: the step's cache key changes when
@@ -1979,12 +2005,14 @@ class Model:
                 if read:
                     for slot in slot_ranges[i]:
                         entry = _request_cache.read_slot(key, slot)
-                        if entry is not None:
+                        if entry is not None and _request_cache.is_row_error(entry):
+                            refused.setdefault(i, entry)
+                        elif entry is not None:
                             hits[i][slot] = entry
                     row_id = row_ids[i]
                     before = (
                         _request_cache.read_row(row_id)
-                        if row_id is not None and len(hits[i]) < n
+                        if row_id is not None and len(hits[i]) < n and i not in refused
                         else None
                     )
                     if before and before["key"] != key and before.get("run") != run:
@@ -2008,7 +2036,7 @@ class Model:
         owners: list[tuple[int, list[int]]] = []  # (prompt, slots asked)
         for i, messages in enumerate(conversations):
             missing = [slot for slot in slot_ranges[i] if slot not in hits[i]]
-            if not missing:
+            if not missing or i in refused:
                 continue
             sizes = _request_sizes(len(missing), fan_out)
             start = 0
@@ -2020,7 +2048,7 @@ class Model:
 
         if caching:
             # The op logs one INFO line per call; each batch only at DEBUG.
-            reused = sum(len(h) for h in hits)
+            reused = sum(n if i in refused else len(h) for i, h in enumerate(hits))
             if scope is not None:
                 scope.count(reused, n * len(prompts))
             _logger.debug(
@@ -2099,11 +2127,11 @@ class Model:
         )
         # A provider may reject n > 1 outright (a 400); those requests come back
         # as exceptions so their slots can be resent as n=1 requests below.
+        # Row errors are request-cached before any failure is raised, so every
+        # request is sent with its exception returned (see the end of this).
         tolerant = n != 1 and not fan_out
         try:
-            responses = self._send(
-                requests, call_kwargs, progress, return_exceptions or tolerant, store
-            )
+            responses = self._send(requests, call_kwargs, progress, True, store)
         finally:
             _TRUNCATION.reset(truncation_token)
             _PROJECTION.reset(projection_token)
@@ -2156,14 +2184,16 @@ class Model:
                     refill,
                     call_kwargs,
                     progress,
-                    return_exceptions,
+                    True,
                     lambda j, response: store(offset + j, response),
                 )
                 refilled = True
-            if not return_exceptions:  # as _send would have, had we not tolerated
-                for response in responses:
-                    if isinstance(response, Exception):
-                        raise response
+        if caching:
+            self._cache_row_errors(owners, responses, keys)
+        if not return_exceptions:  # as _send would have raised
+            for response in responses:
+                if isinstance(response, Exception):
+                    raise response
 
         fresh: list[list[tuple[list[int], Any]]] = [[] for _ in prompts]
         errors: list[list[Exception]] = [[] for _ in prompts]
@@ -2178,6 +2208,13 @@ class Model:
         results: list[Any] = []
         partial: set[int] = set()
         for i in range(len(prompts)):
+            if i in refused:
+                entry = refused[i]
+                replayed = ReplayedRowError(entry["row_error"], entry.get("error", ""))
+                if not return_exceptions:
+                    raise replayed
+                results.append(replayed)
+                continue
             # A cap, quota, or bad request is not a short result to retry: the
             # prompt gets the exception even if some of its requests finished
             # (they are charged and request-cached, so a rerun replays them).
@@ -2205,6 +2242,29 @@ class Model:
                 skip=partial,
             )
         return results
+
+    @staticmethod
+    def _cache_row_errors(
+        owners: list[tuple[int, list[int]]], responses: list[Any], keys: list[Any]
+    ) -> None:
+        """Store each row error in the slots its request asked for.
+
+        E.g. a content-filter 400 for prompt 3's slots [0, 1]: a rerun gives
+        prompt 3 the same error instead of asking again, so it gets the same
+        rows (the filter does not block a prompt every time).
+        """
+        for (i, asked), response in zip(owners, responses):
+            reason = (
+                _row_error_reason(response) if isinstance(response, Exception) else None
+            )
+            if reason is None or keys[i] is None:
+                continue
+            entry = _request_cache.row_error_entry(reason, response)
+            try:
+                for slot in asked:
+                    _request_cache.write_slot(keys[i], slot, entry)
+            except Exception as exc:  # a full disk must not fail the batch
+                _logger.warning("request cache write failed: %s", exc)
 
     def _send(
         self,

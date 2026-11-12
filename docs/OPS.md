@@ -118,7 +118,7 @@ Keywords left out of the signatures below:
 Acquire operations: generate or retrieve new data.
 
 Also exported, not documented here: `GenerateResult`, `TinkerModel`, `TinkerBudgetExceeded`, `PromptTooLongError`,
-`TargetLogprobs`, `RetrievalSource`, `RetrieveMode`.
+`ReplayedRowError`, `TargetLogprobs`, `RetrievalSource`, `RetrieveMode`.
 
 <a name="acquire-model"></a>
 

@@ -93,9 +93,12 @@ cache misses. Repeated calls with the same sandbox stay cache hits.
 
 **Request cache.** Below `@op`, `Model.generate_batch` stores every completion it receives under
 `$FORGER_CACHE/requests/`, so a rerun only pays for requests that never completed: if one row of 260 changes, one
-request 504s, or the run is killed, the finished requests are reused (each is written as it finishes; errors, empty
-text, and tool calls are never cached). The op cache is checked first; the request cache makes the op's partial
-reruns cheap. A completion is keyed on three things, never on the prompt text alone:
+request 504s, or the run is killed, the finished requests are reused (each is written as it finishes; other errors,
+empty text, and tool calls are never cached). The op cache is checked first; the request cache makes the op's partial
+reruns cheap. A row error (a content-filter block or an over-long prompt) is the exception: it is stored in its slots,
+and a rerun gets a `ReplayedRowError` with the same reason instead of asking again, so a replay gives the same rows
+(pass `_no_cache=True` to ask again); a reply the filter cut off (`finish_reason="content_filter"`) is cached as it
+came. A completion is keyed on three things, never on the prompt text alone:
 
 - **The op call:** the op's name, its body, and every argument except its input rows, e.g. the template, the model's
   id and output-changing params (temperature, seed, `api_base`, ..., not the API key, timeouts, or retries), and the

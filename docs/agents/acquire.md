@@ -36,8 +36,9 @@ to separate them out.
 `max_retries` counts rounds whose replies all fail to parse. A request that still fails with a transient provider
 error after the model's own `num_retries` is not sent again: its samples are dropped, so the op returns fewer than `n`
 samples with a warning and is not cached. A row error (a content-filter block or an over-long prompt; see
-`generate_from_context` in [alter.md](alter.md)) is not sent again either, but when every request hit one and no sample
-arrived it raises, since the one prompt is the template itself. Other errors raise.
+`generate_from_context` in [alter.md](alter.md)) is not sent again either and is cached, so a rerun returns the same
+samples; when every request hit one and no sample arrived it raises, since the one prompt is the template itself. Other
+errors raise.
 
 `output_schema` (here and in `alter.generate_from_context`) is a dict of keys, e.g. `{"question": str, "answer": str}`,
 and the prompt gets an instruction to end the response with a JSON object with those keys. Only the keys are checked:
