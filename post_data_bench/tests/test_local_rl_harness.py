@@ -82,5 +82,77 @@ class ReceiptTests(unittest.TestCase):
             self.assertEqual(seen, [True])
 
 
+class ProbeEvaluationTests(unittest.TestCase):
+    """Probes skip the holdout evaluation; full runs evaluate every 10 steps."""
+
+    def dry_run(self, root, *extra):
+        """The Slime script run_rl_training_and_evaluation.sh would execute."""
+        binaries = root / "bin"
+        binaries.mkdir(exist_ok=True)
+        for name, body in {"nvidia-smi": "echo GPU0", "conda": "echo /conda"}.items():
+            (binaries / name).write_text(f"#!/bin/sh\n{body}\n")
+            (binaries / name).chmod(0o755)
+        (root / "slime/bin").mkdir(parents=True, exist_ok=True)
+        python = root / "slime/bin/python3"
+        python.write_text("#!/bin/sh\nexit 1\n")
+        python.chmod(0o755)
+        (root / "deps/Megatron-LM").mkdir(parents=True, exist_ok=True)
+        (root / "checkpoint").mkdir(exist_ok=True)
+        (root / "data").mkdir(exist_ok=True)
+        for name in ("train.jsonl", "val.jsonl"):
+            (root / "data" / name).write_text("{}\n")
+        command = [
+            "bash",
+            str(local_training.CODING / "rl/run_rl_training_and_evaluation.sh"),
+            "--rl-data-dir",
+            str(root / "data"),
+            "--init-checkpoint",
+            str(root / "checkpoint"),
+            "--output-dir",
+            str(root / "out"),
+            "--slime-env",
+            str(root / "slime"),
+            "--slime-deps",
+            str(root / "deps"),
+            "--dry-run",
+            *extra,
+        ]
+        env = {
+            "PATH": f"{binaries}:/usr/bin:/bin",
+            "HOME": str(root),
+            "SLURM_SUBMIT_DIR": "",
+            "TVM_FFI_CACHE_DIR": str(root / "tvm"),
+            "FLASHINFER_WORKSPACE_BASE": str(root / "flash"),
+            "LCB_RM_WORKERS": "4",
+        }
+        result = subprocess.run(
+            command, env=env, capture_output=True, text=True, check=False
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def test_probe_command_turns_evaluation_off(self):
+        """The probe passes --eval-interval 0 and still saves every step."""
+        probe = local_training.rl_command(
+            "data", "ckpt", "out", "env", "deps", probe=True
+        )
+        last = len(probe) - 1 - probe[::-1].index("--eval-interval")
+        self.assertEqual(probe[last + 1], "0")
+        last = len(probe) - 1 - probe[::-1].index("--save-interval")
+        self.assertEqual(probe[last + 1], "1")
+
+    def test_eval_interval_zero_drops_the_holdout_from_slime(self):
+        """No --eval-prompt-data at 0; the default run evaluates every 10 steps."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            probe = self.dry_run(root, "--eval-interval", "0")
+            full = self.dry_run(root)
+        self.assertNotIn("--eval-prompt-data", probe)
+        self.assertNotIn("--eval-interval", probe)
+        self.assertIn("--eval-interval 10", full)
+        self.assertIn("--eval-prompt-data generated_val", full)
+        self.assertIn("--n-samples-per-eval-prompt 4", full)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -144,13 +144,15 @@ def rl_command(
         for key, flag in JUDGE_FLAGS.items():
             command.extend([flag, judge_config[key]])
     if probe:
+        # No holdout evaluation: at --eval-interval 1 each probe step also rolled
+        # out every val.jsonl prompt (185 of them next to 32 training prompts).
         command += [
             "--num-rollout",
             "2",
             "--save-interval",
             "1",
             "--eval-interval",
-            "1",
+            "0",
         ]
     return command
 
