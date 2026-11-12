@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, patch
 from coding.rl import agent_training as training
 from coding.rl import rubric_data as data
 from coding.rl import rubric_rm as rm
+from coding.rl import rubric_worker as worker
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -146,6 +147,25 @@ class CodeTests(unittest.TestCase):
         )
         self.assertEqual(rm.code_score(source, [], "a", "a"), 1)
         self.assertEqual(rm.code_score(source, [], "a", "b"), 0)
+
+    def test_grade_can_call_final_answer(self):
+        """final_answer in grade() follows rubric_rm.final_answer's rule."""
+        source = (
+            "def grade(prompt, response, ground_truth):\n"
+            "    answer = final_answer(response)\n"
+            "    return 1.0 if answer == final_answer(ground_truth) else 0.0\n"
+        )
+        gold = "<think>work</think> 42 "
+        for response, expected in (
+            ("<think>a</think>b</think> 42", 1.0),
+            ("<think>a</think> 41", 0.0),
+            ("<think>cut off before 42", 0.0),
+        ):
+            with self.subTest(response=response):
+                self.assertEqual(rm.code_score(source, [], response, gold), expected)
+        for text in ("<think>a</think>b</think> c ", "<think>open", " plain ", None):
+            with self.subTest(text=text):
+                self.assertEqual(worker.final_answer(text), rm.final_answer(text))
 
     def test_forbidden_access_and_invalid_score(self):
         """Verify forbidden access and invalid score."""
