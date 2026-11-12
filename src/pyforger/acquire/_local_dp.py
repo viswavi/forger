@@ -12,10 +12,14 @@ outputs come back in input order.
 from __future__ import annotations
 
 import atexit
+import getpass
 import multiprocessing
 import os
+import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
@@ -40,6 +44,79 @@ def visible_gpus() -> list[str]:
     return [
         str(i) for i, line in enumerate(listing.splitlines()) if line.startswith("GPU ")
     ]
+
+
+# Where Triton and torch.compile (Inductor) write compiled kernels, and the
+# subdirectory each gets in an engine's own cache directory. By default every
+# process on the machine shares /tmp/torchinductor_<user> (and ~/.triton):
+# eight engines compiling at once on an apptainer /tmp failed with
+# "IsADirectoryError: .../tmp.pid_40242_.../triton_.cubin".
+_COMPILE_CACHES = {"TRITON_CACHE_DIR": "triton", "TORCHINDUCTOR_CACHE_DIR": "inductor"}
+
+
+def _torch_default_cache_dir() -> str:
+    """The Inductor cache torch picks when TORCHINDUCTOR_CACHE_DIR is unset.
+
+    torch also writes it back to ``os.environ`` the first time it compiles,
+    so a variable at this value was not set by the user.
+    """
+    try:
+        user = getpass.getuser()
+    except Exception:  # no user name, e.g. a uid without a passwd entry
+        return ""
+    sanitized = re.sub(r'[\\/:*?"<>|]', "_", user)
+    return os.path.join(tempfile.gettempdir(), "torchinductor_" + sanitized)
+
+
+def own_compile_caches(environ: Any) -> tuple[dict[str, str], str | None]:
+    """Fresh Triton and Inductor cache directories for one engine process.
+
+    Returns the variables to set and the directory to delete once the engine
+    stops, e.g. ``({"TRITON_CACHE_DIR": "/dev/shm/pyforger-engine-x1/triton",
+    "TORCHINDUCTOR_CACHE_DIR": "/dev/shm/pyforger-engine-x1/inductor"},
+    "/dev/shm/pyforger-engine-x1")``. The directory is under /dev/shm when it
+    is writable (memory, not a container's overlay /tmp), else the temp dir.
+    A variable already set in `environ` is kept, so ``({}, None)`` when the
+    user set both; TORCHINDUCTOR_CACHE_DIR at torch's own default counts as
+    unset. The cost: each engine compiles its kernels afresh (start-up only).
+    """
+    default = _torch_default_cache_dir()
+    missing = [
+        name
+        for name in _COMPILE_CACHES
+        if not environ.get(name)
+        or (name == "TORCHINDUCTOR_CACHE_DIR" and environ[name] == default)
+    ]
+    if not missing:
+        return {}, None
+    shm = "/dev/shm"
+    roots = [shm] if os.path.isdir(shm) and os.access(shm, os.W_OK) else []
+    for root in [*roots, None]:  # None: the temp dir
+        try:
+            scratch = tempfile.mkdtemp(prefix="pyforger-engine-", dir=root)
+            break
+        except OSError:
+            if root is None:
+                raise
+    caches = {name: os.path.join(scratch, _COMPILE_CACHES[name]) for name in missing}
+    return caches, scratch
+
+
+def prepare_in_process_engine() -> None:
+    """Set up this process to hold a `vllm.LLM`, as each worker process is set up.
+
+    The engine core runs in this process (VLLM_ENABLE_V1_MULTIPROCESSING=0)
+    rather than in a child vLLM forks: under apptainer --fakeroot that
+    child's CUDA init fails ("CUDA driver initialization failed"). Compiled
+    kernels go to this process's own cache directories (`own_compile_caches`),
+    deleted at exit. Variables already set are kept, e.g.
+    VLLM_ENABLE_V1_MULTIPROCESSING=1 keeps vLLM's engine-core process.
+    """
+    os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    caches, scratch = own_compile_caches(os.environ)
+    os.environ.update(caches)
+    if scratch is not None:
+        atexit.register(shutil.rmtree, scratch, True)
 
 
 def device_groups(
@@ -216,7 +293,10 @@ class EngineProcess:
 
     The worker is a fresh `python -m pyforger.acquire._local_dp_worker` process, not a
     multiprocessing child: "spawn" re-imports the caller's main script, which
-    reruns any script without an `if __name__ == "__main__":` guard.
+    reruns any script without an `if __name__ == "__main__":` guard. Nor is it
+    forked, so it never inherits a CUDA context from this process. It gets its
+    own Triton and Inductor cache directories (`own_compile_caches`), so
+    engines compiling at once do not share one /tmp.
     """
 
     def __init__(self, devices: list[str], engine_kwargs: dict[str, Any]) -> None:
@@ -228,17 +308,24 @@ class EngineProcess:
         # it rather than in a forked child: under apptainer --fakeroot a forked
         # child's CUDA init fails ("CUDA driver initialization failed").
         env.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-        self._process = subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "pyforger.acquire._local_dp_worker",
-                str(child.fileno()),
-            ],
-            pass_fds=[child.fileno()],
-            env=env,
-        )
-        child.close()
+        caches, self._scratch = own_compile_caches(os.environ)
+        env.update(caches)
+        try:
+            self._process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "pyforger.acquire._local_dp_worker",
+                    str(child.fileno()),
+                ],
+                pass_fds=[child.fileno()],
+                env=env,
+            )
+        except BaseException:
+            self._remove_scratch()
+            raise
+        finally:
+            child.close()
         self._conn.send(engine_kwargs)
 
     def _receive(self, on_progress: Any = None) -> Any:
@@ -300,7 +387,15 @@ class EngineProcess:
                 self._process.wait(timeout=30)
             except subprocess.TimeoutExpired:
                 self._process.kill()
+                self._process.wait()
         self._conn.close()
+        self._remove_scratch()
+
+    def _remove_scratch(self) -> None:
+        """Delete the worker's compile caches (see `own_compile_caches`)."""
+        if self._scratch is not None:
+            shutil.rmtree(self._scratch, ignore_errors=True)
+            self._scratch = None
 
 
 class DataParallelEngine:

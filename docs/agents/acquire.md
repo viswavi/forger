@@ -23,6 +23,13 @@ Generate or retrieve new rows.
 | `TinkerModel` |   | Base model or `tinker://` checkpoint sampled on Tinker; `Model`'s interface, `<think>` inline. |
 | `split_reasoning` |   | `str -> (thinking, answer)`: splits a reasoning-model completion on `</think>`. |
 
+`LocalModel` runs one vLLM engine per visible GPU (`data_parallel_size="auto"`), each in a fresh worker process. Every
+engine, also a single in-process one, gets its own Triton and torch.compile cache directories (under `/dev/shm` when
+writable, deleted when it stops) unless you set `TRITON_CACHE_DIR` / `TORCHINDUCTOR_CACHE_DIR`, so 8 engines compiling
+at once no longer collide in one `/tmp` (`IsADirectoryError: .../triton_.cubin`). Each engine core runs in its own
+process rather than in a child vLLM forks, whose CUDA init fails in some containers (`CUDA driver initialization
+failed`); set `VLLM_ENABLE_V1_MULTIPROCESSING=1` to keep vLLM's child.
+
 `LocalModel.target_logprobs(prompts, targets)` scores given responses instead of sampling: for each prompt, the
 log-probability of every token of its target (rendered as the assistant's reply, as SFT trains on it), as a
 `TargetLogprobs` with `logprobs`, `reasoning_tokens` (through `</think>`) and `truncated`.

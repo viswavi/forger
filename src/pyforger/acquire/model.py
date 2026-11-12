@@ -2438,6 +2438,10 @@ class LocalModel(Model):
                 two engines the model runs in this process, as `vllm.LLM`.
                 The engines hold their GPUs until `close()` or exit, so set
                 `CUDA_VISIBLE_DEVICES` to leave GPUs free for other jobs.
+                Each engine gets its own Triton and Inductor cache
+                directories unless TRITON_CACHE_DIR / TORCHINDUCTOR_CACHE_DIR
+                are set, and runs its engine core without a forked child
+                (VLLM_ENABLE_V1_MULTIPROCESSING=0 unless set).
             dtype: Engine dtype ("auto", "bfloat16", "float16", ...).
             enable_thinking: For reasoning models, whether the chat template
                 should enable the thinking block. Forwarded via
@@ -2559,6 +2563,7 @@ class LocalModel(Model):
                 )
                 self._llm = _local_dp.DataParallelEngine.start(groups, engine_kwargs)
             else:
+                _local_dp.prepare_in_process_engine()
                 self._llm = vllm.LLM(**engine_kwargs)
         return self._llm
 
