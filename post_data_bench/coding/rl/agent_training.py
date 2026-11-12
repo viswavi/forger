@@ -133,6 +133,36 @@ def sft(args):
     print(f"SFT complete: {output}. Use this as --checkpoint for rl.agent_training rl.")
 
 
+def check_receipt(checkpoint, backend):
+    """Raise unless `checkpoint` has an RL receipt for `backend` with >= 1 step.
+
+    e.g. rl_trial_1/hf_rollout9 needs rl_submission.json with stage "rl",
+    backend "local", base_model "Qwen/Qwen3-4B" and completed_steps 10.
+    """
+    checkpoint = Path(checkpoint).resolve(strict=True)
+    receipt_path = checkpoint / "rl_submission.json"
+    if not receipt_path.is_file():
+        raise ValueError(
+            f"{checkpoint} has no rl_submission.json; submit a checkpoint with at "
+            "least one completed RL step"
+        )
+    if not receipt_path.resolve(strict=True).is_relative_to(checkpoint):
+        raise ValueError("RL receipt escaped the checkpoint directory")
+    receipt = json.loads(receipt_path.read_text())
+    if (
+        receipt.get("backend") != backend
+        or receipt.get("base_model") != MODELS[backend]
+        or receipt.get("stage") != "rl"
+        or receipt.get("completed_steps", 0) < 1
+    ):
+        raise ValueError("Submit a checkpoint with at least one completed RL step")
+    if backend == "tinker":
+        record = json.loads((checkpoint / "tinker_checkpoint.json").read_text())
+        if receipt.get("sampler_path") != record.get("sampler_path"):
+            raise ValueError("RL receipt does not match the selected sampler")
+    return receipt
+
+
 def _freeze_into(data, submission, agent_dir, output, backend="tinker"):
     """Called only after the agent workspace has closed; no agent code is imported."""
     agent_dir = Path(agent_dir).resolve()
@@ -157,21 +187,7 @@ def _freeze_into(data, submission, agent_dir, output, backend="tinker"):
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=False)
     prepared = prepare(data, output / "data", MODELS[backend])
-    receipt_path = (checkpoint / "rl_submission.json").resolve(strict=True)
-    if not receipt_path.is_relative_to(checkpoint):
-        raise ValueError("RL receipt escaped the checkpoint directory")
-    receipt = json.loads(receipt_path.read_text())
-    if (
-        receipt.get("backend") != backend
-        or receipt.get("base_model") != MODELS[backend]
-        or receipt.get("stage") != "rl"
-        or receipt.get("completed_steps", 0) < 1
-    ):
-        raise ValueError("Submit a checkpoint with at least one completed RL step")
-    if backend == "tinker":
-        record = json.loads((checkpoint / "tinker_checkpoint.json").read_text())
-        if receipt.get("sampler_path") != record.get("sampler_path"):
-            raise ValueError("RL receipt does not match the selected sampler")
+    check_receipt(checkpoint, backend)
     # Weights stay on Tinker; freeze the recorded paths and receipt, never agent code.
     frozen_checkpoint = output / "initial_checkpoint"
     frozen_checkpoint.mkdir()
@@ -619,13 +635,14 @@ def validate(args):
         )
     )
     if args.checkpoint:
+        # The same checks as freeze, so "can be submitted" matches the host.
+        backend = saved_backend(Path(args.data).resolve().parent)
         runs = check_lineage(args.checkpoint, args.data)
+        check_receipt(args.checkpoint, backend)
+        checkpoint_files(args.checkpoint, backend)
         print(
             f"{args.checkpoint} can be submitted with this dataset: "
-            + (
-                " <- ".join(f"{r['stage']} {r['checkpoint']}" for r in runs)
-                or "base model"
-            )
+            + " <- ".join(f"{r['stage']} {r['checkpoint']}" for r in runs)
         )
 
 
