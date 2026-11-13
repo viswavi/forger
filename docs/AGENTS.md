@@ -22,7 +22,8 @@ tweaking parameters.
 
 For a complete worked example, read [`examples/rl_math/pipeline.py`](../examples/rl_math/pipeline.py): an RL dataset
 of math problems with code rubrics, from web search to a difficulty band and rubric probes. Each step's docstring
-records the options compared, the inspect measurements that told them apart, and what was chosen.
+states what was chosen and shows the form of a justification: the options, the call that measures them, and the
+result. Its results are placeholders, not from a run; write only comparisons you ran, with the call that measured them.
 
 ## Credentials and Cost
 
@@ -165,7 +166,8 @@ The detailed reference is split by topic under `docs/agents/`; read the file for
 - [`docs/agents/alter.md`](agents/alter.md): Row transforms: `generate_from_context`, translation, code execution,
   running Python or C++ programs against tests (partial scores, checker programs), STaR.
 - [`docs/agents/filter.md`](agents/filter.md): Quality and diversity filters, including the LLM judge, `by_predicate`,
-  `by_tests`, the difficulty filters, `by_embedding_similarity`, and `by_topic_frequency`.
+  `by_tests`, `by_rubric_score` (every row's grade score), the difficulty filters, `by_embedding_similarity`, and
+  `by_topic_frequency`.
 - [`docs/agents/inspect.md`](agents/inspect.md): Reports on rows: `topic_based_clustering`, `eval_tree`,
   `rubric_scores`, `embedding_dispersion`, `compare_to_reference`, `inspect_step`, `spend`, `runs` and
   `compare_pipelines` (saved pipeline runs), and `student_log_likelihood`.

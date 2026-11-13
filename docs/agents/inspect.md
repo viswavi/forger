@@ -14,7 +14,7 @@ producing new rows in the pipeline.
 | `compare_pipelines` | no | Print where two saved pipeline runs diverge and how each differing step's rows differ. |
 | `phrase_frequency` | no | Print and return, per string field, the phrases and names the most rows share. No LLM. |
 | `student_log_likelihood` | yes | How likely the student finds each row's target, in bits, beside its own responses. |
-| `rubric_scores` | grades | Print and return a reward's score histogram on responses, samples, and controls. |
+| `rubric_scores` | grades | Print and return a reward's score histogram on a sample of `n` rows, beside controls. |
 | `embedding_dispersion` | yes | Print and return how dispersed a field is in embedding space vs. a reference. No LLM. |
 | `compare_to_reference` | yes | Print and return feature distributions (lengths, numbers, labels) beside a reference. |
 
@@ -67,15 +67,19 @@ samples.
 
 `rubric_scores(rows, grade, *, n=50, response_fields="response", probes=None, model=None, k=4, prompt_field="prompt",
 control_columns=True, seed=0, ...)` shows a reward's distribution before RL. `grade(response, row)` returns a score in
-[0, 1] (a bool counts as 0 or 1) or None when ungradable: a code rubric, an LLM judge, or exact match. It grades `n`
-rows drawn with `seed`, one column per response field (e.g. the SFT target), `k` samples per prompt from `model` (what
-RL sees; the report counts prompts whose samples all got the same score, which give no gradient), and with
+[0, 1] (a bool counts as 0 or 1) or None when ungradable: a code rubric, an LLM judge, or exact match. It scores a
+sample, not every row: `n` rows (default 50) drawn with `seed`. The report's first line says how many (`50 of 300 rows
+sampled (seed 0; the other 250 have no score)`), and an `n` below the row count logs a warning. `n=None` scores every
+row; to keep or drop rows by score, use [`filter.by_rubric_score`](filter.md), which scores every row with the same
+`grade` and shares its cached grades. It grades one column per response field (e.g. the SFT target), `k` samples per
+prompt from `model` (what RL sees; the report counts prompts whose samples all got the same score, which give no
+gradient), and with
 `control_columns` three responses no task should reward: `empty`, `random` (200 random characters), and `other_row`
 (another row's response, never its own). A control earning half the reference column's mean is flagged. On a rubric
 that gave 1.0 to any response without a python code block, the targets looked fine; `empty` did not:
 
 ```text
-  50 of 60 rows (seed 0) · grade abstain_bug · sampled: toy-student
+  50 of 60 rows sampled (seed 0; the other 10 have no score) · grade abstain_bug · sampled: toy-student
 
   score          response   sampled ×3   empty   random   other_row
   ─────────────────────────────────────────────────────────────────────
@@ -107,7 +111,8 @@ Ties between a reference and a known-weak baseline are rows where the rubric can
 tied on most rows is a student that already earns the reference's score.
 
 It returns a `RubricScoreReport`; `report.model_dump()` is plain JSON data: `bins`, and per column `counts` (aligned
-with `bins`), `mean`, `share_at_0`, `share_at_1`, `ungradable`, `errors`, the per-row `scores`, `vs_reference`
+with `bins`), `mean`, `share_at_0`, `share_at_1`, `ungradable`, `errors`, the per-row `scores` (`scores[i]` belongs to row
+`report.rows[i]`, the sampled rows only), `vs_reference`
 (`below`, `tied`, `above`, `mean_gap`), and the lowest and highest examples. `grade` is part of the cache key (an object
 by its `cache_key()`), so the grades are cached; a grading that raised is counted with its message and runs again next
 time. Rows are not modified.
