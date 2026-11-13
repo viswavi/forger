@@ -96,7 +96,7 @@ result. Its results are placeholders, not from a run; write only comparisons you
 
 ### Cost
 
-Benchmark quotas count token units: DeepSeek-V4-Flash costs 1 unit per input token and 3 per output token; GLM-5.3
+Token-unit quotas use fixed weights: DeepSeek-V4-Flash costs 1 unit per input token and 3 per output token; GLM-5.3
 costs 4 and 12.5.
 
 - Cached input tokens count at full weight. Completion tokens already include reasoning; do not add it again.
@@ -108,8 +108,5 @@ costs 4 and 12.5.
   held units reach the quota. A request that times out or loses its connection stays charged at its hold, since
   the gateway may still bill it (`unreturned_calls`). A process that dies or is interrupted mid-request releases
   its holds (`released_calls`): the next ledger read frees them, or after two hours when its death cannot be seen.
-- The benchmark launcher sets a generation quota and a separate judge quota, both given in the task instructions.
-- Direct API calls must use the launcher's `rl.token_budget` helpers to be counted; they make one attempt per call
-  (no `num_retries`), so retry in your own code.
 - `TinkerModel` is charged in dollars to a separate ledger (see [`acquire.md`](agents/acquire.md)).
 - Cap a run in units with `@pipeline(max_token_units=...)` or `FORGER_MAX_TOKEN_UNITS`.
