@@ -19,6 +19,7 @@ Remove rows by criterion. If a filter empties the list, downstream operations re
 | `by_syntax` | Validate JSON, YAML, Python, or XML, optionally against required keys or a JSON schema. |
 | `by_predicate` | Keep rows where `fn(row)` is truthy: a plain Python check that shows in the step report. Not cached. |
 | `by_tests` | Run each row's Python or C++ program on its tests; keep rows passing at least `min_pass_rate`. |
+| `by_rubric_score` | Score every row's response with `grade(response, row)`; keep rows in `[min_score, max_score]`. |
 | `by_comparative_difficulty` | Keep rows a strong model answers correctly and a weak model does not. |
 | `by_pass_at_k` | Sample `k` answers per row; keep rows whose pass rate is within `[min_rate, max_rate]`. |
 | `program_verifier` | Not an op: a `metric` for the difficulty filters that runs sampled programs on the row's tests. |
@@ -91,6 +92,23 @@ diversity filter.
 
 ```python
 rows = filter.by_predicate(rows, lambda r: len(r["papers"]) >= 3, label="has ≥3 papers", min_yield=0.5)
+```
+
+`by_rubric_score(rows, grade, *, response_field="response", min_score=None, max_score=None, score_field=None,
+keep_ungradable=False, workers=8)` scores every row, where [`inspect.rubric_scores`](inspect.md) scores a sample of
+`n` rows (default 50) to show the distribution; do not keep or drop rows by that report, whose other rows have no
+score. `grade(response, row)` is the function `rubric_scores` takes: a score (a bool counts as 0 or 1), or None when
+ungradable. A row is kept when `min_score <= score <= max_score` (a None bound is open); `score_field` adds the score
+to kept rows, so with no bounds it scores every row without dropping one. A row whose response is None, that `grade`
+returns None for, or where `grade` raised is ungradable and dropped (`keep_ungradable=True` keeps it with a None
+score); raised grades are a warning with the count and first message, and are not cached, so a rerun grades them
+again. Grades are cached apart from the bounds, under the same op as `rubric_scores`, so changing `min_score` makes no
+`grade` calls, and `rubric_scores(rows, grade, n=None)` reuses the filter's grades of the same rows. The step report
+shows every row's score as a histogram. To score a model's samples per row rather than a response already in the row,
+use `by_pass_at_k(..., metric=grade, extract_answer=lambda text: text)`: its pass rate is the mean score.
+
+```python
+rows = filter.by_rubric_score(rows, grade, response_field="solution", min_score=1.0, score_field="rubric_score")
 ```
 
 ## LLM judges
