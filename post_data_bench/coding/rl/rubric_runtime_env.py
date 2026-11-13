@@ -14,6 +14,7 @@ if __name__ == "__main__":
             "JUDGE_MAX_CONSECUTIVE_FAILURES",
             "JUDGE_QUOTA_STOP_FILE",
             "JUDGE_MODEL",
+            "JUDGE_FALLBACK_MODEL",
             "JUDGE_REASONING_EFFORT",
             "JUDGE_TOKEN_UNIT_LIMIT",
             "JUDGE_TOKEN_USAGE_FILE",

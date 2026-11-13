@@ -69,8 +69,8 @@ Read the file for the ops you use:
 - [`acquire.md`](agents/acquire.md): `sample_from_LLM`, student sampling (`LocalModel`, `TinkerModel`), retrieval, rubrics.
 - [`alter.md`](agents/alter.md): `generate_from_context`, translation, code execution, running Python or C++
   programs on tests (partial scores, checker programs), STaR.
-- [`filter.md`](agents/filter.md): LLM judge, `by_predicate`, `by_tests`, difficulty filters,
-  `by_embedding_similarity`, `by_topic_frequency`.
+- [`filter.md`](agents/filter.md): LLM judge, `by_predicate`, `by_tests`, `by_rubric_score` (every row's grade
+  score), difficulty filters, `by_embedding_similarity`, `by_topic_frequency`.
 - [`inspect.md`](agents/inspect.md): `topic_based_clustering`, `eval_tree`, `rubric_scores`, `embedding_dispersion`,
   `compare_to_reference`, `inspect_step`, `spend`, `runs`, `compare_pipelines`, `student_log_likelihood`.
 - [`models.md`](agents/models.md): `Model`, gateway credentials, concurrency, `n` fan-out, reasoning effort.
@@ -80,7 +80,8 @@ Read the file for the ops you use:
 
 For a complete worked example, read [`examples/rl_math/pipeline.py`](../examples/rl_math/pipeline.py): an RL dataset
 of math problems with code rubrics, from web search to a difficulty band and rubric probes. Each step's docstring
-records the options compared, the inspect measurements that told them apart, and what was chosen.
+states what was chosen and shows the form of a justification: the options, the call that measures them, and the
+result. Its results are placeholders, not from a run; write only comparisons you ran, with the call that measured them.
 
 ## Credentials and Cost
 
@@ -95,7 +96,7 @@ records the options compared, the inspect measurements that told them apart, and
 
 ### Cost
 
-Benchmark quotas count token units: DeepSeek-V4-Flash costs 1 unit per input token and 3 per output token; GLM-5.3
+Token-unit quotas use fixed weights: DeepSeek-V4-Flash costs 1 unit per input token and 3 per output token; GLM-5.3
 costs 4 and 12.5.
 
 - Cached input tokens count at full weight. Completion tokens already include reasoning; do not add it again.
@@ -107,8 +108,5 @@ costs 4 and 12.5.
   held units reach the quota. A request that times out or loses its connection stays charged at its hold, since
   the gateway may still bill it (`unreturned_calls`). A process that dies or is interrupted mid-request releases
   its holds (`released_calls`): the next ledger read frees them, or after two hours when its death cannot be seen.
-- The benchmark launcher sets a generation quota and a separate judge quota, both given in the task instructions.
-- Direct API calls must use the launcher's `rl.token_budget` helpers to be counted; they make one attempt per call
-  (no `num_retries`), so retry in your own code.
 - `TinkerModel` is charged in dollars to a separate ledger (see [`acquire.md`](agents/acquire.md)).
 - Cap a run in units with `@pipeline(max_token_units=...)` or `FORGER_MAX_TOKEN_UNITS`.

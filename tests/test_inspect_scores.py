@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 
 import pytest
 
@@ -132,6 +133,34 @@ def test_samples_n_rows_with_the_seed():
     assert a.rows == rubric_scores(rows, strict, n=10, seed=3).rows
     assert a.rows != rubric_scores(rows, strict, n=10, seed=4).rows
     assert len(a.column("response").scores) == 10
+
+
+def test_a_sample_is_named_in_the_report_and_a_warning(caplog):
+    """An n below the row count warns and says how many rows have no score."""
+    with caplog.at_level(logging.WARNING):
+        report = rubric_scores(_rows(100), strict, n=10)
+    assert "scores a sample of 10 of 100 rows (n=10)" in caplog.text
+    assert "filter.by_rubric_score" in caplog.text
+    text = render_rubric_score_report(report)
+    assert "10 of 100 rows sampled (seed 0; the other 90 have no score)" in text
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        rubric_scores(_rows(), strict, n=50)  # 20 rows: all scored
+    assert "scores a sample" not in caplog.text
+
+
+def test_missing_prompt_names_rubric_scores():
+    """A missing prompt_field names the op the user called, not another."""
+    with pytest.raises(
+        KeyError, match="inspect.rubric_scores: item is missing required field 'task'"
+    ):
+        rubric_scores(_rows(), strict, model=Student(), prompt_field="task", n=None)
+    rows = [{**r, "prompt": {"text": "x"}} for r in _rows()]
+    with pytest.raises(
+        ValueError, match="inspect.rubric_scores: prompt_field 'prompt' must hold"
+    ) as err:
+        rubric_scores(rows, strict, model=Student(), n=None)
+    assert "prompt_template" not in str(err.value)  # rubric_scores has none
 
 
 def test_sampled_column_counts_prompts_without_gradient():

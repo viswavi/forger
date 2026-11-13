@@ -8,6 +8,7 @@ defaults are in [OPS.md](../OPS.md#filter).
 | `by_predicate` | Any Python check on a row; use it instead of a list comprehension. Not cached. |
 | `by_llm_score` | Quality: an LLM judge scores each row on a rubric. See [LLM judges](#llm-judges). |
 | `by_tests` | Code: run each row's Python or C++ program on its tests, keep rows passing `min_pass_rate`. |
+| `by_rubric_score` | Your reward on every row: `grade(response, row)` scores each row, keep rows in bounds. |
 | `by_pass_at_k` | Difficulty for *your* model: sample `k` answers, keep rows whose pass rate is in range. |
 | `by_comparative_difficulty` | Difficulty: keep rows a strong model answers correctly and a weak model does not. |
 | `by_judged_difficulty` | Cheap difficulty guess: a judge rates each task 1 to 5. |
@@ -37,6 +38,19 @@ test).
 
 ```python
 rows = filter.by_predicate(rows, lambda r: len(r["papers"]) >= 3, label="has ≥3 papers", min_yield=0.5)
+```
+
+`by_rubric_score(rows, grade, *, response_field="response", min_score=None, max_score=None, score_field=None,
+keep_ungradable=False)` scores every row with `grade(response, row)`, the function
+[`inspect.rubric_scores`](inspect.md) takes. That report scores only a sample of `n` rows (default 50), so do not keep
+or drop rows by it. Bounds are inclusive (None is open); `score_field` adds the score to kept rows. Ungradable rows (a
+None response, a None grade, or a grade that raised) are dropped unless `keep_ungradable=True`; raised grades warn and
+are not cached. Grades are cached apart from the bounds and shared with `rubric_scores`, so changing `min_score` makes
+no `grade` calls. To score a model's own samples per row, use
+`by_pass_at_k(..., metric=grade, extract_answer=lambda text: text)`.
+
+```python
+rows = filter.by_rubric_score(rows, grade, response_field="solution", min_score=1.0, score_field="rubric_score")
 ```
 
 `by_tests` and `alter.run_programs` share their test format and options; see

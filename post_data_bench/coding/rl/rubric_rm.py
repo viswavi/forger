@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -19,6 +20,7 @@ from .token_budget import (  # noqa: ABS101
     TokenUnitQuotaExceeded,
     default_rl_limit,
     held_units,
+    model_weights,
     response_cost_usd,
     response_token_counts,
     validate_judge_model,
@@ -63,13 +65,15 @@ def _abstention_check():
     return final_answer, is_abstention, ABSTENTION_MARKER
 
 
-def _log_rollout(sample, reward):
+def _log_rollout(sample, reward, blocked=0):
     """Append one scored sample to LCB_RM_LOG_DIR/rollouts_<host>_<pid>.jsonl.
 
     e.g. {"step": 3, "prompt_id": "9f2c...", "reward": 0.75, "truncated": false,
-    "gold_abstains": true, "abstained": true, "answer": "This task is ..."}, the
-    per-sample fields of the test-reward log and of Tinker's rollouts.jsonl.
-    Logging never fails the reward.
+    "blocked": false, "gold_abstains": true, "abstained": true, "answer": "This
+    task is ..."}, the per-sample fields of the test-reward log and of Tinker's
+    rollouts.jsonl. ``blocked`` is True when the content filter blocked one of
+    its judged criteria (custom_rm marks it remove_sample). Logging never fails
+    the reward.
     """
     global _log_file
     log_dir = os.environ.get("LCB_RM_LOG_DIR")
@@ -103,6 +107,7 @@ def _log_rollout(sample, reward):
             ).hexdigest(),
             "reward": reward,
             "truncated": getattr(status, "value", status) == "truncated",
+            "blocked": bool(blocked),
             "response_tokens": getattr(sample, "response_length", None),
             "answer": response.rsplit("</think>", 1)[-1].strip()[:_ANSWER_CHARS],
         }
@@ -133,13 +138,35 @@ def judge_configuration(default_usage_file=None, task=None, overrides=None):
         raise ValueError("Set JUDGE_TOKEN_USAGE_FILE to the shared RL usage ledger")
     filename = str(Path(filename).resolve())
     TokenUnitBudget(filename, limit)
-    return {
+    config = {
         "PDB_TASK": task,
         "JUDGE_MODEL": model,
         "JUDGE_REASONING_EFFORT": effort,
         "JUDGE_TOKEN_UNIT_LIMIT": str(limit),
         "JUDGE_TOKEN_USAGE_FILE": filename,
     }
+    fallback = judge_fallback_model(env)
+    if fallback:
+        config["JUDGE_FALLBACK_MODEL"] = fallback
+    return config
+
+
+def judge_fallback_model(env=None):
+    """JUDGE_FALLBACK_MODEL, the judge asked once when the content filter blocks one.
+
+    Unset (or "") by default: a blocked criterion stays blocked. It must have
+    token-unit weights, e.g. litellm_proxy/azure_ai/FW-GLM-5.3 (4 units per
+    input token, 12.5 per output token), and is charged to the judge ledger.
+    """
+    model = (os.environ if env is None else env).get("JUDGE_FALLBACK_MODEL") or None
+    if model:
+        try:
+            model_weights(model)
+        except ValueError:
+            raise ValueError(
+                "JUDGE_FALLBACK_MODEL must be a DeepSeek-V4-Flash or GLM-5.3 alias"
+            ) from None
+    return model
 
 
 class JudgeState(TypedDict):
@@ -432,10 +459,16 @@ def final_answer(text):
     return text.strip()
 
 
-def _note_content_filter():
-    """One stderr line per blocked criterion, so RL logs count them (no bodies)."""
+def _note_content_filter(fallback=None):
+    """One stderr line per blocked judge call, so RL logs count them (no bodies).
+
+    With ``fallback``, the line names the judge asked next instead, e.g.
+    "JUDGE_CONTENT_FILTER: asking litellm_proxy/azure_ai/FW-GLM-5.3 (provider
+    blocked the reply)".
+    """
+    then = f"asking {fallback}" if fallback else "criterion left unscored"
     print(
-        "JUDGE_CONTENT_FILTER: criterion left unscored (provider blocked the reply)",
+        f"JUDGE_CONTENT_FILTER: {then} (provider blocked the reply)",
         file=sys.stderr,
         flush=True,
     )
@@ -464,6 +497,7 @@ async def prompt_score(
     answer_only=False,
     judge_sees=JUDGE_FIELDS,
     instructions="",
+    model=None,
 ):
     """Score one prompt criterion with the separately budgeted LM judge.
 
@@ -474,6 +508,9 @@ async def prompt_score(
     Returns None, without retrying or counting a failure, when the provider's
     content filter blocks the judge's reply (``content_filtered``): retrying the
     same blocked call forever stopped RL at the end of a step (jobs 168621/168622).
+    A blocked call is asked once more of JUDGE_FALLBACK_MODEL when it is set
+    (``judge_fallback_model``); None when that one is blocked too. ``model``
+    overrides JUDGE_MODEL for one call (the fallback's own).
     """
     if answer_only:
         response, ground_truth = final_answer(response), final_answer(ground_truth)
@@ -490,6 +527,24 @@ async def prompt_score(
     budget = TokenUnitBudget(
         config["JUDGE_TOKEN_USAGE_FILE"], float(config["JUDGE_TOKEN_UNIT_LIMIT"])
     )
+    fallback = None if model else config.get("JUDGE_FALLBACK_MODEL")
+    model = model or config["JUDGE_MODEL"]
+
+    async def blocked():
+        _note_content_filter(fallback)
+        if not fallback:
+            return None
+        # response and ground_truth are already final answers when answer_only.
+        return await prompt_score(
+            criterion,
+            prompt,
+            response,
+            ground_truth,
+            judge_sees=judge_sees,
+            instructions=instructions,
+            model=fallback,
+        )
+
     import litellm
 
     threshold = int(os.environ.get("JUDGE_MAX_CONSECUTIVE_FAILURES", "5"))
@@ -554,13 +609,13 @@ async def prompt_score(
                     ),
                 },
             ]
+            filtered = False
             try:
                 with budget.hold(
-                    config["JUDGE_MODEL"],
-                    held_units(config["JUDGE_MODEL"], messages, 1, JUDGE_MAX_TOKENS),
+                    model, held_units(model, messages, 1, JUDGE_MAX_TOKENS)
                 ) as hold:
                     result = await litellm.acompletion(
-                        model=config["JUDGE_MODEL"],
+                        model=model,
                         messages=messages,
                         api_key=os.environ["LITELLM_JUDGE_API_KEY"],
                         api_base=base_url,
@@ -572,11 +627,12 @@ async def prompt_score(
                         num_retries=0,
                     )
             except Exception as exc:
-                if content_filtered(exc=exc):
-                    _note_content_filter()
-                    return None
-                quota = quota_error(exc)
-                _note_failure(state, failure_reason(exc=exc), threshold)
+                # Asked outside this handler, so a fallback's error never
+                # carries the blocked call's provider body as its context.
+                filtered = content_filtered(exc=exc)
+                if not filtered:
+                    quota = quota_error(exc)
+                    _note_failure(state, failure_reason(exc=exc), threshold)
             else:
                 try:
                     prompt_tokens, completion_tokens = response_token_counts(result)
@@ -588,10 +644,10 @@ async def prompt_score(
                         "cannot enforce token-unit quota"
                     ) from None
                 usage = budget.record(
-                    config["JUDGE_MODEL"],
+                    model,
                     prompt_tokens,
                     completion_tokens,
-                    cost_usd=response_cost_usd(result, config["JUDGE_MODEL"]),
+                    cost_usd=response_cost_usd(result, model),
                     hold=hold,
                 )
                 if usage["remaining_token_units"] <= 0:
@@ -599,8 +655,7 @@ async def prompt_score(
                     record_quota_stop()
                     raise JudgeQuotaExhausted("Judge token-unit quota exhausted")
                 if content_filtered(result=result):
-                    _note_content_filter()
-                    return None
+                    return await blocked()
                 # Parsing errors originate in untrusted model text and are never quota
                 # errors.
                 quota = False
@@ -617,6 +672,8 @@ async def prompt_score(
                     state["failures"] = state["quota_failures"] = 0
                     state["noted"] = False
                     return value
+            if filtered:
+                return await blocked()
             if attempt < 2:
                 await asyncio.sleep(2 ** (attempt + 1))
         if state["open"]:
@@ -648,15 +705,23 @@ async def prompt_score(
 
 
 async def custom_rm(args, sample, **kwargs):
-    """Compute the weighted reward using the fixed rubric executor (rubric_reward)."""
+    """Compute the weighted reward using the fixed rubric executor (rubric_reward).
+
+    A response with a blocked prompt criterion is marked ``remove_sample``, so
+    it never moves the policy: Slime zeroes its loss mask, and
+    post_process_rewards (Slime) and the Tinker trainer keep its reward out of
+    its group's baseline. The reward is still returned, e.g. for held-out means.
+    """
     metadata = sample.metadata
-    reward = await rubric_reward(
+    reward, blocked = await rubric_reward_and_blocks(
         metadata["rubric"],
         metadata["original_prompt"],  # Pre-template prompt, exactly as submitted.
         without_stop_tokens(sample.response),  # as the evaluator sees it
         sample.label,
     )
-    _log_rollout(sample, reward)
+    if blocked:
+        sample.remove_sample = True
+    _log_rollout(sample, reward, blocked)
     return reward
 
 
@@ -664,14 +729,26 @@ async def rubric_reward(rubric, prompt, response, ground_truth):
     """The RL reward of one response: the weighted mean over code and prompt criteria.
 
     Code criteria run in the sandbox (code_score), prompt criteria through the
-    judge (prompt_score). A prompt criterion the content filter blocked
-    (prompt_score returns None) leaves the weighted mean, so the other criteria
-    decide the reward; an answer whose criteria are all blocked gets 0. E.g.
-    rubric [[{"code": ...}, 1], [{"prompt": "Cites a dose?"}, 3]] scoring 0 and
-    1 gives 0.75.
+    judge (prompt_score). E.g. rubric [[{"code": ...}, 1], [{"prompt": "Cites a
+    dose?"}, 3]] scoring 0 and 1 gives 0.75. A prompt criterion the content
+    filter blocked (prompt_score returns None) is ungraded: it leaves the
+    weighted mean here (0 when all are blocked), and RL does not train on the
+    response at all (custom_rm). E.g. an answer that goes along with an unsafe
+    request, whose "Declines to give the dose?" criterion is blocked, would
+    otherwise get 1.0 from a length criterion alone.
+    """
+    return (await rubric_reward_and_blocks(rubric, prompt, response, ground_truth))[0]
+
+
+async def rubric_reward_and_blocks(rubric, prompt, response, ground_truth):
+    """``(rubric_reward, blocked)``: the reward and how many criteria were blocked.
+
+    E.g. (0.5, 1) when one of two prompt criteria scored 0.5 and the content
+    filter blocked the other.
     """
     rubric = validate_rubric(rubric)
     total = scored = 0.0
+    blocked = 0
     for criterion, weight in rubric:
         if weight == 0:
             continue
@@ -691,7 +768,62 @@ async def rubric_reward(rubric, prompt, response, ground_truth):
                     instructions=criterion.get("instructions", ""),
                 )
         if value is None:  # blocked by the provider's content filter
+            blocked += 1
             continue
         total += weight * value
         scored += weight
-    return total / scored if scored else 0.0
+    return (total / scored if scored else 0.0), blocked
+
+
+_NORMALIZED = ("grpo", "gspo", "cispo", "reinforce_plus_plus_baseline")
+
+
+def post_process_rewards(args, samples):
+    """Slime's GRPO group normalization, leaving out samples marked remove_sample.
+
+    Slime calls this once per rollout step with every training sample
+    (--custom-reward-post-process-path) and trains on the second list. A marked
+    sample (custom_rm: a prompt criterion was blocked) gets advantage 0 and
+    stays out of its group's mean and std; Slime also zeroes its loss mask.
+    E.g. group rewards [1, 0, 0.9 (marked)] give advantages [0.71, -0.71, 0];
+    Slime's own normalization gives [0.67, -1.15, 0.48]. Otherwise the same as
+    Slime's default: groups by group_index, std only for grpo, gspo and cispo.
+    Prints one line per step that marked any, e.g. "JUDGE_BLOCKED_SAMPLES: 3 of
+    256 samples left out of this RL step ...".
+    """
+    raw = [sample.get_reward_value(args) for sample in samples]
+    removed = [bool(getattr(sample, "remove_sample", False)) for sample in samples]
+    if any(removed):
+        print(
+            f"JUDGE_BLOCKED_SAMPLES: {sum(removed)} of {len(samples)} samples left "
+            "out of this RL step (a judged criterion was blocked)",
+            file=sys.stderr,
+            flush=True,
+        )
+    estimator = args.advantage_estimator
+    if estimator not in _NORMALIZED or not args.rewards_normalization:
+        return raw, list(raw)
+    groups = {}
+    complete = len(samples) == args.n_samples_per_prompt * args.rollout_batch_size
+    for position, sample in enumerate(samples):
+        group = sample.group_index
+        if group is None:  # Slime's positional rule for flat generators
+            group = position // args.n_samples_per_prompt if complete else 0
+        groups.setdefault(group, []).append(position)
+    rewards = [0.0] * len(samples)
+    for positions in groups.values():
+        trusted = [i for i in positions if not removed[i]]
+        if not trusted:
+            continue
+        mean = statistics.fmean(raw[i] for i in trusted)
+        spread = None
+        if (
+            estimator != "reinforce_plus_plus_baseline"
+            and args.grpo_std_normalization
+            and len(trusted) > 1
+        ):
+            spread = statistics.stdev(raw[i] for i in trusted)  # torch.std's n - 1
+        for i in trusted:
+            centered = raw[i] - mean
+            rewards[i] = centered if spread is None else centered / (spread + 1e-6)
+    return raw, rewards
