@@ -294,20 +294,24 @@ async def sample_group(
 
 
 async def _score(rows_and_texts):
-    """Rubric rewards for (row, response_text) pairs via the fixed reward function."""
+    """(rewards, blocked) for (row, response_text) pairs via the fixed reward function.
+
+    ``blocked[i]`` is True when the judge's content filter blocked one of
+    response i's prompt criteria (custom_rm's remove_sample); RL skips it.
+    """
     from .rubric_rm import custom_rm  # noqa: ABS101
 
-    return await asyncio.gather(
-        *[
-            custom_rm(
-                None,
-                SimpleNamespace(
-                    metadata=row["metadata"], response=text, label=row["label"]
-                ),
-            )
-            for row, text in rows_and_texts
-        ]
-    )
+    samples = [
+        SimpleNamespace(
+            metadata=row["metadata"],
+            response=text,
+            label=row["label"],
+            remove_sample=False,
+        )
+        for row, text in rows_and_texts
+    ]
+    rewards = await asyncio.gather(*[custom_rm(None, s) for s in samples])
+    return list(rewards), [s.remove_sample for s in samples]
 
 
 def _read_jsonl(path):
@@ -372,13 +376,15 @@ def run_rl(
 _ANSWER_CHARS = 300  # of each response's final answer kept in rollouts.jsonl
 
 
-def _log_rollouts(stream, step, row, sequences, texts, rewards):
+def _log_rollouts(stream, step, row, sequences, texts, rewards, blocked):
     """Append one training group to rollouts.jsonl.
 
     e.g. {"step": 3, "prompt_id": "9f2c...", "rewards": [1.0, 0.0, ...],
-    "truncated": [false, true, ...], "answers": ["This task is impossible...",
-    ...]}. prompt_id is rubric_data.prompt_id of the row, so groups join back to
-    the submitted rows; answers are the text after the last </think>, cut short.
+    "blocked": [false, true, ...], "truncated": [false, true, ...], "answers":
+    ["This task is impossible...", ...]}. prompt_id is rubric_data.prompt_id of
+    the row, so groups join back to the submitted rows; answers are the text
+    after the last </think>, cut short. A blocked sample (the content filter
+    blocked one of its judged criteria) is not trained on.
     """
     stream.write(
         json.dumps(
@@ -386,6 +392,7 @@ def _log_rollouts(stream, step, row, sequences, texts, rewards):
                 "step": step,
                 "prompt_id": prompt_id(row),
                 "rewards": rewards,
+                "blocked": blocked,
                 "truncated": [s.stop_reason == "length" for s in sequences],
                 "answers": [
                     text.rsplit("</think>", 1)[-1].strip()[:_ANSWER_CHARS]
@@ -400,21 +407,28 @@ def _log_rollouts(stream, step, row, sequences, texts, rewards):
 
 
 def _group_datums(groups):
-    """Importance-sampling data from (prompt, sequences, rewards) groups.
+    """Importance-sampling data from (prompt, sequences, rewards, blocked) groups.
 
     Advantages are group-normalized, then divided by the batch's sampled
     tokens so the loss is a token mean. Groups with identical rewards carry
-    no signal and are skipped.
+    no signal and are skipped. Blocked samples get no datum and stay out of
+    their group's mean and std, e.g. rewards [1, 0, 0.9 (blocked)] train on
+    [1, 0] alone.
     """
-    sampled_total = sum(len(s.tokens) for _, sequences, _ in groups for s in sequences)
+    sampled_total = sum(
+        len(s.tokens) for _, sequences, _, _ in groups for s in sequences
+    )
     data, kept = [], 0
-    for prompt, sequences, rewards in groups:
-        spread = statistics.pstdev(rewards)
+    for prompt, sequences, rewards, blocked in groups:
+        trusted = [r for r, skip in zip(rewards, blocked) if not skip]
+        spread = statistics.pstdev(trusted) if trusted else 0
         if spread == 0:
             continue
         kept += 1
-        mean = statistics.fmean(rewards)
-        for sequence, reward in zip(sequences, rewards):
+        mean = statistics.fmean(trusted)
+        for sequence, reward, skip in zip(sequences, rewards, blocked):
+            if skip:
+                continue
             advantage = (reward - mean) / (spread + 1e-6)
             pad = [0.0] * (len(prompt) - 1)
             data.append(
@@ -475,10 +489,10 @@ async def _run_rl(data_dir, init_checkpoint, output_dir, budget, **config):
             sampler, tokenizer, row["prompt"], budget, num_samples=n, **sampling
         )
         texts = [(row, response_text(tokenizer, s.tokens)) for s in sequences]
-        rewards = list(await _score(texts))
+        rewards, blocked = await _score(texts)
         if step is not None:
-            _log_rollouts(rollout_log, step, row, sequences, texts, rewards)
-        return prompt, sequences, rewards
+            _log_rollouts(rollout_log, step, row, sequences, texts, rewards, blocked)
+        return prompt, sequences, rewards, blocked
 
     async def collect(rows, n, step=None):
         sampler = await trainer.save_weights_and_get_sampling_client_async()
@@ -488,11 +502,13 @@ async def _run_rl(data_dir, init_checkpoint, output_dir, budget, **config):
 
     async def heldout(step):
         groups, seconds = await collect(held_out, config["n_samples_per_eval_prompt"])
+        # A blocked criterion is ungraded; its sample stays in the mean.
         record = {
             "step": step,
             "heldout_reward_mean": statistics.fmean(
-                r for _, _, rewards in groups for r in rewards
+                r for _, _, rewards, _ in groups for r in rewards
             ),
+            "blocked_samples": sum(b for *_, blocked in groups for b in blocked),
             "sample_s": round(seconds, 1),
         }
         with (output / "heldout_log.jsonl").open("a") as stream:
@@ -545,14 +561,17 @@ async def _run_rl(data_dir, init_checkpoint, output_dir, budget, **config):
                 pending = asyncio.create_task(collect(next_batch(), n, step + 1))
             if step % config["eval_interval"] == 0 or step == total:
                 background.append(asyncio.create_task(heldout(step)))
-            sequences = [s for _, seqs, _ in groups for s in seqs]
-            rewards = [r for _, _, group in groups for r in group]
+            sequences = [s for _, seqs, _, _ in groups for s in seqs]
+            rewards = [r for _, _, group, _ in groups for r in group]
             log.write(
                 json.dumps(
                     {
                         "step": step,
                         "reward_mean": statistics.fmean(rewards),
                         "groups_with_signal": kept,
+                        "blocked_samples": sum(
+                            b for *_, blocked in groups for b in blocked
+                        ),
                         "response_len_mean": statistics.fmean(
                             len(s.tokens) for s in sequences
                         ),

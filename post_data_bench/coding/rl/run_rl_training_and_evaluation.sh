@@ -81,6 +81,7 @@ DRY_RUN=0
 RUN_TAG=""
 RUBRIC_REWARDS=0
 CUSTOM_RM_PATH="rl.impossible_lcb_rm.custom_rm"
+REWARD_POST_PROCESS_ARGS=""
 EXTRA_SLIME_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -127,6 +128,9 @@ done
 
 if [ "$RUBRIC_REWARDS" -eq 1 ]; then
   CUSTOM_RM_PATH="rl.rubric_rm.custom_rm"
+  # A response whose judged criterion the content filter blocked gets advantage
+  # 0 and stays out of its group's baseline (custom_rm marks it remove_sample).
+  REWARD_POST_PROCESS_ARGS="--custom-reward-post-process-path rl.rubric_rm.post_process_rewards"
   # All training knobs remain host-owned. No arbitrary custom RM or eval config
   # can be smuggled into a graded rubric run through the Slime passthrough.
   if [ "${#EXTRA_SLIME_ARGS[@]}" -ne 0 ] || [ "$NO_THINKING" -eq 1 ]; then
@@ -237,6 +241,7 @@ if [ -n "$SIF" ]; then
       --env "LITELLM_BASE_URL=${LITELLM_BASE_URL:-}" \
       --env "JUDGE_QUOTA_STOP_FILE=${JUDGE_QUOTA_STOP_FILE:-}" \
       --env "JUDGE_MODEL=${JUDGE_MODEL:-}" \
+      --env "JUDGE_FALLBACK_MODEL=${JUDGE_FALLBACK_MODEL:-}" \
       --env "JUDGE_REASONING_EFFORT=${JUDGE_REASONING_EFFORT:-}" \
       --env "JUDGE_TOKEN_UNIT_LIMIT=${JUDGE_TOKEN_UNIT_LIMIT:-}" \
       --env "JUDGE_TOKEN_USAGE_FILE=${JUDGE_TOKEN_USAGE_FILE:-}" \
@@ -404,6 +409,7 @@ ray job submit --address=http://127.0.0.1:8265 --submission-id=\"\$RAY_JOB_ID\" 
   --apply-chat-template-kwargs '$CHAT_TEMPLATE_KWARGS' \
   --rollout-shuffle \
   --custom-rm-path $CUSTOM_RM_PATH \
+  $REWARD_POST_PROCESS_ARGS \
   --num-rollout $NUM_ROLLOUT \
   --rollout-batch-size $ROLLOUT_BATCH_SIZE \
   --n-samples-per-prompt $N_SAMPLES_PER_PROMPT \

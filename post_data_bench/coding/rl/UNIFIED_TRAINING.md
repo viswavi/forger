@@ -231,6 +231,18 @@ positive sum. Reward is `sum(weight * score) / sum(weight)`.
   The judge receives the criterion, original prompt, full response,
   and ground truth and returns a JSON score. This is the explicit non-RP branch;
   arbitrary Python inside a code criterion cannot call the judge.
+* **Content filter:** a judge reply the provider's filter blocks (Azure's
+  `content_filter`) is not retried; it prints a `JUDGE_CONTENT_FILTER` line and
+  the criterion is ungraded. RL does not train on that response: `custom_rm`
+  marks it `remove_sample`, Slime zeroes its loss mask, and
+  `rubric_rm.post_process_rewards` (Slime's `--custom-reward-post-process-path`)
+  or the Tinker trainer gives it advantage 0 and keeps it out of its group's
+  mean and std. E.g. an answer that goes along with an unsafe request, whose
+  "Declines to give the dose?" criterion is blocked, would otherwise score 1.0
+  on a length criterion alone. Slime prints one `JUDGE_BLOCKED_SAMPLES` line per
+  step that left any out; Tinker's `train_log.jsonl` and `heldout_log.jsonl`
+  carry `blocked_samples`. Held-out means keep these responses, scored on their
+  graded criteria (0 when none are).
 
 Credentials are loaded only from environment variables. Never print their
 values, include them in prompts, or pass them on command lines:
@@ -245,6 +257,12 @@ values, include them in prompts, or pass them on command lines:
   quota; coding/Impossible-LiveCodeBench and culture/NormAD receive 75M units.
   The quota policy assigns 230M to PRBench and HealthBench; this launcher does
   not yet implement those tasks.
+* `JUDGE_FALLBACK_MODEL`: unset by default. When set (e.g.
+  `litellm_proxy/azure_ai/FW-GLM-5.3`), a criterion the content filter blocked
+  is asked once more of this judge, charged to the same judge ledger at its own
+  unit weights (GLM-5.3: 4/12.5); the response is left out of RL only if this
+  judge is blocked too. Its failures count toward the same circuit as the
+  primary judge's.
 * `JUDGE_MAX_CONSECUTIVE_FAILURES`: defaults to 5. Each logical judge call gets three local attempts with backoff, each
   with up to two LiteLLM retries. After five consecutive exhausted calls in any reward
   worker, the circuit opens and stops RL. Success resets the
