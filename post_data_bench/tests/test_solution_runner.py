@@ -332,6 +332,14 @@ class JudgedRubricScoreTests(unittest.TestCase):
         self.assertNotEqual(judged.cache_key(), rubric_score().cache_key())
         self.assertIn(rubric_rm.JUDGE_MODEL, judged.cache_key())
         self.assertEqual(repr(judged), "rubric_score(judge=True)")
+        glm = "litellm_proxy/azure_ai/FW-GLM-5.3"
+        with patch.dict(os.environ, {"JUDGE_FALLBACK_MODEL": glm}):
+            self.assertIn(glm, judged.cache_key())
+        with patch.dict(os.environ):
+            os.environ.pop("JUDGE_FALLBACK_MODEL", None)
+            unset = judged.cache_key()
+            os.environ["JUDGE_FALLBACK_MODEL"] = ""
+            self.assertEqual(judged.cache_key(), unset)  # "" keeps the old keys
 
 
 if __name__ == "__main__":
