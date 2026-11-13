@@ -267,7 +267,9 @@ def by_comparative_difficulty(
         verifier_workers,
         truncated,
     )
-    prompts = _prompts(items, input_field, prompt_template)
+    prompts = _prompts(
+        items, input_field, prompt_template, "filter.by_comparative_difficulty"
+    )
     grades: dict[str, list[list[bool | float | None]]] = {}
     completions: dict[str, list[list[str | None]]] = {}
     stopped: dict[str, Stopped] = {}
@@ -493,7 +495,7 @@ def by_pass_at_k(
             "pass rate 0 or 1"
         )
 
-    prompts = _prompts(items, input_field, prompt_template)
+    prompts = _prompts(items, input_field, prompt_template, "filter.by_pass_at_k")
     completions, stopped = _samples(
         prompts,
         model=model,
@@ -916,21 +918,27 @@ def _annotate(
 
 
 def _prompts(
-    items: list[dict], input_field: str, prompt_template: PromptTemplate | None
+    items: list[dict],
+    input_field: str,
+    prompt_template: PromptTemplate | None,
+    caller: str,
 ) -> list[Prompt]:
     if prompt_template is not None:
         return [_resolve_prompt(prompt_template, item) for item in items]
-    return [_field_prompt(item, input_field) for item in items]
+    return [_field_prompt(item, input_field, caller) for item in items]
 
 
-def _field_prompt(item: dict, input_field: str) -> Prompt:
+def _field_prompt(
+    item: dict, input_field: str, caller: str, arg: str = "input_field"
+) -> Prompt:
     """Return the task under ``input_field`` as a prompt: text or chat messages.
 
     E.g. an RL row's ``[{"role": "system", ...}, {"role": "user", ...}]`` is sent
     as that conversation, not as the repr of the list. A number is sent as its
-    text, as before.
+    text, as before. Errors name ``caller`` and ``arg``, the op the user called
+    and its parameter, e.g. ``"inspect.rubric_scores"`` and ``"prompt_field"``.
     """
-    value = get_field(item, input_field, "filter.model_difficulty")
+    value = get_field(item, input_field, caller)
     if isinstance(value, str):
         return value
     if isinstance(value, (int, float)):  # bool too: e.g. 7 → "7"
@@ -941,10 +949,16 @@ def _field_prompt(item: dict, input_field: str) -> Prompt:
         and all(isinstance(m, dict) and "role" in m and "content" in m for m in value)
     ):
         return value
+    # rubric_scores has no prompt_template to suggest
+    hint = (
+        "; pass prompt_template to build the prompt from other fields"
+        if arg == "input_field"
+        else ""
+    )
     raise ValueError(
-        f"input_field {input_field!r} must hold text or a list of chat messages "
-        f'({{"role": ..., "content": ...}} dicts), got {type(value).__name__}; '
-        "pass prompt_template to build the prompt from other fields"
+        f"{caller}: {arg} {input_field!r} must hold text or a list of chat "
+        f'messages ({{"role": ..., "content": ...}} dicts), got '
+        f"{type(value).__name__}{hint}"
     )
 
 

@@ -68,6 +68,23 @@ class HoldTests(unittest.TestCase):
         state = self.ledger()
         self.assertEqual((state["token_units"], state["held_token_units"]), (70, 0))
 
+    def test_no_max_tokens_is_sent_uncapped_and_held_at_65536(self):
+        """With no max_tokens the call is uncapped, as in Forger; it holds 65,536."""
+        usage = SimpleNamespace(prompt_tokens=10, completion_tokens=20)
+        result = SimpleNamespace(usage=usage, _hidden_params={"response_cost": 0.0})
+        seen = {}
+
+        def reply(**kwargs):
+            seen["max_tokens"] = kwargs.get("max_tokens")
+            seen["held"] = self.ledger()["held_token_units"]
+            return result
+
+        with patch("litellm.completion", side_effect=reply):
+            token_budget.completion(
+                model=DEEPSEEK, messages=[{"role": "user", "content": "abcd"}]
+            )
+        self.assertEqual(seen, {"max_tokens": None, "held": 2 + 65_536 * 3})
+
     def test_sdk_retries_are_refused(self):
         """A retried attempt would be billed but never recorded."""
         with self.assertRaisesRegex(ValueError, "retry yourself"):

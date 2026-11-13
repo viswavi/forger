@@ -12,7 +12,7 @@ Inspect ops return a *report* about rows and never change them. Signatures are i
 | `compare_pipelines` | no | Print where two saved pipeline runs diverge and how each differing step's rows differ. |
 | `phrase_frequency` | no | Print, per string field, the phrases and names the most rows share. No LLM. |
 | `student_log_likelihood` | yes | How likely the student finds each row's target, in bits, beside its own responses. |
-| `rubric_scores` | grades | Print and return a reward's score histogram on responses, samples, and controls. |
+| `rubric_scores` | grades | Print and return a reward's score histogram on a sample of `n` rows, beside controls. |
 | `embedding_dispersion` | yes | Print and return how dispersed a field is in embedding space vs. a reference. No LLM. |
 | `compare_to_reference` | yes | Print and return feature distributions (lengths, numbers, labels) beside a reference. |
 
@@ -50,12 +50,17 @@ SFT set for Qwen3-4B:
 
 `rubric_scores(rows, grade, *, n=50, response_fields="response", probes=None, model=None, k=4, ...)` bins a reward's
 scores before RL. `grade(response, row)` returns a score in [0, 1] or None: a code rubric, an LLM judge, or exact match.
+It scores a sample, not every row: `n` rows (default 50) drawn with `seed`. The first line says so, and an `n` below
+the row count warns. `n=None` scores every row; to keep or drop rows by score, use
+[`filter.by_rubric_score`](filter.md), which scores every row with the same `grade` and shares its cached grades.
 Columns: each response field (e.g. the SFT target), each probe, `k` samples per prompt from `model` (what RL sees), and
 three controls no task should reward: `empty`, `random` (200 random characters), and `other_row` (another row's
 response). On a rubric that gave 1.0 to any response without a python code block, the targets looked fine; `empty`
 did not:
 
 ```text
+  50 of 60 rows sampled (seed 0; the other 10 have no score) · grade abstain_bug · sampled: toy-student
+
   score          response   sampled ×3   empty   random   other_row
   0                    10           25       0        0          50
   1                    40          125      50       50           0
@@ -71,8 +76,9 @@ did not:
 - The first field column (else the sampled one) is the reference; every other field, probe, and sampled column is
   compared with it row by row: `baseline: below solution on 31, tied 15, above 4 of 50 rows, mean gap +0.21`. Ties
   with a known-weak baseline are rows the reward cannot tell apart.
-- `report.model_dump()` is plain JSON: bins, and per column counts, mean, shares at 0 and 1, per-row scores, and
-  `vs_reference` (`below`, `tied`, `above`, `mean_gap`). Grades are cached (`grade` by its `cache_key()`).
+- `report.model_dump()` is plain JSON: bins, and per column counts, mean, shares at 0 and 1, per-row scores
+  (`scores[i]` belongs to `report.rows[i]`, the sampled rows only), and `vs_reference` (`below`, `tied`, `above`,
+  `mean_gap`). Grades are cached (`grade` by its `cache_key()`).
 
 ## `embedding_dispersion`
 

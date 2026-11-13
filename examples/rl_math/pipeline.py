@@ -1,8 +1,12 @@
 """An RL dataset of olympiad-style math problems with integer answers and code rubrics.
 
-Each step's docstring says what it does and why: the options we compared, how we
-measured them, and what we chose. The numbers in those justifications are
-illustrative, written for this example rather than recorded from a run.
+Each step's docstring says what it does and what we chose. Its "Justification"
+shows the form a justification takes: the options, the call that measures them
+(e.g. ``filter.by_pass_at_k(..., histogram=True)`` on 450 problems), and the
+result. The results here are placeholders, not from a run, and each
+justification says so. In your own docstrings, write only comparisons you ran,
+with the call and row count that measured them; otherwise state the choice
+alone.
 
 The output is one JSON line per problem: the ``prompt`` and its ``rubric``, a list
 of ``[criterion, weight]`` pairs whose one criterion is code that checks the final
@@ -152,7 +156,8 @@ def seed_topics(model: Model, source: str = "web") -> dict[str, list[dict]]:
 
     ``source="memory"`` uses SUBJECTS instead (candidate #1 below).
 
-    Justification: we compared 4 candidates:
+    Justification (placeholder results, not from a run): we compared 4
+    candidates:
         1. Write a list of topics ourselves from memory (SUBJECTS), and
            generate problems.
         2. Use the validation examples directly as seeds.
@@ -174,6 +179,10 @@ def seed_topics(model: Model, source: str = "web") -> dict[str, list[dict]]:
     validation set (Vendi of 11); it failed to cover a few important topics (e.g.
     geometry and precalculus). #4 achieved a coverage of 79%, with Vendi 18, and its
     near-reference share was only 8%. Thus, we picked #4: extract topics via search.
+
+    Measured with: main and main_from_memory at FORGER_LIMIT=25 (#4 and #1),
+    then inspect.compare_pipelines("main", "main_from_memory"). #2 and #3 have
+    no pipeline in this file; a real justification would name theirs.
     """
     if source == "memory":
         topics = [{"topic": s, "query": None, "url": None} for s in SUBJECTS]
@@ -220,7 +229,8 @@ def write(
     that the verifier reproduces on at least 2 of 4 tries, and no near-copy
     among the kept problems or in the validation set.
 
-    Justification: we compared 3 writer models:
+    Justification (placeholder results, not from a run): we compared 3 writer
+    models:
         #1: the strong model at no reasoning effort
         #2: the weak model at low effort
         #3: the weak model at no effort
@@ -240,6 +250,10 @@ def write(
     inspect.embedding_dispersion(..., duplicate_threshold=t) for t in 0.95,
     0.9 and 0.85. At 0.9 the groups were siblings with their numbers swapped;
     at 0.85 they joined distinct problems that opened alike.
+
+    Measured with: this step's filter.by_pass_at_k (its step report shows the
+    pass@4 histogram), run once per writer= in main. #5 has no code in this
+    file; a real justification would name it.
     """
     drafts = alter.generate_from_context(
         topics,
@@ -300,7 +314,8 @@ def write(
 def calibrate(rows: list[dict], student: LocalModel) -> list[dict]:
     """Drop problems the student nearly always solves; keep those it cannot solve yet.
 
-    Justification: we compared two pass@8 ranges:
+    Justification (placeholder results, not from a run): we compared two pass@8
+    ranges:
         #1: (0, 7/8], problems the student solves at least once
         #2: [0, 6/8], also keeping problems it has not solved yet
 
@@ -314,6 +329,10 @@ def calibrate(rows: list[dict], student: LocalModel) -> list[dict]:
     An LLM-as-a-judge (filter.by_judged_difficulty) scored every problem 3/5 or 4/5,
     rating those the student never solved like those it always solved (mean 3.5 vs
     3.3) -- not informative.
+
+    Measured with: the pass@8 histogram in this step's report, which counts
+    every problem, kept or not. The skyline and judge checks have no code in
+    this file; a real justification would name it.
     """
     return filter.by_pass_at_k(
         rows,
@@ -334,7 +353,8 @@ def check_rubrics(rows: list[dict], student: LocalModel, skyline: Model) -> list
     The skyline is a model stronger than the student (here the writer's model)
     solving each problem afresh: the score a capable model gets.
 
-    Justification: we compared two rubric criteria:
+    Justification (placeholder results, not from a run): we compared two rubric
+    criteria:
         1. Any \boxed{} in the response holds the answer.
         2. The last \boxed{} after the reasoning holds the answer.
 
@@ -345,6 +365,10 @@ def check_rubrics(rows: list[dict], student: LocalModel, skyline: Model) -> list
     Therefore, we use #2. Under it, the skyline tied the solution on 182 of 200
     rows and scored below it on 18 (mean 0.91), while the student's samples
     averaged 0.52: room between the student and a stronger model.
+
+    Measured with: the inspect.rubric_scores call below, on a sample of 200
+    rows, once per criterion's GRADE_CODE. #1's code is not in this file; a
+    real justification would name it.
     """
     rows = alter.generate_from_context(
         rows, "{prompt}", skyline, merge=True, output_field="skyline"
