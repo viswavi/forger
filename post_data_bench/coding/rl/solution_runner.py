@@ -266,10 +266,12 @@ class RubricScore:
         """Stable key for Forger's op cache: the grader's sources (and judge)."""
         if not self.judge:
             return ("RubricScore",) + _grader_sources()
-        judge = (
+        judge: tuple[str, ...] = (
             os.environ.get("JUDGE_MODEL", ""),
             os.environ.get("JUDGE_REASONING_EFFORT", ""),
         )
+        if os.environ.get("JUDGE_FALLBACK_MODEL"):  # unset keeps the old keys
+            judge += (os.environ["JUDGE_FALLBACK_MODEL"],)
         return ("RubricScore", "judge") + judge + _grader_sources()
 
     def __repr__(self) -> str:
@@ -298,7 +300,8 @@ def rubric_score(judge: bool = False) -> RubricScore:
     (``rubric_rm.rubric_reward``, the code ``custom_rm`` runs): prompt criteria
     go to the RL judge, charged to the shared judge ledger
     (JUDGE_TOKEN_USAGE_FILE), and a criterion the content filter blocks drops
-    out of the mean (0 when all are blocked). E.g. a rubric of one code
+    out of the mean (0 when all are blocked); RL does not train on such a
+    response at all. E.g. a rubric of one code
     criterion (weight 1) and one prompt criterion (weight 3) scores 0.25 for a
     response that passes only the code one, where the default gives 1.0. Judge
     failures raise ``JudgeUnavailable``; never a silent 0.

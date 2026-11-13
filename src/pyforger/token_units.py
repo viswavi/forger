@@ -144,7 +144,7 @@ def validate_reasoning_effort(effort):
 
 
 def default_generation_limit(task):
-    """Return the generation quota for a launcher task name.
+    """Return the generation quota for a task name.
 
     The algorithmic task recommends ~500 rows (800 at most) instead of ~1,250,
     so its quota shrinks to match.
@@ -175,11 +175,7 @@ def default_judge_reasoning_effort(task):
 
 
 def default_rl_limit(task):
-    """Return the fixed RL quota for a launcher task name.
-
-    Only task names appear here: this module is copied into agent sandboxes,
-    which must never see benchmark names.
-    """
+    """Return the fixed RL quota for a task name."""
     normalized = str(task).strip().lower()
     if normalized in ("coding", "culture"):
         return 50_000_000

@@ -88,6 +88,8 @@ Keywords left out of the signatures below:
   - [`by_rouge_l`](#filter-by_rouge_l): Drop items whose ROUGE-L F1 against any kept item exceeds threshold.
   - [`by_rouge_l_agreement`](#filter-by_rouge_l_agreement): Keep items where ROUGE-L F1 between two fields meets or
     misses threshold.
+  - [`by_rubric_score`](#filter-by_rubric_score): Grade every row's response with `grade`; keep rows scoring within the
+    bounds.
   - [`by_syntax`](#filter-by_syntax): Keep items whose `field` parses as valid `lang`.
   - [`by_tests`](#filter-by_tests): Keep rows whose program passes at least `min_pass_rate` of its tests.
   - [`by_topic_frequency`](#filter-by_topic_frequency): Downsample over-represented topics and drop rare ones.
@@ -103,7 +105,8 @@ Keywords left out of the signatures below:
   - [`inspect_step`](#inspect-inspect_step): Print the full report of the latest run of step `name` and return it.
   - [`phrase_frequency`](#inspect-phrase_frequency): Print and return the phrases and names that the most rows share,
     per field.
-  - [`rubric_scores`](#inspect-rubric_scores): Print and return how `grade` scores responses, binned, one column each.
+  - [`rubric_scores`](#inspect-rubric_scores): Print and return how `grade` scores a sample of `n` rows, binned, by
+    column.
   - [`runs`](#inspect-runs): Print the latest saved pipeline runs, oldest first, and return them.
   - [`spend`](#inspect-spend): Print and return the spend ledger's totals by run, pipeline, and step.
   - [`student_log_likelihood`](#inspect-student_log_likelihood): Print and return how likely the student finds each
@@ -1080,6 +1083,30 @@ Keep items where ROUGE-L F1 between two fields meets or misses threshold.
 **Returns:** A filtered list of data items where the specified fields all agree (or disagree if `disagree=True`) by
 ROUGE-L F1.
 
+<a name="filter-by_rubric_score"></a>
+
+### `filter.by_rubric_score`
+
+Disk-cached (`@op`).
+
+```python
+by_rubric_score(
+    items: list[dict],
+    grade: Grade,
+    *,
+    response_field: str = "response",
+    min_score: float | None = None,
+    max_score: float | None = None,
+    score_field: str | None = None,
+    keep_ungradable: bool = False,
+    workers: int = 8,
+) -> list[dict]
+```
+
+Grade every row's response with `grade`; keep rows scoring within the bounds.
+
+**Returns:** The kept rows, in input order; unchanged unless `score_field` is set.
+
 <a name="filter-by_syntax"></a>
 
 ### `filter.by_syntax`
@@ -1351,7 +1378,7 @@ rubric_scores(
 ) -> RubricScoreReport
 ```
 
-Print and return how `grade` scores responses, binned, one column each.
+Print and return how `grade` scores a sample of `n` rows, binned, by column.
 
 <a name="inspect-runs"></a>
 

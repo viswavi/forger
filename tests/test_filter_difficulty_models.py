@@ -1041,6 +1041,16 @@ def test_non_text_input_field_raises(value, type_name):
     assert model.calls == []
 
 
+def test_missing_input_field_names_the_filter_called():
+    """Errors name the op the user called, e.g. filter.by_pass_at_k."""
+    with pytest.raises(
+        KeyError, match="filter.by_pass_at_k: item is missing required field 'task'"
+    ):
+        _pass_at_k([{"answer": "1"}], ScriptedModel("m", {}), k=1)
+    with pytest.raises(ValueError, match="filter.by_comparative_difficulty: input"):
+        _comparative([{"task": {"text": "t1"}, "answer": "1"}])
+
+
 def test_number_input_field_is_sent_as_text():
     """A number is stringified, as before chat messages were accepted."""
     model = ScriptedModel("m", {"7": ["1"]})

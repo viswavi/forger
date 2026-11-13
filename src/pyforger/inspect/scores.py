@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import contextvars
 import math
 import random
 import string
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -17,9 +15,10 @@ from rich.text import Text
 
 from pyforger._render import WIDTH, _clean, _console, _emit, _fit_table, _plain, _rule
 from pyforger.filter.model_difficulty import _field_prompt, _samples
-from pyforger.op import op, skip_cache_write, tracked
+from pyforger.filter.rubric import Grade, _grade_column
+from pyforger.op import tracked
+from pyforger.utils import get_formatted_logger
 
-Grade = Callable[[str, dict], "float | bool | None"]
 Probe = Callable[[dict], "str | None"]
 
 BINS = ["0", "(0, 0.25]", "(0.25, 0.5]", "(0.5, 0.75]", "(0.75, 1)", "1"]
@@ -101,9 +100,13 @@ class ColumnScores(BaseModel):
 class RubricScoreReport(BaseModel):
     """What ``rubric_scores`` measured; ``model_dump()`` gives plain JSON data.
 
-    ``rows`` are the indices of the sampled rows, in order. ``flags`` has one
-    line per control or probe that earns at least half the reference
-    column's mean (the first field column, else the sampled one).
+    Only a sample is scored: ``rows`` are the indices of the ``len(rows)``
+    sampled rows of the ``n_rows`` given, in order, and a column's
+    ``scores[i]`` belongs to ``rows[i]``. A row not in ``rows`` has no score,
+    e.g. 50 of 300 rows with the default ``n=50``; ``filter.by_rubric_score``
+    scores every row. ``flags`` has one line per control or probe that earns
+    at least half the reference column's mean (the first field column, else
+    the sampled one).
     """
 
     grade: str
@@ -133,70 +136,6 @@ def _bin(score: float) -> int | None:
     if score < 0 or score > 1:
         return None
     return min(4, max(1, math.ceil(score * 4)))
-
-
-def _call(grade: Grade, response: str, row: dict) -> tuple[float | None, str | None]:
-    """``(score, error)``: a raised error is ungradable and keeps its message."""
-    try:
-        value = grade(response, row)
-    except Exception as exc:  # a crash in one response's grading
-        return None, f"{type(exc).__name__}: {exc}"[:300]
-    if value is None:
-        return None, None
-    if not isinstance(value, (bool, int, float)):
-        raise TypeError(
-            f"grade must return a number, a bool, or None; got {value!r} from {grade!r}"
-        )
-    if not math.isfinite(value):
-        return None, f"grade returned {value}"
-    return float(value), None
-
-
-@op(name="inspect.rubric_scores.grades")
-def _grade_column(
-    rows: list[dict],
-    responses: list[list[str | None]],
-    *,
-    grade: Grade,
-    workers: int,
-) -> tuple[list[list[float | None]], list[list[str | None]]]:
-    """Grade ``responses[i][j]`` against ``rows[i]``; a None response is ungradable.
-
-    Returns the scores and, aligned, each error message. A grading that raised
-    keeps the result out of the cache, so a rerun tries it again.
-    """
-    scores: list[list[float | None]] = [[None] * len(r) for r in responses]
-    errors: list[list[str | None]] = [[None] * len(r) for r in responses]
-    jobs = [
-        (i, j)
-        for i, row in enumerate(responses)
-        for j, response in enumerate(row)
-        if response is not None
-    ]
-
-    def run(i: int, j: int) -> tuple[float | None, str | None]:
-        return _call(grade, responses[i][j], rows[i])  # type: ignore[arg-type]
-
-    def run_in(
-        context: contextvars.Context, i: int, j: int
-    ) -> tuple[float | None, str | None]:
-        return context.run(run, i, j)
-
-    if workers <= 1 or len(jobs) <= 1:
-        results = [run(i, j) for i, j in jobs]
-    else:
-        with ThreadPoolExecutor(max_workers=min(workers, len(jobs))) as pool:
-            # Each call runs in a copy of the caller's context, so ops it calls
-            # are cached and reported as without threads.
-            futures = [
-                pool.submit(run_in, contextvars.copy_context(), i, j) for i, j in jobs
-            ]
-            results = [f.result() for f in futures]
-    for (i, j), (score, error) in zip(jobs, results):
-        scores[i][j], errors[i][j] = score, error
-    if any(e is not None for row in errors for e in row):
-        skip_cache_write()
-    return scores, errors
 
 
 def _sample_rows(n_rows: int, n: int | None, seed: int) -> list[int]:
@@ -287,7 +226,7 @@ def rubric_scores(
     workers: int = 8,
     examples: int = 1,
 ) -> RubricScoreReport:
-    """Print and return how ``grade`` scores responses, binned, one column each.
+    """Print and return how ``grade`` scores a sample of ``n`` rows, binned, by column.
 
     Before RL, look at the reward's distribution: on what the policy will
     sample, on the targets, and on responses it should not reward. ``grade(
@@ -297,7 +236,12 @@ def rubric_scores(
     ``__call__`` by its ``cache_key()`` if it has one), so the grades are
     cached; a grading that raised is counted with its message and not cached.
 
-    ``n`` rows are drawn with ``seed``. Columns, one per kind:
+    It scores a sample: ``n`` rows drawn with ``seed`` (default 50), not every
+    row. The report names how many, e.g. "50 of 300 rows sampled", and
+    ``report.rows`` lists them; other rows have no score, so do not keep or
+    drop rows by the report. ``n=None`` scores every row, and
+    ``filter.by_rubric_score`` keeps rows by their score. Columns, one per
+    kind:
 
     - each of ``response_fields``, e.g. a reference solution and a weak
       baseline's response;
@@ -327,7 +271,8 @@ def rubric_scores(
     Args:
         rows: The rows (dicts); each is passed to ``grade`` as is.
         grade: ``(response, row) -> float | bool | None``.
-        n: Rows to sample; None grades every row.
+        n: Rows to sample (default 50); None grades every row. A warning is
+            logged when it leaves rows out.
         response_fields: Fields holding responses to grade as they are; the
             first is the reference.
         probes: ``{name: probe(row) -> response or None}``; None is
@@ -369,6 +314,15 @@ def rubric_scores(
             "pass response_fields, probes, or a model: there is nothing to grade"
         )
     picked = _sample_rows(len(rows), n, seed)
+    if len(picked) < len(rows):
+        get_formatted_logger("RubricScores").warning(
+            "inspect.rubric_scores scores a sample of %d of %d rows (n=%d); the "
+            "others get no score. Pass n=None to score every row, or use "
+            "filter.by_rubric_score to keep rows by score.",
+            len(picked),
+            len(rows),
+            n,
+        )
     sample = [rows[i] for i in picked]
     report = RubricScoreReport(
         grade=_name(grade), n_rows=len(rows), rows=picked, seed=seed
@@ -384,7 +338,10 @@ def rubric_scores(
             getattr(model, "model_id", getattr(model, "_model_id", "")) or model
         )[:120]
         report.k = k
-        prompts = [_field_prompt(r, prompt_field) for r in sample]
+        prompts = [
+            _field_prompt(r, prompt_field, "inspect.rubric_scores", "prompt_field")
+            for r in sample
+        ]
         completions, _ = _samples(
             prompts,
             model=model,
@@ -497,7 +454,16 @@ def _label(c: ColumnScores, k: int) -> str:
 def _renderable(report: RubricScoreReport, *, width: int) -> RenderableType:
     head = Text()
     head.append(f"{len(report.rows):,} of {report.n_rows:,} rows", style="bold")
-    head.append(f" (seed {report.seed}) · grade {_clean(report.grade)}")
+    if len(report.rows) < report.n_rows:
+        # e.g. "50 of 300 rows sampled (seed 0; the other 250 have no score)"
+        head.append(" sampled", style="bold")
+        head.append(
+            f" (seed {report.seed}; the other "
+            f"{report.n_rows - len(report.rows):,} have no score)"
+        )
+    else:
+        head.append(f" (seed {report.seed})")
+    head.append(f" · grade {_clean(report.grade)}")
     if report.model_id:
         head.append(f" · sampled: {_clean(report.model_id)}")
     body: list[RenderableType] = [head]

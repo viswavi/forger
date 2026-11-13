@@ -383,6 +383,7 @@ class RewardTests(unittest.IsolatedAsyncioTestCase):
                 "JUDGE_TOKEN_USAGE_FILE": str(self.usage_file),
                 "JUDGE_TOKEN_UNIT_LIMIT": "75000000",
                 "JUDGE_MODEL": rm.JUDGE_MODEL,
+                "JUDGE_FALLBACK_MODEL": "",
                 "JUDGE_REASONING_EFFORT": "low",
                 "PDB_TASK": "coding",
             },
@@ -784,6 +785,130 @@ class RewardTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(rm, "prompt_score", new=AsyncMock(return_value=None)):
             self.assertEqual(await rm.custom_rm(None, sample), 0.0)
 
+    async def test_blocked_criterion_marks_the_sample_removed(self):
+        """custom_rm marks a sample with a blocked criterion, not a graded one."""
+        rubric = [[{"code": "def grade(p, r, g):\n    return 1.0"}, 1]]
+        rubric.append([{"prompt": "Declines to give the dose?"}, 3])
+
+        def sample():
+            return SimpleNamespace(
+                response="answer",
+                label="gold",
+                metadata={"original_prompt": [], "rubric": rubric},
+            )
+
+        blocked, graded = sample(), sample()
+        with patch.object(rm.asyncio, "to_thread", new=AsyncMock(return_value=1.0)):
+            with patch.object(rm, "prompt_score", new=AsyncMock(return_value=None)):
+                # The length-style code criterion alone would give 1.0.
+                self.assertEqual(await rm.custom_rm(None, blocked), 1.0)
+            with patch.object(rm, "prompt_score", new=AsyncMock(return_value=0.0)):
+                self.assertEqual(await rm.custom_rm(None, graded), 0.25)
+        self.assertTrue(blocked.remove_sample)
+        self.assertFalse(getattr(graded, "remove_sample", False))
+        with patch.object(rm, "prompt_score", new=AsyncMock(side_effect=[0.5, None])):
+            self.assertEqual(
+                await rm.rubric_reward_and_blocks(
+                    [[{"prompt": "a"}, 1], [{"prompt": "b"}, 1]], [], "r", "g"
+                ),
+                (0.5, 1),
+            )
+
+    async def test_rollout_log_marks_blocked_samples(self):
+        """Slime's rollout log says which samples had a blocked criterion."""
+        rubric = [[{"prompt": "a"}, 1]]
+        with tempfile.TemporaryDirectory() as log_dir:
+            with patch.dict(os.environ, {"LCB_RM_LOG_DIR": log_dir}), patch.object(
+                rm, "_log_file", None
+            ):
+                for value in (None, 1.0):
+                    sample = SimpleNamespace(
+                        response="answer",
+                        label="gold",
+                        metadata={"original_prompt": [], "rubric": rubric},
+                    )
+                    with patch.object(
+                        rm, "prompt_score", new=AsyncMock(return_value=value)
+                    ):
+                        await rm.custom_rm(None, sample)
+                rm._log_file.close()
+            (log,) = Path(log_dir).glob("rollouts_*.jsonl")
+            records = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertEqual([r["blocked"] for r in records], [True, False])
+
+    def _judge_env(self, **extra):
+        return patch.dict(
+            os.environ,
+            {
+                "LITELLM_JUDGE_API_KEY": "test",
+                "LITELLM_BASE_URL": "https://example.test",
+                "JUDGE_MAX_CONSECUTIVE_FAILURES": "1",
+                **extra,
+            },
+        )
+
+    async def test_fallback_judge_scores_a_blocked_criterion(self):
+        """JUDGE_FALLBACK_MODEL is asked once, charged at its own unit weights."""
+        blocked = RuntimeError('Error code: 400 {"finish_reason":"content_filter"}')
+        blocked.status_code = 400  # refused, so the blocked call is not billed
+        reply = SimpleNamespace(
+            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=2),
+            choices=[SimpleNamespace(message=SimpleNamespace(content='{"score": 1}'))],
+        )
+        glm = "litellm_proxy/azure_ai/FW-GLM-5.3"
+        with self._judge_env(JUDGE_FALLBACK_MODEL=glm), patch(
+            "litellm.acompletion", new=AsyncMock(side_effect=[blocked, reply])
+        ) as completion, patch("sys.stderr", new=io.StringIO()) as stderr:
+            self.assertEqual(await rm.prompt_score("c", [], "r", "g"), 1)
+        self.assertEqual(
+            [c.kwargs["model"] for c in completion.call_args_list],
+            [rm.JUDGE_MODEL, glm],
+        )
+        self.assertIn(f"JUDGE_CONTENT_FILTER: asking {glm}", stderr.getvalue())
+        ledger = json.loads(self.usage_file.read_text())
+        self.assertEqual(ledger["token_units"], 10 * 4 + 2 * 12.5)
+        self.assertEqual(ledger["models"][glm]["calls"], 1)
+
+    async def test_fallback_blocked_too_leaves_the_criterion_unscored(self):
+        """Both judges blocked: None after two calls, not a retry loop."""
+        blocked = RuntimeError('Error code: 400 {"finish_reason":"content_filter"}')
+        with self._judge_env(
+            JUDGE_FALLBACK_MODEL="litellm_proxy/azure_ai/FW-GLM-5.3"
+        ), patch(
+            "litellm.acompletion", new=AsyncMock(side_effect=blocked)
+        ) as completion, patch(
+            "sys.stderr", new=io.StringIO()
+        ) as stderr:
+            self.assertIsNone(await rm.prompt_score("c", [], "r", "g"))
+        self.assertEqual(completion.await_count, 2)
+        self.assertEqual(
+            stderr.getvalue().count("JUDGE_CONTENT_FILTER: criterion left unscored"), 1
+        )
+
+    async def test_no_fallback_by_default(self):
+        """Unset or empty JUDGE_FALLBACK_MODEL: one call, as before."""
+        blocked = RuntimeError('Error code: 400 {"finish_reason":"content_filter"}')
+        with self._judge_env(JUDGE_FALLBACK_MODEL=""), patch(
+            "litellm.acompletion", new=AsyncMock(side_effect=blocked)
+        ) as completion, patch("sys.stderr", new=io.StringIO()) as stderr:
+            self.assertIsNone(await rm.prompt_score("c", [], "r", "g"))
+        self.assertEqual(completion.await_count, 1)
+        self.assertEqual(
+            stderr.getvalue(),
+            "JUDGE_CONTENT_FILTER: criterion left unscored "
+            "(provider blocked the reply)\n",
+        )
+        self.assertNotIn("JUDGE_FALLBACK_MODEL", rm.judge_configuration())
+
+    def test_fallback_model_needs_unit_weights(self):
+        """A fallback without token-unit weights fails before any RL starts."""
+        with patch.dict(os.environ, {"JUDGE_FALLBACK_MODEL": "openai/gpt-4o"}):
+            with self.assertRaisesRegex(ValueError, "JUDGE_FALLBACK_MODEL"):
+                rm.judge_configuration()
+        glm = "litellm_proxy/azure_ai/FW-GLM-5.3"
+        with patch.dict(os.environ, {"JUDGE_FALLBACK_MODEL": glm}):
+            self.assertEqual(rm.judge_configuration()["JUDGE_FALLBACK_MODEL"], glm)
+
     async def test_success_resets_failures(self):
         """Verify success resets failures."""
         success = SimpleNamespace(
@@ -815,6 +940,120 @@ class RewardTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.assertRaises(rm.JudgeUnavailable):
                 await rm.prompt_score("c", [], "r", "g")
+
+
+class BlockedSampleAdvantageTests(unittest.TestCase):
+    """Samples with a blocked criterion get advantage 0 and leave the baseline."""
+
+    @staticmethod
+    def samples(*groups):
+        """Slime-like samples from groups of rewards; a str reward is marked."""
+
+        class Sample(SimpleNamespace):
+            def get_reward_value(self, args):
+                return self.reward
+
+        return [
+            Sample(
+                group_index=g,
+                reward=float(r),
+                remove_sample=isinstance(r, str),
+            )
+            for g, rewards in enumerate(groups)
+            for r in rewards
+        ]
+
+    @staticmethod
+    def args(**overrides):
+        """Slime's reward-normalization arguments, as the launcher sets them."""
+        return SimpleNamespace(
+            **{
+                "advantage_estimator": "grpo",
+                "rewards_normalization": True,
+                "grpo_std_normalization": True,
+                "n_samples_per_prompt": 3,
+                "rollout_batch_size": 2,
+                **overrides,
+            }
+        )
+
+    def test_marked_sample_gets_zero_and_leaves_the_group_statistics(self):
+        """[1, 0, 0.9 marked] trains on [1, 0] alone; other groups are untouched."""
+        samples = self.samples([1, 0, "0.9"], [1, 0, 0.5])
+        with patch("sys.stderr", new=io.StringIO()) as stderr:
+            raw, advantages = rm.post_process_rewards(self.args(), samples)
+        self.assertEqual(raw, [1.0, 0.0, 0.9, 1.0, 0.0, 0.5])
+        expected = [0.7071, -0.7071, 0.0, 1.0, -1.0, 0.0]
+        for got, want in zip(advantages, expected):
+            self.assertAlmostEqual(got, want, places=4)
+        self.assertEqual(
+            stderr.getvalue(),
+            "JUDGE_BLOCKED_SAMPLES: 1 of 6 samples left out of this RL step "
+            "(a judged criterion was blocked)\n",
+        )
+
+    def test_unmarked_batch_matches_slime_default(self):
+        """No marks: Slime's group mean and n-1 std, and no log line."""
+        samples = self.samples([1, 0, 0.9], [0.2, 0.2, 0.2])
+        with patch("sys.stderr", new=io.StringIO()) as stderr:
+            _, advantages = rm.post_process_rewards(self.args(), samples)
+        expected = [0.6657, -1.1499, 0.4842, 0.0, 0.0, 0.0]
+        for got, want in zip(advantages, expected):
+            self.assertAlmostEqual(got, want, places=4)
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_all_marked_one_trusted_and_other_estimators(self):
+        """All marked: zeros. One trusted: centered, no std. Options as Slime's."""
+        samples = self.samples(["1", "0", "1"], [1, "0", "1"])
+        with patch("sys.stderr"):
+            _, advantages = rm.post_process_rewards(self.args(), samples)
+            self.assertEqual(advantages, [0.0] * 6)
+            samples = self.samples([1, 0, "1"])
+            _, centered = rm.post_process_rewards(
+                self.args(grpo_std_normalization=False), samples
+            )
+            self.assertEqual(centered, [0.5, -0.5, 0.0])
+            _, rpp = rm.post_process_rewards(
+                self.args(advantage_estimator="reinforce_plus_plus_baseline"), samples
+            )
+            self.assertEqual(rpp, [0.5, -0.5, 0.0])
+            raw, same = rm.post_process_rewards(
+                self.args(rewards_normalization=False), samples
+            )
+            self.assertEqual(same, raw)
+
+    def test_flat_samples_group_by_position(self):
+        """Without group_index, Slime's positional groups of n_samples_per_prompt."""
+        samples = self.samples([1, 0, "1"], [1, 0, 0])
+        for sample in samples:
+            sample.group_index = None
+        with patch("sys.stderr"):
+            _, advantages = rm.post_process_rewards(self.args(), samples)
+        self.assertAlmostEqual(advantages[0], 0.7071, places=4)
+        self.assertEqual(advantages[2], 0.0)
+        self.assertAlmostEqual(advantages[3], 1.1547, places=4)
+
+    def test_tinker_skips_blocked_samples(self):
+        """Tinker gives a blocked sample no datum and no place in the baseline."""
+        from coding.rl import tinker_training
+
+        def sequences(count):
+            return [SimpleNamespace(tokens=[7, 8], logprobs=[0.0, 0.0])] * count
+
+        groups = [
+            ([1, 2], sequences(3), [1.0, 0.0, 0.9], [False, False, True]),
+            # Only the blocked sample differs: no signal left.
+            ([1, 2], sequences(3), [0.0, 0.0, 1.0], [False, False, True]),
+        ]
+        with patch.object(
+            tinker_training, "datum", side_effect=lambda tokens, **kw: kw
+        ):
+            data, kept = tinker_training._group_datums(groups)
+        self.assertEqual(kept, 1)
+        self.assertEqual(len(data), 2)
+        # pstdev([1, 0]) = 0.5, so advantages are +-1, over 12 sampled tokens.
+        self.assertAlmostEqual(data[0]["advantages"][-1], 1 / 12, places=5)
+        self.assertAlmostEqual(data[1]["advantages"][-1], -1 / 12, places=5)
 
 
 def tinker_checkpoint(directory, sft_sha256):
@@ -1263,6 +1502,10 @@ class RecipeTests(unittest.TestCase):
             )
             self.assertNotIn("test-only-secret", result.stdout)
             self.assertIn("--custom-rm-path rl.rubric_rm.custom_rm", result.stdout)
+            self.assertIn(
+                "--custom-reward-post-process-path rl.rubric_rm.post_process_rewards",
+                result.stdout,
+            )
             self.assertIn("enable_thinking", result.stdout)
             self.assertNotIn("--no-thinking", result.stdout)
             start = result.stdout.index("set -euo pipefail\ncd ")
