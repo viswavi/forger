@@ -1,10 +1,8 @@
 """Sample a base model or a trained ``tinker://`` checkpoint remotely on Tinker.
 
 Tinker samples token ids, so prompts are rendered with the model's own HF chat
-template and completions decoded with ``skip_special_tokens=True``, exactly as
-PostDataBench's evaluator (``coding/tinker_sampling.py``) does. Rendering is
-duplicated here rather than shared because the evaluator runs in environments
-without pyforger.
+template and completions decoded with ``skip_special_tokens=True``, the way an
+evaluator that samples Tinker directly renders them.
 """
 
 from __future__ import annotations
@@ -107,7 +105,7 @@ def _reserve_on(budget: Any, estimate_usd: float, cancel: threading.Event):
             try:
                 budget.check(reserved + estimate_usd)
             except Exception as exc:
-                # PostDataBench's TinkerBudget raises its own TinkerBudgetExceeded.
+                # An extra `budget` ledger may raise its own *BudgetExceeded type.
                 if not count or not type(exc).__name__.endswith("BudgetExceeded"):
                     raise
                 if cancel.is_set():
@@ -229,8 +227,8 @@ class TinkerModel(Model):
                 "sample", overriding the built-in table for `cost_usd`. A
                 shared ledger always charges its own built-in rates.
             budget: Optional extra ledger with ``check(estimate_usd)`` and
-                ``record(tokens, session_id)``, e.g. PostDataBench's
-                ``TinkerBudget``. Charged in addition to the environment ledger.
+                ``record(tokens, session_id)``, charged in addition to
+                the environment ledger.
             show_progress: Progress for a call with several prompts: a tqdm bar
                 when stderr is a terminal, otherwise a log line every 30
                 seconds. None (default) shows it unless FORGER_PROGRESS=0.

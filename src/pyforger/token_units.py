@@ -144,11 +144,7 @@ def validate_reasoning_effort(effort):
 
 
 def default_rl_limit(task):
-    """Return the fixed RL quota for a launcher task name.
-
-    Only task names appear here: this module is copied into agent sandboxes,
-    which must never see benchmark names.
-    """
+    """Return the fixed RL quota for a task name."""
     normalized = str(task).strip().lower()
     if normalized in ("coding", "culture"):
         return 75_000_000

@@ -1,8 +1,7 @@
 """Tinker prices and a process-safe dollar ledger for Tinker sampling.
 
-Standard library only. The ledger file format and locking match PostDataBench's
-``rl/tinker_budget.py`` ``TinkerBudget``, so `TinkerModel` calls and the
-benchmark's own SFT and evaluation calls can share one capped ledger file.
+Standard library only. Other processes that write the same file format and lock
+(e.g. SFT or evaluation jobs) can share one capped ledger file with `TinkerModel`.
 """
 
 from __future__ import annotations
@@ -18,7 +17,7 @@ from typing import Any
 
 # USD per million tokens, from the Tinker pricing page (2026-10). "cached_prefill"
 # is a prompt token served from the prefix cache; "train" is listed so new ledgers
-# have the same token kinds as the benchmark's own ledgers.
+# have the same token kinds as training ledgers.
 TINKER_PRICES_PER_MILLION: dict[str, dict[str, float]] = {
     "Qwen/Qwen3-8B": {
         "prefill": 0.195,
