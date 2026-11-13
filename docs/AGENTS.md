@@ -61,7 +61,7 @@ if "LITELLM_API_KEY" not in os.environ:
 
 ### Cost
 
-Benchmark LLM quotas use fixed token units, independent of provider prices:
+Token-unit quotas use fixed weights, independent of provider prices:
 DeepSeek-V4-Flash costs 1 unit per input token and 3 per output token; GLM-5.3 costs
 4 per input token and 12.5 per output token.
 Cached input tokens count at full weight. Completion tokens already include reasoning;
@@ -91,10 +91,6 @@ a request that times out or loses its connection keeps its hold as spent, becaus
 (`unreturned_calls` in the ledger). A process that dies or is interrupted mid-request releases its holds
 (`released_calls`): the next ledger read frees them, or after two hours when the process's death cannot be seen.
 Unknown model weights or missing token counts stop budgeted calls instead of counting as free.
-The benchmark launcher sets a generation quota and a separate judge quota, both
-given in the task instructions.
-Direct API calls must use the launcher's `rl.token_budget` helpers to participate in accounting; they make one
-attempt per call (no `num_retries`), so retry in your own code.
 
 ### Execution model
 
