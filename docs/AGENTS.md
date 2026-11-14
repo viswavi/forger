@@ -71,8 +71,9 @@ Read the file for the ops you use:
   programs on tests (partial scores, checker programs), STaR.
 - [`filter.md`](agents/filter.md): LLM judge, `by_predicate`, `by_tests`, `by_rubric_score` (every row's grade
   score), difficulty filters, `by_embedding_similarity`, `by_topic_frequency`.
-- [`inspect.md`](agents/inspect.md): `topic_based_clustering`, `eval_tree`, `rubric_scores`, `embedding_dispersion`,
-  `compare_to_reference`, `inspect_step`, `spend`, `runs`, `compare_pipelines`, `student_log_likelihood`.
+- [`inspect.md`](agents/inspect.md): `topic_based_clustering`, `eval_tree`, `rubric_scores`, `rubric_sensitivity`,
+  `rubric_pair_accuracy`, `embedding_dispersion`, `compare_to_reference`, `inspect_step`, `spend`, `runs`,
+  `compare_pipelines`, `student_log_likelihood`.
 - [`models.md`](agents/models.md): `Model`, gateway credentials, concurrency, `n` fan-out, reasoning effort.
 - [`caching.md`](agents/caching.md): `@op` caching, the request cache, tracing.
 - [`pipelines.md`](agents/pipelines.md): `@step` / `@pipeline`, reports, spend caps, composing pipelines, patterns.
