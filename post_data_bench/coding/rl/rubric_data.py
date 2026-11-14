@@ -173,7 +173,7 @@ def validate_code(source):
 # are added to the judge's system message for this criterion only; scale is
 # "binary" (default: the judge answers yes or no, scored 1 or 0) or "likert" (the
 # judge answers an integer from 1 to 5, scored 0, 0.25, 0.5, 0.75 or 1).
-PROMPT_OPTIONS = ("answer_only", "judge_sees", "instructions", "scale")
+PROMPT_OPTIONS = ("answer_only", "judge_sees", "instructions", "scale", "n")
 SCALES = ("binary", "likert")
 JUDGE_FIELDS = ("prompt", "response", "ground_truth")
 MAX_INSTRUCTIONS = 4000
@@ -222,6 +222,9 @@ def validate_rubric(rubric):
             )
         if criterion.get("scale", "binary") not in SCALES:
             raise ValueError('"scale" must be "binary" or "likert"')
+        n = criterion.get("n", 1)
+        if type(n) is not int or n < 1:
+            raise ValueError('"n" must be a positive integer')
         instructions = criterion.get("instructions", "")
         if not isinstance(instructions, str) or len(instructions) > MAX_INSTRUCTIONS:
             raise ValueError(
