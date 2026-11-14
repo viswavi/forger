@@ -60,6 +60,7 @@ These weights are benchmark policy and stay fixed when provider prices change.
 |---|---:|---:|
 | DeepSeek-V4-Flash | 1 | 3 |
 | GLM-5.3 | 4 | 12.5 |
+| DeepSeek-V4.1-Flash (judge quota only) | 1 | 3 |
 
 For each LiteLLM response, calculate:
 
@@ -70,8 +71,8 @@ token_units = usage.prompt_tokens * input_weight + usage.completion_tokens * out
 For example, 1,000 input tokens and 200 output tokens consume 1,600 units on
 DeepSeek-V4-Flash or 6,500 units on GLM-5.3. Count cached inputs at full weight.
 LiteLLM's aggregate completion count already includes reasoning tokens; do not
-add `reasoning_tokens` again. Model aliases must contain `DeepSeek-V4-Flash` or
-`GLM-5.3` (case-insensitive). There are no defined weights for other models:
+add `reasoning_tokens` again. Generation model aliases must contain `DeepSeek-V4-Flash` or
+`GLM-5.3` (case-insensitive); the judge's must contain `DeepSeek-V4.1-Flash`. There are no defined weights for other models:
 Forger reports `NaN` units for them, and budgeted helpers reject them before a call.
 
 Generation/SFT has 230M units. RL has 75M for Impossible-LiveCodeBench and NormAD,
@@ -144,8 +145,8 @@ expose `total_token_units` and `total_cost`.
 For judge experiments, pass `budget="judge"`. The helper uses the separate
 `LITELLM_JUDGE_API_KEY`, `JUDGE_TOKEN_USAGE_FILE`, and `JUDGE_TOKEN_UNIT_LIMIT`;
 outside the launcher, configure these too. The judge defaults to
-`litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731`. `JUDGE_MODEL` may select an alias
-containing `DeepSeek-V4-Flash`. `JUDGE_REASONING_EFFORT` accepts `none`, `low`
+`litellm_proxy/azure_ai/DeepSeek-V4.1-Flash`. `JUDGE_MODEL` may select an alias
+containing `DeepSeek-V4.1-Flash`. `JUDGE_REASONING_EFFORT` accepts `none`, `low`
 (default), or `high`, passed as `reasoning={"effort": ...}`. An optional
 `LITELLM_JUDGE_BASE_URL` overrides `LITELLM_BASE_URL`.
 

@@ -63,7 +63,8 @@ if "LITELLM_API_KEY" not in os.environ:
 
 Token-unit quotas use fixed weights, independent of provider prices:
 DeepSeek-V4-Flash costs 1 unit per input token and 3 per output token; GLM-5.3 costs
-4 per input token and 12.5 per output token.
+4 per input token and 12.5 per output token. The judge's DeepSeek-V4.1-Flash costs
+1 per input token and 3 per output token, on the judge quota only.
 Cached input tokens count at full weight. Completion tokens already include reasoning;
 do not add reasoning tokens again. Other model families have no defined unit weight.
 

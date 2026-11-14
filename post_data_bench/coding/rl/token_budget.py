@@ -74,7 +74,7 @@ def _prepare(budget, kwargs):
     else:
         kwargs.setdefault("api_key", os.environ.get("LITELLM_API_KEY"))
         kwargs.setdefault("api_base", os.environ.get("LITELLM_BASE_URL"))
-    model_weights(kwargs.get("model"))
+    model_weights(kwargs.get("model"), judge)
     if kwargs.get("stream"):
         raise ValueError("Token-budget helpers require non-streaming responses")
     if kwargs.get("num_retries"):
@@ -86,13 +86,14 @@ def _prepare(budget, kwargs):
     return ledger
 
 
-def _hold(ledger, kwargs):
+def _hold(ledger, kwargs, judge=False):
     """Hold the call's worst case while it is in flight (`TokenUnitBudget.hold`)."""
     units = held_units(
         kwargs["model"],
         kwargs.get("messages") or [],
         kwargs.get("n") or 1,
         kwargs.get("max_tokens"),
+        judge,
     )
     return ledger.hold(kwargs["model"], units)
 
@@ -118,7 +119,7 @@ def completion(*, budget="generation", **kwargs):
     import litellm
 
     ledger = _prepare(budget, kwargs)
-    with _hold(ledger, kwargs) as hold:
+    with _hold(ledger, kwargs, budget == "judge") as hold:
         result = litellm.completion(**kwargs)
     return _record(ledger, kwargs["model"], result, hold)
 
@@ -128,6 +129,6 @@ async def acompletion(*, budget="generation", **kwargs):
     import litellm
 
     ledger = _prepare(budget, kwargs)
-    with _hold(ledger, kwargs) as hold:
+    with _hold(ledger, kwargs, budget == "judge") as hold:
         result = await litellm.acompletion(**kwargs)
     return _record(ledger, kwargs["model"], result, hold)

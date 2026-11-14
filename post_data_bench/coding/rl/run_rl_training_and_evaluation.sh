@@ -146,7 +146,7 @@ fi
 RL_DATA_DIR="$(cd "$RL_DATA_DIR" && pwd)"
 if [ "$RUBRIC_REWARDS" -eq 1 ]; then
   export PDB_TASK="${PDB_TASK:-coding}"
-  export JUDGE_MODEL="${JUDGE_MODEL:-litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731}"
+  export JUDGE_MODEL="${JUDGE_MODEL:-litellm_proxy/azure_ai/DeepSeek-V4.1-Flash}"
   export JUDGE_REASONING_EFFORT="${JUDGE_REASONING_EFFORT:-low}"
   if [ -z "${JUDGE_TOKEN_UNIT_LIMIT:-}" ]; then
     JUDGE_TOKEN_UNIT_LIMIT="$(python3 -c 'import os; from rl.token_budget import default_rl_limit; print(default_rl_limit(os.environ["PDB_TASK"]))')"

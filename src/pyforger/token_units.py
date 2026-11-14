@@ -13,9 +13,13 @@ import uuid
 from pathlib import Path
 
 DEFAULT_GENERATION_LIMIT = 230_000_000
-DEFAULT_JUDGE_MODEL = "litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731"
+DEFAULT_JUDGE_MODEL = "litellm_proxy/azure_ai/DeepSeek-V4.1-Flash"
 DEFAULT_REASONING_EFFORT = "low"
 _WEIGHTS = {"deepseek-v4-flash": (1, 3), "glm-5.3": (4, 12.5)}
+# The judge's model, weighted only on the judge quota: generation keeps the two
+# models above. Same weights as DeepSeek-V4-Flash, so a judge quota buys the same
+# tokens as before at a lower price ($0.30/$1.20 vs $0.44/$1.32 per 1M, 2026-11-14).
+_JUDGE_WEIGHTS = {"deepseek-v4.1-flash": (1, 3)}
 # Completion tokens held for a request sent without max_tokens.
 _DEFAULT_HELD_COMPLETION = 65_536
 # Prompt characters per held token: below the 3-4 real tokenizers give.
@@ -34,16 +38,20 @@ class TokenUnitQuotaExceeded(RuntimeError):
     """No more calls may start under this token-unit quota."""
 
 
-def model_weights(model_id):
-    """Return fixed input/output weights for a supported model or alias."""
+def model_weights(model_id, judge=False):
+    """Return fixed input/output weights for a supported model or alias.
+
+    Generation models are DeepSeek-V4-Flash and GLM-5.3; ``judge=True`` also
+    accepts the judge's DeepSeek-V4.1-Flash.
+    """
     if not isinstance(model_id, str):
         raise ValueError("model_id must be a string")
-    matches = [
-        weights for name, weights in _WEIGHTS.items() if name in model_id.lower()
-    ]
+    table = {**_WEIGHTS, **_JUDGE_WEIGHTS} if judge else _WEIGHTS
+    matches = [weights for name, weights in table.items() if name in model_id.lower()]
     if len(matches) != 1:
         raise ValueError(
             "Token units require a DeepSeek-V4-Flash or GLM-5.3 model alias"
+            + (" (or the judge's DeepSeek-V4.1-Flash)" if judge else "")
         )
     return matches[0]
 
@@ -54,9 +62,9 @@ def _count(value):
     return value
 
 
-def token_units(model_id, prompt_tokens, completion_tokens):
+def token_units(model_id, prompt_tokens, completion_tokens, judge=False):
     """Weight all input tokens and output tokens, including reasoning once."""
-    input_weight, output_weight = model_weights(model_id)
+    input_weight, output_weight = model_weights(model_id, judge)
     return float(
         _count(prompt_tokens) * input_weight + _count(completion_tokens) * output_weight
     )
@@ -129,10 +137,10 @@ def _normalize_cost_metadata(state):
 
 
 def validate_judge_model(model):
-    """Accept only aliases identifying DeepSeek-V4-Flash."""
-    if not isinstance(model, str) or "deepseek-v4-flash" not in model.lower():
-        raise ValueError("JUDGE_MODEL must contain DeepSeek-V4-Flash")
-    model_weights(model)
+    """Accept only aliases identifying DeepSeek-V4.1-Flash."""
+    if not isinstance(model, str) or "deepseek-v4.1-flash" not in model.lower():
+        raise ValueError("JUDGE_MODEL must contain DeepSeek-V4.1-Flash")
+    model_weights(model, judge=True)
     return model
 
 
@@ -151,7 +159,7 @@ def default_rl_limit(task):
     raise ValueError("Unknown task for RL token-unit quota")
 
 
-def held_units(model_id, messages, n=1, max_tokens=None):
+def held_units(model_id, messages, n=1, max_tokens=None, judge=False):
     """Worst-case units of one request: its prompt and ``n`` full completions.
 
     The prompt counts 1 token per 3 characters (more than real tokenizers
@@ -162,7 +170,9 @@ def held_units(model_id, messages, n=1, max_tokens=None):
         for m in messages
     )
     completion = max_tokens or _DEFAULT_HELD_COMPLETION
-    return token_units(model_id, -(-chars // _HELD_CHARS_PER_TOKEN), n * completion)
+    return token_units(
+        model_id, -(-chars // _HELD_CHARS_PER_TOKEN), n * completion, judge
+    )
 
 
 def billed_on_error(exc):
@@ -445,7 +455,9 @@ class TokenUnitBudget:
         self, model_id, prompt_tokens, completion_tokens, *, cost_usd=None, hold=None
     ):
         """Charge tokens and available dollars, replacing the request's ``hold``."""
-        units = token_units(model_id, prompt_tokens, completion_tokens)
+        # Callers gate the model (generation refuses the judge-only one); the ledger
+        # charges any weighted model.
+        units = token_units(model_id, prompt_tokens, completion_tokens, judge=True)
         cost = _valid_cost(cost_usd)
         with self._locked():
             state = self._read()

@@ -233,9 +233,9 @@ sees weights; it judges whether the response does what a criterion describes.
   `</think>` ("" while a `<think>` is open), as `rubric_rm.final_answer` does.
   This is the original sandbox's guardrail model, not a hardened security boundary.
 * **Prompt:** trusted reward code calls LiteLLM outside RestrictedPython with
-  `litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731`, temperature 1, low reasoning,
+  `litellm_proxy/azure_ai/DeepSeek-V4.1-Flash`, temperature 1, low reasoning,
   and `n=1`. `JUDGE_MODEL` may override the alias only if it contains
-  `DeepSeek-V4-Flash` (case-insensitive). `JUDGE_REASONING_EFFORT` may be `none`,
+  `DeepSeek-V4.1-Flash` (case-insensitive). `JUDGE_REASONING_EFFORT` may be `none`,
   `low` (default), or `high`; LiteLLM receives `reasoning={"effort": ...}`.
   The judge receives the criterion, original prompt, full response,
   and ground truth and returns a JSON score. This is the explicit non-RP branch;
@@ -280,7 +280,8 @@ values, include them in prompts, or pass them on command lines:
   criteria per worker can be in flight when the circuit opens.
 
 DeepSeek-V4-Flash input/output tokens use 1/3 units; GLM-5.3 input/output tokens
-use 4/12.5 units. Cached inputs count at full weight and output includes reasoning
+use 4/12.5 units. The judge's DeepSeek-V4.1-Flash uses 1/3 units on the judge quota
+only; generation refuses it. Cached inputs count at full weight and output includes reasoning
 once. Weights do not depend on provider prices. The launcher creates
 `generation_token_usage.json` and `judge_token_usage.json` in the agent's
 persistent directory. Their `token_units` and `remaining_token_units` fields
