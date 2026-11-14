@@ -319,3 +319,158 @@ def test_probes_are_graded_flagged_and_paired():
     assert [c.name for c in only.columns] == ["trivial"]
     with pytest.raises(ValueError, match="probes .* clash"):
         rubric_scores(_graded_rows(), partial, probes={"empty": lambda row: ""})
+
+
+def keyword_rubric(response: str, row: dict) -> float:
+    """Weighted mean over criteria "mentions WORD" (positive weights only)."""
+    pairs = [(c, w) for c, w in row["rubric"] if w > 0]
+    total = sum(w for _, w in pairs)
+    met = sum(w for c, w in pairs if c.split(" ", 1)[1] in response)
+    return met / total
+
+
+def _rubric_rows(n: int = 6) -> list[dict]:
+    """The reference names a dose a good reply may leave out."""
+    return [
+        {
+            "prompt": [{"role": "user", "content": f"question {i}"}],
+            "reference": "Give aspirin 81 mg; watch for bleeding.",
+            "rubric": [
+                ["mentions aspirin", 50],
+                ["mentions 81 mg", 100],
+                ["mentions bleeding", 25],
+                ["mentions warfarin", -10],
+            ],
+        }
+        for i in range(n)
+    ]
+
+
+class Teacher:
+    """Replies name aspirin and bleeding; odd prompts' first reply names the dose."""
+
+    model_id = "toy-teacher"
+
+    def cache_key(self):
+        """The key Forger's op cache uses."""
+        return ("Teacher",)
+
+    def generate_batch(self, prompts, n=1, **kwargs):
+        """``n`` replies per prompt; the prompts are recorded."""
+        self.prompts = prompts
+        out = []
+        for p in prompts:
+            i = int(p[-1]["content"].split()[-1])
+            plain = "Aspirin is reasonable: aspirin, but watch bleeding."
+            dosed = plain + " 81 mg daily."
+            out.append([dosed if (i % 2 and j == 0) else plain for j in range(n)])
+        return out
+
+
+def test_teacher_finds_criteria_only_the_reference_meets():
+    """The dose criterion fails every teacher reply on even rows, some on odd ones."""
+    teacher = Teacher()
+    report = rubric_scores(
+        _rubric_rows(),
+        keyword_rubric,
+        n=None,
+        response_fields="reference",
+        teacher=teacher,
+        control_columns=False,
+    )
+    assert report.teacher_id == "toy-teacher" and report.teacher_k == 2
+    assert teacher.prompts[0] == [{"role": "user", "content": "question 0"}]
+    assert [c.name for c in report.columns] == ["reference", "teacher"]
+    t = report.teacher_criteria
+    assert (t.rows, t.criteria, t.skipped) == (6, 18, 6)
+    assert (t.reference_passes, t.fails_all, t.fails_some) == (18, 3, 3)
+    assert t.share_fails_all == pytest.approx(3 / 18)
+    assert [(e.row, e.index, e.criterion, e.weight) for e in t.examples] == [
+        (0, 1, "mentions 81 mg", 100.0),
+        (2, 1, "mentions 81 mg", 100.0),
+        (4, 1, "mentions 81 mg", 100.0),
+    ]
+    assert t.examples[0].reference == 1.0 and t.examples[0].teacher == [0.0, 0.0]
+    assert report.flags == []  # 17% is under the 20% flag
+    text = render_rubric_score_report(report)
+    assert "teacher: toy-teacher" in text and "teacher ×2" in text
+    assert (
+        "per criterion: teacher ×2 fails 3 of the 18 criteria reference passes" in text
+    )
+    assert "teacher fails: row 0 criterion 1 [100]" in text and "mentions 81 mg" in text
+
+
+def test_teacher_flag_and_one_reply():
+    """With one reply, even rows fail the dose criterion: 3 of 12, flagged."""
+    rows = _rubric_rows()
+    for r in rows:
+        r["rubric"] = r["rubric"][:2]  # aspirin, dose: the dose misses are 3 of 12
+    report = rubric_scores(
+        rows,
+        keyword_rubric,
+        n=None,
+        response_fields="reference",
+        teacher=Teacher(),
+        teacher_k=1,
+        control_columns=False,
+    )
+    t = report.teacher_criteria
+    assert (t.reference_passes, t.fails_all, t.fails_some) == (12, 3, 0)
+    assert report.flags == [
+        "teacher fails 3 of the 12 criteria reference passes (25%) on every reply: "
+        "read them below"
+    ]
+
+
+def test_teacher_without_a_rubric_or_reference():
+    """Without a rubric field the teacher is a column paired with the reference."""
+    rows = [{k: v for k, v in r.items() if k != "rubric"} for r in _rubric_rows()]
+    report = rubric_scores(
+        rows,
+        lambda resp, row: float("81 mg" in resp),
+        n=None,
+        response_fields="reference",
+        teacher=Teacher(),
+        control_columns=False,
+    )
+    assert report.teacher_criteria is None
+    paired = report.column(
+        "teacher"
+    ).vs_reference  # odd rows: one reply of two names the dose
+    assert (paired.below, paired.mean_gap) == (6, pytest.approx(0.75))
+    alone = rubric_scores(
+        _rubric_rows(),
+        keyword_rubric,
+        n=None,
+        response_fields=None,
+        teacher=Teacher(),
+        control_columns=False,
+    )
+    assert alone.teacher_criteria is None and alone.column("teacher").mean is not None
+    with pytest.raises(ValueError, match="teacher_k"):
+        rubric_scores(_rubric_rows(), keyword_rubric, teacher=Teacher(), teacher_k=0)
+    with pytest.raises(ValueError, match="clash"):
+        rubric_scores(_rubric_rows(), keyword_rubric, response_fields="teacher")
+
+
+def test_a_sampled_column_near_one_is_flagged():
+    """A student that already scores 0.9 or more leaves RL little to raise."""
+
+    class Copier(Teacher):
+        def cache_key(self):
+            return ("Copier",)
+
+        def generate_batch(self, prompts, n=1, **kwargs):
+            return [["aspirin 81 mg, bleeding"] * n for _ in prompts]
+
+    report = rubric_scores(
+        _rubric_rows(),
+        keyword_rubric,
+        n=None,
+        response_fields="reference",
+        model=Copier(),
+        k=1,
+        control_columns=False,
+    )
+    assert report.column("sampled").mean >= 0.9
+    assert any(f.startswith("sampled scores") for f in report.flags)

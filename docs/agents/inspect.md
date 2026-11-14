@@ -48,7 +48,8 @@ SFT set for Qwen3-4B:
 
 ## `rubric_scores`
 
-`rubric_scores(rows, grade, *, n=50, response_fields="response", probes=None, model=None, k=4, ...)` bins a reward's
+`rubric_scores(rows, grade, *, n=50, response_fields="response", probes=None, model=None, k=4, teacher=None,
+teacher_k=2, rubric_field="rubric", ...)` bins a reward's
 scores before RL. `grade(response, row)` returns a score in [0, 1] or None: a code rubric, an LLM judge, or exact match.
 It scores a sample, not every row: `n` rows (default 50) drawn with `seed`. The first line says so, and an `n` below
 the row count warns. `n=None` scores every row; to keep or drop rows by score, use
@@ -70,15 +71,27 @@ did not:
 ```
 
 - A control earning half the reference column's mean is flagged. Prompts whose samples all score the same give no
-  RL gradient.
+  RL gradient. A sampled column with a mean of 0.9 or more is flagged: little is left for RL to raise.
 - `probes={"name": probe(row) -> response}`: responses a sound reward scores low, built per row: a program printing a
   valid but trivial answer, the example output hard-coded, the number from the statement. Flagged like the controls.
 - The first field column (else the sampled one) is the reference; every other field, probe, and sampled column is
   compared with it row by row: `baseline: below solution on 31, tied 15, above 4 of 50 rows, mean gap +0.21`. Ties
   with a known-weak baseline are rows the reward cannot tell apart.
+- `teacher=`: a reference that scores well on its own rubric does not show the rubric pays good replies, since a rubric
+  written from the reference, or from the notes behind it, can demand the reference's own details. The teacher column
+  holds `teacher_k` replies per prompt (default 2) from a model trusted to answer well, which sees only the prompt.
+  With rubrics in `rubric_field` (`[[criterion, weight], ...]`), each positive-weight criterion is also scored alone
+  (`grade` gets the row with `[[criterion, 1]]`) on the reference and every reply, passing at 0.5; the report counts
+  the criteria the reference passes and every reply fails, flags 20% or more, and lists the heaviest:
+  `teacher fails: row 12 criterion 1 [100] (reference 1.00; teacher 0.00, 0.00)  Mentions that the dose is 81 mg…`.
+  Read them: one may demand a detail a good reply can leave out, or the teacher may be wrong. Two samples of one model
+  often disagree on a criterion, so one reply's miss is weak evidence. The stronger the teacher, the stronger the
+  check; one that did not write the rubric or the reference does not share their habits. It costs `teacher_k`
+  generations per sampled row and `1 + teacher_k` grades per criterion.
 - `report.model_dump()` is plain JSON: bins, and per column counts, mean, shares at 0 and 1, per-row scores
-  (`scores[i]` belongs to `report.rows[i]`, the sampled rows only), and `vs_reference` (`below`, `tied`, `above`,
-  `mean_gap`). Grades are cached (`grade` by its `cache_key()`).
+  (`scores[i]` belongs to `report.rows[i]`, the sampled rows only), `vs_reference` (`below`, `tied`, `above`,
+  `mean_gap`), and with a teacher, `teacher_criteria` (`reference_passes`, `fails_all`, `fails_some`,
+  `share_fails_all`, `examples`). Grades are cached (`grade` by its `cache_key()`).
 
 ## `embedding_dispersion`
 

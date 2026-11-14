@@ -23,6 +23,11 @@ Probe = Callable[[dict], "str | None"]
 
 BINS = ["0", "(0, 0.25]", "(0.25, 0.5]", "(0.5, 0.75]", "(0.75, 1)", "1"]
 CONTROLS = ("empty", "random", "other_row")
+PASS = 0.5  # a criterion scored alone passes at this score or above
+TEACHER_FLAG = (
+    0.2  # flag when the teacher fails this share of reference-passed criteria
+)
+EASY_FLAG = 0.9  # flag a sampled column whose mean is at least this
 _EPS = 1e-9  # 0.9999999999 from a weighted mean is 1
 _RANDOM_CHARS = 200
 _ALPHABET = string.ascii_letters + string.digits + string.punctuation + " \n"
@@ -97,6 +102,44 @@ class ColumnScores(BaseModel):
         return dict(zip(BINS, self.counts))
 
 
+class CriterionCheck(BaseModel):
+    """One criterion scored alone: on the reference and on each teacher sample.
+
+    ``row`` indexes the rows given; ``index`` is the criterion's place in the
+    row's rubric. ``teacher`` holds one score per sample, None when ungradable.
+    """
+
+    row: int
+    index: int
+    criterion: str
+    weight: float
+    reference: float
+    teacher: list[float | None]
+
+
+class TeacherCriteria(BaseModel):
+    """Which rubric criteria the reference passes and fresh teacher replies fail.
+
+    Each criterion with a positive weight is scored alone (the row's rubric
+    replaced by ``[[criterion, 1]]``) on the reference and on every teacher
+    sample; it passes at ``PASS`` (0.5) or above. Of the ``reference_passes``
+    criteria, ``fails_all`` fail every gradable teacher sample and
+    ``fails_some`` fail some but not all. ``skipped`` counts criteria with a
+    weight of 0 or less, whose meaning flips. ``examples`` lists criteria that
+    fail every sample, heaviest first.
+    """
+
+    reference: str
+    rows: int = 0
+    criteria: int = 0
+    skipped: int = 0
+    reference_passes: int = 0
+    fails_all: int = 0
+    fails_some: int = 0
+    share_fails_all: float | None = None
+    examples: list[CriterionCheck] = Field(default_factory=list)
+
+
 class RubricScoreReport(BaseModel):
     """What ``rubric_scores`` measured; ``model_dump()`` gives plain JSON data.
 
@@ -106,7 +149,9 @@ class RubricScoreReport(BaseModel):
     e.g. 50 of 300 rows with the default ``n=50``; ``filter.by_rubric_score``
     scores every row. ``flags`` has one line per control or probe that earns
     at least half the reference column's mean (the first field column, else
-    the sampled one).
+    the sampled one), one when the teacher fails ``TEACHER_FLAG`` of the
+    criteria the reference passes, and one when the sampled column's mean is
+    ``EASY_FLAG`` or more.
     """
 
     grade: str
@@ -116,7 +161,10 @@ class RubricScoreReport(BaseModel):
     bins: list[str] = Field(default_factory=lambda: list(BINS))
     model_id: str | None = None
     k: int = 0
+    teacher_id: str | None = None
+    teacher_k: int = 0
     columns: list[ColumnScores] = Field(default_factory=list)
+    teacher_criteria: TeacherCriteria | None = None
     flags: list[str] = Field(default_factory=list)
 
     def column(self, name: str) -> ColumnScores:
@@ -218,6 +266,9 @@ def rubric_scores(
     probes: dict[str, Probe] | None = None,
     model: Any = None,
     k: int = 4,
+    teacher: Any = None,
+    teacher_k: int = 2,
+    rubric_field: str = "rubric",
     prompt_field: str = "prompt",
     temperature: float | None = None,
     max_tokens: int | None = None,
@@ -251,7 +302,21 @@ def rubric_scores(
       flagged, like the controls;
     - with ``model``, ``k`` samples per prompt: what RL sees. The report counts
       prompts whose samples all got the same score, which give GRPO-style RL
-      no gradient;
+      no gradient. A mean of 0.9 or more is flagged: little is left to learn;
+    - with ``teacher``, ``teacher_k`` replies per prompt from a model trusted
+      to answer well, which sees only the prompt: does the reward pay good
+      replies, or only the reference's own? When rows carry a rubric in
+      ``rubric_field`` (``[[criterion, weight], ...]``), each criterion with a
+      positive weight is also scored alone on the reference and on every
+      teacher reply (``grade`` gets the row with ``[[criterion, 1]]`` in that
+      field), and the report counts the criteria the reference passes and
+      every teacher reply fails, e.g. "teacher ×2 fails 31 of the 120
+      criteria the reference passes on every reply", listing the heaviest.
+      Read them: such a criterion may demand a detail, number or choice that
+      a good reply can leave out, or the teacher may be wrong. 20% or more is
+      flagged. The stronger the teacher, the stronger the check; one that did
+      not write the rubric or the reference does not share their habits.
+      This calls ``grade`` ``1 + teacher_k`` times per criterion;
     - with ``control_columns``, responses no task should reward: ``empty``
       (``""``), ``random`` (200 random characters), and ``other_row`` (the
       first column's response to another sampled row, never its own). A
@@ -282,8 +347,16 @@ def rubric_scores(
             ``generate_batch``. Completions are graded whole, thinking
             included.
         k: Samples per prompt from ``model``.
-        prompt_field: Field holding the prompt sent to ``model`` (text or
-            chat messages).
+        teacher: Model whose replies make the ``teacher`` column; needs
+            ``generate_batch``. It sees only the prompt.
+        teacher_k: Replies per prompt from ``teacher`` (default 2). With
+            two or more, a criterion every reply fails is told apart from
+            one reply's chance miss.
+        rubric_field: Field holding the row's rubric as ``[[criterion,
+            weight], ...]``, scored per criterion with ``teacher`` and a
+            response field; rows without one are left out of that check.
+        prompt_field: Field holding the prompt sent to ``model`` and
+            ``teacher`` (text or chat messages).
         temperature: Sampling temperature (the model's default if None);
             must be > 0 when ``k > 1``.
         max_tokens: Max tokens per sample (the model's default if None).
@@ -299,19 +372,25 @@ def rubric_scores(
         else list(response_fields or [])
     )
     probes = dict(probes or {})
-    clash = set(fields) & {*CONTROLS, "sampled"}
+    clash = set(fields) & {*CONTROLS, "sampled", "teacher"}
     if clash:
         raise ValueError(f"response_fields {sorted(clash)} clash with column names")
-    clash = set(probes) & {*fields, *CONTROLS, "sampled"}
+    clash = set(probes) & {*fields, *CONTROLS, "sampled", "teacher"}
     if clash:
         raise ValueError(f"probes {sorted(clash)} clash with column names")
     if model is not None and k < 1:
         raise ValueError(f"k must be at least 1, got {k}")
-    if model is not None and k > 1 and temperature is not None and temperature <= 0:
-        raise ValueError("temperature must be > 0 when k > 1: samples would match")
-    if not fields and model is None and not probes:
+    if teacher is not None and teacher_k < 1:
+        raise ValueError(f"teacher_k must be at least 1, got {teacher_k}")
+    several = (model is not None and k > 1) or (teacher is not None and teacher_k > 1)
+    if several and temperature is not None and temperature <= 0:
         raise ValueError(
-            "pass response_fields, probes, or a model: there is nothing to grade"
+            "temperature must be > 0 when k or teacher_k > 1: samples would match"
+        )
+    if not fields and model is None and teacher is None and not probes:
+        raise ValueError(
+            "pass response_fields, probes, a model, or a teacher: there is nothing "
+            "to grade"
         )
     picked = _sample_rows(len(rows), n, seed)
     if len(picked) < len(rows):
@@ -333,15 +412,17 @@ def rubric_scores(
         columns.append(
             (name, "field", [[None if t is None else str(t)] for t in texts])
         )
-    if model is not None and sample:
-        report.model_id = str(
-            getattr(model, "model_id", getattr(model, "_model_id", "")) or model
-        )[:120]
-        report.k = k
-        prompts = [
+    prompts = (
+        [
             _field_prompt(r, prompt_field, "inspect.rubric_scores", "prompt_field")
             for r in sample
         ]
+        if sample and (model is not None or teacher is not None)
+        else []
+    )
+    if model is not None and sample:
+        report.model_id = _model_name(model)
+        report.k = k
         completions, _ = _samples(
             prompts,
             model=model,
@@ -351,6 +432,19 @@ def rubric_scores(
             batch_size=None,
         )
         columns.append(("sampled", "sampled", completions))
+    teacher_replies: list[list[str | None]] = []
+    if teacher is not None and sample:
+        report.teacher_id = _model_name(teacher)
+        report.teacher_k = teacher_k
+        teacher_replies, _ = _samples(
+            prompts,
+            model=teacher,
+            n=teacher_k,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            batch_size=None,
+        )
+        columns.append(("teacher", "teacher", teacher_replies))
     for name, probe in probes.items():
         built = [probe(r) for r in sample]
         columns.append(
@@ -369,10 +463,112 @@ def rubric_scores(
         _summarize(col, responses, errors, picked, examples)
         report.columns.append(col)
     _pair_with_reference(report)
+    if teacher_replies and fields:
+        report.teacher_criteria = _teacher_criteria(
+            sample,
+            picked,
+            [r[0] for r in columns[0][2]],
+            teacher_replies,
+            reference=fields[0],
+            rubric_field=rubric_field,
+            grade=grade,
+            workers=workers,
+        )
     report.flags = _flags(report)
     console = _console()
     _emit(_renderable(report, width=console.width), console)
     return report
+
+
+_CRITERION_EXAMPLES = 5
+
+
+def _model_name(model: Any) -> str:
+    return str(getattr(model, "model_id", getattr(model, "_model_id", "")) or model)[
+        :120
+    ]
+
+
+def _criterion_text(criterion: Any) -> str:
+    """A criterion's words: the string, or a dict's ``prompt`` or ``code``."""
+    if isinstance(criterion, dict):
+        text = criterion.get("prompt") or criterion.get("code") or str(criterion)
+    else:
+        text = str(criterion)
+    return text[:300]
+
+
+def _teacher_criteria(
+    sample: list[dict],
+    picked: list[int],
+    references: list[str | None],
+    replies: list[list[str | None]],
+    *,
+    reference: str,
+    rubric_field: str,
+    grade: Grade,
+    workers: int,
+) -> TeacherCriteria | None:
+    """Score each positive-weight criterion alone on the reference and every reply.
+
+    None when no sampled row has both a reference and a rubric list.
+    """
+    out = TeacherCriteria(reference=reference)
+    jobs: list[
+        tuple[int, int, Any, float]
+    ] = []  # (sample i, criterion index, criterion, weight)
+    for i, row in enumerate(sample):
+        rubric = row.get(rubric_field) if isinstance(row, dict) else None
+        if references[i] is None or not isinstance(rubric, list | tuple):
+            continue
+        out.rows += 1
+        for ci, pair in enumerate(rubric):
+            try:
+                criterion, weight = pair
+                weight = float(weight)
+            except (TypeError, ValueError):
+                continue
+            if weight <= 0:
+                out.skipped += 1
+                continue
+            jobs.append((i, ci, criterion, weight))
+    if not out.rows:
+        return None
+    if not jobs:
+        return out
+    rows = [{**sample[i], rubric_field: [[c, 1]]} for i, _, c, _ in jobs]
+    responses = [[references[i], *replies[i]] for i, _, _, _ in jobs]
+    scores, _ = _grade_column(rows, responses, grade=grade, workers=workers)
+    failed: list[CriterionCheck] = []
+    for (i, ci, criterion, weight), row_scores in zip(jobs, scores):
+        ref, own = row_scores[0], row_scores[1:]
+        if ref is None:
+            continue
+        out.criteria += 1
+        good = [s for s in own if s is not None]
+        if ref < PASS or not good:
+            continue
+        out.reference_passes += 1
+        misses = sum(s < PASS for s in good)
+        if misses == len(good):
+            out.fails_all += 1
+            failed.append(
+                CriterionCheck(
+                    row=picked[i],
+                    index=ci,
+                    criterion=_criterion_text(criterion),
+                    weight=weight,
+                    reference=ref,
+                    teacher=own,
+                )
+            )
+        elif misses:
+            out.fails_some += 1
+    if out.reference_passes:
+        out.share_fails_all = out.fails_all / out.reference_passes
+    failed.sort(key=lambda c: (-c.weight, c.row, c.index))
+    out.examples = failed[:_CRITERION_EXAMPLES]
+    return out
 
 
 def _name(grade: Grade) -> str:
@@ -435,6 +631,22 @@ def _flags(report: RubricScoreReport) -> list[str]:
                 f"{c.name} scores {c.mean:.2f} on average, at least half of "
                 f"{reference.name}'s {reference.mean:.2f}: RL can earn it too"
             )
+        if c.kind == "sampled" and c.mean is not None and c.mean >= EASY_FLAG:
+            flags.append(
+                f"sampled scores {c.mean:.2f} on average: little is left for RL "
+                "to raise"
+            )
+    t = report.teacher_criteria
+    if (
+        t is not None
+        and t.share_fails_all is not None
+        and t.share_fails_all >= TEACHER_FLAG
+    ):
+        flags.append(
+            f"teacher fails {t.fails_all} of the {t.reference_passes} criteria "
+            f"{t.reference} passes ({t.share_fails_all:.0%}) on every reply: "
+            "read them below"
+        )
     return flags
 
 
@@ -447,8 +659,12 @@ def _share(x: float | None) -> str:
     return "-" if x is None else f"{x:.0%}"
 
 
-def _label(c: ColumnScores, k: int) -> str:
-    return f"sampled ×{k}" if c.kind == "sampled" else c.name
+def _label(c: ColumnScores, report: RubricScoreReport) -> str:
+    if c.kind == "sampled":
+        return f"sampled ×{report.k}"
+    if c.kind == "teacher":
+        return f"teacher ×{report.teacher_k}"
+    return c.name
 
 
 def _renderable(report: RubricScoreReport, *, width: int) -> RenderableType:
@@ -466,6 +682,8 @@ def _renderable(report: RubricScoreReport, *, width: int) -> RenderableType:
     head.append(f" · grade {_clean(report.grade)}")
     if report.model_id:
         head.append(f" · sampled: {_clean(report.model_id)}")
+    if report.teacher_id:
+        head.append(f" · teacher: {_clean(report.teacher_id)}")
     body: list[RenderableType] = [head]
     cols = report.columns
     if not cols or not report.rows:
@@ -491,7 +709,7 @@ def _renderable(report: RubricScoreReport, *, width: int) -> RenderableType:
             [Text(name, style="dim")] + [Text(cell(c), style="dim") for c in cols]
         )
     # An empty last column: _fit_table left-aligns the last one.
-    headers = ["score"] + [_clean(_label(c, report.k)) for c in cols] + [""]
+    headers = ["score"] + [_clean(_label(c, report)) for c in cols] + [""]
     lines = [cells + [Text("")] for cells in lines]
     body += [Text(""), _fit_table(headers, lines, width - 2, left=set())]
     notes: list[Text] = []
@@ -501,7 +719,7 @@ def _renderable(report: RubricScoreReport, *, width: int) -> RenderableType:
             gap = "" if p.mean_gap is None else f", mean gap {p.mean_gap:+.2f}"
             notes.append(
                 Text(
-                    f"{_label(c, report.k)}: below {_clean(p.reference)} on "
+                    f"{_label(c, report)}: below {_clean(p.reference)} on "
                     f"{p.below}, tied {p.tied}, above {p.above} of {p.rows} "
                     f"rows{gap}"
                 )
@@ -522,11 +740,36 @@ def _renderable(report: RubricScoreReport, *, width: int) -> RenderableType:
                     f"e.g. {_clean(c.error)}"
                 )
             )
+    t = report.teacher_criteria
+    if t is not None:
+        # e.g. "per criterion: teacher ×2 fails 31 of the 120 criteria reference
+        # passes on every reply, 18 on some (152 criteria on 40 rows; 3 skipped)"
+        skipped = f"; {t.skipped} with weight <= 0 skipped" if t.skipped else ""
+        notes.append(
+            Text(
+                f"per criterion: teacher ×{report.teacher_k} fails {t.fails_all} of "
+                f"the {t.reference_passes} criteria {_clean(t.reference)} passes on "
+                f"every reply, {t.fails_some} on some ({t.criteria} criteria on "
+                f"{t.rows} rows{skipped})"
+            )
+        )
     for flag in report.flags:
         notes.append(Text(f"! {flag}", style="bold red"))
     if notes:
         body.append(Text(""))
         body += notes
+    if t is not None and t.examples:
+        body.append(Text(""))
+        for e in t.examples:
+            scores = ", ".join("-" if s is None else f"{s:.2f}" for s in e.teacher)
+            item = Text(
+                f"teacher fails: row {e.row} criterion {e.index} [{e.weight:g}] "
+                f"({_clean(t.reference)} {e.reference:.2f}; teacher {scores})  ",
+                style="dim",
+            )
+            item.append(_clean(e.criterion))
+            item.truncate(width - 2, overflow="ellipsis")
+            body.append(item)
     # Empty and random responses need no example; a flagged other_row does.
     flagged = {f.split(" ", 1)[0] for f in report.flags}
     shown = [
@@ -538,7 +781,7 @@ def _renderable(report: RubricScoreReport, *, width: int) -> RenderableType:
         for tag, picks in (("lowest", c.lowest), ("highest", c.highest)):
             for e in picks:
                 item = Text(
-                    f"{_label(c, report.k)} {tag}: row {e.row} {e.score:.2f}  ",
+                    f"{_label(c, report)} {tag}: row {e.row} {e.score:.2f}  ",
                     style="dim",
                 )
                 item.append(_clean(e.response) or '""')
