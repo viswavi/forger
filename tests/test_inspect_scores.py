@@ -545,3 +545,19 @@ def test_reference_field_comes_first():
     assert [c.name for c in report.columns] == ["reference", "weak"]
     with pytest.raises(TypeError, match="reference_field"):
         rubric_scores(rows, keyword_rubric, reference_field="")
+
+
+def test_rubric_scores_max_grades_counts_the_teacher_check():
+    """6 rows x (reference + 2 teacher replies) + 24 criteria x 3 = 90 grade calls."""
+    teacher = Teacher()
+    with pytest.raises(ValueError, match="up to 90 times"):
+        rubric_scores(
+            _rubric_rows(),
+            keyword_rubric,
+            n=None,
+            response_fields="reference",
+            teacher=teacher,
+            control_columns=False,
+            max_grades=89,
+        )
+    assert not hasattr(teacher, "prompts")  # raised before the teacher was asked

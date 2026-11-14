@@ -193,6 +193,33 @@ def _bin(score: float) -> int | None:
     return min(4, max(1, math.ceil(score * 4)))
 
 
+def _check_max_grades(max_grades: int | None) -> None:
+    if max_grades is not None and (
+        isinstance(max_grades, bool)
+        or not isinstance(max_grades, int)
+        or max_grades < 1
+    ):
+        raise ValueError("max_grades must be a positive integer or None")
+
+
+def _plan_grades(op: str, count: int, detail: str, max_grades: int | None) -> None:
+    """Print how many times ``op`` will call ``grade``; raise above ``max_grades``.
+
+    ``grade`` is the caller's function, so its cost per call is unknown here: an
+    LLM-judged rubric calls its judge once per judged criterion on each call.
+    """
+    message = f"{op} will call grade up to {count:,} times ({detail})"
+    if max_grades is not None and count > max_grades:
+        raise ValueError(
+            f"{message}, above max_grades={max_grades:,}: pass a smaller n or a "
+            "larger max_grades"
+        )
+    get_formatted_logger("RubricGrades").warning(
+        "%s. Each grade call may call an LLM judge once per judged criterion.",
+        message,
+    )
+
+
 def _sample_rows(n_rows: int, n: int | None, seed: int) -> list[int]:
     """``n`` row indices drawn with ``seed``, in order; all rows when n is None."""
     if n is None or n >= n_rows:
@@ -284,6 +311,7 @@ def rubric_scores(
     seed: int = 0,
     workers: int = 8,
     examples: int = 1,
+    max_grades: int | None = None,
 ) -> RubricScoreReport:
     """Print and return how ``grade`` scores a sample of ``n`` rows, binned, by column.
 
@@ -382,6 +410,9 @@ def rubric_scores(
         seed: Seeds the row sample, the random text, and ``other_row``.
         workers: ``grade`` calls run at a time.
         examples: Lowest- and highest-scoring responses kept per column.
+        max_grades: Raise before any model or grade call when the planned
+            number of ``grade`` calls is above it. The plan is printed either
+            way, e.g. "will call grade up to 1,450 times (50 rows: ...)".
     """
     fields = (
         [response_fields]
@@ -424,6 +455,42 @@ def rubric_scores(
             n,
         )
     sample = [rows[i] for i in picked]
+    _check_max_grades(max_grades)
+    per_row = (
+        len(fields)
+        + (k if model is not None else 0)
+        + (teacher_k if teacher is not None else 0)
+        + len(probes)
+        + (len(CONTROLS) if control_columns else 0)
+    )
+    criteria = 0
+    if teacher is not None and fields:
+        for r in sample:
+            rubric = r.get(rubric_field) if isinstance(r, dict) else None
+            if (
+                isinstance(r, dict)
+                and r.get(fields[0]) is not None
+                and isinstance(rubric, list | tuple)
+            ):
+                criteria += sum(
+                    1
+                    for pair in rubric
+                    if isinstance(pair, list | tuple)
+                    and len(pair) == 2
+                    and isinstance(pair[1], int | float)
+                    and pair[1] != 0
+                )
+    _plan_grades(
+        "inspect.rubric_scores",
+        len(sample) * per_row + criteria * (1 + teacher_k),
+        f"{len(sample)} rows x {per_row} responses"
+        + (
+            f", plus {criteria} criteria x {1 + teacher_k} for the teacher check"
+            if criteria
+            else ""
+        ),
+        max_grades,
+    )
     report = RubricScoreReport(
         grade=_name(grade), n_rows=len(rows), rows=picked, seed=seed
     )

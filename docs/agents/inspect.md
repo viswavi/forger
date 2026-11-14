@@ -438,10 +438,20 @@ repeat-noise ranges and errors. `sensitive_criteria()` ranks candidates by their
 The `(row, index)` set supports downstream selection or filtering, but does not automatically delete criteria:
 review meaning preservation and judge noise first, and ensure any edited rubric still has a positive weight.
 
+## Grading cost of rubric checks
+
+`rubric_scores`, `rubric_sensitivity` and `rubric_pair_accuracy` call your `grade` function many times, and a
+judge-graded rubric calls its LLM judge once per judged criterion on every call: with an RL reward as `grade`, these
+calls spend the same judge quota as RL. Before any model or grade call, each prints its plan, e.g. `inspect.
+rubric_pair_accuracy will call grade up to 1,600 times (50 rows, 200 distinct texts and 200 criteria scored alone, x
+2 repeats)`, and `max_grades=N` raises instead when the plan is above `N`. They cannot price a call, since `grade`
+is yours; time a few calls on a small `n` first.
+
 ## Rubric pair accuracy
 
-`rubric_pair_accuracy(rows, grade, *, better_field="better", worse_field="worse", n=None, repeats=1,
-per_criterion=True, rubric_field="rubric")` asks whether a reward ranks responses the way you do. Each row holds one
+`rubric_pair_accuracy(rows, grade, *, better_field="better", worse_field="worse", n=50, repeats=1,
+per_criterion=True, rubric_field="rubric", max_grades=None)` asks whether a reward ranks responses the way you do.
+Each row holds one
 text or a list of texts in each field, and every (better, worse) combination on the row is a pair. What makes one
 better is yours to decide, e.g. a reference against a copy with a key fact removed or a mistake added, or a strong
 model's reply against a weak one's. Each pair is a win, tie or loss with a margin, mean(better) - mean(worse):
