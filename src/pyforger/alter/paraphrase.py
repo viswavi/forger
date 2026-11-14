@@ -10,6 +10,9 @@ from pyforger.op import op
 from pyforger.utils import get_field
 
 PARAPHRASE_SYSTEM = """Rewrite the supplied response with minimal changes to wording.
+Make one to three small, local rephrasings of ordinary prose where safe, such as
+an equivalent phrase or a reordered sentence clause. Return the whole response.
+Copying the response unchanged is not a paraphrase when a safe rephrasing exists.
 Preserve its meaning, usefulness, and quality in the context of the supplied task.
 Do not answer the task again, improve the answer, fix errors, add information,
 omit information, summarize, or change the level of detail. Preserve every claim,
