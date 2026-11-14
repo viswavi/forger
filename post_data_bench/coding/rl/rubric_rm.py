@@ -396,7 +396,10 @@ def content_filtered(exc=None, result=None):
     if exc is not None:
         return "content_filter" in str(exc).lower()
     try:
-        return result.choices[0].finish_reason == "content_filter"
+        return any(
+            getattr(c, "finish_reason", None) == "content_filter"
+            for c in result.choices
+        )
     except (AttributeError, IndexError, TypeError):
         return False
 
@@ -450,6 +453,7 @@ async def prompt_score(
     instructions="",
     scale="binary",
     model=None,
+    n=1,
 ):
     """Score one prompt criterion with the separately budgeted LM judge.
 
@@ -460,6 +464,8 @@ async def prompt_score(
     ``scale`` "binary" asks {"met": true/false} (1 or 0); "likert" asks an integer
     from 1 to 5, scored (n - 1) / 4 (``scale_score``). A reply off the scale is a
     failed attempt like unparseable JSON: retried, never rounded or scored 0.
+    ``n`` (positive integer, default 1) averages that many normalized judgments
+    in one call. Missing or invalid choices retry the entire call.
     Returns None, without retrying or counting a failure, when the provider's
     content filter blocks the judge's reply (``content_filtered``): retrying the
     same blocked call forever stopped RL at the end of a step (jobs 168621/168622).
@@ -467,6 +473,8 @@ async def prompt_score(
     (``judge_fallback_model``); None when that one is blocked too. ``model``
     overrides JUDGE_MODEL for one call (the fallback's own).
     """
+    if type(n) is not int or n < 1:
+        raise ValueError("n must be a positive integer")
     if answer_only:
         response, ground_truth = final_answer(response), final_answer(ground_truth)
     if not os.environ.get("LITELLM_JUDGE_API_KEY"):
@@ -499,6 +507,7 @@ async def prompt_score(
             instructions=instructions,
             scale=scale,
             model=fallback,
+            n=n,
         )
 
     import litellm
@@ -557,7 +566,7 @@ async def prompt_score(
             filtered = False
             try:
                 with budget.hold(
-                    model, held_units(model, messages, 1, JUDGE_MAX_TOKENS)
+                    model, held_units(model, messages, n, JUDGE_MAX_TOKENS)
                 ) as hold:
                     result = await litellm.acompletion(
                         model=model,
@@ -566,7 +575,7 @@ async def prompt_score(
                         api_base=base_url,
                         temperature=1.0,
                         reasoning={"effort": config["JUDGE_REASONING_EFFORT"]},
-                        n=1,
+                        n=n,
                         max_tokens=JUDGE_MAX_TOKENS,
                         timeout=120,
                         num_retries=0,
@@ -605,10 +614,17 @@ async def prompt_score(
                 # errors.
                 quota = False
                 try:
-                    content = (result.choices[0].message.content or "").strip()
-                    if content.startswith("```json") and content.endswith("```"):
-                        content = content[7:-3].strip()
-                    value = scale_score(json.loads(content), scale)
+                    if len(result.choices) != n:
+                        raise ValueError("Judge returned the wrong number of choices")
+                    values = []
+                    for choice in result.choices:
+                        if getattr(choice, "finish_reason", None) == "length":
+                            raise ValueError("Judge reply was truncated")
+                        content = (choice.message.content or "").strip()
+                        if content.startswith("```json") and content.endswith("```"):
+                            content = content[7:-3].strip()
+                        values.append(scale_score(json.loads(content), scale))
+                    value = statistics.mean(values)
                 except (ValueError, TypeError, KeyError, AttributeError):
                     _note_failure(state, failure_reason(result=result), threshold)
                 else:
@@ -713,6 +729,7 @@ async def rubric_reward_and_blocks(rubric, prompt, response, ground_truth):
                     judge_sees=tuple(criterion.get("judge_sees", JUDGE_FIELDS)),
                     instructions=criterion.get("instructions", ""),
                     scale=criterion.get("scale", "binary"),
+                    n=criterion.get("n", 1),
                 )
         if value is None:  # blocked by the provider's content filter
             blocked += 1

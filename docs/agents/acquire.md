@@ -254,3 +254,11 @@ must wrap each criterion as `{"prompt": criterion_text}` (or convert it to `{"co
 ensure a nonempty rubric with a positive weight, and supply the required `prompt` and `ground_truth`
 fields. The current RL validator requires `ground_truth` to include nonempty `<think>...</think>` reasoning
 and a final answer. This building block does not generate those fields or execute criteria.
+
+Prompt criteria accept `"n": 3` (positive integer, default 1) to average three
+judge samples in one request before applying the weight. Forger can set this
+with `prompt_criterion_options={"n": 3}`. Binary samples remain 0/1; their mean
+can be fractional. This spends additional judge quota and may reduce sampling
+noise, but does not guarantee correction of systematic errors. Missing or
+invalid samples retry the whole request; filtered samples leave it ungraded
+(or trigger the configured fallback). Aggregate API usage is charged once.

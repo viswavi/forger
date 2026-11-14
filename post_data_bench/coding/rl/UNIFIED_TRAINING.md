@@ -380,3 +380,11 @@ The legacy LiveCodeBench execution reward has a separate result protocol,
 credential-free environment, and resource limits. These are robustness controls,
 not a hardened OS sandbox for arbitrary Python. Unified final RL uses the fixed
 RestrictedPython/LiteLLM rubric reward instead.
+
+Prompt criteria accept `"n": 3` (positive integer, default 1) to average three
+judge samples in one request before applying the weight. Forger can set this
+with `prompt_criterion_options={"n": 3}`. Binary samples remain 0/1; their mean
+can be fractional. This spends additional judge quota and may reduce sampling
+noise, but does not guarantee correction of systematic errors. Missing or
+invalid samples retry the whole request; filtered samples leave it ungraded
+(or trigger the configured fallback). Aggregate API usage is charged once.

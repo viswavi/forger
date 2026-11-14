@@ -759,6 +759,86 @@ class RewardTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(completion.await_count, len(contents))
 
+    @staticmethod
+    def _multi_reply(contents, filtered=False):
+        return SimpleNamespace(
+            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=6),
+            choices=[
+                SimpleNamespace(
+                    finish_reason="content_filter" if filtered and i == 1 else "stop",
+                    message=SimpleNamespace(content=content),
+                )
+                for i, content in enumerate(contents)
+            ],
+        )
+
+    async def test_n_averages_votes_and_bills_aggregate_usage_once(self):
+        """Average all votes, reserve all outputs, and bill aggregate usage once."""
+        reply = self._multi_reply(['{"met": true}', '{"met": false}', '{"met": true}'])
+        with self._judge_env(), patch(
+            "litellm.acompletion", new=AsyncMock(return_value=reply)
+        ) as completion, patch.object(rm, "held_units", wraps=rm.held_units) as held:
+            self.assertAlmostEqual(await rm.prompt_score("c", [], "r", "g", n=3), 2 / 3)
+        self.assertEqual(completion.call_args.kwargs["n"], 3)
+        self.assertEqual(held.call_args.args[2], 3)
+        ledger = json.loads(self.usage_file.read_text())
+        self.assertEqual(ledger["models"][rm.JUDGE_MODEL]["calls"], 1)
+        self.assertEqual(ledger["token_units"], 28)
+
+    async def test_n_likert_retries_missing_and_invalid_choices(self):
+        """Missing or invalid samples cannot silently change the denominator."""
+        good = ['{"score": 1}', '{"score": 3}', '{"score": 5}']
+        with self._judge_env(), patch(
+            "litellm.acompletion",
+            new=AsyncMock(
+                side_effect=[
+                    self._multi_reply(good[:2]),
+                    self._multi_reply(good[:2] + ['{"score": 0.7}']),
+                    self._multi_reply(good),
+                ]
+            ),
+        ) as completion, patch.object(rm.asyncio, "sleep", new=AsyncMock()):
+            self.assertEqual(
+                await rm.prompt_score("c", [], "r", "g", scale="likert", n=3), 0.5
+            )
+        self.assertEqual(completion.await_count, 3)
+
+    async def test_n_filter_in_later_choice_preserves_n_on_fallback(self):
+        """A blocked later choice invokes the fallback with the same sample count."""
+        contents = ['{"met": true}', '{"met": false}', '{"met": true}']
+        with self._judge_env(
+            JUDGE_FALLBACK_MODEL="litellm_proxy/azure_ai/FW-GLM-5.3"
+        ), patch(
+            "litellm.acompletion",
+            new=AsyncMock(
+                side_effect=[
+                    self._multi_reply(contents, filtered=True),
+                    self._multi_reply(contents),
+                ]
+            ),
+        ) as completion:
+            self.assertAlmostEqual(await rm.prompt_score("c", [], "r", "g", n=3), 2 / 3)
+        self.assertEqual([c.kwargs["n"] for c in completion.call_args_list], [3, 3])
+
+    async def test_n_validation_and_reward_forwarding(self):
+        """Validate counts and pass per-criterion counts through the reward."""
+        for n in (0, -1, True, 1.5, "3", None):
+            with self.subTest(n=n), self.assertRaisesRegex(
+                ValueError, "positive integer"
+            ):
+                data.validate_rubric([[{"prompt": "c", "n": n}, 1]])
+            with self.assertRaisesRegex(ValueError, "positive integer"):
+                await rm.prompt_score("c", [], "r", "g", n=n)
+        with self.assertRaises(ValueError):
+            data.validate_rubric([[{"code": "def grade(p,r,g): return 1", "n": 3}, 1]])
+        with patch.object(
+            rm, "prompt_score", new=AsyncMock(return_value=2 / 3)
+        ) as judge:
+            await rm.rubric_reward(
+                [[{"prompt": "c", "n": 3}, 1], [{"prompt": "d"}, 1]], [], "r", "g"
+            )
+        self.assertEqual([c.kwargs["n"] for c in judge.call_args_list], [3, 1])
+
     async def test_scales_and_code_criteria_combine_in_the_reward(self):
         """Binary and Likert criteria score on their scales; code keeps 0.4."""
         rubric = [

@@ -75,6 +75,8 @@ def _check_prompt_criterion_options(options: dict[str, Any] | None) -> None:
         return
     if not isinstance(options, dict) or any(not isinstance(k, str) for k in options):
         raise TypeError("prompt_criterion_options must be a dict with string keys")
+    if "n" in options and (type(options["n"]) is not int or options["n"] < 1):
+        raise ValueError("n must be a positive integer")
     clash = sorted({"prompt", "code"} & set(options))
     if clash:
         raise ValueError(
@@ -671,8 +673,10 @@ def convert_rubric_criteria(
     criterion returned, e.g. ``{"answer_only": True}`` gives
     ``{"prompt": "Is it kind?", "answer_only": True}``, and ``{"scale": "likert"}``
     asks the judge for a 1-to-5 rating instead of yes or no; code criteria are left
-    alone. It may not set "prompt" or "code". It is added after the cached
-    conversion, so changing it never asks the model again.
+    alone. ``{"n": 3}`` averages three judge samples (default 1), so binary
+    samples can have a fractional mean. It may not set "prompt" or "code".
+    It is added after the cached conversion, so changing it never asks the
+    model again.
     """
     _check_prompt_criterion_options(prompt_criterion_options)
     converted = _convert_rubric_criteria(
