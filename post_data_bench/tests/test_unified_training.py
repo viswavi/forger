@@ -416,7 +416,7 @@ class RewardTests(unittest.IsolatedAsyncioTestCase):
         """With answer_only the judge sees final answers; the prompt stays whole."""
         result = SimpleNamespace(
             usage=SimpleNamespace(prompt_tokens=10, completion_tokens=2),
-            choices=[SimpleNamespace(message=SimpleNamespace(content='{"score": 1}'))],
+            choices=[SimpleNamespace(message=SimpleNamespace(content='{"met": true}'))],
         )
         prompt = [{"role": "user", "content": "<think>not a trace</think> task"}]
         response = "<think>long trace</think>\n```cpp\nint main(){}\n```\n"
@@ -456,9 +456,7 @@ class RewardTests(unittest.IsolatedAsyncioTestCase):
         """Verify judge model and separate key."""
         response = SimpleNamespace(
             usage=SimpleNamespace(prompt_tokens=10, completion_tokens=2),
-            choices=[
-                SimpleNamespace(message=SimpleNamespace(content='{"score": 0.75}'))
-            ],
+            choices=[SimpleNamespace(message=SimpleNamespace(content='{"score": 4}'))],
         )
         with patch.dict(
             os.environ,
@@ -471,7 +469,10 @@ class RewardTests(unittest.IsolatedAsyncioTestCase):
             "litellm.acompletion", new=AsyncMock(return_value=response)
         ) as completion:
             self.assertEqual(
-                await rm.prompt_score("criterion", [], "response", "gold"), 0.75
+                await rm.prompt_score(
+                    "criterion", [], "response", "gold", scale="likert"
+                ),
+                0.75,
             )
             self.assertEqual(completion.call_args.kwargs["api_key"], "test-judge")
             self.assertEqual(completion.call_args.kwargs["model"], rm.JUDGE_MODEL)
@@ -540,7 +541,7 @@ class RewardTests(unittest.IsolatedAsyncioTestCase):
         """A success ends the streak, so the next failure prints again."""
         success = SimpleNamespace(
             usage=SimpleNamespace(prompt_tokens=10, completion_tokens=2),
-            choices=[SimpleNamespace(message=SimpleNamespace(content='{"score": 1}'))],
+            choices=[SimpleNamespace(message=SimpleNamespace(content='{"met": true}'))],
         )
         not_json = SimpleNamespace(
             usage=SimpleNamespace(prompt_tokens=10, completion_tokens=2),
@@ -601,7 +602,7 @@ class RewardTests(unittest.IsolatedAsyncioTestCase):
         """judge_sees limits the payload; instructions extend the system message."""
         result = SimpleNamespace(
             usage=SimpleNamespace(prompt_tokens=10, completion_tokens=2),
-            choices=[SimpleNamespace(message=SimpleNamespace(content='{"score": 1}'))],
+            choices=[SimpleNamespace(message=SimpleNamespace(content='{"met": true}'))],
         )
         with patch.dict(
             os.environ,
@@ -626,7 +627,11 @@ class RewardTests(unittest.IsolatedAsyncioTestCase):
                 json.loads(messages[1]["content"]),
                 {"criterion": "mentions apixaban", "response": "Start apixaban."},
             )
-            self.assertTrue(messages[0]["content"].endswith("Brand names count."))
+            self.assertIn("Brand names count.", messages[0]["content"])
+            # The reply format comes after the instructions, so they cannot change it.
+            self.assertTrue(
+                messages[0]["content"].endswith('{"met": true} or {"met": false}.')
+            )
             await rm.prompt_score("c", [], "r", "g")
             sent = json.loads(completion.call_args.kwargs["messages"][1]["content"])
             self.assertEqual(
@@ -668,6 +673,117 @@ class RewardTests(unittest.IsolatedAsyncioTestCase):
             (second.kwargs["judge_sees"], second.kwargs["instructions"]),
             (("prompt", "response", "ground_truth"), ""),
         )
+
+    def test_scale_is_validated(self):
+        """The scale is "binary" or "likert", on prompt criteria only."""
+        for scale in ("binary", "likert"):
+            rubric = [[{"prompt": "c", "scale": scale}, 1]]
+            self.assertIs(data.validate_rubric(rubric), rubric)
+        for bad in (
+            {"prompt": "c", "scale": "continuous"},
+            {"prompt": "c", "scale": 5},
+            {"code": "def grade(p, r, g):\n    return 1.0", "scale": "binary"},
+        ):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "scale"):
+                data.validate_rubric([[bad, 1]])
+
+    def test_scale_score_accepts_only_the_scale(self):
+        """Binary maps met to 1 or 0; Likert maps 1..5 to 0..1; nothing is rounded."""
+        self.assertEqual(data.scale_score({"met": True}), 1.0)
+        self.assertEqual(data.scale_score({"met": False}, "binary"), 0.0)
+        for value, expected in ((1, 0.0), (2, 0.25), (3, 0.5), (3.0, 0.5), (5, 1.0)):
+            self.assertEqual(data.scale_score({"score": value}, "likert"), expected)
+        for reply, scale in (
+            ({"score": 0.7}, "binary"),
+            ({"score": 1}, "binary"),
+            ({"met": "true"}, "binary"),
+            ({"met": 1}, "binary"),
+            ({"score": 3.5}, "likert"),
+            ({"score": "3"}, "likert"),
+            ({"score": 0}, "likert"),
+            ({"score": 6}, "likert"),
+            ({"score": True}, "likert"),
+            ({"met": True}, "likert"),
+            ([1], "likert"),
+        ):
+            with self.subTest(reply=reply, scale=scale), self.assertRaises(ValueError):
+                data.scale_score(reply, scale)
+
+    def test_system_message_differs_by_scale(self):
+        """Each scale asks for its own format; neither message carries a weight."""
+        binary = rm.judge_system_message("binary")
+        likert = rm.judge_system_message("likert", "Count brand names.")
+        self.assertIn('{"met": true} or {"met": false}', binary)
+        self.assertNotIn("1 to 5", binary)
+        self.assertIn("from 1 to 5", likert)
+        self.assertTrue(likert.endswith('{"score": 3}.'))
+        self.assertIn("Count brand names.", likert)
+        for message in (binary, likert):
+            self.assertNotIn("weight", message.lower())
+            self.assertIn("a criterion may describe a mistake", message)
+
+    async def test_off_scale_replies_are_retried_never_scored(self):
+        """A fraction under binary, or 3.5 or 6 under Likert, is a failed attempt."""
+
+        def reply(content):
+            return SimpleNamespace(
+                usage=SimpleNamespace(prompt_tokens=10, completion_tokens=2),
+                choices=[
+                    SimpleNamespace(
+                        finish_reason="stop", message=SimpleNamespace(content=content)
+                    )
+                ],
+            )
+
+        cases = [
+            ("binary", ['{"score": 0.7}', '{"met": false}'], 0.0),
+            ("binary", ['{"verdict": "yes"}', '{"met": true}'], 1.0),
+            ("likert", ['{"score": 3.5}', '{"score": 6}', '{"score": 2}'], 0.25),
+        ]
+        for scale, contents, expected in cases:
+            with self.subTest(scale=scale, contents=contents), patch.dict(
+                os.environ,
+                {
+                    "LITELLM_JUDGE_API_KEY": "test",
+                    "LITELLM_BASE_URL": "https://example.test",
+                },
+            ), patch(
+                "litellm.acompletion",
+                new=AsyncMock(side_effect=[reply(c) for c in contents]),
+            ) as completion, patch.object(
+                rm.asyncio, "sleep", new=AsyncMock()
+            ):
+                rm._JUDGE_STATE.clear()
+                self.assertEqual(
+                    await rm.prompt_score("c", [], "r", "g", scale=scale), expected
+                )
+                self.assertEqual(completion.await_count, len(contents))
+
+    async def test_scales_and_code_criteria_combine_in_the_reward(self):
+        """Binary and Likert criteria score on their scales; code keeps 0.4."""
+        rubric = [
+            [{"prompt": "Names the drug?"}, 1],
+            [{"prompt": "Explains the dose?", "scale": "likert"}, 1],
+            [{"code": "def grade(p, r, g):\n    return 0.4"}, 2],
+        ]
+        replies = {
+            "Names the drug?": '{"met": true}',
+            "Explains the dose?": '{"score": 4}',
+        }
+
+        async def judge(criterion, *args, scale="binary", **kwargs):
+            value = data.scale_score(json.loads(replies[criterion]), scale)
+            judge.scales.append(scale)
+            return value
+
+        judge.scales = []
+        with patch.object(rm, "prompt_score", new=judge), patch.object(
+            rm, "code_score", return_value=0.4
+        ):
+            reward, blocked = await rm.rubric_reward_and_blocks(rubric, [], "r", "g")
+        self.assertEqual(judge.scales, ["binary", "likert"])
+        self.assertEqual(blocked, 0)
+        self.assertAlmostEqual(reward, (1 * 1.0 + 1 * 0.75 + 2 * 0.4) / 4)
 
     def test_judge_options_are_validated(self):
         """judge_sees needs "response" and known fields; options are prompt-only."""
@@ -840,7 +956,7 @@ class RewardTests(unittest.IsolatedAsyncioTestCase):
         blocked.status_code = 400  # refused, so the blocked call is not billed
         reply = SimpleNamespace(
             usage=SimpleNamespace(prompt_tokens=10, completion_tokens=2),
-            choices=[SimpleNamespace(message=SimpleNamespace(content='{"score": 1}'))],
+            choices=[SimpleNamespace(message=SimpleNamespace(content='{"met": true}'))],
         )
         glm = "litellm_proxy/azure_ai/FW-GLM-5.3"
         with self._judge_env(JUDGE_FALLBACK_MODEL=glm), patch(
@@ -900,7 +1016,7 @@ class RewardTests(unittest.IsolatedAsyncioTestCase):
         """Verify success resets failures."""
         success = SimpleNamespace(
             usage=SimpleNamespace(prompt_tokens=10, completion_tokens=2),
-            choices=[SimpleNamespace(message=SimpleNamespace(content='{"score": 1}'))],
+            choices=[SimpleNamespace(message=SimpleNamespace(content='{"met": true}'))],
         )
         with patch.dict(
             os.environ,

@@ -162,7 +162,7 @@ class JudgeTests(unittest.IsolatedAsyncioTestCase):
             return SimpleNamespace(
                 usage=SimpleNamespace(prompt_tokens=10, completion_tokens=2),
                 choices=[
-                    SimpleNamespace(message=SimpleNamespace(content='{"score":1}'))
+                    SimpleNamespace(message=SimpleNamespace(content='{"met":true}'))
                 ],
             )
 

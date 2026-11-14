@@ -33,8 +33,14 @@ response's thinking is never closed. The prompt, when sent, is always whole.
 It may also add `"judge_sees"`, a list of the fields the judge receives (from
 `"prompt"`, `"response"` and `"ground_truth"`; it must include `"response"`;
 default all three), and `"instructions"`, up to 4,000 characters added to the
-judge's system message for that criterion only. Neither is allowed on code
-criteria (`rubric_data.PROMPT_OPTIONS`).
+judge's system message for that criterion only. `"scale"` sets how the judge
+answers: `"binary"` (the default) asks yes or no, scored 1 or 0; `"likert"` asks
+an integer from 1 (not at all) to 5 (fully), scored `(n - 1) / 4`. The reply
+format comes after the instructions, which cannot change it; a reply off the
+scale (e.g. `{"score": 0.7}` under binary) is retried like unparseable JSON,
+never rounded (`rubric_data.scale_score`). None of these options is allowed on
+code criteria (`rubric_data.PROMPT_OPTIONS`), which may return any value in
+`[0, 1]`.
 
 Submit at least 10 unique prompts. The harness sorts by prompt hash, shuffles
 with seed 0, and holds out `floor(N / 10)` rows for RL reward monitoring. The
@@ -182,7 +188,7 @@ exactly one of `code` or `prompt`. Weights must be finite; the positive weights
 must have a positive sum. Reward is `sum(weight * score) / sum(positive weights)`,
 clipped to `[0, 1]` (`rubric_data.weighted_score`): a negative-weight criterion
 describes a mistake and subtracts when the response makes it. The judge never
-sees weights; it scores how fully the response does what a criterion describes.
+sees weights; it judges whether the response does what a criterion describes.
 
 * **Code:** defines `grade(prompt, response, ground_truth) -> float` in `[0,1]`.
   Define exactly one top-level synchronous `grade` function with exactly three
