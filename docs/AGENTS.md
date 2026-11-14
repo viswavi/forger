@@ -97,7 +97,7 @@ result. Its results are placeholders, not from a run; write only comparisons you
 ### Cost
 
 Token-unit quotas use fixed weights: DeepSeek-V4-Flash costs 1 unit per input token and 3 per output token; GLM-5.3
-costs 4 and 12.5.
+costs 4 and 12.5. The judge's DeepSeek-V4.1-Flash costs 1 and 3, on the judge quota only.
 
 - Cached input tokens count at full weight. Completion tokens already include reasoning; do not add it again.
 - Other models report `NaN` units, and budgeted calls to them stop. Local GPU inference is free and exempt.

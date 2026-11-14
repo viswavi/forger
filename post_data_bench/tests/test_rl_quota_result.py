@@ -101,7 +101,7 @@ class QuotaCircuitTests(unittest.IsolatedAsyncioTestCase):
             )
             for content in ("bad JSON", '{"score":3}')
         ]
-        alias = "custom/DeepSeek-V4-Flash-company"
+        alias = "custom/DeepSeek-V4.1-Flash-company"
         with patch.dict(
             os.environ,
             {

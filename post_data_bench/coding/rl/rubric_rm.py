@@ -172,10 +172,11 @@ def judge_fallback_model(env=None):
     model = (os.environ if env is None else env).get("JUDGE_FALLBACK_MODEL") or None
     if model:
         try:
-            model_weights(model)
+            model_weights(model, judge=True)
         except ValueError:
             raise ValueError(
-                "JUDGE_FALLBACK_MODEL must be a DeepSeek-V4-Flash or GLM-5.3 alias"
+                "JUDGE_FALLBACK_MODEL must be a DeepSeek-V4.1-Flash, DeepSeek-V4-Flash"
+                " or GLM-5.3 alias"
             ) from None
     return model
 
@@ -666,7 +667,7 @@ async def prompt_score(
             filtered = False
             try:
                 with budget.hold(
-                    model, held_units(model, messages, n, JUDGE_MAX_TOKENS)
+                    model, held_units(model, messages, n, JUDGE_MAX_TOKENS, judge=True)
                 ) as hold:
                     result = await litellm.acompletion(
                         model=model,
