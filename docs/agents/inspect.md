@@ -449,17 +449,19 @@ is yours; time a few calls on a small `n` first.
 
 ## Rubric pair accuracy
 
-`rubric_pair_accuracy(rows, grade, *, better_field="better", worse_field="worse", n=50, repeats=1,
-per_criterion=True, rubric_field="rubric", max_grades=None)` asks whether a reward ranks responses the way you do.
-Each row holds one
-text or a list of texts in each field, and every (better, worse) combination on the row is a pair. What makes one
-better is yours to decide, e.g. a reference against a copy with a key fact removed or a mistake added, or a strong
-model's reply against a weak one's. Each pair is a win, tie or loss with a margin, mean(better) - mean(worse):
+`rubric_pair_accuracy(rows, grade, *, better_field="better", worse_field="worse", n=50, repeats=1, epsilon=0.05,
+per_criterion=True, rubric_field="rubric", max_grades=None)` asks whether a reward ranks responses the way you do. Each
+row holds one text or a list of texts in each field, and every (better, worse) combination on the row is a pair. What
+makes one better is yours to decide, e.g. a reference against a copy with a key fact removed or a mistake added, or a
+strong model's reply against a weak one's. Each pair gets a margin, mean(better) - mean(worse), and is a win when the
+margin is above `epsilon` (default 0.05), a loss below -epsilon, else a tie, so code criteria returning fractions do not
+turn a 0.001 difference into a ranking:
 
 ```python
 report = inspect.rubric_pair_accuracy(rows, grade=rubric_score(judge=True), repeats=2)
 # Rubric pair accuracy: 40 of 40 rows; 80 pairs compared, 0 ungradable, 0 missing a text.
-# Better text scored higher in 52, tied in 21, lower in 7 (accuracy 78.1%, ties count half; mean margin +0.214).
+# Better text scored higher by more than 0.05 in 52, within it in 21, lower in 7 (accuracy 78.1%, ties count
+# half; mean margin +0.214).
 report.losing_pairs()        # pairs the worse text won, with their row
 report.wrong_way_criteria()  # criteria that passed a worse text and failed its better one, with (row, index)
 ```
