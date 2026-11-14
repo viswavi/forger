@@ -95,6 +95,8 @@ def test_validation():
     """Bad arguments fail before any grading."""
     with pytest.raises(ValueError, match="repeats"):
         rubric_pair_accuracy([], keyword_rubric, repeats=0)
+    with pytest.raises(ValueError, match="epsilon"):
+        rubric_pair_accuracy([], keyword_rubric, epsilon=-1)
     with pytest.raises(ValueError, match="differ"):
         rubric_pair_accuracy([], keyword_rubric, better_field="x", worse_field="x")
     with pytest.raises(TypeError, match="better"):
@@ -124,3 +126,15 @@ def test_max_grades_raises_before_any_call():
     assert len(calls) == 12
     with pytest.raises(ValueError, match="max_grades"):
         rubric_pair_accuracy(rows, grade, max_grades=0)
+
+
+def test_epsilon_counts_small_margins_as_ties():
+    """A margin of 0.02 is a tie at the default 0.05 and a win at epsilon=0."""
+    rows = [{"better": "aa", "worse": "a"}]
+
+    def grade(response, row):
+        return 0.5 + 0.01 * len(response)
+
+    assert rubric_pair_accuracy(rows, grade).pairs[0].outcome == "tie"
+    report = rubric_pair_accuracy(rows, grade, epsilon=0)
+    assert report.pairs[0].outcome == "win" and report.epsilon == 0

@@ -1397,6 +1397,7 @@ rubric_pair_accuracy(
     worse_field: str = "worse",
     n: int | None = 50,
     repeats: int = 1,
+    epsilon: float = 0.05,
     per_criterion: bool = True,
     rubric_field: str = "rubric",
     seed: int = 0,
