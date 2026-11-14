@@ -166,8 +166,8 @@ The detailed reference is split by topic under `docs/agents/`; read the file for
   `by_tests`, `by_rubric_score` (every row's grade score), the difficulty filters, `by_embedding_similarity`, and
   `by_topic_frequency`.
 - [`docs/agents/inspect.md`](agents/inspect.md): Reports on rows: `topic_based_clustering`, `eval_tree`,
-  `rubric_scores`, `embedding_dispersion`, `compare_to_reference`, `inspect_step`, `spend`, `runs` and
-  `compare_pipelines` (saved pipeline runs), and `student_log_likelihood`.
+  `rubric_scores`, `rubric_sensitivity`, `rubric_pair_accuracy`, `embedding_dispersion`, `compare_to_reference`,
+  `inspect_step`, `spend`, `runs` and `compare_pipelines` (saved pipeline runs), and `student_log_likelihood`.
 - [`docs/agents/models.md`](agents/models.md): The `Model` class, gateway credentials, concurrency, `n` fan-out,
   reasoning effort, prompt types.
 - [`docs/agents/caching.md`](agents/caching.md): How `@op` caching, the request cache, and tracing work.
