@@ -1,0 +1,262 @@
+"""Measure reward changes under candidate meaning-preserving rewrites."""
+
+from __future__ import annotations
+
+import math
+from collections.abc import Callable
+from statistics import mean
+from typing import Any
+
+from pydantic import BaseModel, Field
+from rich.text import Text
+
+from pyforger._render import _console, _emit
+from pyforger.alter.paraphrase import paraphrase
+from pyforger.filter.rubric import Grade, _grade_column
+from pyforger.inspect.scores import _sample_rows
+from pyforger.op import tracked
+from pyforger.utils import get_field
+
+
+class SensitivityPair(BaseModel):
+    """Original and candidate scores; row indexes the caller's input rows.
+
+    equivalent is an optional independent check, not the paraphraser's claim.
+    False excludes the pair from the comparison; None leaves it unverified.
+    """
+
+    row: int
+    original: str
+    candidate: str
+    original_scores: list[float | None]
+    candidate_scores: list[float | None]
+    equivalent: bool | None = None
+    gap: float | None = None
+    changed: bool | None = None
+
+
+class RubricSensitivityReport(BaseModel):
+    """Candidate sensitivity is a diagnostic, not proof of equal utility.
+
+    candidate_tie_rate includes unverified pairs; verified_tie_rate includes
+    only pairs accepted by equivalent. Both use absolute differences between
+    repeated-score means at epsilon. identical_response_gaps measures the
+    range across fresh grades of each identical text, a separate noise check.
+    Missing grades are never filled with zero. Only complete repeat groups
+    enter comparisons. External grader caches must also be disabled by the
+    caller; the inspection bypasses Forger caches when grading.
+    """
+
+    n_rows: int
+    rows: list[int]
+    epsilon: float
+    repeats: int
+    pairs: list[SensitivityPair] = Field(default_factory=list)
+    unchanged: int = 0
+    duplicates: int = 0
+    missing: int = 0
+    ungradable_pairs: int = 0
+    rejected: int = 0
+    compared: int = 0
+    changed: int = 0
+    verified: int = 0
+    candidate_tie_rate: float | None = None
+    verified_tie_rate: float | None = None
+    mean_abs_gap: float | None = None
+    max_abs_gap: float | None = None
+    identical_response_gaps: list[float] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+
+
+def _complete(values: list[float | None]) -> list[float] | None:
+    """Return a complete group, or None if any fresh grading was unavailable."""
+    if not values or any(v is None for v in values):
+        return None
+    return [float(v) for v in values if v is not None]
+
+
+@tracked("inspect.rubric_sensitivity", smoke=("n",))
+def rubric_sensitivity(
+    rows: list[dict],
+    grade: Grade,
+    *,
+    model: Any = None,
+    variants_field: str | None = None,
+    response_field: str = "response",
+    prompt_field: str | None = "prompt",
+    n: int | None = 50,
+    k: int = 2,
+    repeats: int = 2,
+    epsilon: float = 0.05,
+    equivalent: Callable[[str, str, dict], bool | None] | None = None,
+    seed: int = 0,
+    workers: int = 8,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+) -> RubricSensitivityReport:
+    """Inspect reward stability across conservative candidate paraphrases.
+
+    Supply model to generate paraphrases, or variants_field holding existing
+    lists of strings/None. Report the share whose mean reward changes by more
+    than epsilon, plus the noise across repeated fresh grades of identical
+    text. This probes specificity, not discrimination: a constant reward
+    passes this check. Use rubric_scores controls and teacher checks too.
+
+    A paraphrase may change quality. equivalent(original, candidate, row)
+    can independently accept/reject it; None is unverified. Rejected pairs
+    are retained for review but excluded from summary metrics. Without this
+    check, results describe candidate sensitivity, not verified specificity.
+
+    Grading bypasses Forger caches, including nested @op calls, so repetitions
+    are fresh. A callable with its own external cache must bypass that too.
+    Paraphrase generation is cached separately. At most n * (k + 1) * repeats
+    grade calls plus n * k generations; each grade may call many rubric judges.
+    With variants_field, the number of supplied variants replaces k. Samples
+    keep original row indices; no rows are removed or changed.
+
+    Returns:
+        A serializable report with paired texts, scores, omissions, errors,
+        and separate candidate/verified tie rates at the chosen tolerance.
+    """
+    if (model is None) == (variants_field is None):
+        raise ValueError("supply exactly one of model or variants_field")
+    for name, value in (("repeats", repeats), ("workers", workers), ("k", k)):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"{name} must be a positive integer")
+    if not math.isfinite(epsilon) or epsilon < 0:
+        raise ValueError("epsilon must be finite and nonnegative")
+    if n is not None and (isinstance(n, bool) or not isinstance(n, int) or n < 1):
+        raise ValueError("n must be a positive integer or None")
+    picked = _sample_rows(len(rows), n, seed)
+    sample = [rows[i] for i in picked]
+    report = RubricSensitivityReport(
+        n_rows=len(rows), rows=picked, epsilon=epsilon, repeats=repeats
+    )
+    if model is not None:
+        # Avoid writing even a temporary output field into the caller's rows.
+        inputs = []
+        for row in sample:
+            item = {"response": get_field(row, response_field, "rubric_sensitivity")}
+            if prompt_field is not None:
+                item["prompt"] = get_field(row, prompt_field, "rubric_sensitivity")
+            inputs.append(item)
+        generated = paraphrase(
+            inputs,
+            model=model,
+            prompt_field="prompt" if prompt_field else None,
+            k=k,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        variants = [row["paraphrases"] for row in generated]
+    else:
+        assert variants_field is not None  # exactly one source was required above
+        variants = [
+            get_field(row, variants_field, "rubric_sensitivity") for row in sample
+        ]
+    texts: list[list[str | None]] = []
+    candidates: list[list[str]] = []
+    for row, choices in zip(sample, variants):
+        original = get_field(row, response_field, "rubric_sensitivity")
+        if not isinstance(original, str):
+            raise TypeError("response_field must contain text")
+        if not isinstance(choices, list):
+            raise TypeError("variants_field must contain lists")
+        seen = {original}
+        unique = []
+        for choice in choices:
+            if choice is None or (isinstance(choice, str) and not choice.strip()):
+                report.missing += 1
+                continue
+            if not isinstance(choice, str):
+                raise TypeError("variants must be text or None")
+            if choice == original:
+                report.unchanged += 1
+            elif choice in seen:
+                report.duplicates += 1
+            else:
+                unique.append(choice)
+                seen.add(choice)
+        candidates.append(unique)
+        texts.append([text for text in [original, *unique] for _ in range(repeats)])
+    # _no_cache propagates into nested ops and worker contexts. Reusing cached
+    # grades of identical strings would manufacture a zero-noise baseline.
+    scores, errors = _grade_column(
+        sample, texts, grade=grade, workers=workers, _no_cache=True
+    )
+    for i, (row, unique, values) in enumerate(zip(sample, candidates, scores)):
+        groups = [values[j : j + repeats] for j in range(0, len(values), repeats)]
+        for group in groups:
+            complete = _complete(group)
+            if complete is not None and repeats > 1:
+                report.identical_response_gaps.append(max(complete) - min(complete))
+        original = str(texts[i][0])
+        for candidate, group in zip(unique, groups[1:]):
+            accepted = equivalent(original, candidate, row) if equivalent else None
+            if accepted is not None and not isinstance(accepted, bool):
+                raise TypeError("equivalent must return bool or None")
+            pair = SensitivityPair(
+                row=picked[i],
+                original=original,
+                candidate=candidate,
+                original_scores=groups[0],
+                candidate_scores=group,
+                equivalent=accepted,
+            )
+            a, b = _complete(groups[0]), _complete(group)
+            if a is not None and b is not None:
+                pair.gap = mean(b) - mean(a)
+                pair.changed = abs(pair.gap) > epsilon
+            report.pairs.append(pair)
+        report.errors.extend(error for error in errors[i] if error is not None)
+    report.rejected = sum(p.equivalent is False for p in report.pairs)
+    report.ungradable_pairs = sum(p.gap is None for p in report.pairs)
+    eligible = [
+        p for p in report.pairs if p.equivalent is not False and p.gap is not None
+    ]
+    verified = [p for p in eligible if p.equivalent is True]
+    report.compared = len(eligible)
+    report.changed = sum(p.changed is True for p in eligible)
+    report.verified = len(verified)
+    if eligible:
+        report.candidate_tie_rate = 1 - report.changed / len(eligible)
+        gaps = [abs(p.gap) for p in eligible if p.gap is not None]
+        report.mean_abs_gap, report.max_abs_gap = mean(gaps), max(gaps)
+    if verified:
+        report.verified_tie_rate = 1 - sum(p.changed is True for p in verified) / len(
+            verified
+        )
+    noise = report.identical_response_gaps
+    noise_text = (
+        f"mean range {mean(noise):.3g}, max {max(noise):.3g}, "
+        f"{sum(gap > epsilon for gap in noise)}/{len(noise)} exceed tolerance"
+        if noise
+        else "not measured (need two complete grades per text)"
+    )
+    _emit(
+        Text(
+            f"Rubric sensitivity: {len(picked)} of {len(rows)} rows sampled; "
+            f"{report.changed}/{report.compared} candidate pairs changed by more "
+            f"than {epsilon:g}; {report.verified} pairs independently accepted.\n"
+            f"Identical-text repeat variation: {noise_text}.\n"
+            f"unchanged rewrites: {report.unchanged}; duplicates: {report.duplicates}; "
+            f"missing: {report.missing}; rejected: {report.rejected}; "
+            f"ungradable pairs: {report.ungradable_pairs}.\n"
+            "Review paired texts: semantic equivalence is not guaranteed. "
+            "No comparisons means no evidence of stability."
+        ),
+        _console(),
+    )
+    largest = sorted(eligible, key=lambda p: abs(p.gap or 0), reverse=True)[:3]
+    for pair in largest:
+        # Keep full text in the returned report; terminal examples stay short.
+        _emit(
+            Text(
+                f"row {pair.row}: gap {pair.gap:+.3f}; "
+                f"equivalence {'accepted' if pair.equivalent else 'unverified'}\n"
+                f"  original: {pair.original[:240]!r}\n"
+                f"  rewrite:  {pair.candidate[:240]!r}"
+            ),
+            _console(),
+        )
+    return report
