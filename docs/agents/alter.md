@@ -6,6 +6,7 @@ Transform rows without removing items. Signatures and defaults: [OPS.md](../OPS.
 |---|---|
 | `generate_from_context` | LLM generation from each row's fields (`sample_from_LLM` over rows). |
 | `self_taught_reasoner` | STaR: keep the student's own samples that are verified correct. |
+| `paraphrase` | Conservative candidate rewrites, preserving the original response. |
 | `translate.to_language` | LLM translation of selected fields into a target natural language. |
 | `translate.to_code` | LLM conversion of fields into code in a target programming language. Strips markdown fences. |
 | `execute_code` | Call the last function in each row's code with one argument, in-process (RestrictedPython). |
@@ -120,3 +121,14 @@ hard = filter.by_pass_at_k(verified, model=student, input_field="statement",
   sandbox, so code that passes here passes there. Give it a `cache_key()` method.
 - **Not a security sandbox**: `run_programs` runs as your user with your files and network, and `execute_code`'s
   RestrictedPython only guards against accidents. Run untrusted code at scale in a container or VM.
+
+## Conservative paraphrases
+
+`paraphrase(rows, model=model, response_field="response", output_field="paraphrases", k=2)` adds a list of
+candidate rewrites to each row, preserving the original. The model sees only the response and its task
+(`prompt_field="prompt"`; set it to `None` for no context), never the rubric or reference answer. It is asked to
+change wording minimally while preserving claims, mistakes, uncertainty, conditions, numbers, code, and citations.
+The output field must be new. Blank or truncated completions become `None`; unchanged and duplicate rewrites remain
+visible. Generation is cached and batched. These are candidate paraphrases, not certified semantic equivalents.
+Use `inspect.rubric_sensitivity` to inspect the reward changes and review the pairs, rather than automatically
+filtering rows on the assumption that every rewrite preserved quality.

@@ -13,6 +13,7 @@ from pyforger.inspect.reference import ReferenceReport, compare_to_reference
 from pyforger.inspect.report import inspect_step
 from pyforger.inspect.runs import runs
 from pyforger.inspect.scores import RubricScoreReport, rubric_scores
+from pyforger.inspect.sensitivity import RubricSensitivityReport, rubric_sensitivity
 from pyforger.inspect.spend import SpendReport, SpendTotal, spend
 
 __all__ = [
@@ -22,6 +23,7 @@ __all__ = [
     "PhraseReport",
     "ReferenceReport",
     "RubricScoreReport",
+    "RubricSensitivityReport",
     "SpendReport",
     "SpendTotal",
     "embedding_dispersion",
@@ -31,6 +33,7 @@ __all__ = [
     "inspect_step",
     "phrase_frequency",
     "rubric_scores",
+    "rubric_sensitivity",
     "runs",
     "spend",
     "student_log_likelihood",

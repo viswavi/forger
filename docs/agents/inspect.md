@@ -13,6 +13,7 @@ Inspect ops return a *report* about rows and never change them. Signatures are i
 | `phrase_frequency` | no | Print, per string field, the phrases and names the most rows share. No LLM. |
 | `student_log_likelihood` | yes | How likely the student finds each row's target, in bits, beside its own responses. |
 | `rubric_scores` | grades | Print and return a reward's score histogram on a sample of `n` rows, beside controls. |
+| `rubric_sensitivity` | rewrites | Compare paraphrases' scores and measure identical-text grading noise. |
 | `embedding_dispersion` | yes | Print and return how dispersed a field is in embedding space vs. a reference. No LLM. |
 | `compare_to_reference` | yes | Print and return feature distributions (lengths, numbers, labels) beside a reference. |
 
@@ -236,3 +237,39 @@ full); a name means that pipeline's latest run, and a run id from `runs()` names
 recorded their keys say `no key recorded (an older run)` for each step. It returns a dict: `first_difference`, and per
 step `same`, `why`, `ops` (with `b_minus_a`: the difference, its `ci`, and `clear`), `scores`, and `rows` (with
 `sign_test_p`).
+
+## Rubric sensitivity
+
+`rubric_sensitivity(rows, grade, model=rewriter, n=50, k=2, repeats=2, epsilon=0.05)` measures how a reward changes
+under conservative candidate paraphrases. It uses `alter.paraphrase`, which sees the task and response, never the
+rubric. Supply `variants_field="paraphrases"` instead of `model` to inspect existing rewrites (including manually
+reviewed ones). Rows are sampled with `seed`; `n=None` inspects all rows. The original rows are unchanged.
+
+```python
+report = inspect.rubric_sensitivity(
+    rows, grade, model=rewriter, response_field="solution", n=30, k=2,
+    repeats=2, epsilon=0.05,
+)
+# report.pairs keeps the full original/rewrite texts and all repeated scores.
+```
+
+The report compares repeated-score means and counts absolute changes larger than `epsilon`. It separately reports
+score ranges from grading the *identical text* repeatedly: judge randomness may already cause disagreement.
+Grading bypasses Forger caches, including nested ops; disable any separate cache inside your grader too.
+Paraphrase generation is cached separately. Each call grades fresh, at most `n * (k + 1) * repeats` times, plus
+`n * k` generated rewrites. Each grade may itself execute many rubric criteria. At `repeats=1`, repeat noise is
+unmeasured. This comparison does not establish statistical significance or subtract away judge noise.
+It measures the supplied grade function: aggregate rubric scores can hide offsetting criterion changes.
+To inspect a particular criterion, supply a grade function that scores that criterion alone.
+
+`equivalent(original, candidate, row)` optionally returns `True`, `False`, or `None` from an independent review.
+Rejected pairs remain available but are excluded from summary comparisons. `candidate_tie_rate` includes unverified
+pairs; `verified_tie_rate` includes only accepted pairs, so its reliability depends on that review. Without a check,
+the report measures *candidate* sensitivity: a rewrite can accidentally fix an error, weaken a claim, or violate an
+exact wording constraint. Such changes can legitimately change reward. Constant rewards pass this inspection too;
+use `rubric_scores` controls and teacher checks to assess discrimination. Paraphrases probe a subset of equally
+useful responses, not every equivalence class discussed in [Discretizing Reward Models](https://arxiv.org/abs/2606.21795).
+
+Unchanged rewrites, duplicates, missing completions, rejected pairs, and ungradable pairs are counted separately.
+No comparisons gives `None` for the tie rate, never perfect stability. The largest differences are previewed; use
+`report.model_dump()` for all pairs and scores. This inspection reports evidence and does not filter or rewrite rubrics.
