@@ -236,7 +236,8 @@ Common patterns (not a complete list):
   test inputs, a required refusal) as a code criterion, e.g. `acquire.generate_custom_rubric(...,
   code_criteria_only=True)`, and keep LLM judges for what code cannot check.
 - **Rubric-based filtering:** for quality that simple heuristics cannot check, generate a rubric with
-  `acquire.generate_custom_rubric_criteria` and use one `filter.by_llm_score` judge per rubric item.
+  `acquire.generate_custom_rubric_criteria` and use one `filter.by_llm_score` judge per rubric item. An item with a
+  negative weight names a mistake: drop the outputs that meet it, not the ones that miss it.
 - **Agent-as-a-step:** an agent ([`dynamic_step`](dynamic_step.md)) handles one input with multi-turn reasoning
   inside a larger pipeline; slower, but more flexible.
 - **Strong-vs-weak gap:** answer each input with a weak model and several strong ones; keep rows where the strong

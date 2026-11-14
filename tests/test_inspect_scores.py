@@ -382,20 +382,21 @@ def test_teacher_finds_criteria_only_the_reference_meets():
     assert teacher.prompts[0] == [{"role": "user", "content": "question 0"}]
     assert [c.name for c in report.columns] == ["reference", "teacher"]
     t = report.teacher_criteria
-    assert (t.rows, t.criteria, t.skipped) == (6, 18, 6)
-    assert (t.reference_passes, t.fails_all, t.fails_some) == (18, 3, 3)
-    assert t.share_fails_all == pytest.approx(3 / 18)
+    # "mentions warfarin" [-10] is a mistake both avoid: it passes everywhere.
+    assert (t.rows, t.criteria, t.skipped) == (6, 24, 0)
+    assert (t.reference_passes, t.fails_all, t.fails_some) == (24, 3, 3)
+    assert t.share_fails_all == pytest.approx(3 / 24)
     assert [(e.row, e.index, e.criterion, e.weight) for e in t.examples] == [
         (0, 1, "mentions 81 mg", 100.0),
         (2, 1, "mentions 81 mg", 100.0),
         (4, 1, "mentions 81 mg", 100.0),
     ]
     assert t.examples[0].reference == 1.0 and t.examples[0].teacher == [0.0, 0.0]
-    assert report.flags == []  # 17% is under the 20% flag
+    assert report.flags == []  # 12.5% is under the 20% flag
     text = render_rubric_score_report(report)
     assert "teacher: toy-teacher" in text and "teacher ×2" in text
     assert (
-        "per criterion: teacher ×2 fails 3 of the 18 criteria reference passes" in text
+        "per criterion: teacher ×2 fails 3 of the 24 criteria reference passes" in text
     )
     assert "teacher fails: row 0 criterion 1 [100]" in text and "mentions 81 mg" in text
 
@@ -474,3 +475,38 @@ def test_a_sampled_column_near_one_is_flagged():
     )
     assert report.column("sampled").mean >= 0.9
     assert any(f.startswith("sampled scores") for f in report.flags)
+
+
+def test_teacher_check_flips_mistake_criteria():
+    """A mistake every teacher reply makes and the reference avoids is listed."""
+    rows = [
+        {
+            "prompt": [{"role": "user", "content": f"question {i}"}],
+            "reference": "Give aspirin 81 mg; watch for bleeding.",
+            "rubric": [
+                ["mentions aspirin", 50],
+                ["mentions reasonable", -75],  # every teacher reply says it
+                ["mentions daily", -25],  # only odd rows' first reply says it
+                ["mentions warfarin", 0],
+            ],
+        }
+        for i in range(4)
+    ]
+    report = rubric_scores(
+        rows,
+        keyword_rubric,
+        n=None,
+        response_fields="reference",
+        teacher=Teacher(),
+        control_columns=False,
+    )
+    t = report.teacher_criteria
+    assert (t.rows, t.criteria, t.skipped) == (4, 12, 4)
+    assert (t.reference_passes, t.fails_all, t.fails_some) == (12, 4, 2)
+    assert [(e.row, e.criterion, e.weight) for e in t.examples] == [
+        (i, "mentions reasonable", -75.0) for i in range(4)
+    ]
+    assert t.examples[0].reference == 0.0 and t.examples[0].teacher == [1.0, 1.0]
+    text = render_rubric_score_report(report)
+    assert "4 with weight 0 skipped" in text
+    assert "teacher fails: row 0 criterion 1 [-75]" in text
