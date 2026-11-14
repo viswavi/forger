@@ -58,6 +58,7 @@ Keywords left out of the signatures below:
     @op cache.
   - [`execute_code`](#alter-execute_code): Compile each item's code and call it with `arg_field`'s value.
   - [`generate_from_context`](#alter-generate_from_context): Generate LLM outputs conditioned on upstream input items.
+  - [`paraphrase`](#alter-paraphrase): Add conservative candidate paraphrases, retaining the original response.
   - [`run_programs`](#alter-run_programs): Run each row's stdin/stdout program on each of its tests.
   - [`self_taught_reasoner`](#alter-self_taught_reasoner): Self-Taught Reasoner (STaR): keep a student model's own
     correct solutions.
@@ -107,6 +108,8 @@ Keywords left out of the signatures below:
     per field.
   - [`rubric_scores`](#inspect-rubric_scores): Print and return how `grade` scores a sample of `n` rows, binned, by
     column.
+  - [`rubric_sensitivity`](#inspect-rubric_sensitivity): Inspect reward stability across conservative candidate
+    paraphrases.
   - [`runs`](#inspect-runs): Print the latest saved pipeline runs, oldest first, and return them.
   - [`spend`](#inspect-spend): Print and return the spend ledger's totals by run, pipeline, and step.
   - [`student_log_likelihood`](#inspect-student_log_likelihood): Print and return how likely the student finds each
@@ -639,6 +642,30 @@ merged rows of the slots that succeeded. When the model returns a reasoning trac
 `GenerateResult.reasoning`, it is included under the `thinking_trace` key. Inline `<think>` traces (e.g. from
 `LocalModel`, which supplies `None` for that metadata) are not extracted; use `split_reasoning` to separate them out as
 needed.
+
+<a name="alter-paraphrase"></a>
+
+### `alter.paraphrase`
+
+Disk-cached (`@op`).
+
+```python
+paraphrase(
+    items: list[dict],
+    *,
+    model: Any,
+    response_field: str = "response",
+    output_field: str = "paraphrases",
+    prompt_field: str | None = "prompt",
+    k: int = 2,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+) -> list[dict]
+```
+
+Add conservative candidate paraphrases, retaining the original response.
+
+**Returns:** Copies of the rows with the candidate list in output_field.
 
 <a name="alter-run_programs"></a>
 
@@ -1221,7 +1248,7 @@ A `metric` for the difficulty filters that runs programs on tests.
 Inspect operations: analyze existing data.
 
 Also exported, not documented here: `DispersionReport`, `LikelihoodReport`, `RowLikelihood`, `PhraseReport`,
-`ReferenceReport`, `RubricScoreReport`, `SpendReport`, `SpendTotal`.
+`ReferenceReport`, `RubricScoreReport`, `RubricSensitivityReport`, `SpendReport`, `SpendTotal`.
 
 <a name="inspect-embedding_dispersion"></a>
 
@@ -1384,6 +1411,39 @@ rubric_scores(
 ```
 
 Print and return how `grade` scores a sample of `n` rows, binned, by column.
+
+<a name="inspect-rubric_sensitivity"></a>
+
+### `inspect.rubric_sensitivity`
+
+Listed in step reports as `inspect.rubric_sensitivity`; its expensive parts are disk-cached (`@op` `alter.paraphrase`,
+`inspect.rubric_scores.grades`), so a rerun reuses them.
+
+```python
+rubric_sensitivity(
+    rows: list[dict],
+    grade: Grade,
+    *,
+    model: Any = None,
+    variants_field: str | None = None,
+    response_field: str = "response",
+    prompt_field: str | None = "prompt",
+    n: int | None = 50,
+    k: int = 2,
+    repeats: int = 2,
+    epsilon: float = 0.05,
+    equivalent: Callable[[str, str, dict], bool | None] | None = None,
+    seed: int = 0,
+    workers: int = 8,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+) -> RubricSensitivityReport
+```
+
+Inspect reward stability across conservative candidate paraphrases.
+
+**Returns:** A serializable report with paired texts, scores, omissions, errors, and separate candidate/verified tie
+rates at the chosen tolerance.
 
 <a name="inspect-runs"></a>
 
