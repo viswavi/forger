@@ -315,9 +315,13 @@ review meaning preservation and judge noise first, and ensure any edited rubric 
 
 ## Rubric pair accuracy
 
-`rubric_pair_accuracy(rows, grade, *, better_field="better", worse_field="worse", n=None, repeats=1,
-per_criterion=True)` grades pairs you order: each field holds a text or a list, and every (better, worse) combination
-on a row is a pair (e.g. a reference against a copy with a fact removed). It reports wins, ties and losses
-(`accuracy` counts ties half), `mean_margin`, `losing_pairs()`, and per criterion scored alone how often it passes the
-better text and fails the worse or the reverse: `wrong_way_criteria()` with `(row, index)`. `repeats > 1` regrades
-fresh and records identical-text ranges. Nothing is removed or changed.
+`rubric_pair_accuracy(rows, grade, *, better_field="better", worse_field="worse", n=50, repeats=1, per_criterion=True,
+max_grades=None)` grades pairs you order: each field holds a text or a list, and every (better, worse) combination on a
+row is a pair (e.g. a reference against a copy with a fact removed). It reports wins, ties and losses (`accuracy` counts
+ties half), `mean_margin`, `losing_pairs()`, and per criterion scored alone how often it passes the better text and
+fails the worse or the reverse: `wrong_way_criteria()` with `(row, index)`. `repeats > 1` regrades fresh and records
+identical-text ranges. Nothing is removed or changed.
+
+`rubric_scores`, `rubric_sensitivity` and `rubric_pair_accuracy` print how many times they will call `grade` before
+any model or grade call; `max_grades=N` raises instead when the plan is above `N`. A judge-graded rubric calls its
+judge once per judged criterion on every call, from the same judge quota as RL.

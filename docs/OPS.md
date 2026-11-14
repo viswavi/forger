@@ -1395,12 +1395,13 @@ rubric_pair_accuracy(
     *,
     better_field: str = "better",
     worse_field: str = "worse",
-    n: int | None = None,
+    n: int | None = 50,
     repeats: int = 1,
     per_criterion: bool = True,
     rubric_field: str = "rubric",
     seed: int = 0,
     workers: int = 8,
+    max_grades: int | None = None,
 ) -> RubricPairReport
 ```
 
@@ -1436,6 +1437,7 @@ rubric_scores(
     seed: int = 0,
     workers: int = 8,
     examples: int = 1,
+    max_grades: int | None = None,
 ) -> RubricScoreReport
 ```
 
@@ -1469,6 +1471,7 @@ rubric_sensitivity(
     workers: int = 8,
     temperature: float | None = None,
     max_tokens: int | None = None,
+    max_grades: int | None = None,
 ) -> RubricSensitivityReport
 ```
 

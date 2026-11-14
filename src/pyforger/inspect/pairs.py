@@ -12,7 +12,13 @@ from rich.text import Text
 
 from pyforger._render import _console, _emit
 from pyforger.filter.rubric import Grade, _grade_column
-from pyforger.inspect.scores import PASS, _criterion_text, _sample_rows
+from pyforger.inspect.scores import (
+    PASS,
+    _check_max_grades,
+    _criterion_text,
+    _plan_grades,
+    _sample_rows,
+)
 from pyforger.op import tracked
 from pyforger.utils import get_field
 
@@ -135,12 +141,13 @@ def rubric_pair_accuracy(
     *,
     better_field: str = "better",
     worse_field: str = "worse",
-    n: int | None = None,
+    n: int | None = 50,
     repeats: int = 1,
     per_criterion: bool = True,
     rubric_field: str = "rubric",
     seed: int = 0,
     workers: int = 8,
+    max_grades: int | None = None,
 ) -> RubricPairReport:
     """Report how often ``grade`` scores the better response of a pair higher.
 
@@ -169,7 +176,9 @@ def rubric_pair_accuracy(
     removed or changed.
 
     Grade calls: ``repeats`` per distinct text, plus as many per criterion
-    with ``per_criterion``. ``n`` samples rows with ``seed`` (default: all).
+    with ``per_criterion``. ``n`` samples rows with ``seed`` (default 50;
+    None for all). The planned number of grade calls is printed before any
+    call, and ``max_grades`` raises instead when the plan is above it.
 
     Returns:
         A serializable report with every pair, its scores and outcome, and
@@ -180,6 +189,7 @@ def rubric_pair_accuracy(
             raise ValueError(f"{name} must be a positive integer")
     if n is not None and (isinstance(n, bool) or not isinstance(n, int) or n < 1):
         raise ValueError("n must be a positive integer or None")
+    _check_max_grades(max_grades)
     if better_field == worse_field:
         raise ValueError("better_field and worse_field must differ")
     picked = _sample_rows(len(rows), n, seed)
@@ -236,6 +246,17 @@ def rubric_pair_accuracy(
                     report.zero_weight_criteria += 1
                     continue
                 criterion_jobs.append((i, ci, criterion, float(weight)))
+    planned = (
+        sum(len(own) for own in texts)
+        + sum(len(texts[i]) for i, _, _, _ in criterion_jobs)
+    ) * repeats
+    _plan_grades(
+        "inspect.rubric_pair_accuracy",
+        planned,
+        f"{len(sample)} rows, {sum(len(own) for own in texts)} distinct texts and "
+        f"{len(criterion_jobs)} criteria scored alone, x {repeats} repeats",
+        max_grades,
+    )
     fresh = repeats > 1
     expanded = [[t for t in own for _ in range(repeats)] for own in texts]
     scores, errors = _grade_column(

@@ -13,7 +13,7 @@ from rich.text import Text
 from pyforger._render import _console, _emit
 from pyforger.alter.paraphrase import paraphrase
 from pyforger.filter.rubric import Grade, _grade_column
-from pyforger.inspect.scores import _sample_rows
+from pyforger.inspect.scores import _check_max_grades, _plan_grades, _sample_rows
 from pyforger.op import tracked
 from pyforger.utils import get_field
 
@@ -196,6 +196,7 @@ def rubric_sensitivity(
     workers: int = 8,
     temperature: float | None = None,
     max_tokens: int | None = None,
+    max_grades: int | None = None,
 ) -> RubricSensitivityReport:
     """Inspect reward stability across candidate paraphrases.
 
@@ -216,7 +217,9 @@ def rubric_sensitivity(
     are fresh. A callable with its own external cache must bypass that too.
     Paraphrase generation is cached separately. At most n * (k + 1) * repeats
     grade calls plus n * k generations; each grade may call many rubric judges.
-    With variants_field, the number of supplied variants replaces k.
+    With variants_field, the number of supplied variants replaces k. The
+    planned number of grade calls is printed before any model call, and
+    max_grades raises instead when the plan is above it.
 
     per_criterion=True additionally grades each nonzero-weight criterion
     from rubric_field separately: grade receives the original row with that
@@ -246,6 +249,7 @@ def rubric_sensitivity(
         raise ValueError("epsilon must be finite and nonnegative")
     if n is not None and (isinstance(n, bool) or not isinstance(n, int) or n < 1):
         raise ValueError("n must be a positive integer or None")
+    _check_max_grades(max_grades)
     criterion_epsilon = epsilon if criterion_epsilon is None else criterion_epsilon
     if not math.isfinite(criterion_epsilon) or criterion_epsilon < 0:
         raise ValueError("criterion_epsilon must be finite and nonnegative")
@@ -288,6 +292,24 @@ def rubric_sensitivity(
                     report.zero_weight_criteria += 1
                     continue
                 criterion_jobs.append((i, ci, criterion, float(weight)))
+    # The original plus each paraphrase (k, or the variants supplied).
+    texts_per_row = []
+    for row in sample:
+        if model is not None:
+            texts_per_row.append(1 + k)
+        else:
+            supplied = get_field(row, str(variants_field), "rubric_sensitivity")
+            texts_per_row.append(
+                1 + (len(supplied) if isinstance(supplied, list) else 0)
+            )
+    per_criterion_texts = sum(texts_per_row[i] for i, _, _, _ in criterion_jobs)
+    _plan_grades(
+        "inspect.rubric_sensitivity",
+        (sum(texts_per_row) + per_criterion_texts) * repeats,
+        f"{len(sample)} rows, {sum(texts_per_row)} texts and "
+        f"{len(criterion_jobs)} criteria scored alone, x {repeats} repeats",
+        max_grades,
+    )
     if model is not None:
         # Avoid writing even a temporary output field into the caller's rows.
         inputs = []
