@@ -99,3 +99,28 @@ def test_validation():
         rubric_pair_accuracy([], keyword_rubric, better_field="x", worse_field="x")
     with pytest.raises(TypeError, match="better"):
         rubric_pair_accuracy([{"better": 3, "worse": "a"}], keyword_rubric)
+
+
+def test_max_grades_raises_before_any_call():
+    """The plan counts distinct texts and lone criteria; above max_grades, no call."""
+    calls = []
+
+    def grade(response, row):
+        calls.append(response)
+        return 1.0
+
+    rows = [
+        {
+            "rubric": [["mentions a", 1], ["mentions b", 0]],
+            "better": "a",
+            "worse": ["b", "c"],
+        }
+    ]
+    # 3 texts, plus 3 for the one nonzero criterion, x 2 repeats = 12.
+    with pytest.raises(ValueError, match="up to 12 times"):
+        rubric_pair_accuracy(rows, grade, repeats=2, max_grades=11)
+    assert calls == []
+    rubric_pair_accuracy(rows, grade, repeats=2, max_grades=12)
+    assert len(calls) == 12
+    with pytest.raises(ValueError, match="max_grades"):
+        rubric_pair_accuracy(rows, grade, max_grades=0)
