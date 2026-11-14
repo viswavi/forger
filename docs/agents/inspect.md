@@ -80,11 +80,13 @@ did not:
 - `teacher=`: a reference that scores well on its own rubric does not show the rubric pays good replies, since a rubric
   written from the reference, or from the notes behind it, can demand the reference's own details. The teacher column
   holds `teacher_k` replies per prompt (default 2) from a model trusted to answer well, which sees only the prompt.
-  With rubrics in `rubric_field` (`[[criterion, weight], ...]`), each positive-weight criterion is also scored alone
-  (`grade` gets the row with `[[criterion, 1]]`) on the reference and every reply, passing at 0.5; the report counts
-  the criteria the reference passes and every reply fails, flags 20% or more, and lists the heaviest:
+  With rubrics in `rubric_field` (`[[criterion, weight], ...]`), each nonzero-weight criterion is also scored alone
+  (`grade` gets the row with `[[criterion, 1]]`) on the reference and every reply, passing at 0.5 (a negative-weight
+  mistake passes below 0.5); the report counts the criteria the reference passes and every reply fails, flags 20% or
+  more, and lists the heaviest by absolute weight:
   `teacher fails: row 12 criterion 1 [100] (reference 1.00; teacher 0.00, 0.00)  Mentions that the dose is 81 mg…`.
-  Read them: one may demand a detail a good reply can leave out, or the teacher may be wrong. Two samples of one model
+  Read them: one may demand a detail a good reply can leave out, a mistake may be docked on a reply that names it
+  only to warn against it, or the teacher may be wrong. Two samples of one model
   often disagree on a criterion, so one reply's miss is weak evidence. The stronger the teacher, the stronger the
   check; one that did not write the rubric or the reference does not share their habits. It costs `teacher_k`
   generations per sampled row and `1 + teacher_k` grades per criterion.

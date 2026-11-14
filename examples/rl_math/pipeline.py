@@ -103,12 +103,17 @@ def _grader(code: str) -> Callable[[str, str, str], float]:
 
 
 def reward(response: str, row: dict) -> float:
-    """The row's rubric score for ``response``: the weighted mean of its criteria."""
+    """The row's rubric score for ``response``: weighted sum over positive weights.
+
+    A met mistake criterion (negative weight) subtracts, e.g. [[c1, 1], [c2, -1]]
+    scores 0.0 when both are met; the result is clipped to [0, 1].
+    """
     scored = [
         (weight, _grader(criterion["code"])(row["prompt"], response, ""))
         for criterion, weight in row["rubric"]
     ]
-    return sum(w * score for w, score in scored) / sum(w for w, _ in scored)
+    total = sum(w * score for w, score in scored)
+    return min(1.0, max(0.0, total / sum(w for w, _ in scored if w > 0)))
 
 
 def solved(response: str, row: dict) -> bool:

@@ -23,7 +23,9 @@ Probe = Callable[[dict], "str | None"]
 
 BINS = ["0", "(0, 0.25]", "(0.25, 0.5]", "(0.5, 0.75]", "(0.75, 1)", "1"]
 CONTROLS = ("empty", "random", "other_row")
-PASS = 0.5  # a criterion scored alone passes at this score or above
+# A criterion scored alone passes at this score or above; a mistake (negative
+# weight) passes below it, e.g. "recommends aspirin" scored 0.0 is avoided.
+PASS = 0.5
 TEACHER_FLAG = (
     0.2  # flag when the teacher fails this share of reference-passed criteria
 )
@@ -120,13 +122,15 @@ class CriterionCheck(BaseModel):
 class TeacherCriteria(BaseModel):
     """Which rubric criteria the reference passes and fresh teacher replies fail.
 
-    Each criterion with a positive weight is scored alone (the row's rubric
+    Each criterion with a nonzero weight is scored alone (the row's rubric
     replaced by ``[[criterion, 1]]``) on the reference and on every teacher
-    sample; it passes at ``PASS`` (0.5) or above. Of the ``reference_passes``
-    criteria, ``fails_all`` fail every gradable teacher sample and
-    ``fails_some`` fail some but not all. ``skipped`` counts criteria with a
-    weight of 0 or less, whose meaning flips. ``examples`` lists criteria that
-    fail every sample, heaviest first.
+    sample. A positive-weight criterion passes at ``PASS`` (0.5) or above; a
+    negative-weight one names a mistake and passes below it, e.g. "Recommends
+    aspirin for a child" [-75] passes when the reply scores 0 on it. Of the
+    ``reference_passes`` criteria, ``fails_all`` fail every gradable teacher
+    sample and ``fails_some`` fail some but not all. ``skipped`` counts
+    criteria with a weight of 0, which change no score. ``examples`` lists
+    criteria that fail every sample, heaviest (largest absolute weight) first.
     """
 
     reference: str
@@ -307,13 +311,16 @@ def rubric_scores(
       to answer well, which sees only the prompt: does the reward pay good
       replies, or only the reference's own? When rows carry a rubric in
       ``rubric_field`` (``[[criterion, weight], ...]``), each criterion with a
-      positive weight is also scored alone on the reference and on every
+      nonzero weight is also scored alone on the reference and on every
       teacher reply (``grade`` gets the row with ``[[criterion, 1]]`` in that
       field), and the report counts the criteria the reference passes and
       every teacher reply fails, e.g. "teacher ×2 fails 31 of the 120
       criteria the reference passes on every reply", listing the heaviest.
-      Read them: such a criterion may demand a detail, number or choice that
-      a good reply can leave out, or the teacher may be wrong. 20% or more is
+      A negative-weight criterion names a mistake: it passes when the reply
+      scores below 0.5 on it. Read them: such a criterion may demand a
+      detail, number or choice that a good reply can leave out, a mistake
+      may be docked on a reply that names it only to warn against it, or
+      the teacher may be wrong. 20% or more is
       flagged. The stronger the teacher, the stronger the check; one that did
       not write the rubric or the reference does not share their habits.
       This calls ``grade`` ``1 + teacher_k`` times per criterion;
@@ -509,7 +516,7 @@ def _teacher_criteria(
     grade: Grade,
     workers: int,
 ) -> TeacherCriteria | None:
-    """Score each positive-weight criterion alone on the reference and every reply.
+    """Score each nonzero-weight criterion alone on the reference and every reply.
 
     None when no sampled row has both a reference and a rubric list.
     """
@@ -528,7 +535,7 @@ def _teacher_criteria(
                 weight = float(weight)
             except (TypeError, ValueError):
                 continue
-            if weight <= 0:
+            if weight == 0:
                 out.skipped += 1
                 continue
             jobs.append((i, ci, criterion, weight))
@@ -546,10 +553,10 @@ def _teacher_criteria(
             continue
         out.criteria += 1
         good = [s for s in own if s is not None]
-        if ref < PASS or not good:
+        if not _passes(ref, weight) or not good:
             continue
         out.reference_passes += 1
-        misses = sum(s < PASS for s in good)
+        misses = sum(not _passes(s, weight) for s in good)
         if misses == len(good):
             out.fails_all += 1
             failed.append(
@@ -566,9 +573,14 @@ def _teacher_criteria(
             out.fails_some += 1
     if out.reference_passes:
         out.share_fails_all = out.fails_all / out.reference_passes
-    failed.sort(key=lambda c: (-c.weight, c.row, c.index))
+    failed.sort(key=lambda c: (-abs(c.weight), c.row, c.index))
     out.examples = failed[:_CRITERION_EXAMPLES]
     return out
+
+
+def _passes(score: float, weight: float) -> bool:
+    """A requirement passes when met, a mistake (weight < 0) when not made."""
+    return score >= PASS if weight > 0 else score < PASS
 
 
 def _name(grade: Grade) -> str:
@@ -744,7 +756,7 @@ def _renderable(report: RubricScoreReport, *, width: int) -> RenderableType:
     if t is not None:
         # e.g. "per criterion: teacher ×2 fails 31 of the 120 criteria reference
         # passes on every reply, 18 on some (152 criteria on 40 rows; 3 skipped)"
-        skipped = f"; {t.skipped} with weight <= 0 skipped" if t.skipped else ""
+        skipped = f"; {t.skipped} with weight 0 skipped" if t.skipped else ""
         notes.append(
             Text(
                 f"per criterion: teacher ×{report.teacher_k} fails {t.fails_all} of "

@@ -113,6 +113,14 @@ is a rubric only, so you still supply each row's `prompt` and `ground_truth`.
   rejects). Both stages follow it; it cannot widen the import allowlist or banned builtins.
 - Generated graders are compiled and statically checked but **never executed**: test them on known passing and
   failing responses before training on them.
+- A mistake is a presence criterion with a negative weight, e.g. `["Does the response recommend aspirin for a
+  child?", -75]`, never an absence one (`["Does the response avoid recommending aspirin for a child?", 75]`): LLM
+  judges dock replies that name aspirin only to warn against it. "X without Y" criteria ("Recommends opioids without
+  asking about pain history") hide an absence too, so the prompt asks to split them. A response scores
+  `sum(w * s) / sum(positive w)`, clipped to `[0, 1]`: `[(100, 1.0), (50, 0.0), (-75, 1.0)]` gives
+  `(100 - 75) / 150 = 0.17`. A negative code criterion's `grade` returns 1.0 when the response makes the mistake.
+  `negative_criteria=False` asks for requirements only (weights in `[0, 100]`), for a scorer that divides by the sum
+  of all weights.
 
 ```python
 from pyforger.acquire import generate_custom_rubric
@@ -136,7 +144,8 @@ rubrics = generate_custom_rubric(tasks, model=model, prompt_criterion_options={"
 ```
 
 To run the stages separately, `generate_custom_rubric_criteria(inputs, model=...)` returns textual
-`[(criterion, weight), ...]` per input (weights in `[0, 100]`, not summing to 100), e.g. for creative writing.
+`[(criterion, weight), ...]` per input (weights in `[-100, 100]`, not summing to 100, at least one positive),
+e.g. for creative writing.
 Optional `meta_description` adds shared context, and `candidate_responses` help find failure modes. Then
 `convert_rubric_criteria(text_rubrics, model, inputs=tasks)` turns them into code/prompt criteria (it takes
 `prompt_criterion_options` too). Textual rubrics are not valid RL rubrics until converted or wrapped as
