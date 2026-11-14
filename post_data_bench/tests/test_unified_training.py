@@ -95,9 +95,24 @@ class DatasetTests(unittest.TestCase):
             [[{"prompt": "x"}, -1]],
             [[{"prompt": "x"}, float("nan")]],
             [[{"prompt": "x"}, 0]],
+            [[{"prompt": "x"}, 1], [{"prompt": "y"}, float("-inf")]],
         ):
             with self.subTest(rubric=rubric), self.assertRaises(ValueError):
                 data.validate_rubric(rubric)
+
+    def test_negative_weights_with_a_positive_one(self):
+        """A mistake criterion may have a negative weight beside positive ones."""
+        rubric = [[{"prompt": "Cites a dose?"}, 3], [{"prompt": "Wrong dose?"}, -2]]
+        self.assertIs(data.validate_rubric(rubric), rubric)
+
+    def test_weighted_score(self):
+        """Weighted sum over the positive weights, clipped to [0, 1]."""
+        self.assertEqual(data.weighted_score([(3, 1.0), (1, 0.0)]), 0.75)
+        self.assertEqual(data.weighted_score([(3, 1.0), (1, 0.0), (-2, 1.0)]), 0.25)
+        self.assertEqual(data.weighted_score([(3, 1.0), (1, 1.0), (-2, 0.0)]), 1.0)
+        self.assertEqual(data.weighted_score([(1, 0.0), (-2, 1.0)]), 0.0)
+        self.assertIsNone(data.weighted_score([(-2, 1.0)]))
+        self.assertIsNone(data.weighted_score([]))
 
     def test_answer_only_on_prompt_criteria(self):
         """answer_only is a bool on prompt criteria only, in either key order."""
@@ -731,6 +746,37 @@ class RewardTests(unittest.IsolatedAsyncioTestCase):
         ) as completion:
             self.assertIsNone(await rm.prompt_score("c", [], "r", "g"))
             self.assertEqual(completion.await_count, 1)
+
+    async def test_negative_weight_subtracts_when_the_response_does_it(self):
+        """A met mistake criterion lowers the reward; an avoided one costs nothing."""
+        sample = SimpleNamespace(
+            response="answer",
+            label="gold",
+            prompt="templated",
+            metadata={
+                "original_prompt": [{"role": "user", "content": "original"}],
+                "rubric": [
+                    [{"prompt": "Cites a dose?"}, 3],
+                    [{"prompt": "Explains why?"}, 1],
+                    [{"prompt": "Recommends aspirin for a child?"}, -2],
+                ],
+            },
+        )
+        with patch.object(rm, "prompt_score", new=AsyncMock(side_effect=[1, 0, 1])):
+            self.assertEqual(await rm.custom_rm(None, sample), 0.25)
+        with patch.object(rm, "prompt_score", new=AsyncMock(side_effect=[1, 1, 0])):
+            self.assertEqual(await rm.custom_rm(None, sample), 1.0)
+        with patch.object(rm, "prompt_score", new=AsyncMock(side_effect=[0, 0, 1])):
+            self.assertEqual(await rm.custom_rm(None, sample), 0.0)
+        # The judge never sees a weight, only the criterion.
+        with patch.object(
+            rm, "prompt_score", new=AsyncMock(side_effect=[1, 1, 0])
+        ) as judge:
+            await rm.custom_rm(None, sample)
+        self.assertEqual(
+            [call.args[0] for call in judge.call_args_list],
+            ["Cites a dose?", "Explains why?", "Recommends aspirin for a child?"],
+        )
 
     async def test_blocked_criteria_leave_the_weighted_mean(self):
         """Blocked criteria drop out; an answer with all of them blocked gets 0."""
