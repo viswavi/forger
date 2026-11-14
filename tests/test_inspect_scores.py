@@ -510,3 +510,38 @@ def test_teacher_check_flips_mistake_criteria():
     text = render_rubric_score_report(report)
     assert "4 with weight 0 skipped" in text
     assert "teacher fails: row 0 criterion 1 [-75]" in text
+
+
+def test_teacher_check_lists_every_failing_criterion():
+    """``failed`` holds all criteria every teacher reply fails; ``examples`` five."""
+    report = rubric_scores(
+        _rubric_rows(12),
+        keyword_rubric,
+        n=None,
+        response_fields=None,
+        reference_field="reference",
+        teacher=Teacher(),
+        teacher_k=1,
+        control_columns=False,
+    )
+    t = report.teacher_criteria
+    assert t.reference == "reference"
+    assert [c.name for c in report.columns] == ["reference", "teacher"]
+    assert [(e.row, e.index) for e in t.failed] == [(r, 1) for r in range(0, 12, 2)]
+    assert t.examples == t.failed[:5] and len(t.failed) == 6
+
+
+def test_reference_field_comes_first():
+    """reference_field is the reference even when listed later in response_fields."""
+    rows = [dict(r, weak="aspirin only") for r in _rubric_rows(4)]
+    report = rubric_scores(
+        rows,
+        keyword_rubric,
+        n=None,
+        response_fields=["weak", "reference"],
+        reference_field="reference",
+        control_columns=False,
+    )
+    assert [c.name for c in report.columns] == ["reference", "weak"]
+    with pytest.raises(TypeError, match="reference_field"):
+        rubric_scores(rows, keyword_rubric, reference_field="")
