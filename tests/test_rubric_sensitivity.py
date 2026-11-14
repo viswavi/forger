@@ -370,3 +370,13 @@ def test_sampled_criteria_keep_input_row_indices_and_missing_rubric_coverage():
     missing = rubric_sensitivity(_rows(), _surface_grade, variants_field="variants")
     assert missing.rows_without_rubric == [0]
     assert missing.criterion_changes.compared == 0
+
+
+def test_sensitivity_max_grades_raises_before_paraphrasing():
+    """1 row x (original + 2 rewrites) x 2 repeats = 6 calls; above max_grades, none."""
+    model = Rewriter()
+    with pytest.raises(ValueError, match="up to 6 times"):
+        rubric_sensitivity(
+            _rows(), lambda r, row: 1.0, model=model, per_criterion=False, max_grades=5
+        )
+    assert model.calls == 0
