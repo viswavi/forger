@@ -150,3 +150,17 @@ def test_bad_arguments():
         KeyError, match="filter.by_rubric_score: item is missing required field 'sol'"
     ):
         filter.by_rubric_score(_rows(), closeness, response_field="sol")
+
+
+def test_open_bound_step_report_renders():
+    """min_score alone (an open upper bound) renders; it raised OverflowError."""
+    from pyforger import _render
+
+    @step
+    def graded(rows):
+        return filter.by_rubric_score(rows, closeness, min_score=0.5)
+
+    graded(_rows())
+    scores = _tracking.step_records()["graded"].ops[0].scores
+    assert "keeps 0.5 to inf" in _render.render_scores(scores, "filter.by_rubric_score")
+    assert _render.render_step(_tracking.step_records()["graded"], full=True)
