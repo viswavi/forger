@@ -33,7 +33,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-from .rubric_data import validate_rubric  # noqa: ABS101
+from .rubric_data import validate_rubric, weighted_score  # noqa: ABS101
 from .rubric_rm import _WORKER_ENV, code_score, rubric_reward  # noqa: ABS101
 from .rubric_worker import RUN_TIMEOUT_S  # noqa: ABS101
 
@@ -169,17 +169,16 @@ def _code_jobs(row: dict, response: str) -> list[tuple[int, str, list, str, str]
 
 
 def _weighted(row: dict, criteria: list[float | None]) -> dict[str, Any]:
-    """The weighted mean over the scored criteria, as score_targets reports it."""
+    """weighted_score over the scored criteria, as score_targets reports it."""
     weights = [float(weight) for _, weight in row["rubric"]]
-    code_weight = sum(w for w, s in zip(weights, criteria) if s is not None)
     return {
-        "score": (
-            sum(w * s for w, s in zip(weights, criteria) if s is not None) / code_weight
-            if code_weight
-            else None
+        "score": weighted_score(
+            (w, s) for w, s in zip(weights, criteria) if s is not None
         ),
         "criteria": criteria,
-        "prompt_weight": sum(weights) - code_weight,
+        "prompt_weight": sum(
+            w for w, s in zip(weights, criteria) if s is None and w > 0
+        ),
     }
 
 
@@ -191,12 +190,12 @@ def score_targets(
 ) -> list[dict[str, Any]]:
     """Score each row's target with its own code criteria, as RL would.
 
-    Returns one dict per row: ``score`` (the weighted mean over the code
-    criteria; None when the row has none), ``criteria`` (one score per rubric
-    entry, None for prompt criteria, which need the judge and are not run),
-    and ``prompt_weight`` (the weight left unscored). A correct target whose
-    score is below 1 means its rubric or its code does not survive the RL
-    sandbox. Rows may be raw submission rows or validated ones.
+    Returns one dict per row: ``score`` (weighted_score over the code
+    criteria; None when the row has no positive-weight one), ``criteria`` (one
+    score per rubric entry, None for prompt criteria, which need the judge and
+    are not run), and ``prompt_weight`` (the positive weight left unscored). A
+    correct target whose score is below 1 means its rubric or its code does not
+    survive the RL sandbox. Rows may be raw submission rows or validated ones.
     """
     jobs = [
         (i, *job)

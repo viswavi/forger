@@ -113,8 +113,11 @@ old unfrozen agent runs should use the launcher version that created them.
 
 A rubric is a nonempty list of `[criterion, weight]` pairs. A criterion contains
 exactly one of `code` or `prompt` (a prompt criterion may also set `answer_only`, `judge_sees` and `instructions`: `rubric_data.PROMPT_OPTIONS`).
-Weights must be finite and nonnegative, with a positive sum. Reward is
-`sum(weight * score) / sum(weight)`.
+Weights must be finite; the positive weights
+must have a positive sum. Reward is `sum(weight * score) / sum(positive weights)`,
+clipped to `[0, 1]` (`rubric_data.weighted_score`): a negative-weight criterion
+describes a mistake and subtracts when the response makes it. The judge never
+sees weights; it scores how fully the response does what a criterion describes.
 
 - **Code:** defines `grade(prompt, response, ground_truth) -> float` in `[0,1]`.
   Define exactly one top-level synchronous `grade` function with exactly three
