@@ -16,6 +16,7 @@ producing new rows in the pipeline.
 | `student_log_likelihood` | yes | How likely the student finds each row's target, in bits, beside its own responses. |
 | `rubric_scores` | grades | Print and return a reward's score histogram on a sample of `n` rows, beside controls. |
 | `rubric_sensitivity` | rewrites | Compare paraphrases' scores and measure identical-text grading noise. |
+| `rubric_pair_accuracy` | grades | How often a reward scores the better of your ordered pairs higher, per criterion. |
 | `embedding_dispersion` | yes | Print and return how dispersed a field is in embedding space vs. a reference. No LLM. |
 | `compare_to_reference` | yes | Print and return feature distributions (lengths, numbers, labels) beside a reference. |
 
@@ -66,8 +67,9 @@ default `data_parallel_size="auto"`). Scoring is fast; sampling the student's ow
 long reasoning responses took 37 minutes on one L40S and 19 on two. Its median rate is stable with the default 64
 samples.
 
-`rubric_scores(rows, grade, *, n=50, response_fields="response", probes=None, model=None, k=4, teacher=None,
-teacher_k=2, rubric_field="rubric", prompt_field="prompt", control_columns=True, seed=0, ...)` shows a reward's
+`rubric_scores(rows, grade, *, n=50, response_fields="response", reference_field=None, probes=None, model=None, k=4,
+teacher=None, teacher_k=2, rubric_field="rubric", prompt_field="prompt", control_columns=True, seed=0, ...)` shows a
+reward's
 distribution before RL. `grade(response, row)` returns a score in [0, 1] (a bool counts as 0 or 1) or None when
 ungradable: a code rubric, an LLM judge, or exact match. It scores a sample, not every row: `n` rows (default 50) drawn
 with `seed`. The report's first line says how many (`50 of 300 rows sampled (seed 0; the other 250 have no score)`), and
@@ -119,8 +121,9 @@ prompt. When rows carry a rubric in `rubric_field` (default `"rubric"`, as `[[cr
 criterion with a nonzero weight is also scored alone, on the reference and on every teacher reply (`grade` gets the row
 with `[[criterion, 1]]` in that field), and passes at 0.5. A negative-weight criterion names a mistake and passes below
 0.5, e.g. `["Recommends aspirin for a child", -75]` passes on a reply scored 0 on it. The report counts the criteria
-the reference passes and every teacher reply fails, flags 20% or more, and lists the heaviest (largest absolute
-weight):
+the reference passes and every teacher reply fails, flags 20% or more, and prints the five heaviest (largest absolute
+weight). The reference is an answer already stored in the rows: the first of `response_fields`, or the field
+`reference_field` names (e.g. `"ground_truth"`). The teacher is a model writing fresh replies:
 
 ```text
   per criterion: teacher ×2 fails 31 of the 120 criteria reference passes on every reply, 18 on some (152 criteria on 40 rows)
@@ -139,7 +142,8 @@ It returns a `RubricScoreReport`; `report.model_dump()` is plain JSON data: `bin
 with `bins`), `mean`, `share_at_0`, `share_at_1`, `ungradable`, `errors`, the per-row `scores` (`scores[i]` belongs to row
 `report.rows[i]`, the sampled rows only), `vs_reference` (`below`, `tied`, `above`, `mean_gap`), the lowest and highest
 examples, and, with a teacher and rubrics, `teacher_criteria` (`criteria`, `reference_passes`, `fails_all`,
-`fails_some`, `share_fails_all`, `examples`). `grade` is part of the cache key (an object by its `cache_key()`), so the
+`fails_some`, `share_fails_all`, `failed`: every criterion that fails every teacher reply, heaviest first, with its
+`row` and `index`; `examples` is its first five). `grade` is part of the cache key (an object by its `cache_key()`), so the
 grades are cached; a grading that raised is counted with its message and runs again next
 time. Rows are not modified.
 
@@ -433,3 +437,26 @@ suspect = {(entry.row, entry.index) for entry in report.sensitive_criteria()}
 repeat-noise ranges and errors. `sensitive_criteria()` ranks candidates by their largest eligible absolute gap.
 The `(row, index)` set supports downstream selection or filtering, but does not automatically delete criteria:
 review meaning preservation and judge noise first, and ensure any edited rubric still has a positive weight.
+
+## Rubric pair accuracy
+
+`rubric_pair_accuracy(rows, grade, *, better_field="better", worse_field="worse", n=None, repeats=1,
+per_criterion=True, rubric_field="rubric")` asks whether a reward ranks responses the way you do. Each row holds one
+text or a list of texts in each field, and every (better, worse) combination on the row is a pair. What makes one
+better is yours to decide, e.g. a reference against a copy with a key fact removed or a mistake added, or a strong
+model's reply against a weak one's. Each pair is a win, tie or loss with a margin, mean(better) - mean(worse):
+
+```python
+report = inspect.rubric_pair_accuracy(rows, grade=rubric_score(judge=True), repeats=2)
+# Rubric pair accuracy: 40 of 40 rows; 80 pairs compared, 0 ungradable, 0 missing a text.
+# Better text scored higher in 52, tied in 21, lower in 7 (accuracy 78.1%, ties count half; mean margin +0.214).
+report.losing_pairs()        # pairs the worse text won, with their row
+report.wrong_way_criteria()  # criteria that passed a worse text and failed its better one, with (row, index)
+```
+
+Ties are counted apart because rubrics with yes/no criteria tie often. With `per_criterion`, each nonzero-weight
+criterion is scored alone on every text (`grade` gets the row with `[[criterion, 1]]` in `rubric_field`); a criterion
+is right on a pair when it passes the better text and fails the worse, wrong for the reverse, and a mistake (negative
+weight) passes a text that does not make it. `repeats > 1` grades each text again with fresh grades and records each
+text's range in `identical_response_gaps`: a margin inside that range may be judge noise. It calls `grade` `repeats`
+times per distinct text, and as often again per criterion. Nothing is removed or changed.
