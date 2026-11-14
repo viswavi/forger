@@ -148,9 +148,11 @@ def fmt_num(x: float) -> str:
 
 
 def _fmt_cut(x: float) -> str:
-    """A threshold, precise enough to tell apart: ``0.999``, ``2/3``, ``0.65``."""
+    """A threshold, precise enough to tell apart: ``0.999``, ``2/3``, ``inf``."""
+    if not math.isfinite(x):  # an open bound of a "between" filter
+        return "-inf" if x < 0 else "inf"
     label = _fmt_value_label(x)
-    if "/" in label or not math.isfinite(x) or float(x).is_integer():
+    if "/" in label or float(x).is_integer():
         return label
     if 0.01 <= abs(x) < 10_000:
         return _strip_zeros(f"{x:.4g}") if "e" not in f"{x:.4g}" else f"{x:.4g}"
