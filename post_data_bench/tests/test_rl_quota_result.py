@@ -68,7 +68,7 @@ class QuotaCircuitTests(unittest.IsolatedAsyncioTestCase):
         marker = self.usage_file.with_name("stop.json")
         reply = SimpleNamespace(
             usage=SimpleNamespace(prompt_tokens=10, completion_tokens=2),
-            choices=[SimpleNamespace(message=SimpleNamespace(content='{"score":1}'))],
+            choices=[SimpleNamespace(message=SimpleNamespace(content='{"met":true}'))],
         )
         with patch.dict(
             os.environ,
@@ -99,7 +99,7 @@ class QuotaCircuitTests(unittest.IsolatedAsyncioTestCase):
                 _hidden_params={"response_cost": 0.25},
                 choices=[SimpleNamespace(message=SimpleNamespace(content=content))],
             )
-            for content in ("bad JSON", '{"score":0.5}')
+            for content in ("bad JSON", '{"score":3}')
         ]
         alias = "custom/DeepSeek-V4-Flash-company"
         with patch.dict(
@@ -113,7 +113,9 @@ class QuotaCircuitTests(unittest.IsolatedAsyncioTestCase):
         ) as call, patch.object(
             rm.asyncio, "sleep", new=AsyncMock()
         ):
-            self.assertEqual(await rm.prompt_score("c", [], "r", "g"), 0.5)
+            self.assertEqual(
+                await rm.prompt_score("c", [], "r", "g", scale="likert"), 0.5
+            )
             self.assertEqual(call.call_args.kwargs["model"], alias)
             self.assertEqual(call.call_args.kwargs["reasoning"], {"effort": "high"})
             self.assertEqual(call.call_args.kwargs["max_tokens"], 4096)
@@ -128,7 +130,7 @@ class QuotaCircuitTests(unittest.IsolatedAsyncioTestCase):
         reply = SimpleNamespace(
             usage={"prompt_tokens": 10, "completion_tokens": 2},
             _hidden_params={"response_cost": float("nan")},
-            choices=[SimpleNamespace(message=SimpleNamespace(content='{"score":1}'))],
+            choices=[SimpleNamespace(message=SimpleNamespace(content='{"met":true}'))],
         )
         with patch("litellm.acompletion", new=AsyncMock(return_value=reply)), patch(
             "litellm.completion_cost", side_effect=RuntimeError("unpriced")
@@ -143,7 +145,7 @@ class QuotaCircuitTests(unittest.IsolatedAsyncioTestCase):
     async def test_missing_usage_stops_without_retry_and_blocks_later_workers(self):
         """Fail closed across workers when response usage is unavailable."""
         reply = SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content='{"score":1}'))],
+            choices=[SimpleNamespace(message=SimpleNamespace(content='{"met":true}'))],
         )
         with patch("litellm.acompletion", new=AsyncMock(return_value=reply)) as call:
             with self.assertRaisesRegex(
