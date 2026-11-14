@@ -246,14 +246,14 @@ class RubricScoreTests(unittest.TestCase):
         self.assertEqual([f.split()[0] for f in report.flags], ["other_row"])
 
 
-def judge_reply(score):
-    """A LiteLLM judge reply giving ``score``, with token usage for the ledger."""
+def judge_reply(met):
+    """A LiteLLM binary judge reply (``met``), with token usage for the ledger."""
     return SimpleNamespace(
         usage=SimpleNamespace(prompt_tokens=10, completion_tokens=2),
         choices=[
             SimpleNamespace(
                 finish_reason="stop",
-                message=SimpleNamespace(content=json.dumps({"score": score})),
+                message=SimpleNamespace(content=json.dumps({"met": met})),
             )
         ],
     )
@@ -292,9 +292,9 @@ class JudgedRubricScoreTests(unittest.TestCase):
         return patch("litellm.acompletion", new=AsyncMock(**kwargs))
 
     def test_weights_code_and_judged_criteria_as_rl_does(self):
-        """Code 1 x weight 1 and judge 0.5 x weight 3 give 0.625; default skips it."""
-        with self.judge(return_value=judge_reply(0.5)) as completion:
-            self.assertEqual(rubric_score(judge=True)(target(DOUBLE), self.ROW), 0.625)
+        """Code 1 x weight 1 and judge 0 x weight 3 give 0.25; default skips it."""
+        with self.judge(return_value=judge_reply(False)) as completion:
+            self.assertEqual(rubric_score(judge=True)(target(DOUBLE), self.ROW), 0.25)
             self.assertEqual(rubric_score()(target(DOUBLE), self.ROW), 1.0)
         self.assertEqual(completion.await_count, 1)
         sent = json.loads(completion.call_args.kwargs["messages"][1]["content"])
@@ -310,7 +310,7 @@ class JudgedRubricScoreTests(unittest.TestCase):
             label=row["ground_truth"],
             metadata={"rubric": row["rubric"], "original_prompt": _messages(row)},
         )
-        with self.judge(return_value=judge_reply(1)):
+        with self.judge(return_value=judge_reply(True)):
             expected = asyncio.run(rubric_rm.custom_rm(None, sample))
             self.assertEqual(expected, 0.75)
             self.assertEqual(
@@ -342,7 +342,7 @@ class JudgedRubricScoreTests(unittest.TestCase):
         async def caller():
             return rubric_score(judge=True)(target(DOUBLE), self.ROW)
 
-        with self.judge(return_value=judge_reply(1)):
+        with self.judge(return_value=judge_reply(True)):
             self.assertEqual(asyncio.run(caller()), 1.0)
 
     def test_cache_key_and_repr_name_the_judge(self):

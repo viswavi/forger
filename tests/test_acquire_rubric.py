@@ -476,6 +476,43 @@ def test_prompt_criterion_options_reach_prompt_criteria_only():
     )
 
 
+def test_scale_option_reaches_every_prompt_criterion():
+    """A judge scale passes through to each prompt criterion, not to code."""
+    model = ScriptedModel(
+        [
+            [
+                [
+                    encoded(
+                        ["Is the answer 42?", 100],
+                        ["Is it kind?", 50],
+                        ["Is it short?", 10],
+                    )
+                ]
+            ],
+            [
+                [converted("code", CODE)],
+                [converted("prompt", "Is it kind?")],
+                [converted("prompt", "Is it short?")],
+            ],
+        ]
+    )
+    result = generate_custom_rubric(
+        ["What is 6 * 7?"], model, prompt_criterion_options={"scale": "likert"}
+    )
+    assert result == [
+        [
+            [{"code": CODE}, 100.0],
+            [{"prompt": "Is it kind?", "scale": "likert"}, 50.0],
+            [{"prompt": "Is it short?", "scale": "likert"}, 10.0],
+        ]
+    ]
+    conversion = model.recorded_prompts[1][0][0]["content"]
+    assert (
+        "answers it as a yes/no question, scored 1.0 for yes and 0.0 for no"
+        in conversion
+    )
+
+
 def test_prompt_criterion_options_are_copied_per_criterion():
     """Editing one criterion's options leaves the other criteria alone."""
     model = ScriptedModel([[[converted("prompt", "A?")], [converted("prompt", "B?")]]])

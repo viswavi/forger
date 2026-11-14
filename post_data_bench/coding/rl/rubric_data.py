@@ -50,6 +50,35 @@ def score(value):
     return float(value)
 
 
+def scale_score(reply, scale="binary"):
+    """The criterion score of a judge's parsed JSON reply on a fixed scale.
+
+    "binary": {"met": true} is 1.0 and {"met": false} is 0.0. "likert": {"score":
+    n} for an integer n from 1 to 5 is (n - 1) / 4, e.g. 3 is 0.5. Any other reply
+    (e.g. {"score": 0.7}, {"score": 3.5} or {"score": "3"}) raises ValueError; it
+    is never rounded into the scale.
+    """
+    if not isinstance(reply, dict):
+        raise ValueError(f"judge reply must be a JSON object, got {reply!r}")
+    if scale == "binary":
+        met = reply.get("met")
+        if not isinstance(met, bool):
+            raise ValueError(f'binary reply needs "met": true or false, got {reply!r}')
+        return float(met)
+    if scale == "likert":
+        value = reply.get("score")
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value != int(value)
+            or not 1 <= value <= 5
+        ):
+            raise ValueError(f'likert reply needs "score": 1 to 5, got {reply!r}')
+        return (int(value) - 1) / 4
+    raise ValueError(f'scale must be "binary" or "likert", got {scale!r}')
+
+
 def weighted_score(pairs):
     """The rubric score of (weight, criterion score) pairs, clipped to [0, 1].
 
@@ -141,8 +170,11 @@ def validate_code(source):
 # Optional keys of a "prompt" criterion: answer_only strips thinking from the
 # response and ground truth; judge_sees picks which of JUDGE_FIELDS the judge gets
 # (default all, e.g. ["response"] for "mentions anticoagulation"); instructions
-# are added to the judge's system message for this criterion only.
-PROMPT_OPTIONS = ("answer_only", "judge_sees", "instructions")
+# are added to the judge's system message for this criterion only; scale is
+# "binary" (default: the judge answers yes or no, scored 1 or 0) or "likert" (the
+# judge answers an integer from 1 to 5, scored 0, 0.25, 0.5, 0.75 or 1).
+PROMPT_OPTIONS = ("answer_only", "judge_sees", "instructions", "scale")
+SCALES = ("binary", "likert")
 # Tasks whose prompt criteria default to the judge seeing only the criterion and
 # the final answer (by the launcher's public task name, $PDB_TASK): answer_only
 # on and judge_sees ["response"], unless a criterion sets either itself.
@@ -212,6 +244,8 @@ def validate_rubric(rubric):
                 '"judge_sees" must list distinct fields from "prompt", "response" '
                 'and "ground_truth", including "response"'
             )
+        if criterion.get("scale", "binary") not in SCALES:
+            raise ValueError('"scale" must be "binary" or "likert"')
         instructions = criterion.get("instructions", "")
         if not isinstance(instructions, str) or len(instructions) > MAX_INSTRUCTIONS:
             raise ValueError(
