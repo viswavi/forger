@@ -8,6 +8,7 @@ from pyforger.inspect.likelihood import (
     RowLikelihood,
     student_log_likelihood,
 )
+from pyforger.inspect.pairs import RubricPairReport, rubric_pair_accuracy
 from pyforger.inspect.phrases import PhraseReport, phrase_frequency
 from pyforger.inspect.reference import ReferenceReport, compare_to_reference
 from pyforger.inspect.report import inspect_step
@@ -22,6 +23,7 @@ __all__ = [
     "RowLikelihood",
     "PhraseReport",
     "ReferenceReport",
+    "RubricPairReport",
     "RubricScoreReport",
     "RubricSensitivityReport",
     "SpendReport",
@@ -32,6 +34,7 @@ __all__ = [
     "eval_tree",
     "inspect_step",
     "phrase_frequency",
+    "rubric_pair_accuracy",
     "rubric_scores",
     "rubric_sensitivity",
     "runs",

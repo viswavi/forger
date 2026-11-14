@@ -106,6 +106,8 @@ Keywords left out of the signatures below:
   - [`inspect_step`](#inspect-inspect_step): Print the full report of the latest run of step `name` and return it.
   - [`phrase_frequency`](#inspect-phrase_frequency): Print and return the phrases and names that the most rows share,
     per field.
+  - [`rubric_pair_accuracy`](#inspect-rubric_pair_accuracy): Report how often `grade` scores the better response of a
+    pair higher.
   - [`rubric_scores`](#inspect-rubric_scores): Print and return how `grade` scores a sample of `n` rows, binned, by
     column.
   - [`rubric_sensitivity`](#inspect-rubric_sensitivity): Inspect reward stability across candidate paraphrases.
@@ -1247,7 +1249,7 @@ A `metric` for the difficulty filters that runs programs on tests.
 Inspect operations: analyze existing data.
 
 Also exported, not documented here: `DispersionReport`, `LikelihoodReport`, `RowLikelihood`, `PhraseReport`,
-`ReferenceReport`, `RubricScoreReport`, `RubricSensitivityReport`, `SpendReport`, `SpendTotal`.
+`ReferenceReport`, `RubricPairReport`, `RubricScoreReport`, `RubricSensitivityReport`, `SpendReport`, `SpendTotal`.
 
 <a name="inspect-embedding_dispersion"></a>
 
@@ -1379,6 +1381,33 @@ phrase_frequency(
 
 Print and return the phrases and names that the most rows share, per field.
 
+<a name="inspect-rubric_pair_accuracy"></a>
+
+### `inspect.rubric_pair_accuracy`
+
+Listed in step reports as `inspect.rubric_pair_accuracy`; its expensive parts are disk-cached (`@op`
+`inspect.rubric_scores.grades`), so a rerun reuses them.
+
+```python
+rubric_pair_accuracy(
+    rows: list[dict],
+    grade: Grade,
+    *,
+    better_field: str = "better",
+    worse_field: str = "worse",
+    n: int | None = None,
+    repeats: int = 1,
+    per_criterion: bool = True,
+    rubric_field: str = "rubric",
+    seed: int = 0,
+    workers: int = 8,
+) -> RubricPairReport
+```
+
+Report how often `grade` scores the better response of a pair higher.
+
+**Returns:** A serializable report with every pair, its scores and outcome, and per-criterion counts.
+
 <a name="inspect-rubric_scores"></a>
 
 ### `inspect.rubric_scores`
@@ -1393,6 +1422,7 @@ rubric_scores(
     *,
     n: int | None = 50,
     response_fields: list[str] | str | None = "response",
+    reference_field: str | None = None,
     probes: dict[str, Probe] | None = None,
     model: Any = None,
     k: int = 4,

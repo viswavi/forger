@@ -129,8 +129,10 @@ class TeacherCriteria(BaseModel):
     aspirin for a child" [-75] passes when the reply scores 0 on it. Of the
     ``reference_passes`` criteria, ``fails_all`` fail every gradable teacher
     sample and ``fails_some`` fail some but not all. ``skipped`` counts
-    criteria with a weight of 0, which change no score. ``examples`` lists
-    criteria that fail every sample, heaviest (largest absolute weight) first.
+    criteria with a weight of 0, which change no score. ``failed`` lists every
+    criterion that fails every sample, heaviest (largest absolute weight)
+    first, with its row and index, e.g. to drop or rewrite them;
+    ``examples`` is its first five, as printed.
     """
 
     reference: str
@@ -142,6 +144,7 @@ class TeacherCriteria(BaseModel):
     fails_some: int = 0
     share_fails_all: float | None = None
     examples: list[CriterionCheck] = Field(default_factory=list)
+    failed: list[CriterionCheck] = Field(default_factory=list)
 
 
 class RubricScoreReport(BaseModel):
@@ -267,6 +270,7 @@ def rubric_scores(
     *,
     n: int | None = 50,
     response_fields: list[str] | str | None = "response",
+    reference_field: str | None = None,
     probes: dict[str, Probe] | None = None,
     model: Any = None,
     k: int = 4,
@@ -346,7 +350,13 @@ def rubric_scores(
         n: Rows to sample (default 50); None grades every row. A warning is
             logged when it leaves rows out.
         response_fields: Fields holding responses to grade as they are; the
-            first is the reference.
+            first is the reference unless ``reference_field`` names one.
+        reference_field: The field holding the reference, e.g.
+            ``"ground_truth"``: an answer already stored in each row, which
+            every other column is compared with and on which the teacher
+            check scores each criterion. It is graded even when not in
+            ``response_fields``. The teacher, by contrast, is a model that
+            writes fresh replies from the prompt.
         probes: ``{name: probe(row) -> response or None}``; None is
             ungradable. Probes run on every call; their responses' grades
             are cached like the others.
@@ -378,6 +388,10 @@ def rubric_scores(
         if isinstance(response_fields, str)
         else list(response_fields or [])
     )
+    if reference_field is not None:
+        if not isinstance(reference_field, str) or not reference_field:
+            raise TypeError("reference_field must be a field name")
+        fields = [reference_field, *(f for f in fields if f != reference_field)]
     probes = dict(probes or {})
     clash = set(fields) & {*CONTROLS, "sampled", "teacher"}
     if clash:
@@ -574,6 +588,7 @@ def _teacher_criteria(
     if out.reference_passes:
         out.share_fails_all = out.fails_all / out.reference_passes
     failed.sort(key=lambda c: (-abs(c.weight), c.row, c.index))
+    out.failed = failed
     out.examples = failed[:_CRITERION_EXAMPLES]
     return out
 

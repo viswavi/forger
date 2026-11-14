@@ -14,6 +14,7 @@ Inspect ops return a *report* about rows and never change them. Signatures are i
 | `student_log_likelihood` | yes | How likely the student finds each row's target, in bits, beside its own responses. |
 | `rubric_scores` | grades | Print and return a reward's score histogram on a sample of `n` rows, beside controls. |
 | `rubric_sensitivity` | rewrites | Compare paraphrases' scores and measure identical-text grading noise. |
+| `rubric_pair_accuracy` | grades | How often a reward scores the better of your ordered pairs higher, per criterion. |
 | `embedding_dispersion` | yes | Print and return how dispersed a field is in embedding space vs. a reference. No LLM. |
 | `compare_to_reference` | yes | Print and return feature distributions (lengths, numbers, labels) beside a reference. |
 
@@ -49,8 +50,8 @@ SFT set for Qwen3-4B:
 
 ## `rubric_scores`
 
-`rubric_scores(rows, grade, *, n=50, response_fields="response", probes=None, model=None, k=4, teacher=None,
-teacher_k=2, rubric_field="rubric", ...)` bins a reward's
+`rubric_scores(rows, grade, *, n=50, response_fields="response", reference_field=None, probes=None, model=None, k=4,
+teacher=None, teacher_k=2, rubric_field="rubric", ...)` bins a reward's
 scores before RL. `grade(response, row)` returns a score in [0, 1] or None: a code rubric, an LLM judge, or exact match.
 It scores a sample, not every row: `n` rows (default 50) drawn with `seed`. The first line says so, and an `n` below
 the row count warns. `n=None` scores every row; to keep or drop rows by score, use
@@ -94,7 +95,9 @@ did not:
 - `report.model_dump()` is plain JSON: bins, and per column counts, mean, shares at 0 and 1, per-row scores
   (`scores[i]` belongs to `report.rows[i]`, the sampled rows only), `vs_reference` (`below`, `tied`, `above`,
   `mean_gap`), and with a teacher, `teacher_criteria` (`reference_passes`, `fails_all`, `fails_some`,
-  `share_fails_all`, `examples`). Grades are cached (`grade` by its `cache_key()`).
+  `share_fails_all`, `failed`: every criterion every teacher reply fails, with `row` and `index`; `examples`: its
+  first five). The reference is a stored answer: the first of `response_fields`, or `reference_field`
+  (e.g. `"ground_truth"`); the teacher writes fresh replies. Grades are cached (`grade` by its `cache_key()`).
 
 ## `embedding_dispersion`
 
@@ -309,3 +312,12 @@ suspect = {(entry.row, entry.index) for entry in report.sensitive_criteria()}
 repeat-noise ranges and errors. `sensitive_criteria()` ranks candidates by their largest eligible absolute gap.
 The `(row, index)` set supports downstream selection or filtering, but does not automatically delete criteria:
 review meaning preservation and judge noise first, and ensure any edited rubric still has a positive weight.
+
+## Rubric pair accuracy
+
+`rubric_pair_accuracy(rows, grade, *, better_field="better", worse_field="worse", n=None, repeats=1,
+per_criterion=True)` grades pairs you order: each field holds a text or a list, and every (better, worse) combination
+on a row is a pair (e.g. a reference against a copy with a fact removed). It reports wins, ties and losses
+(`accuracy` counts ties half), `mean_margin`, `losing_pairs()`, and per criterion scored alone how often it passes the
+better text and fails the worse or the reverse: `wrong_way_criteria()` with `(row, index)`. `repeats > 1` regrades
+fresh and records identical-text ranges. Nothing is removed or changed.
