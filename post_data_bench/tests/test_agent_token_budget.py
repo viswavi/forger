@@ -52,7 +52,7 @@ class AgentTokenBudgetTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, patch.dict(
             os.environ, {}, clear=True
         ):
-            os.environ["JUDGE_MODEL"] = "custom/DEEPSEEK-V4-FLASH-test"
+            os.environ["JUDGE_MODEL"] = "custom/DEEPSEEK-V4.1-FLASH-test"
             os.environ["JUDGE_REASONING_EFFORT"] = "high"
             configure(directory, "coding")
             generation = TokenUnitBudget(
@@ -65,7 +65,9 @@ class AgentTokenBudgetTests(unittest.TestCase):
             configure(directory, "coding")
             self.assertEqual(generation.snapshot()["token_units"], 70)
             self.assertEqual(judge.snapshot()["token_units"], 14)
-            self.assertEqual(os.environ["JUDGE_MODEL"], "custom/DEEPSEEK-V4-FLASH-test")
+            self.assertEqual(
+                os.environ["JUDGE_MODEL"], "custom/DEEPSEEK-V4.1-FLASH-test"
+            )
             self.assertEqual(os.environ["JUDGE_REASONING_EFFORT"], "high")
             self.assertEqual(os.environ["PDB_TASK"], "coding")
 
