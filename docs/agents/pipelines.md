@@ -407,7 +407,9 @@ building block to perform case-by-case extraction of usable details from the ret
 better to retrieve knowledge before generating content, rather than relying solely on the model's parametric knowledge.
 - **Rubric-based filtering:** For complex tasks where quality is hard to assure with simple heuristics, generate a
 rubric (using `pyforger.acquire.generate_custom_rubric_criteria`) and then use multiple `by_llm_score` calls
-with each rubric item as a separate judge to filter for high-quality outputs that meet multiple criteria.
+with each rubric item as a separate judge to filter for high-quality outputs that meet multiple criteria. An item with
+a negative weight names a mistake, e.g. `("Does the response recommend aspirin for a child?", -75)`: drop the outputs
+that meet it, not the ones that miss it, or pass `negative_criteria=False` for requirements only.
 - **Overgenerate and filter:** Generate more candidates than needed (especially early in a pipeline) and then apply
 `pyforger.filter` operations to assure quality and diversity. Forger offers tons of filters to make this worthwhile.
 - **Strong-vs-weak gap:** For a given input, generate one output with a "weak" model (e.g. "gemini-3.1") and one with

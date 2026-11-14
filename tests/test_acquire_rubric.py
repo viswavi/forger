@@ -117,7 +117,10 @@ def test_only_failed_inputs_retried_in_order_with_batch_limit():
         '{"rubric": "text"}',
         encoded(["Criterion?", True]),
         encoded(["Criterion?", "50"]),
-        encoded(["Criterion?", -1]),
+        encoded(["Criterion?", -1]),  # no positive weight
+        encoded(["Criterion?", 0]),
+        encoded(["Zero?", 0], ["Mistake?", -50]),
+        encoded(["Criterion?", -101]),
         encoded(["Criterion?", 101]),
         encoded(["Criterion?", float("nan")]),
         encoded(["Criterion?", float("inf")]),
@@ -127,16 +130,74 @@ def test_only_failed_inputs_retried_in_order_with_batch_limit():
         encoded(["Criterion?"]),
         encoded(["Criterion?", 50, "extra"]),
         encoded({"criterion": "Criterion?", "weight": 50}),
-        encoded(["Valid?", 50], ["Invalid?", -1]),
+        encoded(["Valid?", 50], ["Invalid?", -101]),
     ],
 )
 def test_malformed_rubric_gets_fresh_retry(bad):
     """Reject malformed pairs and request fresh output on retry."""
-    model = ScriptedModel([[[bad]], [[encoded(["Recovered?", 0])]]])
+    model = ScriptedModel([[[bad]], [[encoded(["Recovered?", 1], ["Zero?", 0])]]])
     assert generate_custom_rubric_criteria(["input"], model, max_retries=1) == [
-        [("Recovered?", 0.0)]
+        [("Recovered?", 1.0), ("Zero?", 0.0)]
     ]
     assert model._call_count == 2
+
+
+def test_negative_weights_parse_as_mistakes():
+    """A mistake keeps its negative weight; the prompt asks for presence questions."""
+    model = RecordingMockModel(
+        responses=[
+            encoded(
+                ["Does it give a weight-based dose?", 100],
+                ["Does it recommend aspirin for a child?", -75],
+                ["Does it use jargon?", -100],
+            )
+        ]
+    )
+    assert generate_custom_rubric_criteria(["Child has a fever."], model) == [
+        [
+            ("Does it give a weight-based dose?", 100.0),
+            ("Does it recommend aspirin for a child?", -75.0),
+            ("Does it use jargon?", -100.0),
+        ]
+    ]
+    system = " ".join(model.recorded_prompts[0][0][0]["content"].split())
+    assert "weight from -100 to 100" in system
+    assert "never as a question about its absence with a positive weight" in system
+    assert 'without asking about pain history?" Split it' in system
+
+
+def test_negative_criteria_false_asks_for_requirements_only():
+    """Opting out sends weights 0 to 100 and retries a negative weight."""
+    model = ScriptedModel(
+        [
+            [[encoded(["Is it kind?", 100], ["Is it rude?", -50])]],
+            [[encoded(["Is it kind?", 100])]],
+        ]
+    )
+    result = generate_custom_rubric_criteria(
+        ["Comfort a friend."], model, negative_criteria=False, max_retries=1
+    )
+    assert result == [[("Is it kind?", 100.0)]]
+    assert model._call_count == 2
+    system = model.recorded_prompts[0][0][0]["content"]
+    assert "weight from 0 to 100" in system
+    assert "-100" not in system and "negative weight" not in system
+    assert "A yes answer must indicate better response quality." in system
+
+
+def test_negative_criteria_false_reaches_mixed_entry_point():
+    """generate_custom_rubric passes the flag to the criteria stage."""
+    model = ScriptedModel(
+        [
+            [[encoded(["Is it kind?", 100])]],
+            [[converted("prompt", "Is it kind?")]],
+        ]
+    )
+    result = generate_custom_rubric(
+        ["Comfort a friend."], model, negative_criteria=False
+    )
+    assert result == [[[{"prompt": "Is it kind?"}, 100.0]]]
+    assert "weight from 0 to 100" in model.recorded_prompts[0][0][0]["content"]
 
 
 @pytest.mark.parametrize("missing", [[], [[]]])
@@ -300,6 +361,56 @@ def test_prompts_unchanged_without_code_guidelines():
         "from the caller" not in batch[0][0]["content"]
         for batch in default.recorded_prompts
     )
+
+
+def test_conversion_preserves_negative_weights():
+    """A mistake keeps its weight; the prompt says grade scores the mistake itself."""
+    model = ScriptedModel(
+        [
+            [
+                [
+                    encoded(
+                        ["Is the final answer 42?", 100],
+                        ["Does it print a stack trace?", -50],
+                    )
+                ]
+            ],
+            [[converted("code", CODE)], [converted("code", CODE)]],
+        ]
+    )
+    result = generate_custom_rubric(["Print 6 * 7."], model)
+    assert result == [[[{"code": CODE}, 100.0], [{"code": CODE}, -50.0]]]
+    conversion = model.recorded_prompts[1][0][0]["content"]
+    assert "never invert its score" in conversion
+    assert "1.0 when the response does what" in conversion
+
+
+def test_convert_rubric_criteria_keeps_negative_prompt_criteria():
+    """Converting a text rubric alone keeps a negative weight as given."""
+    model = ScriptedModel([[[converted("prompt", "A?")], [converted("prompt", "B?")]]])
+    result = convert_rubric_criteria([[("A?", 10.0), ("B?", -10.0)]], model)
+    assert result == [[[{"prompt": "A?"}, 10.0], [{"prompt": "B?"}, -10.0]]]
+
+
+@pytest.mark.parametrize("rubric", [[("A?", -10.0)], [("A?", 0.0), ("B?", -1.0)]])
+def test_convert_rejects_rubric_without_positive_weight(rubric):
+    """No response could score above 0, so conversion refuses before any call."""
+    model = RecordingMockModel(responses=[])
+    with pytest.raises(ValueError, match="invalid textual rubric at index 0"):
+        convert_rubric_criteria([rubric], model)
+    assert model._call_count == 0
+
+
+def test_code_only_rubric_left_with_only_mistakes_raises():
+    """Omitting the only requirement leaves nothing to score above 0."""
+    model = ScriptedModel(
+        [
+            [[encoded(["Is it clear?", 100], ["Does it print a stack trace?", -50])]],
+            [[converted("omit")], [converted("code", CODE)]],
+        ]
+    )
+    with pytest.raises(ValueError, match=r"input indices \[0\] have no code"):
+        generate_custom_rubric(["Print 42."], model, code_criteria_only=True)
 
 
 def test_convert_rubric_criteria_takes_code_guidelines():

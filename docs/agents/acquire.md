@@ -132,8 +132,29 @@ rubrics = generate_custom_rubric(
     model=model,
 )
 # rubrics[i] is [[{"code": "def grade(prompt, response, ground_truth): ..."}, 100.0],
-#                [{"prompt": "Is the story suitable for ages 6–8?"}, 75.0], ...]
+#                [{"prompt": "Is the story suitable for ages 6–8?"}, 75.0],
+#                [{"prompt": "Does the story describe violence in graphic detail?"}, -75.0], ...]
 ```
+
+A mistake is a presence criterion with a negative weight, e.g. `["Does the response recommend aspirin for a
+child?", -75]`, never an absence criterion with a positive one (`["Does the response avoid recommending aspirin for a
+child?", 75]`): LLM judges dock replies that name aspirin only to warn against it. The criteria prompt asks for this,
+and also asks to split "X without Y" criteria ("Recommends opioids without asking about pain history") into a mistake
+and a missing step, since they hide an absence too. Weights lie in `[-100, 100]`. A response scores the weighted sum
+of its criterion scores over the positive weights, clipped to `[0, 1]`:
+
+```python
+def rubric_score(scored: list[tuple[float, float]]) -> float:  # [(weight, score in [0, 1]), ...]
+    total = sum(w * s for w, s in scored) / sum(w for w, _ in scored if w > 0)
+    return min(1.0, max(0.0, total))
+# [(100, 1.0), (50, 0.0), (-75, 1.0)] scores (100 - 75) / 150 = 0.17
+```
+
+So every nonempty rubric needs a positive weight; the criteria stage asks the model again for one without, and
+conversion rejects it. A code criterion with a negative weight returns 1.0 from `grade` when the response makes the
+mistake, never an inverted score. Pass `negative_criteria=False` to `generate_custom_rubric` or
+`generate_custom_rubric_criteria` when your scorer cannot take negative weights, e.g. one that divides by the sum of
+all weights: the prompt then asks for requirements only, with weights in `[0, 100]`.
 
 The result uses JSON lists and single-key `code`/`prompt` objects (plus any
 `prompt_criterion_options`, below) accepted by `rl.rubric_data.validate_rubric`. Each code criterion defines a synchronous
@@ -141,13 +162,14 @@ The result uses JSON lists and single-key `code`/`prompt` objects (plus any
 Weights and criterion order are preserved; prompted criteria keep their exact
 text. Ambiguous requirements and combined objective/subjective criteria stay
 prompted rather than being approximated by heuristics. The main entry point
-rejects empty or zero-total-weight rubrics; an empty input list returns `[]`.
+rejects empty rubrics and rubrics without a positive weight; an empty input list returns `[]`.
 
 Pass `code_criteria_only=True` when every criterion should be checked in code, e.g.
 tasks with exact answers, where an LLM judge only adds cost and reward noise. Both
 stages then ask only for code-checkable criteria, and criteria that still cannot be
 checked faithfully in code are dropped rather than approximated. An input left
-without a positive-weight code criterion raises `ValueError`. The same flag exists
+without a positive-weight code criterion raises `ValueError`, e.g. one whose only code criterion is a mistake. The
+same flag exists
 on `generate_custom_rubric_criteria` and `convert_rubric_criteria`.
 
 Pass `code_guidelines` when your grading environment differs from the default, e.g.
@@ -217,7 +239,8 @@ rubrics = generate_custom_rubric_criteria(
 # rubrics[i] is [(criterion_text, weight), ...] for input i.
 ```
 
-Weights are independent finite floats in `[0, 100]`, not percentages summing to 100. An empty input list
+Weights are independent finite floats in `[-100, 100]` (`[0, 100]` with `negative_criteria=False`), not percentages
+summing to 100; negative weights mark mistakes, and a nonempty rubric has at least one positive weight. An empty input list
 returns `[]`; a model may return an empty rubric when no meaningful criteria can be grounded in the context.
 `batch_size` (default 10) limits prompts per batch for a `LocalModel` (a `Model` sends every prompt at once, up to
 its `max_concurrency`), `temperature` defaults to 1.0, and `max_retries`
@@ -227,6 +250,6 @@ Results are cached with `@op`; `_no_cache=True` forces fresh generation.
 
 The output is an intermediate textual rubric. For `rl.agent_training validate`, a later dataset adapter
 must wrap each criterion as `{"prompt": criterion_text}` (or convert it to `{"code": source}`),
-ensure a nonempty rubric with positive total weight, and supply the required `prompt` and `ground_truth`
+ensure a nonempty rubric with a positive weight, and supply the required `prompt` and `ground_truth`
 fields. The current RL validator requires `ground_truth` to include nonempty `<think>...</think>` reasoning
 and a final answer. This building block does not generate those fields or execute criteria.

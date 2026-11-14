@@ -115,9 +115,11 @@ A reference that scores well on its own rubric does not show that the rubric pay
 the reference, or from the notes the reference was written from, can demand the reference's own details. `teacher=`
 adds a column of `teacher_k` replies per prompt (default 2) from a model trusted to answer well, which sees only the
 prompt. When rows carry a rubric in `rubric_field` (default `"rubric"`, as `[[criterion, weight], ...]`), each
-criterion with a positive weight is also scored alone, on the reference and on every teacher reply (`grade` gets the row
-with `[[criterion, 1]]` in that field), and passes at 0.5. The report counts the criteria the reference passes and
-every teacher reply fails, flags 20% or more, and lists the heaviest:
+criterion with a nonzero weight is also scored alone, on the reference and on every teacher reply (`grade` gets the row
+with `[[criterion, 1]]` in that field), and passes at 0.5. A negative-weight criterion names a mistake and passes below
+0.5, e.g. `["Recommends aspirin for a child", -75]` passes on a reply scored 0 on it. The report counts the criteria
+the reference passes and every teacher reply fails, flags 20% or more, and lists the heaviest (largest absolute
+weight):
 
 ```text
   per criterion: teacher ×2 fails 31 of the 120 criteria reference passes on every reply, 18 on some (152 criteria on 40 rows)
@@ -125,11 +127,12 @@ every teacher reply fails, flags 20% or more, and lists the heaviest:
   teacher fails: row 12 criterion 1 [100] (reference 1.00; teacher 0.00, 0.00)  Mentions that the starting dose is 81 mg…
 ```
 
-Read the listed criteria. One may demand a detail, number or choice that a good reply can leave out, or the teacher may
-be wrong; the count says where to look, not which criteria are bad. Two replies per prompt matter: two samples of one
-model often disagree on a criterion, so one reply's miss is weak evidence. The stronger the teacher, the stronger the
-check, and a model that did not write the rubric or the reference does not share their habits. The check calls `grade`
-`1 + teacher_k` times per criterion and costs `teacher_k` generations per sampled row.
+Read the listed criteria. One may demand a detail, number or choice that a good reply can leave out, a mistake may be
+docked on a reply that names it only to warn against it, or the teacher may be wrong; the count says where to look, not
+which criteria are bad. Two replies per prompt matter: two samples of one model often disagree on a criterion, so one
+reply's miss is weak evidence. The stronger the teacher, the stronger the check, and a model that did not write the
+rubric or the reference does not share their habits. The check calls `grade` `1 + teacher_k` times per criterion and
+costs `teacher_k` generations per sampled row.
 
 It returns a `RubricScoreReport`; `report.model_dump()` is plain JSON data: `bins`, and per column `counts` (aligned
 with `bins`), `mean`, `share_at_0`, `share_at_1`, `ungradable`, `errors`, the per-row `scores` (`scores[i]` belongs to row
