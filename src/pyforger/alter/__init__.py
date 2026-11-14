@@ -7,6 +7,7 @@ from pyforger.alter import translate
 from pyforger.alter.dynamic import dynamic_step, dynamic_step_source
 from pyforger.alter.execute_code import execute_code
 from pyforger.alter.generate import generate_from_context, self_taught_reasoner
+from pyforger.alter.paraphrase import paraphrase
 from pyforger.alter.programs import run_programs
 
 __all__ = [
@@ -14,6 +15,7 @@ __all__ = [
     "dynamic_step_source",
     "execute_code",
     "generate_from_context",
+    "paraphrase",
     "run_programs",
     "self_taught_reasoner",
     "translate",

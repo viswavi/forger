@@ -5,6 +5,7 @@ Transform rows without removing items.
 | Export | Description |
 |---|---|
 | `generate_from_context` |  LLM-based generation given upstream data (sample_from_LLM with wrapped dependencies) |
+| `paraphrase` | Conservative candidate rewrites, preserving the original response. |
 | `translate.to_language` | LLM translation of selected fields into a target natural language. |
 | `translate.to_code` | LLM conversion of fields into code in a target programming language. Strips markdown fences. |
 | `execute_code` | Call the last function in each row's code with one argument, in-process (RestrictedPython). |
@@ -197,3 +198,14 @@ also passes there. The runner is called once per row, `max_workers` rows at a ti
 Neither `run_programs` nor `execute_code` is a security sandbox. `execute_code`'s RestrictedPython is a guardrail
 against accidental damage from machine-generated code, not a boundary against adversarial code, and `run_programs`
 runs each program as your user, with your files and network. Run untrusted code at scale in a container or VM.
+
+## Conservative paraphrases
+
+`paraphrase(rows, model=model, response_field="response", output_field="paraphrases", k=2)` adds a list of
+candidate rewrites to each row, preserving the original. The model sees only the response and its task
+(`prompt_field="prompt"`; set it to `None` for no context), never the rubric or reference answer. It is asked to
+change wording minimally while preserving claims, mistakes, uncertainty, conditions, numbers, code, and citations.
+The output field must be new. Blank or truncated completions become `None`; unchanged and duplicate rewrites remain
+visible. Generation is cached and batched. These are candidate paraphrases, not certified semantic equivalents.
+Use `inspect.rubric_sensitivity` to inspect the reward changes and review the pairs, rather than automatically
+filtering rows on the assumption that every rewrite preserved quality.
