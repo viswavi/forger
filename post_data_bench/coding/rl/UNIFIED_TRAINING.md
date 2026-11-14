@@ -101,7 +101,10 @@ exactly one of `code` or `prompt` (a prompt criterion may also set `answer_only`
 `scale` is `"binary"` (default: the judge answers yes or no, scored 1 or 0) or
 `"likert"` (an integer from 1 to 5, scored `(n - 1) / 4`); a reply off the scale
 is retried, never rounded (`rubric_data.scale_score`), and instructions cannot
-change it. Code criteria may return any value in `[0, 1]`.
+change it. `n` (positive integer, default 1) averages that many judge samples
+from one request before weighting, so binary samples can have a fractional
+mean; a missing or invalid sample retries the whole request, and usage is
+charged once per request. Code criteria may return any value in `[0, 1]`.
 Weights must be finite; the positive weights
 must have a positive sum. Reward is `sum(weight * score) / sum(positive weights)`,
 clipped to `[0, 1]` (`rubric_data.weighted_score`): a negative-weight criterion
