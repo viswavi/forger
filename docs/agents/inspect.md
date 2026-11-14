@@ -241,7 +241,7 @@ step `same`, `why`, `ops` (with `b_minus_a`: the difference, its `ci`, and `clea
 ## Rubric sensitivity
 
 `rubric_sensitivity(rows, grade, model=rewriter, n=50, k=2, repeats=2, epsilon=0.05)` measures how a reward changes
-under conservative candidate paraphrases. It uses `alter.paraphrase`, which sees the task and response, never the
+under candidate paraphrases. It uses `alter.paraphrase`, which sees the task and response, never the
 rubric. Supply `variants_field="paraphrases"` instead of `model` to inspect existing rewrites (including manually
 reviewed ones). Rows are sampled with `seed`; `n=None` inspects all rows. The original rows are unchanged.
 
