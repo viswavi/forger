@@ -74,6 +74,7 @@ class RubricPairReport(BaseModel):
     """
 
     n_rows: int
+    epsilon: float = 0.05
     rows: list[int]
     repeats: int
     pairs: list[PairResult] = Field(default_factory=list)
@@ -143,6 +144,7 @@ def rubric_pair_accuracy(
     worse_field: str = "worse",
     n: int | None = 50,
     repeats: int = 1,
+    epsilon: float = 0.05,
     per_criterion: bool = True,
     rubric_field: str = "rubric",
     seed: int = 0,
@@ -156,8 +158,9 @@ def rubric_pair_accuracy(
     (better, worse) combination on the row is a pair. You decide what makes
     one better, e.g. a reference against a copy with a key fact removed or a
     mistake added, or a strong model's reply against a weak model's. For
-    each pair, the report records a win, tie or loss and the margin
-    mean(better) - mean(worse), then ``accuracy`` = (wins + ties / 2) /
+    each pair, the report records the margin mean(better) - mean(worse) and
+    a win when it is above ``epsilon`` (default 0.05), a loss below
+    -epsilon, else a tie, then ``accuracy`` = (wins + ties / 2) /
     compared and ``mean_margin``. ``report.losing_pairs()`` lists every pair
     whose worse text won, with its row.
 
@@ -190,11 +193,19 @@ def rubric_pair_accuracy(
     if n is not None and (isinstance(n, bool) or not isinstance(n, int) or n < 1):
         raise ValueError("n must be a positive integer or None")
     _check_max_grades(max_grades)
+    if (
+        isinstance(epsilon, bool)
+        or not isinstance(epsilon, (int, float))
+        or not (math.isfinite(epsilon) and epsilon >= 0)
+    ):
+        raise ValueError("epsilon must be finite and nonnegative")
     if better_field == worse_field:
         raise ValueError("better_field and worse_field must differ")
     picked = _sample_rows(len(rows), n, seed)
     sample = [rows[i] for i in picked]
-    report = RubricPairReport(n_rows=len(rows), rows=picked, repeats=repeats)
+    report = RubricPairReport(
+        n_rows=len(rows), rows=picked, repeats=repeats, epsilon=epsilon
+    )
     # Per row: distinct texts to grade and the (better, worse) pairs among them.
     texts: list[list[str]] = []
     pairs: list[list[tuple[int, int, int, int]]] = []  # (bi, wi, b slot, w slot)
@@ -290,7 +301,11 @@ def rubric_pair_accuracy(
             else:
                 result.margin = hi - lo
                 result.outcome = (
-                    "win" if hi - lo > 1e-9 else "loss" if lo - hi > 1e-9 else "tie"
+                    "win"
+                    if hi - lo > epsilon
+                    else "loss"
+                    if lo - hi > epsilon
+                    else "tie"
                 )
                 margins.append(result.margin)
             report.pairs.append(result)
@@ -350,7 +365,8 @@ def _render(report: RubricPairReport) -> None:
     ]
     if report.accuracy is not None and report.mean_margin is not None:
         lines.append(
-            f"Better text scored higher in {report.wins}, tied in {report.ties}, "
+            f"Better text scored higher by more than {report.epsilon:g} in "
+            f"{report.wins}, within it in {report.ties}, "
             f"lower in {report.losses} (accuracy {report.accuracy:.1%}, ties "
             f"count half; mean margin {report.mean_margin:+.3f})."
         )
