@@ -497,13 +497,13 @@ def test_scale_option_reaches_every_prompt_criterion():
         ]
     )
     result = generate_custom_rubric(
-        ["What is 6 * 7?"], model, prompt_criterion_options={"scale": "likert"}
+        ["What is 6 * 7?"], model, prompt_criterion_options={"scale": "likert", "n": 3}
     )
     assert result == [
         [
             [{"code": CODE}, 100.0],
-            [{"prompt": "Is it kind?", "scale": "likert"}, 50.0],
-            [{"prompt": "Is it short?", "scale": "likert"}, 10.0],
+            [{"prompt": "Is it kind?", "scale": "likert", "n": 3}, 50.0],
+            [{"prompt": "Is it short?", "scale": "likert", "n": 3}, 10.0],
         ]
     ]
     conversion = model.recorded_prompts[1][0][0]["content"]
