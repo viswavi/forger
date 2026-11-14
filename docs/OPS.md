@@ -58,7 +58,7 @@ Keywords left out of the signatures below:
     @op cache.
   - [`execute_code`](#alter-execute_code): Compile each item's code and call it with `arg_field`'s value.
   - [`generate_from_context`](#alter-generate_from_context): Generate LLM outputs conditioned on upstream input items.
-  - [`paraphrase`](#alter-paraphrase): Add conservative candidate paraphrases, retaining the original response.
+  - [`paraphrase`](#alter-paraphrase): Add candidate paraphrases, retaining the original response.
   - [`run_programs`](#alter-run_programs): Run each row's stdin/stdout program on each of its tests.
   - [`self_taught_reasoner`](#alter-self_taught_reasoner): Self-Taught Reasoner (STaR): keep a student model's own
     correct solutions.
@@ -108,8 +108,7 @@ Keywords left out of the signatures below:
     per field.
   - [`rubric_scores`](#inspect-rubric_scores): Print and return how `grade` scores a sample of `n` rows, binned, by
     column.
-  - [`rubric_sensitivity`](#inspect-rubric_sensitivity): Inspect reward stability across conservative candidate
-    paraphrases.
+  - [`rubric_sensitivity`](#inspect-rubric_sensitivity): Inspect reward stability across candidate paraphrases.
   - [`runs`](#inspect-runs): Print the latest saved pipeline runs, oldest first, and return them.
   - [`spend`](#inspect-spend): Print and return the spend ledger's totals by run, pipeline, and step.
   - [`student_log_likelihood`](#inspect-student_log_likelihood): Print and return how likely the student finds each
@@ -663,7 +662,7 @@ paraphrase(
 ) -> list[dict]
 ```
 
-Add conservative candidate paraphrases, retaining the original response.
+Add candidate paraphrases, retaining the original response.
 
 **Returns:** Copies of the rows with the candidate list in output_field.
 
@@ -1443,7 +1442,7 @@ rubric_sensitivity(
 ) -> RubricSensitivityReport
 ```
 
-Inspect reward stability across conservative candidate paraphrases.
+Inspect reward stability across candidate paraphrases.
 
 **Returns:** A serializable report with paired texts, scores, omissions, errors, and separate candidate/verified tie
 rates at the chosen tolerance.

@@ -197,7 +197,7 @@ def rubric_sensitivity(
     temperature: float | None = None,
     max_tokens: int | None = None,
 ) -> RubricSensitivityReport:
-    """Inspect reward stability across conservative candidate paraphrases.
+    """Inspect reward stability across candidate paraphrases.
 
     Supply model to generate paraphrases, or variants_field holding existing
     lists of strings/None. Report the share whose mean reward changes by more
