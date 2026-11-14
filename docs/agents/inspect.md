@@ -65,18 +65,18 @@ default `data_parallel_size="auto"`). Scoring is fast; sampling the student's ow
 long reasoning responses took 37 minutes on one L40S and 19 on two. Its median rate is stable with the default 64
 samples.
 
-`rubric_scores(rows, grade, *, n=50, response_fields="response", probes=None, model=None, k=4, prompt_field="prompt",
-control_columns=True, seed=0, ...)` shows a reward's distribution before RL. `grade(response, row)` returns a score in
-[0, 1] (a bool counts as 0 or 1) or None when ungradable: a code rubric, an LLM judge, or exact match. It scores a
-sample, not every row: `n` rows (default 50) drawn with `seed`. The report's first line says how many (`50 of 300 rows
-sampled (seed 0; the other 250 have no score)`), and an `n` below the row count logs a warning. `n=None` scores every
-row; to keep or drop rows by score, use [`filter.by_rubric_score`](filter.md), which scores every row with the same
-`grade` and shares its cached grades. It grades one column per response field (e.g. the SFT target), `k` samples per
-prompt from `model` (what RL sees; the report counts prompts whose samples all got the same score, which give no
-gradient), and with
-`control_columns` three responses no task should reward: `empty`, `random` (200 random characters), and `other_row`
-(another row's response, never its own). A control earning half the reference column's mean is flagged. On a rubric
-that gave 1.0 to any response without a python code block, the targets looked fine; `empty` did not:
+`rubric_scores(rows, grade, *, n=50, response_fields="response", probes=None, model=None, k=4, teacher=None,
+teacher_k=2, rubric_field="rubric", prompt_field="prompt", control_columns=True, seed=0, ...)` shows a reward's
+distribution before RL. `grade(response, row)` returns a score in [0, 1] (a bool counts as 0 or 1) or None when
+ungradable: a code rubric, an LLM judge, or exact match. It scores a sample, not every row: `n` rows (default 50) drawn
+with `seed`. The report's first line says how many (`50 of 300 rows sampled (seed 0; the other 250 have no score)`), and
+an `n` below the row count logs a warning. `n=None` scores every row; to keep or drop rows by score, use
+[`filter.by_rubric_score`](filter.md), which scores every row with the same `grade` and shares its cached grades. It
+grades one column per response field (e.g. the SFT target), `k` samples per prompt from `model` (what RL sees; the
+report counts prompts whose samples all got the same score, which give no gradient), and with `control_columns` three
+responses no task should reward: `empty`, `random` (200 random characters), and `other_row` (another row's response,
+never its own). A control earning half the reference column's mean is flagged. On a rubric that gave 1.0 to any response
+without a python code block, the targets looked fine; `empty` did not:
 
 ```text
   50 of 60 rows sampled (seed 0; the other 10 have no score) · grade abstain_bug · sampled: toy-student
@@ -108,13 +108,35 @@ probe, and sampled column is compared with it row by row, e.g. with `response_fi
 ```
 
 Ties between a reference and a known-weak baseline are rows where the rubric cannot tell them apart; a sampled column
-tied on most rows is a student that already earns the reference's score.
+tied on most rows is a student that already earns the reference's score. A sampled column whose mean is 0.9 or more is
+flagged: little is left for RL to raise.
+
+A reference that scores well on its own rubric does not show that the rubric pays good replies: a rubric written from
+the reference, or from the notes the reference was written from, can demand the reference's own details. `teacher=`
+adds a column of `teacher_k` replies per prompt (default 2) from a model trusted to answer well, which sees only the
+prompt. When rows carry a rubric in `rubric_field` (default `"rubric"`, as `[[criterion, weight], ...]`), each
+criterion with a positive weight is also scored alone, on the reference and on every teacher reply (`grade` gets the row
+with `[[criterion, 1]]` in that field), and passes at 0.5. The report counts the criteria the reference passes and
+every teacher reply fails, flags 20% or more, and lists the heaviest:
+
+```text
+  per criterion: teacher ×2 fails 31 of the 120 criteria reference passes on every reply, 18 on some (152 criteria on 40 rows)
+  ! teacher fails 31 of the 120 criteria reference passes (26%) on every reply: read them below
+  teacher fails: row 12 criterion 1 [100] (reference 1.00; teacher 0.00, 0.00)  Mentions that the starting dose is 81 mg…
+```
+
+Read the listed criteria. One may demand a detail, number or choice that a good reply can leave out, or the teacher may
+be wrong; the count says where to look, not which criteria are bad. Two replies per prompt matter: two samples of one
+model often disagree on a criterion, so one reply's miss is weak evidence. The stronger the teacher, the stronger the
+check, and a model that did not write the rubric or the reference does not share their habits. The check calls `grade`
+`1 + teacher_k` times per criterion and costs `teacher_k` generations per sampled row.
 
 It returns a `RubricScoreReport`; `report.model_dump()` is plain JSON data: `bins`, and per column `counts` (aligned
 with `bins`), `mean`, `share_at_0`, `share_at_1`, `ungradable`, `errors`, the per-row `scores` (`scores[i]` belongs to row
-`report.rows[i]`, the sampled rows only), `vs_reference`
-(`below`, `tied`, `above`, `mean_gap`), and the lowest and highest examples. `grade` is part of the cache key (an object
-by its `cache_key()`), so the grades are cached; a grading that raised is counted with its message and runs again next
+`report.rows[i]`, the sampled rows only), `vs_reference` (`below`, `tied`, `above`, `mean_gap`), the lowest and highest
+examples, and, with a teacher and rubrics, `teacher_criteria` (`criteria`, `reference_passes`, `fails_all`,
+`fails_some`, `share_fails_all`, `examples`). `grade` is part of the cache key (an object by its `cache_key()`), so the
+grades are cached; a grading that raised is counted with its message and runs again next
 time. Rows are not modified.
 
 `embedding_dispersion(rows, field, *, reference=None, reference_field=None, embed_fn=None, embedding_model=...,
