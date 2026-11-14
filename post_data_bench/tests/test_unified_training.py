@@ -1688,7 +1688,7 @@ class RecipeTests(unittest.TestCase):
             ]
             result = subprocess.run(command, capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("JUDGE_MODEL must contain DeepSeek-V4-Flash", result.stderr)
+            self.assertIn("JUDGE_MODEL must contain DeepSeek-V4.1-Flash", result.stderr)
             self.assertNotIn("nvidia-smi", result.stderr)
 
     def test_dry_run_builds_fixed_reward_and_valid_shell_without_credentials(self):

@@ -15,11 +15,13 @@ import pytest
 
 from pyforger.token_units import (
     DEFAULT_GENERATION_LIMIT,
+    DEFAULT_JUDGE_MODEL,
     TokenUnitBudget,
     TokenUnitQuotaExceeded,
     default_generation_limit,
     default_rl_limit,
     held_units,
+    model_weights,
     response_cost_usd,
     response_token_counts,
     token_units,
@@ -122,14 +124,38 @@ def test_unknown_models_rejected():
 
 def test_judge_policy():
     """Only the specified judge family and reasoning levels are accepted."""
-    assert validate_judge_model("account/DeepSeek-V4-Flash-custom")
-    for model in ("DeepSeek-V4-Pro", "FW-GLM-5.3", "DeepSeek-R1"):
+    assert validate_judge_model("account/DeepSeek-V4.1-Flash-custom")
+    for model in (
+        "DeepSeek-V4-Pro",
+        "FW-GLM-5.3",
+        "DeepSeek-R1",
+        "DeepSeek-V4-Flash-0731",
+    ):
         with pytest.raises(ValueError):
             validate_judge_model(model)
     for effort in ("none", "low", "high"):
         assert validate_reasoning_effort(effort) == effort
     with pytest.raises(ValueError):
         validate_reasoning_effort("medium")
+
+
+def test_judge_model_is_weighted_only_for_the_judge(tmp_path):
+    """DeepSeek-V4.1-Flash costs 1/3 units as the judge; generation refuses it."""
+    judge = "litellm_proxy/azure_ai/DeepSeek-V4.1-Flash"
+    assert DEFAULT_JUDGE_MODEL == judge
+    assert model_weights(judge, judge=True) == (1, 3)
+    assert token_units(judge, 10, 2, judge=True) == 16
+    with pytest.raises(ValueError):
+        model_weights(judge)
+    with pytest.raises(ValueError):
+        token_units(judge, 10, 2)
+    # The 0731 generation model keeps its own weights; names do not collide.
+    assert model_weights(
+        "litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731", judge=True
+    ) == (1, 3)
+    ledger = TokenUnitBudget(tmp_path / "judge.json", 100)
+    ledger.record(judge, 10, 2)
+    assert ledger.check()["token_units"] == 16
 
 
 def test_task_quotas():
