@@ -259,8 +259,7 @@ Grading bypasses Forger caches, including nested ops; disable any separate cache
 Paraphrase generation is cached separately. Each call grades fresh, at most `n * (k + 1) * repeats` times, plus
 `n * k` generated rewrites. Each grade may itself execute many rubric criteria. At `repeats=1`, repeat noise is
 unmeasured. This comparison does not establish statistical significance or subtract away judge noise.
-It measures the supplied grade function: aggregate rubric scores can hide offsetting criterion changes.
-To inspect a particular criterion, supply a grade function that scores that criterion alone.
+Full-rubric and isolated criterion grading use independent draws; judge noise can make their results differ.
 
 `equivalent(original, candidate, row)` optionally returns `True`, `False`, or `None` from an independent review.
 Rejected pairs remain available but are excluded from summary comparisons. `candidate_tie_rate` includes unverified
@@ -273,3 +272,40 @@ useful responses, not every equivalence class discussed in [Discretizing Reward 
 Unchanged rewrites, duplicates, missing completions, rejected pairs, and ungradable pairs are counted separately.
 No comparisons gives `None` for the tie rate, never perfect stability. The largest differences are previewed; use
 `report.model_dump()` for all pairs and scores. This inspection reports evidence and does not filter or rewrite rubrics.
+
+### Three sensitivity rates and criterion exploration
+
+The report exposes `ChangeRate` objects with `changed`, `compared`, and `fraction` (multiply by 100 for percent):
+
+| Field | Numerator | Denominator |
+|---|---|---|
+| `rubric_pair_changes` | Full-rubric original/paraphrase pairs changing beyond `epsilon` | Eligible pairs |
+| `rubric_changes` | Input rows with at least one changing pair | Rows with at least one eligible pair |
+| `criterion_changes` | Criterion occurrences with at least one changing pair | Criteria with an eligible pair |
+
+A criterion occurrence is `(row, index)`, so identical wording in two tasks is counted twice. Each rate is also
+available with a `verified_` prefix, using only pairs accepted by the optional equivalence review. Rejected or
+ungradable comparisons never count as stable; a zero denominator gives `fraction=None`. With two rewrites each
+for ten rubrics, two changes on separate rubrics mean 2/20 pairs (10%) but 2/10 rubrics (20%).
+
+`per_criterion=True` (default) scores each nonzero-weight criterion separately from `rubric_field="rubric"`.
+It calls the supplied grade with that field replaced by `[[criterion, 1.0]]`, so **the grade must read the supplied
+rubric**. Use `per_criterion=False` for an opaque reward that ignores it. Negative weights are kept in the report,
+but isolated scores use +1 so clipping cannot hide changes. `criterion_epsilon` defaults to `epsilon`.
+Missing rubrics and zero-weight criteria are reported separately. Each criterion costs an additional
+`(k + 1) * repeats` grade calls. All three rates measure observed changes, not statistical proof of oversensitivity.
+
+```python
+for entry in report.sensitive_criteria(verified_only=True):
+    print(entry.row, entry.index, entry.criterion, entry.weight)
+    for pair in entry.pairs:
+        print(pair.original_scores, pair.candidate_scores, pair.equivalent)
+        # pair.original and pair.candidate contain the full responses.
+suspect = {(entry.row, entry.index) for entry in report.sensitive_criteria()}
+# These indices address the original input rows, even when n sampled a subset.
+```
+
+`report.criteria` includes every tested criterion, including stable and ungradable ones, with raw paired scores,
+repeat-noise ranges and errors. `sensitive_criteria()` ranks candidates by their largest eligible absolute gap.
+The `(row, index)` set supports downstream selection or filtering, but does not automatically delete criteria:
+review meaning preservation and judge noise first, and ensure any edited rubric still has a positive weight.
