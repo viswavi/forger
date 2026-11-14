@@ -197,3 +197,176 @@ def test_invalid_arguments_fail_before_grading(kwargs):
         kwargs["variants_field"] = "variants"
     with pytest.raises(ValueError):
         rubric_sensitivity(_rows(), _surface_grade, **kwargs)
+
+
+def _rubric_grade(response, row):
+    """A signed reward with a deliberately lexical blue criterion."""
+    predicates = {
+        "blue": float(response.startswith("Blue")),
+        "not_blue": float(not response.startswith("Blue")),
+        "always": 1.0,
+    }
+    rubric = row["rubric"]
+    return max(
+        0.0,
+        min(
+            1.0,
+            sum(w * predicates[c] for c, w in rubric)
+            / sum(w for _, w in rubric if w > 0),
+        ),
+    )
+
+
+def test_pair_rubric_and_criterion_rates_have_distinct_denominators():
+    """Four pairs, two rubrics and four criterion occurrences are separate units."""
+    rows = [
+        {
+            "response": "Blue yes",
+            "variants": ["blue yes", "Blue YES"],
+            "rubric": [["blue", 1], ["always", 1]],
+        },
+        {
+            "response": "Red yes",
+            "variants": ["red yes", "Red YES"],
+            "rubric": [["always", 1], ["always", 1]],
+        },
+    ]
+    report = rubric_sensitivity(rows, _rubric_grade, variants_field="variants")
+    assert report.rubric_pair_changes.model_dump() == {
+        "changed": 1,
+        "compared": 4,
+        "fraction": 0.25,
+    }
+    assert report.rubric_changes.model_dump() == {
+        "changed": 1,
+        "compared": 2,
+        "fraction": 0.5,
+    }
+    assert report.criterion_changes.model_dump() == {
+        "changed": 1,
+        "compared": 4,
+        "fraction": 0.25,
+    }
+    found = report.sensitive_criteria()
+    assert [(c.row, c.index, c.criterion) for c in found] == [(0, 0, "blue")]
+    assert found[0].pairs[0].original_scores == [1, 1]
+    assert found[0].pairs[0].candidate_scores == [0, 0]
+    assert report.sensitive_criteria(verified_only=True) == []
+    assert report.verified_criterion_changes.fraction is None
+
+
+def test_criterion_changes_cannot_hide_behind_aggregate_cancellation():
+    """Two opposing criterion flips leave the full rubric unchanged."""
+    rows = [
+        {
+            "response": "Blue",
+            "variants": ["blue"],
+            "rubric": [["blue", 1], ["not_blue", 1]],
+        }
+    ]
+    report = rubric_sensitivity(rows, _rubric_grade, variants_field="variants")
+    assert report.rubric_changes.fraction == 0
+    assert report.criterion_changes.fraction == 1
+    assert len(report.sensitive_criteria()) == 2
+
+
+def test_negative_criterion_is_scored_with_positive_unit_weight():
+    """Isolated negative weights must not cause every score to clip to zero."""
+    rows = [
+        {
+            "response": "Blue",
+            "variants": ["blue"],
+            "rubric": [["always", 1], ["blue", -2], ["always", 0]],
+        }
+    ]
+    original = copy.deepcopy(rows)
+    report = rubric_sensitivity(
+        rows,
+        _rubric_grade,
+        variants_field="variants",
+        equivalent=lambda a, b, row: True,
+    )
+    assert report.zero_weight_criteria == 1
+    assert report.criterion_changes.fraction == 0.5
+    assert report.verified_criterion_changes.fraction == 0.5
+    found = report.sensitive_criteria(verified_only=True)
+    assert len(found) == 1 and found[0].weight == -2 and found[0].index == 1
+    assert found[0].pairs[0].gap == -1
+    assert rows == original
+
+
+def test_rejected_and_ungradable_criteria_do_not_count_as_stable():
+    """A missing criterion comparison is absent from the denominator."""
+    rows = [
+        {
+            "response": "Blue",
+            "variants": ["blue"],
+            "rubric": [["blue", 1], ["always", 1]],
+        }
+    ]
+
+    def incomplete(response, row):
+        """Fail only the isolated always criterion on the paraphrase."""
+        if row["rubric"] == [["always", 1]] and response == "blue":
+            return None
+        return _rubric_grade(response, row)
+
+    report = rubric_sensitivity(rows, incomplete, variants_field="variants")
+    assert report.criterion_changes.compared == 1
+    assert report.criterion_changes.changed == 1
+    rejected = rubric_sensitivity(
+        rows,
+        _rubric_grade,
+        variants_field="variants",
+        equivalent=lambda a, b, row: False,
+    )
+    assert rejected.criterion_changes.fraction is None
+    assert rejected.rubric_changes.fraction is None
+    assert rejected.sensitive_criteria() == []
+    assert len(rejected.criteria[0].pairs) == 1
+
+
+def test_criterion_inspection_can_be_disabled_and_has_separate_tolerance():
+    """Opting out spends no calls on isolated criteria; the tolerance is explicit."""
+    rows = [
+        {
+            "response": "Blue",
+            "variants": ["blue"],
+            "rubric": [["blue", 1], ["always", 1]],
+        }
+    ]
+    report = rubric_sensitivity(
+        rows, _rubric_grade, variants_field="variants", per_criterion=False
+    )
+    assert report.criteria == [] and report.criterion_changes.fraction is None
+    report = rubric_sensitivity(
+        rows,
+        _rubric_grade,
+        variants_field="variants",
+        epsilon=0.6,
+        criterion_epsilon=0.1,
+    )
+    assert report.rubric_changes.fraction == 0
+    assert report.criterion_changes.fraction == 0.5
+
+
+def test_malformed_rubric_fails_before_paraphrase_generation():
+    """The more expensive diagnostic validates input before spending model calls."""
+    model = Rewriter()
+    rows = [{"response": "Blue", "rubric": [["blue", float("nan")]]}]
+    with pytest.raises(ValueError, match="weight must be finite"):
+        rubric_sensitivity(rows, _rubric_grade, model=model)
+    assert model.calls == 0
+
+
+def test_sampled_criteria_keep_input_row_indices_and_missing_rubric_coverage():
+    """Returned indices remain useful for downstream selection on the source rows."""
+    rows = [
+        {"response": "Blue", "variants": ["blue"], "rubric": [["blue", 1]]}
+        for _ in range(10)
+    ]
+    report = rubric_sensitivity(rows, _rubric_grade, variants_field="variants", n=3)
+    assert [c.row for c in report.criteria] == report.rows
+    missing = rubric_sensitivity(_rows(), _surface_grade, variants_field="variants")
+    assert missing.rows_without_rubric == [0]
+    assert missing.criterion_changes.compared == 0

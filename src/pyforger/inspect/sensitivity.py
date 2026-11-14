@@ -35,8 +35,42 @@ class SensitivityPair(BaseModel):
     changed: bool | None = None
 
 
+class ChangeRate(BaseModel):
+    """A changed/compared count; fraction is None when nothing was comparable."""
+
+    changed: int = 0
+    compared: int = 0
+    fraction: float | None = None
+
+
+class CriterionSensitivity(BaseModel):
+    """A criterion occurrence, identified by original input row and rubric index.
+
+    Pairs retain full texts and raw repeat scores. The original weight is
+    metadata: isolated scoring uses weight +1, so negative weights cannot
+    clip every isolated score to zero or invert the measured differences.
+    """
+
+    row: int
+    index: int
+    criterion: Any
+    weight: float
+    pairs: list[SensitivityPair] = Field(default_factory=list)
+    pair_changes: ChangeRate = Field(default_factory=ChangeRate)
+    verified_pair_changes: ChangeRate = Field(default_factory=ChangeRate)
+    identical_response_gaps: list[float] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+
+
 class RubricSensitivityReport(BaseModel):
     """Candidate sensitivity is a diagnostic, not proof of equal utility.
+
+    rubric_pair_changes counts original/paraphrase pairs; rubric_changes
+    counts each sampled input row once if any eligible pair changed;
+    criterion_changes counts each (row, rubric index) once if any pair changed.
+    Denominators include only units with at least one complete, non-rejected
+    comparison. verified_* rates require an accepted equivalence review.
+    The original tie-rate fields are retained for compatibility.
 
     candidate_tie_rate includes unverified pairs; verified_tie_rate includes
     only pairs accepted by equivalent. Both use absolute differences between
@@ -46,6 +80,18 @@ class RubricSensitivityReport(BaseModel):
     enter comparisons. External grader caches must also be disabled by the
     caller; the inspection bypasses Forger caches when grading.
     """
+
+    rubric_pair_changes: ChangeRate = Field(default_factory=ChangeRate)
+    rubric_changes: ChangeRate = Field(default_factory=ChangeRate)
+    criterion_changes: ChangeRate = Field(default_factory=ChangeRate)
+    verified_rubric_pair_changes: ChangeRate = Field(default_factory=ChangeRate)
+    verified_rubric_changes: ChangeRate = Field(default_factory=ChangeRate)
+    verified_criterion_changes: ChangeRate = Field(default_factory=ChangeRate)
+    criteria: list[CriterionSensitivity] = Field(default_factory=list)
+    per_criterion: bool = True
+    criterion_epsilon: float = 0.05
+    rows_without_rubric: list[int] = Field(default_factory=list)
+    zero_weight_criteria: int = 0
 
     n_rows: int
     rows: list[int]
@@ -66,6 +112,60 @@ class RubricSensitivityReport(BaseModel):
     max_abs_gap: float | None = None
     identical_response_gaps: list[float] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
+
+    def sensitive_criteria(
+        self, *, verified_only: bool = False
+    ) -> list[CriterionSensitivity]:
+        """Return criteria with at least one eligible changed pair, largest gap first.
+
+        Use (entry.row, entry.index) to inspect or select original criteria.
+        This does not mutate data or automatically remove criteria; a changed
+        score is a diagnostic candidate, not proof that a criterion is wrong.
+        """
+        found = [
+            c
+            for c in self.criteria
+            if (c.verified_pair_changes if verified_only else c.pair_changes).changed
+        ]
+        return sorted(
+            found,
+            key=lambda c: max(
+                (abs(p.gap or 0) for p in _eligible(c.pairs, verified_only)), default=0
+            ),
+            reverse=True,
+        )
+
+
+def _eligible(
+    pairs: list[SensitivityPair], verified_only: bool = False
+) -> list[SensitivityPair]:
+    """Keep complete comparisons whose equivalence review did not reject them."""
+    return [
+        p
+        for p in pairs
+        if p.gap is not None
+        and (p.equivalent is True if verified_only else p.equivalent is not False)
+    ]
+
+
+def _rate(flags: list[bool]) -> ChangeRate:
+    """Count unique units supplied by the caller, never infer missing stability."""
+    return ChangeRate(
+        changed=sum(flags),
+        compared=len(flags),
+        fraction=sum(flags) / len(flags) if flags else None,
+    )
+
+
+def _pair_and_row_rates(
+    pairs: list[SensitivityPair], verified_only: bool = False
+) -> tuple[ChangeRate, ChangeRate]:
+    """Return pair and unique-row rates from the same eligible comparisons."""
+    eligible = _eligible(pairs, verified_only)
+    by_row: dict[int, bool] = {}
+    for pair in eligible:
+        by_row[pair.row] = by_row.get(pair.row, False) or pair.changed is True
+    return _rate([p.changed is True for p in eligible]), _rate(list(by_row.values()))
 
 
 def _complete(values: list[float | None]) -> list[float] | None:
@@ -88,6 +188,9 @@ def rubric_sensitivity(
     k: int = 2,
     repeats: int = 2,
     epsilon: float = 0.05,
+    per_criterion: bool = True,
+    rubric_field: str = "rubric",
+    criterion_epsilon: float | None = None,
     equivalent: Callable[[str, str, dict], bool | None] | None = None,
     seed: int = 0,
     workers: int = 8,
@@ -99,7 +202,9 @@ def rubric_sensitivity(
     Supply model to generate paraphrases, or variants_field holding existing
     lists of strings/None. Report the share whose mean reward changes by more
     than epsilon, plus the noise across repeated fresh grades of identical
-    text. This probes specificity, not discrimination: a constant reward
+    text. Three rates have distinct denominators: rubric/paraphrase pairs,
+    input rows with any changed pair, and criterion occurrences with any
+    changed pair. This probes specificity, not discrimination: a constant reward
     passes this check. Use rubric_scores controls and teacher checks too.
 
     A paraphrase may change quality. equivalent(original, candidate, row)
@@ -111,8 +216,22 @@ def rubric_sensitivity(
     are fresh. A callable with its own external cache must bypass that too.
     Paraphrase generation is cached separately. At most n * (k + 1) * repeats
     grade calls plus n * k generations; each grade may call many rubric judges.
-    With variants_field, the number of supplied variants replaces k. Samples
-    keep original row indices; no rows are removed or changed.
+    With variants_field, the number of supplied variants replaces k.
+
+    per_criterion=True additionally grades each nonzero-weight criterion
+    from rubric_field separately: grade receives the original row with that
+    field replaced by [[criterion, 1.0]]. The grade function MUST honor this
+    substituted rubric; set per_criterion=False for an opaque reward that
+    ignores it. Negative weights are preserved as metadata, not used in
+    isolated scoring. criterion_epsilon defaults to epsilon. Missing rubrics
+    and zero weights are counted separately. This adds (k + 1) * repeats
+    grade calls per nonzero criterion, with the same cache bypass. Full-rubric
+    and isolated grades are independent draws, so noise can make them differ.
+
+    Samples keep original row indices; no rows are removed or changed.
+    report.sensitive_criteria() returns ranked criterion entries with row,
+    index, exact criterion, weight, paired texts, raw scores and repeat noise.
+    Use verified_only=True to select only independently accepted comparisons.
 
     Returns:
         A serializable report with paired texts, scores, omissions, errors,
@@ -127,11 +246,48 @@ def rubric_sensitivity(
         raise ValueError("epsilon must be finite and nonnegative")
     if n is not None and (isinstance(n, bool) or not isinstance(n, int) or n < 1):
         raise ValueError("n must be a positive integer or None")
+    criterion_epsilon = epsilon if criterion_epsilon is None else criterion_epsilon
+    if not math.isfinite(criterion_epsilon) or criterion_epsilon < 0:
+        raise ValueError("criterion_epsilon must be finite and nonnegative")
     picked = _sample_rows(len(rows), n, seed)
     sample = [rows[i] for i in picked]
     report = RubricSensitivityReport(
-        n_rows=len(rows), rows=picked, epsilon=epsilon, repeats=repeats
+        n_rows=len(rows),
+        rows=picked,
+        epsilon=epsilon,
+        repeats=repeats,
+        per_criterion=per_criterion,
+        criterion_epsilon=criterion_epsilon,
     )
+    # Validate the criterion schema before any model calls. A missing rubric
+    # is allowed for generic grade functions, but never counted as stable.
+    criterion_jobs = []
+    if per_criterion:
+        for i, row in enumerate(sample):
+            rubric = row.get(rubric_field)
+            if rubric is None:
+                report.rows_without_rubric.append(picked[i])
+                continue
+            if not isinstance(rubric, (list, tuple)):
+                raise TypeError(f"row {picked[i]}: rubric must be a sequence of pairs")
+            for ci, entry in enumerate(rubric):
+                if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+                    raise ValueError(
+                        f"row {picked[i]} criterion {ci}: expected [criterion, weight]"
+                    )
+                criterion, weight = entry
+                if (
+                    isinstance(weight, bool)
+                    or not isinstance(weight, (int, float))
+                    or not math.isfinite(weight)
+                ):
+                    raise ValueError(
+                        f"row {picked[i]} criterion {ci}: weight must be finite"
+                    )
+                if weight == 0:
+                    report.zero_weight_criteria += 1
+                    continue
+                criterion_jobs.append((i, ci, criterion, float(weight)))
     if model is not None:
         # Avoid writing even a temporary output field into the caller's rows.
         inputs = []
@@ -226,6 +382,72 @@ def rubric_sensitivity(
         report.verified_tie_rate = 1 - sum(p.changed is True for p in verified) / len(
             verified
         )
+    report.rubric_pair_changes, report.rubric_changes = _pair_and_row_rates(
+        report.pairs
+    )
+    (
+        report.verified_rubric_pair_changes,
+        report.verified_rubric_changes,
+    ) = _pair_and_row_rates(report.pairs, True)
+    if criterion_jobs:
+        isolated = [
+            {**sample[i], rubric_field: [[criterion, 1.0]]}
+            for i, _, criterion, _ in criterion_jobs
+        ]
+        criterion_scores, criterion_errors = _grade_column(
+            isolated,
+            [texts[i] for i, _, _, _ in criterion_jobs],
+            grade=grade,
+            workers=workers,
+            _no_cache=True,
+        )
+        # Reuse each response pair's equivalence verdict; never ask a separate
+        # equivalence judge for each rubric criterion.
+        reviews = {(p.row, p.candidate): p.equivalent for p in report.pairs}
+        for job, values, messages in zip(
+            criterion_jobs, criterion_scores, criterion_errors
+        ):
+            i, ci, criterion, weight = job
+            entry = CriterionSensitivity(
+                row=picked[i], index=ci, criterion=criterion, weight=weight
+            )
+            groups = [values[j : j + repeats] for j in range(0, len(values), repeats)]
+            for group in groups:
+                complete = _complete(group)
+                if complete is not None and repeats > 1:
+                    entry.identical_response_gaps.append(max(complete) - min(complete))
+            for candidate, group in zip(candidates[i], groups[1:]):
+                pair = SensitivityPair(
+                    row=picked[i],
+                    original=str(texts[i][0]),
+                    candidate=candidate,
+                    original_scores=groups[0],
+                    candidate_scores=group,
+                    equivalent=reviews[(picked[i], candidate)],
+                )
+                a, b = _complete(groups[0]), _complete(group)
+                if a is not None and b is not None:
+                    pair.gap = mean(b) - mean(a)
+                    pair.changed = abs(pair.gap) > criterion_epsilon
+                entry.pairs.append(pair)
+            entry.errors = [m for m in messages if m is not None]
+            entry.pair_changes = _pair_and_row_rates(entry.pairs)[0]
+            entry.verified_pair_changes = _pair_and_row_rates(entry.pairs, True)[0]
+            report.criteria.append(entry)
+        report.criterion_changes = _rate(
+            [
+                c.pair_changes.changed > 0
+                for c in report.criteria
+                if c.pair_changes.compared
+            ]
+        )
+        report.verified_criterion_changes = _rate(
+            [
+                c.verified_pair_changes.changed > 0
+                for c in report.criteria
+                if c.verified_pair_changes.compared
+            ]
+        )
     noise = report.identical_response_gaps
     noise_text = (
         f"mean range {mean(noise):.3g}, max {max(noise):.3g}, "
@@ -247,6 +469,35 @@ def rubric_sensitivity(
         ),
         _console(),
     )
+    for label, rate in (
+        ("Rubric–paraphrase pairs", report.rubric_pair_changes),
+        ("Rubrics with any changed paraphrase", report.rubric_changes),
+        ("Criteria with any changed paraphrase", report.criterion_changes),
+    ):
+        percentage = (
+            f"{100 * rate.fraction:.1f}%"
+            if rate.fraction is not None
+            else "not measured"
+        )
+        _emit(
+            Text(f"{label}: {rate.changed}/{rate.compared} ({percentage})"), _console()
+        )
+    _emit(
+        Text(
+            f"Criterion coverage: {len(report.criteria)} nonzero-weight criteria; "
+            f"{len(report.rows_without_rubric)} rows without rubric; "
+            f"{report.zero_weight_criteria} zero-weight criteria skipped."
+        ),
+        _console(),
+    )
+    for criterion in report.sensitive_criteria()[:3]:
+        _emit(
+            Text(
+                f"Sensitive criterion: row {criterion.row}, index {criterion.index}, "
+                f"weight {criterion.weight:g}: {str(criterion.criterion)[:240]}"
+            ),
+            _console(),
+        )
     largest = sorted(eligible, key=lambda p: abs(p.gap or 0), reverse=True)[:3]
     for pair in largest:
         # Keep full text in the returned report; terminal examples stay short.
