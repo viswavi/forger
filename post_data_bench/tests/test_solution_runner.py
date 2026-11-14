@@ -119,6 +119,26 @@ class ScoreTargetsTests(unittest.TestCase):
         )
         self.assertEqual(scores[1]["score"], 0.0)
 
+    def test_negative_code_criterion_subtracts(self):
+        """A met negative-weight code criterion lowers the score.
+
+        prompt_weight counts only positive weight.
+        """
+        always = "def grade(p, r, g):\n    return 1.0"
+        row = {
+            "prompt": "Double it",
+            "ground_truth": target(DOUBLE),
+            "rubric": [
+                [{"code": GRADE}, 4.0],
+                [{"code": always}, -1.0],
+                [{"prompt": "Mistake?"}, -3.0],
+            ],
+        }
+        self.assertEqual(
+            score_targets([row])[0],
+            {"score": 0.75, "criteria": [1.0, 1.0, None], "prompt_weight": 0},
+        )
+
 
 class RubricVerifierTests(unittest.TestCase):
     """rubric_verifier grades a sampled response with the row's own rubric."""

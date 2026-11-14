@@ -50,6 +50,23 @@ def score(value):
     return float(value)
 
 
+def weighted_score(pairs):
+    """The rubric score of (weight, criterion score) pairs, clipped to [0, 1].
+
+    The weighted sum over every pair divided by the sum of the positive weights,
+    so a negative-weight criterion subtracts its weight times how fully the
+    response does what it describes. E.g. [(3, 1.0), (1, 0.0), (-2, 1.0)] gives
+    (3 - 2) / 4 = 0.25. None when no pair has a positive weight. Callers leave
+    out unscored criteria (e.g. ones the content filter blocked).
+    """
+    pairs = list(pairs)
+    positive = sum(weight for weight, _ in pairs if weight > 0)
+    if positive <= 0:
+        return None
+    total = sum(weight * value for weight, value in pairs)
+    return min(1.0, max(0.0, total / positive))
+
+
 @lru_cache(maxsize=128)
 def validate_code(source):
     """Check the declared executor interface without importing or running code."""
@@ -155,7 +172,12 @@ MAX_INSTRUCTIONS = 4000
 
 
 def validate_rubric(rubric):
-    """Validate criterion variants, code signatures and positive total weight."""
+    """Validate criterion variants, code signatures and weights.
+
+    Weights may be negative (a criterion describing a mistake, e.g. "Recommends
+    aspirin for a child" with weight -5); the positive weights must have a
+    finite, positive sum.
+    """
     if not isinstance(rubric, list) or not rubric:
         raise ValueError("rubric must be a nonempty list of [criterion, weight] pairs")
     total = 0.0
@@ -199,17 +221,16 @@ def validate_rubric(rubric):
             isinstance(weight, bool)
             or not isinstance(weight, (int, float))
             or not math.isfinite(weight)
-            or weight < 0
         ):
-            raise ValueError("weights must be finite, nonnegative numbers")
+            raise ValueError("weights must be finite numbers")
         if "code" in criterion:
             try:
                 validate_code(criterion["code"])
             except ValueError as exc:
                 raise ValueError(f"criterion {number}: {exc}") from exc
-        total += weight
+        total += max(weight, 0)
     if not math.isfinite(total) or total <= 0:
-        raise ValueError("rubric weights must have a finite, positive sum")
+        raise ValueError("the positive rubric weights must have a finite, positive sum")
     return rubric
 
 
