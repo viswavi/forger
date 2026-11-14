@@ -195,7 +195,8 @@ rubrics = generate_custom_rubric(
 Pass `prompt_criterion_options` to give every prompted criterion your judge's per-criterion options, instead of
 editing the rows afterwards. Its keys are merged into each `{"prompt": ...}` criterion; code criteria are unchanged,
 and it may not set `prompt` or `code`. It is applied after the cached conversion, so changing it reruns no model calls.
-`convert_rubric_criteria` takes it too.
+`convert_rubric_criteria` takes it too. The conversion treats each prompted criterion as a yes/no question; a judge
+that accepts a scale option can be given one here, e.g. `{"scale": "likert"}` for a 1-to-5 rating.
 
 ```python
 rubrics = generate_custom_rubric(
