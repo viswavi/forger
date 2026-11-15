@@ -117,6 +117,16 @@ kept = filter.by_llm_score(
 )
 ```
 
+To judge one field on its own, leave out `input_field`: the prompt then shows only the output, e.g. generated user
+messages scored for realism:
+
+```python
+kept = filter.by_llm_score(rows, model=judge, output_field="message", criteria="reads like a message a real user sends")
+```
+
+Passing the same field as both `input_field` and `output_field` raises `ValueError`: the judge would read the output as
+a copy of its input and score it low.
+
 Failures and parsing (the first holds for every LLM filter):
 
 - An unparseable answer, a request that still fails after retries (504, timeout), or a row error (content filter,
