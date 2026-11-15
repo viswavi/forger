@@ -536,11 +536,20 @@ class _SpendProjection:
     that would fit, e.g. 3 long answers in the first 20 of 400. The batch is
     also sent in a fixed shuffled order (``_send_order``), so rows sorted by
     difficulty do not all come first.
+
+    At that same point it logs one "Cost estimate" line for the whole batch
+    when the batch will likely cost at least $1 (1M token units for a model
+    without prices); see ``_estimate_line``. ``enforce=False``
+    (``FORGER_PROJECT_SPEND=0``) keeps the estimate but never stops the batch.
     """
 
-    def __init__(self, model: Model, total: int, shuffle: bool = True) -> None:
+    def __init__(
+        self, model: Model, total: int, shuffle: bool = True, enforce: bool = True
+    ) -> None:
         self.model = model
         self.total = total
+        self.enforce = enforce
+        self.estimated = False
         # Send in _send_order; pointless for the parts of a single prompt.
         self.shuffle = shuffle
         self.done = 0
@@ -555,7 +564,7 @@ class _SpendProjection:
         self.where = _tracking.spend_where()
 
     def add(self, completions: int, cost: float, units: float) -> None:
-        """Count one finished request."""
+        """Count one finished request; log the batch's cost estimate once."""
         units = units if math.isfinite(units) else 0.0
         with self.lock:
             self.done += completions
@@ -565,6 +574,53 @@ class _SpendProjection:
             if completions:
                 self.cost_sq += cost * cost / completions
                 self.units_sq += units * units / completions
+            due = not self.estimated and self._sampled(self.done, self.requests)
+            if due:
+                self.estimated = True
+                line = self._estimate_line()
+        if due and line is not None and _tracking._spend_logging():
+            _logger.info(line)
+
+    def _sampled(self, done: int, requests: int) -> bool:
+        """True once enough of the batch finished to project the rest."""
+        return (
+            requests >= _PROJECT_MIN_DONE
+            and done >= _PROJECT_MIN_SHARE * self.total
+            and done < self.total
+        )
+
+    def _estimate_line(self) -> str | None:
+        """E.g. "Cost estimate: filter.x in step y: the first 102 of 2,040 ...".
+
+        None below $1 (1M token units without prices). Callers hold ``lock``.
+        """
+        done, requests, rest = self.done, self.requests, self.total - self.done
+        if self.cost > 0:
+            spent, spent_sq, unit = self.cost, self.cost_sq, "usd"
+            if spent * self.total / done < _tracking._SPEND_LOG_FIRST_USD:
+                return None
+        else:
+            spent, spent_sq, unit = self.units, self.units_sq, "units"
+            if spent * self.total / done < _tracking._SPEND_LOG_FIRST_UNITS:
+                return None
+        whole = spent * self.total / done
+        low = spent + rest * self._low(spent, spent_sq, done, requests)
+        line = (
+            f"Cost estimate: {self.where}: the first {done:,} of {self.total:,} "
+            f"completions cost {_fmt_spend(spent, unit)}, so all {self.total:,} "
+            f"will likely cost about {_fmt_spend(whole, unit)}"
+        )
+        if _fmt_spend(low, unit) != _fmt_spend(whole, unit):
+            line += f" (at least {_fmt_spend(low, unit)})"
+        if unit == "usd" and self.units:
+            line += f", {_fmt_spend(self.units * self.total / done, 'units')}"
+        budget = self.model._token_budget
+        if budget is not None:
+            left = budget.snapshot()["remaining_token_units"]
+            line += (
+                f"; the token-unit quota has {_fmt_spend(max(left, 0.0), 'units')} left"
+            )
+        return line + "."
 
     def _low(self, spent: float, spent_sq: float, done: int, requests: int) -> float:
         """95% lower bound of the cost per completion (requests as the samples)."""
@@ -574,6 +630,8 @@ class _SpendProjection:
 
     def check(self) -> None:
         """Raise ``SpendProjectionError`` if the rest of the batch would pass a cap."""
+        if not self.enforce:
+            return
         with self.lock:
             if self.error is not None:
                 raise self.error
@@ -584,11 +642,9 @@ class _SpendProjection:
                 self.units,
             )
             sums_sq = {"usd": self.cost_sq, "units": self.units_sq}
-        if requests < _PROJECT_MIN_DONE or done < _PROJECT_MIN_SHARE * self.total:
+        if not self._sampled(done, requests):
             return
         rest = self.total - done
-        if rest <= 0:
-            return
         headroom = _tracking.cap_headroom()
         budget = self.model._token_budget
         if budget is not None:
@@ -2155,8 +2211,10 @@ class Model:
         # Workers copy this context, so their requests see the projection.
         weight = sum(size for _, size in requests)
         projection = (
-            _SpendProjection(self, weight, shuffle=len(prompts) > 1)
-            if _projecting() and weight >= _PROJECT_MIN_TOTAL
+            _SpendProjection(
+                self, weight, shuffle=len(prompts) > 1, enforce=_projecting()
+            )
+            if weight >= _PROJECT_MIN_TOTAL
             else None
         )
         projection_token = _PROJECTION.set(projection)

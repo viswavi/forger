@@ -195,6 +195,14 @@ them, and score lists of over 100,000 rows, have none: rerun with `_no_cache=Tru
   look typical. Finished requests are in the request cache, so after making the op cheaper (fewer samples or judges,
   a cheaper model, shorter outputs, fewer rows) the rerun does not pay for them again. `FORGER_PROJECT_SPEND=0`
   turns the check off.
+- Cost estimates: every uncached batch of 40+ model completions (an op sends all its prompts as one batch) logs
+  one line once 5% of it (at least 10 requests) has finished, if the whole batch will likely cost $1 or more (1M
+  token units for a model without prices), e.g. "Cost estimate: filter.by_topic_frequency in step balance: the
+  first 102 of 2,040 completions cost $0.21, so all 2,040 will likely cost about $4.20 (at least $3.80), 9,800,000
+  token units; the token-unit quota has 130,000,000 token units left." Rows answered from the request cache are not
+  sent and not counted, and a cached op sends nothing. The estimate assumes the rest of the batch costs what its
+  first completions did; the batch is sent in shuffled order so they are a fair sample. It is logged also with
+  `FORGER_PROJECT_SPEND=0`, which only stops the spend projection from raising.
 - Live spend: while a step runs, it logs a line each time its spend first reaches $1, $2, $5, $10, $20, $50, ...,
   e.g. "Spend so far: step balance $5.03 (2,104,511 token units, 812 calls, 3m 10s); now in
   filter.by_topic_frequency, $4.80 (...); pipeline main $31.20 in all. Next line at $10." An op called outside a

@@ -318,14 +318,18 @@ completion(model='litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731')
         self.assertNotIn(helper, prompts["coding/FORGER_PROMPT.txt"])
         self.assertIn(helper, prompts["coding/minimal_scaffold_prompt.txt"])
         self.assertIn(helper, prompts["culture/FORGER_PROMPT.txt"])
-        # Both coding scaffolds share the operational contract verbatim.
+        # Both coding scaffolds share the operational contract verbatim, but
+        # only Native is told that unused generation quota is lost.
+        lost = "- Generation quota left unused when the session ends is simply lost.\n"
+        self.assertNotIn(lost, prompts["coding/FORGER_PROMPT.txt"])
+        self.assertIn(lost, prompts["coding/minimal_scaffold_prompt.txt"])
         for start, stop in (
             ("# Data Format", "# LLM API Usage"),
             ("# Training and Validation", "# High-Level Approach"),
             ("# High-Level Approach", "# Scaffold"),
         ):
             sections = {
-                text[text.index(start) : text.index(stop)]
+                text[text.index(start) : text.index(stop)].replace(lost, "")
                 for name, text in prompts.items()
                 if name.startswith("coding/")
             }

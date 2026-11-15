@@ -109,3 +109,41 @@ def test_batch_spend_text():
     finally:
         model_mod._PROJECTION.reset(token)
     assert model_mod._batch_spend() == ""
+
+
+@pytest.fixture
+def model_lines(caplog):
+    """INFO messages of the model module's logger."""
+    caplog.set_level(logging.INFO, logger=model_mod._logger.name)
+    return lambda: [
+        r.getMessage() for r in caplog.records if r.name == model_mod._logger.name
+    ]
+
+
+class _NoBudget:
+    _token_budget = None
+
+
+def test_cost_estimate_logged_once_after_five_percent(model_lines, monkeypatch):
+    """A batch likely to cost $1+ logs one estimate once 5% (10+ requests) finished."""
+    monkeypatch.delenv("FORGER_SPEND_LOG", raising=False)
+    projection = model_mod._SpendProjection(_NoBudget(), total=400, enforce=False)
+    for _ in range(19):
+        projection.add(1, 0.01, 2500.0)
+    assert not [m for m in model_lines() if m.startswith("Cost estimate")]
+    for _ in range(30):
+        projection.add(1, 0.01, 2500.0)
+    lines = [m for m in model_lines() if m.startswith("Cost estimate")]
+    assert lines == [
+        "Cost estimate: this batch: the first 20 of 400 completions cost $0.20, so "
+        "all 400 will likely cost about $4.00, 1,000,000 token units."
+    ]
+
+
+def test_cost_estimate_skipped_under_a_dollar(model_lines, monkeypatch):
+    """A batch likely to cost under $1 logs no estimate."""
+    monkeypatch.delenv("FORGER_SPEND_LOG", raising=False)
+    projection = model_mod._SpendProjection(_NoBudget(), total=400, enforce=False)
+    for _ in range(40):
+        projection.add(1, 0.001, 0.0)
+    assert not [m for m in model_lines() if m.startswith("Cost estimate")]
