@@ -242,7 +242,7 @@ def _check_tested(name: str, fn: Any) -> None:
         "FORGER_LIMIT=3 (a smoke run) or FORGER_LIMIT=50 (a pilot); once a limited "
         "run of the same code finishes, the full run starts. Any edit to the "
         "pipeline, its steps, their helpers, or the prompts and constants they read "
-        "is new code. FORGER_FULL_RUN=1 skips this check."
+        "is new code; sizes passed as arguments are not."
     )
 
 

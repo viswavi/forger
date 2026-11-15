@@ -80,7 +80,8 @@ pay for every row.
 
 A full run of pipeline code that has not finished a limited run refuses to start (`UntestedFullRunError`). Once a
 limited run of the same code finishes, the full run starts. Any edit to the pipeline, its steps, their helpers, or the
-prompts and constants they read is new code and needs a new limited run. `FORGER_FULL_RUN=1` skips the check.
+prompts and constants they read is new code and needs a new limited run. Sizes passed as arguments are not, e.g.
+`main(model, n_seeds=2000)` after a pilot of `main(model)`.
 
 - `acquire.sample_from_LLM` (`n`) and `acquire.retrieve*` (`queries`, `n`) also cap their counts. Rows a step builds
   in plain Python (e.g. 1,400 prompts from a list of archetypes, or rows from a dict of row lists) are cut too: an op

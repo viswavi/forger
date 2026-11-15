@@ -12,7 +12,7 @@ ops (typically acquire or alter, then filter) from `list[dict]` rows to rows.
   each, or suppress it with a reason using the flag in brackets at the end of the line, e.g.
   `@step(suppress_truncation_warning="<why these rows are still fine>")`. Dim `INFO:` lines are about the code.
 - Run each new pipeline version with `FORGER_LIMIT=3` first: every op on three rows, in about a minute. A full run of
-  code that has not finished a limited run refuses to start (`FORGER_FULL_RUN=1` skips the check).
+  code that has not finished a limited run refuses to start.
 - A batch of model requests that would not fit a cap or quota stops after about 5% of it (`SpendProjectionError`).
 - `pyforger.inspect.runs()` lists saved runs with rows, cost, step yields and warnings ("Saved pipeline runs" in
   [`inspect.md`](agents/inspect.md)).

@@ -311,7 +311,10 @@ def generate_custom_rubric_criteria(
     Exhaustion raises ValueError with zero-based input indices, rather than
     dropping inputs or disguising generation failures as empty rubrics.
     Provider errors propagate. Successful results are cached by ``@op``; pass
-    ``_no_cache=True`` to regenerate.
+    ``_no_cache=True`` to regenerate. Each input's first attempt reuses its
+    earlier reply from the request cache, and only retries ask afresh, so
+    calling this again on part of a failed batch pays only for the inputs that
+    failed.
 
     These are textual rubrics, not full RL training rows. The RL dataset adapter
     must wrap each criterion as {"prompt": text} (or convert it to code), supply
@@ -355,7 +358,7 @@ def generate_custom_rubric_criteria(
     )
     results: list[list[tuple[str, float]]] = [[] for _ in inputs]
     pending = list(range(len(inputs)))
-    for _ in range(max_retries + 1):
+    for attempt in range(max_retries + 1):
         if not pending:
             break
         rows = generate_from_context(
@@ -366,9 +369,12 @@ def generate_custom_rubric_criteria(
             temperature=temperature,
             max_retries=0,
             batch_size=batch_size,
-            # This op owns retries and caching, including nested validation.
-            # A retry must not replay the previous malformed response from cache.
-            _no_cache=True,
+            # This op owns retries. A first attempt reads the request cache, so
+            # inputs asked before (e.g. the rest of a chunk retried without one
+            # failing input) cost nothing. A retry skips it, so it gets a fresh
+            # reply rather than the malformed one, and stores that reply in the
+            # input's slot for later calls to reuse.
+            _no_cache=attempt > 0,
         )
         next_pending = []
         for i, row in zip(pending, rows):
@@ -581,7 +587,7 @@ def _convert_rubric_criteria(
     prompt = _prompt_builder(_conversion_prompt, code_criteria_only, code_guidelines)
     omitted: set[tuple[int, int]] = set()
     pending = list(range(len(items)))
-    for _ in range(max_retries + 1):
+    for attempt in range(max_retries + 1):
         if not pending:
             break
         rows = generate_from_context(
@@ -592,7 +598,9 @@ def _convert_rubric_criteria(
             temperature=temperature,
             max_retries=0,
             batch_size=batch_size,
-            _no_cache=True,
+            # As in generate_custom_rubric_criteria: only retries skip the
+            # request cache.
+            _no_cache=attempt > 0,
         )
         retry = []
         for offset, k in enumerate(pending):
