@@ -85,6 +85,8 @@ whole batch will likely cost $1 or more, e.g. "Cost estimate: filter.by_topic_fr
 102 of 2,040 completions cost $0.21, so all 2,040 will likely cost about $4.20". While a step runs, a `Spend so far`
 line appears each time its spend first reaches $1, $2, $5, $10, ..., and a batch's 30-second progress lines repeat
 its projected total. `FORGER_SPEND_LOG=0` turns these lines off.
+A full run of pipeline code that has not finished a limited run (`FORGER_LIMIT=3` or `50`) refuses to start;
+`FORGER_FULL_RUN=1` skips that check (see "Limited runs" in `pipelines.md`).
 `reset_history()` resets the model's view, but never resets a configured shared quota.
 Cached `@op` results do not make API calls and do not consume the quota again.
 

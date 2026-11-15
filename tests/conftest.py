@@ -21,6 +21,9 @@ def _isolate_op_cache(tmp_path, monkeypatch):
     This means that every test starts with a clean cache.
     """
     monkeypatch.setenv("FORGER_CACHE", str(tmp_path))
+    # Tests run pipelines at full size without a limited run first; the
+    # check that refuses that has its own tests (test_untested_full_run.py).
+    monkeypatch.setenv("FORGER_FULL_RUN", "1")
     clear_trace()
     yield
 
