@@ -93,7 +93,7 @@ from pyforger._tracking import (
     UsageTotals,
 )
 from pyforger.op import UNSEEDED_HASH, _cache_dir, op
-from pyforger.utils import calls_unseeded_hash, get_formatted_logger
+from pyforger.utils import _helper_key, calls_unseeded_hash, get_formatted_logger
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -204,6 +204,58 @@ def saved_step_records() -> dict[str, StepRecord]:
         records.pop(rec.name, None)
         records[rec.name] = rec
     return records
+
+
+class UntestedFullRunError(RuntimeError):
+    """A full run of pipeline code that never finished a limited run."""
+
+
+def _full_run_ok() -> bool:
+    return os.environ.get("FORGER_FULL_RUN", "").strip().lower() in ("1", "true", "yes")
+
+
+def _code_key(fn: Any) -> str:
+    """A hash of a pipeline's code, as ``@op`` keys functions.
+
+    It covers the pipeline's body, the steps and helpers it calls, and the
+    plain-data globals they read (prompts, constants).
+    """
+    try:
+        key: Any = _helper_key(fn)
+    except Exception:  # noqa: BLE001 - fall back to the name
+        key = getattr(fn, "__qualname__", repr(fn))
+    return hashlib.sha256(repr(key).encode()).hexdigest()[:20]
+
+
+def _limited_marker(name: str, code: str) -> Path:
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", name)[:80]
+    return _cache_dir() / "limited_runs" / f"{safe}-{code}.json"
+
+
+def _check_tested(name: str, fn: Any) -> None:
+    """Refuse a full run of code with no finished limited run (see ``pipeline``)."""
+    if _full_run_ok() or _limited_marker(name, _code_key(fn)).exists():
+        return
+    raise UntestedFullRunError(
+        f"pipeline {name}: this code has not finished a limited run, so a full run "
+        "would find its bugs at full size and full cost. Run it first with "
+        "FORGER_LIMIT=3 (a smoke run) or FORGER_LIMIT=50 (a pilot); once a limited "
+        "run of the same code finishes, the full run starts. Any edit to the "
+        "pipeline, its steps, their helpers, or the prompts and constants they read "
+        "is new code. FORGER_FULL_RUN=1 skips this check."
+    )
+
+
+def _mark_tested(name: str, fn: Any, limit: int) -> None:
+    """Record that a limited run of this code finished. Never raises."""
+    path = _limited_marker(name, _code_key(fn))
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"limit": limit, "finished": time.strftime("%Y-%m-%d %H:%M:%S")})
+        )
+    except OSError as exc:
+        _logger.debug("could not record the limited run of %s: %s", name, exc)
 
 
 class PipelineContractError(RuntimeError):
@@ -1210,6 +1262,8 @@ def pipeline(
                 smoke_rows=(limit or None) if limit is not None else _env_smoke(),
                 started_at=time.strftime("%Y-%m-%d %H:%M:%S"),
             )
+            if rec.smoke_rows is None:
+                _check_tested(pipeline_name, fn)
             start = time.perf_counter()
 
             def on_dynamic_step(step_rec: StepRecord) -> None:
@@ -1235,6 +1289,8 @@ def pipeline(
                 _SUBMITTED.reset(submitted_token)
                 _tracking.exit_pipeline(scope)
             rec.duration_s = time.perf_counter() - start
+            if rec.smoke_rows is not None:
+                _mark_tested(pipeline_name, fn, rec.smoke_rows)
             _check_pipeline(rec)
             _suppress_pipeline(rec, suppress)
             _tracking.store_pipeline(rec)
