@@ -83,7 +83,6 @@ After your session ends, the host freezes your selected final RL checkpoint and 
 {BACKEND_BUDGET}
 - You have {JUDGE_TOKEN_UNIT_LIMIT} token units of compute ({JUDGE_USAGE_PATH}) strictly for the judge, to use only if absolutely needed; they are shared by all your judge experiments, RL runs, and validation evaluations. Exhausting it stops RL at its latest checkpoint. In-flight judge calls count at their worst case (prompt plus 4,096 output tokens) until they return, so many concurrent judge calls can stop RL before `token_units` alone reaches the quota. Judge credentials are `LITELLM_JUDGE_API_KEY` (and `LITELLM_JUDGE_BASE_URL`, defaulting to `LITELLM_BASE_URL`). For your own judge calls, use `completion` or `acompletion` from `rl.token_budget` (in {TASK_DIR}) with budget="judge"; they load the judge credentials and record usage. JUDGE_MODEL is litellm_proxy/azure_ai/DeepSeek-V4.1-Flash (1 judge unit per input token, 3 per output token), with reasoning effort JUDGE_REASONING_EFFORT (default none for this task).
 - Validation evaluations grade with this judge and quota: DeepSeek-V4.1-Flash with the evaluation grader's prompt. The secret test set is graded by a different, stronger model with the same prompt. FYI, given the size of the validation set, one validation evaluation with 8 answers per chat makes 1,552 grader calls (one per criterion of each answer).
-- Generation quota left unused when the session ends is simply lost.
 - Never delete or reset any usage ledger or change its environment settings.
 
 # Final Submission
