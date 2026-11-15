@@ -78,8 +78,11 @@ gets at most 3 rows per rows argument, so every op runs in about a minute and a 
 minutes into the full run. `FORGER_LIMIT=50` is a pilot: it shows each filter's yield and the cost per row before you
 pay for every row.
 
-- Only `acquire.sample_from_LLM` (`n`) and `acquire.retrieve*` (`queries`, `n`) also cap their counts; other ops that
-  make rows from nothing still make all of them.
+- `acquire.sample_from_LLM` (`n`) and `acquire.retrieve*` (`queries`, `n`) also cap their counts. Rows a step builds
+  in plain Python (e.g. 1,400 prompts from a list of archetypes, or rows from a dict of row lists) are cut too: an op
+  the step calls directly takes at most N rows (or as many as the step got, if more) and logs "using the first 3 of
+  its 1,400 input rows; a full run sends all of them, so scale this op's cost by 1,400 / 3". Ops called inside other
+  ops are not cut. Pair an op's results with the rows you passed it, not with a longer list of your own.
 - Outputs are not representative. A yield miss on fewer than 20 rows is only `INFO:`; a step that drops every row is a
   warning, since later steps then check nothing.
 - The full run recomputes every step but reuses the limited run's completions from the request cache, e.g.

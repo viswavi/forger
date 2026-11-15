@@ -790,6 +790,11 @@ _ACTIVE_FLOW: ContextVar[StepFlow | None] = ContextVar(
 )
 
 
+def op_depth() -> int:
+    """How many ops enclose this call: 0 for an op the pipeline code calls itself."""
+    return _OP_DEPTH.get()
+
+
 def active_step() -> StepRecord | None:
     """Return the step currently running in this context, if any."""
     return _ACTIVE_STEP.get()
