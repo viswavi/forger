@@ -78,6 +78,10 @@ gets at most 3 rows per rows argument, so every op runs in about a minute and a 
 minutes into the full run. `FORGER_LIMIT=50` is a pilot: it shows each filter's yield and the cost per row before you
 pay for every row.
 
+A full run of pipeline code that has not finished a limited run refuses to start (`UntestedFullRunError`). Once a
+limited run of the same code finishes, the full run starts. Any edit to the pipeline, its steps, their helpers, or the
+prompts and constants they read is new code and needs a new limited run. `FORGER_FULL_RUN=1` skips the check.
+
 - `acquire.sample_from_LLM` (`n`) and `acquire.retrieve*` (`queries`, `n`) also cap their counts. Rows a step builds
   in plain Python (e.g. 1,400 prompts from a list of archetypes, or rows from a dict of row lists) are cut too: an op
   the step calls directly takes at most N rows (or as many as the step got, if more) and logs "using the first 3 of
