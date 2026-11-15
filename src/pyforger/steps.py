@@ -92,7 +92,7 @@ from pyforger._tracking import (
     StepRecord,
     UsageTotals,
 )
-from pyforger.op import UNSEEDED_HASH, _cache_dir, op
+from pyforger.op import UNSEEDED_HASH, _cache_dir, op, spread_indices
 from pyforger.utils import _helper_key, calls_unseeded_hash, get_formatted_logger
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -593,8 +593,8 @@ def step(
     It returns a list of rows or a dict of named row lists (streams), e.g.
     ``{"train": kept, "refusals": refused}``; each stream gets its own count,
     fields line, and sample rows. In a limited run (``@pipeline(limit=3)`` or
-    ``FORGER_LIMIT=3``) each rows argument is cut to its first 3 rows
-    before the call.
+    ``FORGER_LIMIT=3``) each rows argument is cut to 3 rows spread over it
+    (``pyforger.op.spread_indices``) before the call.
 
     If a parameter or the return value is annotated ``list[X]`` with ``X`` a
     pydantic model, every row must be a dict that validates against ``X``
@@ -937,13 +937,20 @@ def _smoke_cut(
     kwargs: dict,
     limit: int,
 ) -> tuple[tuple, dict, list[tuple[str, str, list[Any]]]]:
-    """Cut each rows argument to its first ``limit`` rows, for a smoke run.
+    """Cut each rows argument to ``limit`` rows spread over it, for a smoke run.
 
-    Returns the step's new ``args``, ``kwargs``, and rows arguments. The rows
-    arguments are the very objects in ``args`` / ``kwargs`` (also each
-    ``*rows`` item), so they are swapped by identity.
+    Rows arguments of the same length are cut at the same positions (those of
+    the first one), so lists that go together stay aligned, e.g. rows and
+    their labels. Returns the step's new ``args``, ``kwargs``, and rows
+    arguments. The rows arguments are the very objects in ``args`` /
+    ``kwargs`` (also each ``*rows`` item), so they are swapped by identity.
     """
-    cut = {id(rows): rows[:limit] for _, _, rows in row_args if len(rows) > limit}
+    keep: dict[int, list[int]] = {}  # length -> positions
+    cut = {}
+    for _, _, rows in row_args:
+        if len(rows) > limit:
+            positions = keep.setdefault(len(rows), spread_indices(rows, limit))
+            cut[id(rows)] = [rows[i] for i in positions]
     if not cut:
         return args, kwargs, row_args
     return (

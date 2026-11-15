@@ -11,6 +11,7 @@ from fixtures import MockModel
 
 from pyforger import _tracking, alter, filter, op
 from pyforger.acquire import Model, retrieve_from_s2, retrieve_from_web, sample_from_LLM
+from pyforger.op import spread_indices
 from pyforger.steps import pipeline, render_pipeline, render_step, step
 
 BANNER = (
@@ -30,6 +31,15 @@ def _quiet_and_fresh(monkeypatch):
 
 def _rows(n: int, start: int = 0) -> list[dict]:
     return [{"id": i, "text": f"row number {i}"} for i in range(start, start + n)]
+
+
+def _kept(rows: list[Any], limit: int) -> list[Any]:
+    """The rows a limited run keeps of `rows`."""
+    return [rows[i] for i in spread_indices(rows, limit)]
+
+
+def _ids(rows: list[dict], limit: int) -> list[int]:
+    return [r["id"] for r in _kept(rows, limit)]
 
 
 SEEN: list[int] = []  # rows each _tag call got
@@ -64,7 +74,7 @@ def _last() -> _tracking.PipelineRecord:
     return rec
 
 
-def test_step_inputs_are_cut_to_the_first_rows():
+def test_step_inputs_are_cut_to_rows_spread_over_them():
     """Each rows argument is cut, also *rows items and keyword rows."""
     SEEN.clear()
 
@@ -75,14 +85,15 @@ def test_step_inputs_are_cut_to_the_first_rows():
 
     out = build()
     assert SEEN == [3, 3 + 3 + 1 + 3]
-    assert [r["id"] for r in out] == [0, 1, 2, 10, 11, 12, 20, 30, 31, 32]
+    expected = _ids(_rows(10), 3) + _ids(_rows(5, 10), 3) + [20] + _ids(_rows(4, 30), 3)
+    assert [r["id"] for r in out] == expected
     rec = _last()
     assert rec.smoke_rows == 3
     first, second = rec.steps
     assert (first.n_in, first.smoke_n_in, first.smoke_rows) == (3, 10, 3)
     assert [s.n_rows for s in second.inputs] == [3, 3, 1, 3]
     assert second.smoke_n_in == 3 + 5 + 1 + 4
-    assert "LIMIT: first 3 of 10 rows" in render_step(first)
+    assert "LIMIT: 3 of 10 rows" in render_step(first)
     # The cut is not shown as rows dropped in plain Python between steps.
     assert rec.python_gaps == []
 
@@ -118,7 +129,7 @@ def test_smoke_yield_miss_is_a_suggestion(monkeypatch, capsys):
 
     @pipeline(smoke=3)
     def build() -> list[dict]:
-        return picky(UNEVEN)
+        return picky(UNEVEN[:3])  # 3 rows: nothing to cut, so the yield is 0.33
 
     assert [r["id"] for r in build()] == [0]
     rec = _last()
@@ -194,7 +205,10 @@ def test_limited_yield_miss_on_enough_rows_is_a_warning():
 
     build()
     (only,) = _last().steps
-    assert only.warnings == ["filter.by_length: yield 0.33 below min_yield 0.90"]
+    share = sum(r["text"] == "a longer text" for r in _kept(many, 30)) / 30
+    assert only.warnings == [
+        f"filter.by_length: yield {share:.2f} below min_yield 0.90"
+    ]
 
 
 def test_limited_step_that_drops_every_row_warns():
@@ -232,7 +246,7 @@ def test_sample_from_llm_count_is_capped():
 
 
 def test_retrieval_queries_and_count_are_capped():
-    """Only the first 3 queries run, each with n capped to 3."""
+    """3 of the 5 queries run, spread over the list, each with n capped to 3."""
     calls: list[tuple[Any, int]] = []
 
     def fetch(self, mode, *, query=None, n=10, seed=None, **kwargs):
@@ -250,7 +264,7 @@ def test_retrieval_queries_and_count_are_capped():
 
     with patch("pyforger.acquire.sources.WebRetrievalSource.fetch", fetch):
         out = build()
-    assert calls == [("a", 3), ("b", 3), ("c", 3)]
+    assert calls == [(q, 3) for q in _kept(["a", "b", "c", "d", "e"], 3)]
     assert len(out) == 3  # the next step's input is cut too
 
 
@@ -275,7 +289,7 @@ def test_concurrent_s2_queries_and_count_are_capped():
         "pyforger.acquire.sources.S2RetrievalSource._get_client"
     ):
         build()
-    assert sorted(calls) == [("a", 3), ("b", 3), ("c", 3)]
+    assert sorted(calls) == [(q, 3) for q in _kept(["a", "b", "c", "d", "e"], 3)]
 
 
 def test_environment_variable_and_decorator_forms(monkeypatch):
@@ -395,12 +409,14 @@ def test_full_run_after_a_smoke_run_sends_only_new_rows(sent):
         return build(model)
 
     smoke = build_with(2)
-    assert sorted(sent) == [("Say row number 0", 1), ("Say row number 1", 1)]
+    asked = _ids(_rows(5), 2)
+    assert sorted(sent) == [(f"Say row number {i}", 1) for i in asked]
     sent.clear()
     full = build_with(None)
     assert not any(s.cache_hit for s in _last().steps)  # a new step entry
-    assert sorted(sent) == [(f"Say row number {i}", 1) for i in (2, 3, 4)]
-    assert full[:2] == smoke  # the smoke run's completions, reused
+    rest = [i for i in range(5) if i not in asked]
+    assert sorted(sent) == [(f"Say row number {i}", 1) for i in rest]
+    assert [full[i] for i in asked] == smoke  # the smoke run's completions, reused
 
 
 def test_capped_sample_count_keeps_its_samples_for_the_full_run(sent):
@@ -465,11 +481,12 @@ def test_rows_built_in_a_step_are_cut_too(caplog):
     with caplog.at_level("INFO", logger="forger.op"):
         out = build()
     assert SEEN == [3, 3]
-    assert [r["id"] for r in out] == [200, 201, 202]
+    built = [{"id": 200 + i, "text": f"kw {i}"} for i in range(12)]
+    assert [r["id"] for r in out] == _ids(built, 3)
     lines = [r.getMessage() for r in caplog.records if "limited run" in r.getMessage()]
     assert lines[0] == (
-        "alter.test_smoke_tag: limited run: using the first 3 of its 40 input rows; "
-        "a full run sends all of them, so scale this op's cost by 40 / 3"
+        "alter.test_smoke_tag: limited run: using 3 of its 40 input rows, spread over "
+        "the list; a full run sends all of them, so scale this op's cost by 40 / 3"
     )
 
 
@@ -496,3 +513,47 @@ def test_full_run_ops_are_not_cut():
         return build_from_nothing(_rows(2))
 
     assert len(build()) == 40 and SEEN == [40]
+
+
+def test_spread_indices_take_one_row_per_block():
+    """3 of 50 come from the first, middle and last third, in list order."""
+    rows = [{"query": f"q{i}"} for i in range(50)]
+    picks = spread_indices(rows, 3)
+    assert [0 <= picks[0] < 16, 16 <= picks[1] < 33, 33 <= picks[2] < 50] == [True] * 3
+    assert picks == spread_indices(
+        [dict(r) for r in rows], 3
+    )  # by content, not identity
+    assert spread_indices(rows[:2], 3) == [0, 1]
+
+
+def test_rows_written_per_seed_come_from_many_seeds():
+    """12 of 36 chats written 3 per seed come from 12 seeds, not the first 4."""
+    chats = [{"seed": s, "k": k} for s in range(12) for k in range(3)]
+    assert sorted({chats[i]["seed"] for i in spread_indices(chats, 12)}) == list(
+        range(12)
+    )
+
+
+@op(name="alter.test_smoke_pairs", category="alter")
+def _pairs(inputs: list[str], candidates: list[str]) -> list[dict]:
+    assert len(inputs) == len(candidates)
+    return [{"text": i, "candidate": c} for i, c in zip(inputs, candidates)]
+
+
+@step
+def pair_up(rows: list[dict]) -> list[dict]:
+    """Build two aligned lists in Python and pass both to one op."""
+    texts = [f"t{i}" for i in range(20)]
+    return _pairs(texts, [t.upper() for t in texts])
+
+
+def test_aligned_list_arguments_are_cut_at_the_same_positions():
+    """An op's other list arguments of the same length stay aligned with its rows."""
+
+    @pipeline(limit=3)
+    def build() -> list[dict]:
+        return pair_up(_rows(1))
+
+    out = build()
+    assert len(out) == 3
+    assert all(r["candidate"] == r["text"].upper() for r in out)

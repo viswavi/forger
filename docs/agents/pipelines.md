@@ -214,24 +214,28 @@ them, and score lists of over 100,000 rows, have none: rerun with `_no_cache=Tru
   or a missing argument fails at once instead of minutes into the full run. A full run of pipeline code that has not
   finished a limited run refuses to start (`pyforger.steps.UntestedFullRunError`): run `FORGER_LIMIT=3` or
   `FORGER_LIMIT=50` first, and once a limited run of the same code finishes, the full run starts. Any edit to the
-  pipeline, its steps, their helpers, or the prompts and constants they read is new code; sizes passed as arguments
-  are not, e.g. `main(model, n_seeds=2000)` after a pilot of `main(model)`. A larger limit is a pilot:
-  `FORGER_LIMIT=50` shows each filter's yield and the cost per row on a sample before you pay for every row. Inside
-  the pipeline, every `@step` call cuts each rows argument (each of several inputs, `*rows` items too) to its first N
-  rows. These ops also cap their counts: `acquire.sample_from_LLM` (`n`) and
-  `acquire.retrieve` / `retrieve_from_*` (the first N `queries`, `n` at most N). Rows a step builds in plain Python
-  (e.g. 1,400 prompts from a list of archetypes) are cut too: an op the step calls directly takes at most N rows, or as
-  many as the step got if more (a step merging three limited inputs keeps all of them), and logs "using the first 3 of
-  its 1,400 input rows; a full run sends all of them, so scale this op's cost by 1,400 / 3". Ops called inside other ops
-  are not cut. Pair an op's results with the rows you passed it, not with a longer list of your own. Step reports say
-  `LIMIT: first 3 of 120 rows`, and the summary ends with `LIMITED RUN (limit=3): at most 3 rows per step; outputs are
-  not representative`. A step that drops every row of a limited run is a warning, since the steps after it then check
-  nothing. Limited results are cached under keys that include the limit, so a later full run never reads or overwrites
-  them and recomputes every step. A second limited run of the same code reuses them. The request cache is not keyed on
-  the limit, though, so the full run sends no model request the limited run already sent for the same rows:
-  `generate_from_context` asks only about rows 4 onward, and `sample_from_LLM(n=100)` asks for 97 more samples.
-  `limit=0` turns it off even when the variable is set. The old names `@pipeline(smoke=3)` and `FORGER_SMOKE_ROWS=3`
-  still work.
+  pipeline, its steps, their helpers, or the prompts and constants they read is new code; sizes passed as arguments are
+  not, e.g. `main(model, n_seeds=2000)` after a pilot of `main(model)`. A larger limit is a pilot: `FORGER_LIMIT=50`
+  shows each filter's yield and the cost per row on a sample before you pay for every row. Inside the pipeline, every
+  `@step` call cuts each rows argument (each of several inputs, `*rows` items too) to N rows spread over it: the list is
+  split into N equal blocks and each block gives one row, picked by a hash of its content. So 3 of 50 queries grouped by
+  theme come from the first, middle and last third, and 12 of 36 chats written 3 per seed come from 12 seeds, not 4. The
+  same rows always give the same picks, so a rerun or an alternative pipeline sharing a step sees the same rows. These
+  ops also cap their counts: `acquire.sample_from_LLM` (`n`) and `acquire.retrieve` / `retrieve_from_*` (N `queries`,
+  picked the same way, and `n` at most N). Rows a step builds in plain Python (e.g. 1,400 prompts from a list of
+  archetypes) are cut too: an op the step calls directly takes at most N rows, or as many as the step got if more (a
+  step merging three limited inputs keeps all of them), and logs "using 3 of its 1,400 input rows, spread over the list;
+  a full run sends all of them, so scale this op's cost by 1,400 / 3". Its other list arguments of the same length are
+  cut at the same positions, so lists that go together (e.g. `inputs` and `candidate_responses`) stay aligned. Ops
+  called inside other ops are not cut. Pair an op's results with the rows you passed it, not with a longer list of your
+  own. Step reports say `LIMIT: 3 of 120 rows`, and the summary ends with `LIMITED RUN (limit=3): at most 3 rows per
+  step; outputs are not representative`. A step that drops every row of a limited run is a warning, since the steps
+  after it then check nothing. Limited results are cached under keys that include the limit, so a later full run never
+  reads or overwrites them and recomputes every step. A second limited run of the same code reuses them. The request
+  cache is not keyed on the limit, though, so the full run sends no model request the limited run already sent for the
+  same rows: `generate_from_context` asks only about rows 4 onward, and `sample_from_LLM(n=100)` asks for 97 more
+  samples. `limit=0` turns it off even when the variable is set. The old names `@pipeline(smoke=3)` and
+  `FORGER_SMOKE_ROWS=3` still work.
 
 ## Composing a pipeline
 

@@ -1435,9 +1435,9 @@ def _repeated_text(rec: StepRecord | RowStream, label: str = "") -> Text | None:
 
 
 def _smoke_mark(rec: StepRecord) -> str:
-    """``LIMIT: first 3 of 120 rows``, or ``LIMIT: ≤3 rows`` when nothing was cut."""
+    """``LIMIT: 3 of 120 rows``, or ``LIMIT: ≤3 rows`` when nothing was cut."""
     if rec.smoke_n_in is not None and rec.smoke_n_in != rec.n_in:
-        return f"LIMIT: first {fmt_int(rec.n_in)} of {fmt_int(rec.smoke_n_in)} rows"
+        return f"LIMIT: {fmt_int(rec.n_in)} of {fmt_int(rec.smoke_n_in)} rows"
     return f"LIMIT: ≤{rec.smoke_rows} rows"
 
 
