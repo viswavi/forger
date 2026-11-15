@@ -453,7 +453,9 @@ def _watch(
 
     A check warns about stragglers and, with `log`, logs "<desc>: 120/500
     done, 31s", also when nothing finished since the last line. A batch that
-    finishes within the interval logs nothing.
+    finishes within the interval logs nothing. With a spend projection (a
+    batch of 40+ completions), the line adds the batch's spend so far and
+    its projected total, e.g. "$0.42 so far, ~$1.75 for the batch".
     """
     start = time.monotonic()
     next_check = start + _PROGRESS_LOG_INTERVAL_S
@@ -473,12 +475,46 @@ def _watch(
         now = time.monotonic()
         if pending and now >= next_check:
             if log:
-                _logger.info("%s: %s", desc, _done_line(done, total, now - start))
+                _logger.info(
+                    "%s: %s%s",
+                    desc,
+                    _done_line(done, total, now - start),
+                    _batch_spend(),
+                )
                 logged = True
             clock.warn_stragglers(now)
             next_check = now + _PROGRESS_LOG_INTERVAL_S
     if logged:
-        _logger.info("%s: %s", desc, _done_line(done, total, time.monotonic() - start))
+        _logger.info(
+            "%s: %s%s",
+            desc,
+            _done_line(done, total, time.monotonic() - start),
+            _batch_spend(),
+        )
+
+
+def _batch_spend() -> str:
+    """``"; $0.42 so far, ~$1.75 for the batch"`` from the batch's spend projection.
+
+    Token units stand in for dollars when the model has no prices. Empty
+    without a projection or before a completion finished.
+    """
+    projection = _PROJECTION.get()
+    if projection is None:
+        return ""
+    with projection.lock:
+        done, cost, units = projection.done, projection.cost, projection.units
+    if not done:
+        return ""
+    spent, unit = (cost, "usd") if cost > 0 else (units, "units")
+    if not spent:
+        return ""
+    if done >= projection.total:
+        return f"; {_fmt_spend(spent, unit)} for the batch"
+    whole = spent * projection.total / done
+    return (
+        f"; {_fmt_spend(spent, unit)} so far, ~{_fmt_spend(whole, unit)} for the batch"
+    )
 
 
 def _fmt_spend(amount: float, unit: str) -> str:
