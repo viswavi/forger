@@ -604,13 +604,13 @@ def op(
     In a limited run (``@pipeline(limit=3)`` or ``FORGER_LIMIT=3``) the
     cache key also holds the row limit, so limited results never mix with a
     full run's. ``smoke`` names count parameters capped to the limit: an int
-    above it is lowered (``n=100`` → ``n=3``), a list is cut to its first
-    rows, e.g. ``@op(name="acquire.sample_from_LLM", smoke=("n",))``. An op
-    the pipeline code calls itself (not one called by another op) also cuts
-    its first argument, when it is a list, to the limit, so rows built in
-    Python inside a step are limited too (see ``_smoke_rows_cut``). The
-    request cache is not keyed on the limit, so the full run reuses the
-    completions the limited run got for the same rows.
+    above it is lowered (``n=100`` → ``n=3``), a list keeps rows spread over
+    it (see ``spread_indices``), e.g. ``@op(name="acquire.sample_from_LLM",
+    smoke=("n",))``. An op the pipeline code calls itself (not one called by
+    another op) also cuts its first argument, when it is a list, to the
+    limit, so rows built in Python inside a step are limited too (see
+    ``_smoke_rows_cut``). The request cache is not keyed on the limit, so the
+    full run reuses the completions the limited run got for the same rows.
 
     ``report_arg`` names a boolean parameter that, when true, prints the
     histograms of the per-row scores the op recorded (as in a ``@step``
@@ -1158,6 +1158,28 @@ def _check_smoke_params(sig: inspect.Signature | None, smoke: tuple[str, ...]) -
         raise TypeError(f"smoke= names parameters the function lacks: {missing}")
 
 
+def spread_indices(rows: list[Any], limit: int) -> list[int]:
+    """Positions of ``limit`` rows spread over ``rows``, for a limited run.
+
+    The list is split into ``limit`` consecutive blocks of near-equal size,
+    and each block gives the row whose content hashes smallest, e.g. 3 of 50
+    queries grouped by theme come from the first, middle, and last third
+    rather than all from the first theme, and 12 of 36 chats written 3 per
+    seed come from 12 seeds rather than 4. The same rows always give the same
+    positions, so reruns and alternative pipelines sharing a step see the same
+    rows, and the full run reuses their cached completions. Positions are in
+    list order.
+    """
+    total = len(rows)
+    if total <= limit:
+        return list(range(total))
+    out = []
+    for k in range(limit):
+        lo, hi = k * total // limit, (k + 1) * total // limit
+        out.append(min(range(lo, hi), key=lambda i: (_hash(rows[i])[0], i)))
+    return out
+
+
 def _smoke_capped(
     sig: inspect.Signature | None,
     smoke: tuple[str, ...],
@@ -1166,8 +1188,9 @@ def _smoke_capped(
 ) -> tuple[tuple[Any, ...], dict[str, Any]]:
     """Cap the ``smoke`` parameters to the smoke run's row limit, if one is active.
 
-    An int above the limit becomes the limit (``n=100`` → ``n=3``); a list is
-    cut to its first rows. Calls whose arguments do not bind pass unchanged.
+    An int above the limit becomes the limit (``n=100`` → ``n=3``); a list
+    keeps ``limit`` rows spread over it (``spread_indices``). Calls whose
+    arguments do not bind pass unchanged.
     """
     if not smoke or sig is None:
         return args, kwargs
@@ -1184,7 +1207,7 @@ def _smoke_capped(
         if isinstance(value, int) and not isinstance(value, bool) and value > limit:
             bound.arguments[param] = limit
         elif isinstance(value, list) and len(value) > limit:
-            bound.arguments[param] = value[:limit]
+            bound.arguments[param] = [value[i] for i in spread_indices(value, limit)]
     return bound.args, bound.kwargs
 
 
@@ -1201,9 +1224,12 @@ def _smoke_rows_cut(
     "limited" run would pay for all of them. An op called by the pipeline
     code (op depth 0) therefore cuts its first argument, when it is a list
     longer than both the limit and the rows its step got (a step merging three
-    inputs of 3 rows keeps all 9), and logs it, e.g. "using the first 3 of its
-    1,400 input rows". Ops called by other ops keep their rows: the outer op
-    was cut already and may pair its rows with the inner op's results.
+    inputs of 3 rows keeps all 9), to rows spread over it (``spread_indices``),
+    and logs it, e.g. "using 3 of its 1,400 input rows, spread over the list".
+    Every other list argument of the same length is cut at the same positions,
+    so lists that go together stay aligned, e.g. ``inputs`` and
+    ``candidate_responses``. Ops called by other ops keep their rows: the outer
+    op was cut already and may pair its rows with the inner op's results.
     """
     limit = _tracking.smoke_rows()
     if limit is None or _tracking.op_depth() != 0:
@@ -1212,26 +1238,31 @@ def _smoke_rows_cut(
     if step is not None and step.n_in:
         limit = max(limit, step.n_in)
     if args:
-        rows, where = args[0], "args"
+        rows = args[0]
     else:
         first = next(iter(sig.parameters), None) if sig is not None else None
         if first is None or first not in kwargs:
             return args, kwargs
-        rows, where = kwargs[first], first
+        rows = kwargs[first]
     if not isinstance(rows, list) or len(rows) <= limit:
         return args, kwargs
     logger.info(
-        "%s: limited run: using the first %s of its %s input rows; a full run "
-        "sends all of them, so scale this op's cost by %s / %s",
+        "%s: limited run: using %s of its %s input rows, spread over the list; "
+        "a full run sends all of them, so scale this op's cost by %s / %s",
         op_name,
         f"{limit:,}",
         f"{len(rows):,}",
         f"{len(rows):,}",
         f"{limit:,}",
     )
-    if where == "args":
-        return (rows[:limit], *args[1:]), kwargs
-    return args, {**kwargs, where: rows[:limit]}
+    keep = spread_indices(rows, limit)
+    total = len(rows)
+
+    def cut(value: Any) -> Any:
+        aligned = isinstance(value, list) and len(value) == total
+        return [value[i] for i in keep] if aligned else value
+
+    return tuple(cut(a) for a in args), {k: cut(v) for k, v in kwargs.items()}
 
 
 def _failed_call(
