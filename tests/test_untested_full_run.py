@@ -84,3 +84,12 @@ def test_full_run_override(monkeypatch):
     """FORGER_FULL_RUN=1 skips the check."""
     monkeypatch.setenv("FORGER_FULL_RUN", "1")
     assert len(main(ROWS)) == 5
+
+
+def test_a_size_passed_as_an_argument_is_not_new_code(monkeypatch):
+    """A pilot on 5 rows lets the full run on 8 start: rows are arguments."""
+    monkeypatch.setenv("FORGER_LIMIT", "3")
+    main(ROWS)
+    monkeypatch.delenv("FORGER_LIMIT")
+    more = ROWS + [{"text": f"row {i}"} for i in range(5, 8)]
+    assert len(main(more)) == 8

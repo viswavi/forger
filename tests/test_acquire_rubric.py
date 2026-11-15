@@ -210,12 +210,18 @@ def test_missing_model_outputs_are_retried(missing):
 
 
 def test_exhaustion_reports_indices_and_does_not_cache_failure():
-    """Identify exhausted inputs and avoid caching generation failures."""
+    """Identify exhausted inputs; a rerun replays first attempts, retries afresh."""
     model = RecordingMockModel(responses=[encoded(), "bad"])
     for _ in range(2):
         with pytest.raises(ValueError, match=r"input indices \[1\].*1 attempts"):
             generate_custom_rubric_criteria(["first", "second"], model, max_retries=0)
+    # The failure is not cached, but first attempts are: the rerun replays them.
+    assert model._call_count == 1
+    # With a retry, only the failing input is asked again, and fresh.
+    rubrics = generate_custom_rubric_criteria(["first", "second"], model, max_retries=1)
+    assert rubrics == [[], []]
     assert model._call_count == 2
+    assert len(model.recorded_prompts[-1]) == 1
 
 
 @pytest.mark.parametrize(
