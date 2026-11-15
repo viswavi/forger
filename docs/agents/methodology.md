@@ -26,8 +26,10 @@ A small run is also how you learn what the full run will cost. Before scaling up
   measured cost: its full-scale cost is unknown, not zero.
 - From each step's report, take its cost per row and multiply by the rows it will get at full scale, e.g. "seeds: $0.40
   for 50 rows, so about $16 for 2,000". Most ops make a fixed number of calls per row (one per row for
-  `filter.by_topic_frequency`, one per sample and judge for others), so their cost grows with the rows. Add up the
-  steps and compare the total with the quota you have left.
+  `filter.by_topic_frequency`, one per sample and judge for others), so their cost grows with the rows. An op that
+  got more rows than the limit (e.g. rows a step expanded or built itself) was cut, and logged "scale this op's cost
+  by 500 / 50": multiply that op's cost by its factor too. Add up the steps and compare the total with the quota you
+  have left.
 - Models differ in price several times over, and a reasoning model also pays for its reasoning on every call. Price
   each model you will use from calls in the pilot, not from its list price alone.
 - Write the projection in your decision log next to the quota left, and compare it with the step reports after the
