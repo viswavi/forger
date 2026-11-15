@@ -214,10 +214,11 @@ them, and score lists of over 100,000 rows, have none: rerun with `_no_cache=Tru
   or a missing argument fails at once instead of minutes into the full run. A full run of pipeline code that has not
   finished a limited run refuses to start (`pyforger.steps.UntestedFullRunError`): run `FORGER_LIMIT=3` or
   `FORGER_LIMIT=50` first, and once a limited run of the same code finishes, the full run starts. Any edit to the
-  pipeline, its steps, their helpers, or the prompts and constants they read is new code. `FORGER_FULL_RUN=1` skips the
-  check. A larger limit is a pilot: `FORGER_LIMIT=50` shows each filter's yield and the cost per row on a sample before
-  you pay for every row. Inside the pipeline, every `@step` call cuts each rows argument (each of several inputs,
-  `*rows` items too) to its first N rows. These ops also cap their counts: `acquire.sample_from_LLM` (`n`) and
+  pipeline, its steps, their helpers, or the prompts and constants they read is new code; sizes passed as arguments
+  are not, e.g. `main(model, n_seeds=2000)` after a pilot of `main(model)`. A larger limit is a pilot:
+  `FORGER_LIMIT=50` shows each filter's yield and the cost per row on a sample before you pay for every row. Inside
+  the pipeline, every `@step` call cuts each rows argument (each of several inputs, `*rows` items too) to its first N
+  rows. These ops also cap their counts: `acquire.sample_from_LLM` (`n`) and
   `acquire.retrieve` / `retrieve_from_*` (the first N `queries`, `n` at most N). Rows a step builds in plain Python
   (e.g. 1,400 prompts from a list of archetypes) are cut too: an op the step calls directly takes at most N rows, or as
   many as the step got if more (a step merging three limited inputs keeps all of them), and logs "using the first 3 of
