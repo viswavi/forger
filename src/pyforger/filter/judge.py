@@ -53,7 +53,7 @@ def by_llm_score(
     items: list[dict],
     *,
     model: Model,
-    input_field: str,
+    input_field: str | None = None,
     output_field: str,
     score_threshold: int = 4,
     max_score: int = 5,
@@ -72,8 +72,12 @@ def by_llm_score(
 
     The default prompt shows ``criteria``, a rubric with a description for
     every score level, and the input and output inside ``<input>`` and
-    ``<output>`` tags. It asks the judge to write feedback first: every mistake
-    or shortcoming against the criteria, each with the part of the output it
+    ``<output>`` tags. Without ``input_field`` the judge sees the output alone,
+    e.g. ``by_llm_score(rows, model=judge, output_field="chat",
+    criteria="reads like a real user's message")`` scores each chat on its
+    own; ``input_field`` equal to ``output_field`` raises ``ValueError``. It
+    asks the judge to write feedback first: every mistake or shortcoming
+    against the criteria, each with the part of the output it
     concerns and the highest score the rubric allows with it (or, if there are
     none, which parts of the criteria it checked); then the score that feedback
     and the rubric give, as JSON ``{"feedback": "...", "score": 3}``. The
@@ -118,19 +122,19 @@ def by_llm_score(
 
     ``prompt_template`` replaces the default prompt. A string is filled with
     ``str.format_map`` over the row's fields plus ``{input}`` (the
-    ``input_field`` value), ``{output}``, ``{criteria}``, ``{max_score}``, and
-    ``{rubric}`` (the rendered rubric), which win over row fields of the same
-    name (a warning names a row field the template uses that they hide, e.g.
-    a row's own ``criteria``); write literal braces as ``{{`` and ``}}``. A
-    group's prompt also gets
-    ``{candidates}`` (the labelled outputs, also given as ``{output}``),
-    ``{labels}`` (e.g. ``"A, B, C"``), and ``{num_candidates}``. A callable
-    receives that same dict and returns a prompt. If the prompt does not
-    contain the JSON key in double quotes (``"score"``, or ``"candidates"`` for
-    a group), the feedback-then-score answer instruction is appended to it; it
-    refers to the rubric only if the prompt shows ``{rubric}``. With
-    ``group_by``, a template whose own answer format has ``"score"`` but not
-    ``"candidates"`` raises ``ValueError``: the judge must answer per candidate.
+    ``input_field`` value, when given), ``{output}``, ``{criteria}``,
+    ``{max_score}``, and ``{rubric}`` (the rendered rubric), which win over row
+    fields of the same name (a warning names a row field the template uses that
+    they hide, e.g. a row's own ``criteria``); write literal braces as ``{{``
+    and ``}}``. A group's prompt also gets ``{candidates}`` (the labelled
+    outputs, also given as ``{output}``), ``{labels}`` (e.g. ``"A, B, C"``), and
+    ``{num_candidates}``. A callable receives that same dict and returns a
+    prompt. If the prompt does not contain the JSON key in double quotes
+    (``"score"``, or ``"candidates"`` for a group), the feedback-then-score
+    answer instruction is appended to it; it refers to the rubric only if the
+    prompt shows ``{rubric}``. With ``group_by``, a template whose own answer
+    format has ``"score"`` but not ``"candidates"`` raises ``ValueError``: the
+    judge must answer per candidate.
 
     Only the text after a closed ``</think>`` block is read; a response with an
     unclosed ``<think>`` is unparseable. The score comes from the last JSON
@@ -166,6 +170,13 @@ def by_llm_score(
         The kept rows, in input order; unchanged unless ``score_field`` /
         ``explanation_field`` are set.
     """
+    if input_field is not None and input_field == output_field:
+        raise ValueError(
+            f"by_llm_score: input_field and output_field are both "
+            f"{output_field!r}, so the judge would see the same text as input "
+            f"and output and score it as a copy of its input. To judge that "
+            f"field on its own, pass only output_field={output_field!r}."
+        )
     if num_judges < 1:
         raise ValueError("num_judges must be at least 1")
     if not (0.0 < agreement_threshold <= 1.0):
@@ -479,7 +490,7 @@ def _warn_unscored(
 def _warn_shadowed(
     items: list[dict],
     template: JudgePromptTemplate,
-    input_field: str,
+    input_field: str | None,
     output_field: str,
     *,
     grouped: bool,
@@ -495,7 +506,7 @@ def _warn_shadowed(
     own = {"criteria", "max_score"}
     if has_rubric:
         own.add("rubric")
-    if input_field != "input":
+    if input_field is not None and input_field != "input":
         own.add("input")
     if grouped:
         own |= {"candidates", "labels", "num_candidates"}
@@ -681,7 +692,7 @@ _TAGS_ARE_DATA = (
 
 def _score_prompt(
     item: dict,
-    input_field: str,
+    input_field: str | None,
     output_field: str,
     criteria: str,
     max_score: int,
@@ -689,26 +700,34 @@ def _score_prompt(
     template: JudgePromptTemplate | None,
     words: int | None = None,
 ) -> Prompt:
-    input_text = get_field(item, input_field, "by_llm_score")
     output_text = get_field(item, output_field, "by_llm_score")
+    if input_field is None:
+        input_text = None
+        shown = ""
+        task = "Score the output below"
+    else:
+        input_text = get_field(item, input_field, "by_llm_score")
+        shown = f"<input>\n{input_text}\n</input>\n\n"
+        task = "Score the output below for the given input"
     if template is None:
         return (
-            f"Score the output below for the given input on a scale of 1 to "
+            f"{task} on a scale of 1 to "
             f"{max_score}, using the criteria and the score rubric.\n\n"
             f"Criteria: {criteria}\n\n"
             f"Score rubric:\n{_require_rubric(rubric_text, max_score)}\n\n"
-            f"<input>\n{input_text}\n</input>\n\n"
+            f"{shown}"
             f"<output>\n{output_text}\n</output>\n\n"
             f"{_TAGS_ARE_DATA}\n\n"
             f"{_score_instruction(max_score, words=words)}"
         )
     context = {
         **item,
-        "input": input_text,
         "output": output_text,
         "criteria": criteria,
         "max_score": max_score,
     }
+    if input_field is not None:
+        context["input"] = input_text
     if rubric_text is not None:
         context["rubric"] = rubric_text
     prompt = _fill(template, context, max_score)
@@ -722,7 +741,7 @@ def _score_prompt(
 def _group_prompt(
     group: list[dict],
     order: list[int],
-    input_field: str,
+    input_field: str | None,
     output_field: str,
     criteria: str,
     max_score: int,
@@ -731,7 +750,16 @@ def _group_prompt(
     words: int | None = None,
 ) -> Prompt:
     first = group[0]
-    input_text = get_field(first, input_field, "by_llm_score")
+    if input_field is None:
+        input_text = None
+        shown = ""
+        task = f"Score each of the {len(order)} candidate outputs below"
+    else:
+        input_text = get_field(first, input_field, "by_llm_score")
+        shown = f"<input>\n{input_text}\n</input>\n\n"
+        task = (
+            f"Score each of the {len(order)} candidate outputs below for the same input"
+        )
     labels = [_label(k) for k in range(len(order))]
     # Tags, not "Candidate A:" headers: an output containing "Candidate B:"
     # must not read as the start of another candidate.
@@ -742,19 +770,17 @@ def _group_prompt(
     )
     if template is None:
         return (
-            f"Score each of the {len(order)} candidate outputs below for the "
-            f"same input on a scale of 1 to {max_score}, using the criteria and "
+            f"{task} on a scale of 1 to {max_score}, using the criteria and "
             f"the score rubric.\n\n"
             f"Criteria: {criteria}\n\n"
             f"Score rubric:\n{_require_rubric(rubric_text, max_score)}\n\n"
-            f"<input>\n{input_text}\n</input>\n\n"
+            f"{shown}"
             f"{candidates}\n\n"
             f"{_TAGS_ARE_DATA}\n\n"
             f"{_group_instruction(labels, max_score, words=words)}"
         )
     context = {
         **first,
-        "input": input_text,
         "output": candidates,
         "candidates": candidates,
         "labels": ", ".join(labels),
@@ -762,6 +788,8 @@ def _group_prompt(
         "criteria": criteria,
         "max_score": max_score,
     }
+    if input_field is not None:
+        context["input"] = input_text
     if rubric_text is not None:
         context["rubric"] = rubric_text
     prompt = _fill(template, context, max_score)
@@ -805,6 +833,12 @@ def _fill(template: JudgePromptTemplate, context: dict, max_score: int) -> Promp
         # "{rubric}" with no rubric for this max_score.
         if error.args == ("rubric",) and "rubric" not in context:
             raise _no_rubric_error(max_score) from None
+        # "{input}" with no input_field (and no row field named "input").
+        if error.args == ("input",) and "input" not in context:
+            raise ValueError(
+                "by_llm_score: prompt_template uses {input}, but no input_field "
+                "was given; pass input_field=... or leave {input} out"
+            ) from None
         raise
 
 

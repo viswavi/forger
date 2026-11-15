@@ -988,7 +988,7 @@ by_llm_score(
     items: list[dict],
     *,
     model: Model,
-    input_field: str,
+    input_field: str | None = None,
     output_field: str,
     score_threshold: int = 4,
     max_score: int = 5,

@@ -163,6 +163,16 @@ kept = filter.by_llm_score(
 )
 ```
 
+To judge one field on its own, leave out `input_field`: the prompt then shows only the output, e.g. generated user
+messages scored for realism:
+
+```python
+kept = filter.by_llm_score(rows, model=judge, output_field="message", criteria="reads like a message a real user sends")
+```
+
+Passing the same field as both `input_field` and `output_field` raises `ValueError`: the judge would read the output as
+a copy of its input and score it low.
+
 `group_by="question"` judges the rows that share a value together, e.g. `n=4` samples per prompt: one prompt shows the
 input once and the candidates in `<candidate label="A">` tags, and the judge gives feedback and a score per candidate
 on the same rubric (`{"candidates": [{"label": "A", "feedback": "...", "score": 4}, ...]}`). Seeing the alternatives
