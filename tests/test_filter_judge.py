@@ -1716,3 +1716,72 @@ class TestMaxFeedbackWords:
                 output_field="a",
                 max_feedback_words=bad,
             )
+
+
+class TestSingleField:
+    """Without input_field the judge sees the output alone."""
+
+    _CHATS = [
+        {"chat": "bp 150/95 on lisinopril 20, add amlodipine or uptitrate?"},
+        {"chat": "Dear Sir, kindly explain hypertension."},
+    ]
+
+    def test_prompt_has_no_input_section_and_rows_are_scored(self):
+        """Each chat is shown once, in <output> tags, with no input section."""
+        judge = _FakeJudge()
+        by_llm_score(
+            self._CHATS,
+            model=judge,
+            output_field="chat",
+            criteria="reads like a message a real user would send",
+            score_threshold=1,
+            score_field="score",
+        )
+        assert len(judge.prompts) == 2
+        for prompt, row in zip(judge.prompts, self._CHATS):
+            assert prompt.startswith("Score the output below on a scale of 1 to 5")
+            assert "<input>" not in prompt and "given input" not in prompt
+            assert prompt.count(row["chat"]) == 1
+            assert f"<output>\n{row['chat']}\n</output>" in prompt
+
+    def test_same_field_as_input_and_output_raises_before_calling(self):
+        """input_field == output_field would show the judge a copy of its input."""
+        judge = _FakeJudge()
+        with pytest.raises(ValueError, match=r"pass only output_field='chat'"):
+            by_llm_score(
+                self._CHATS, model=judge, input_field="chat", output_field="chat"
+            )
+        assert judge.call_count == 0
+
+    def test_template_input_without_input_field_raises_before_calling(self):
+        """{input} with no input_field (and no row field 'input') fails clearly."""
+        judge = _FakeJudge()
+        with pytest.raises(ValueError, match=r"uses \{input\}, but no input_field"):
+            by_llm_score(
+                self._CHATS,
+                model=judge,
+                output_field="chat",
+                prompt_template="Is {output} a fair reply to {input}?",
+            )
+        assert judge.call_count == 0
+
+    def test_template_input_shows_a_row_field_named_input(self):
+        """Without input_field, {input} is the row's own 'input' field."""
+        judge = _FakeJudge()
+        by_llm_score(
+            [{"input": "q?", "chat": "a."}],
+            model=judge,
+            output_field="chat",
+            score_threshold=1,
+            prompt_template='Rate {output} given {input}: {{"score": 1}}',
+        )
+        assert judge.prompts == ['Rate a. given q?: {"score": 1}']
+
+    def test_group_prompt_without_input(self):
+        """Candidates grouped without input_field are shown with no input section."""
+        judge = _FakeJudge()
+        rows = [{"g": 1, "chat": "first"}, {"g": 1, "chat": "second"}]
+        by_llm_score(rows, model=judge, output_field="chat", group_by="g")
+        (prompt,) = judge.prompts
+        assert prompt.startswith("Score each of the 2 candidate outputs below on a")
+        assert "<input>" not in prompt and "same input" not in prompt

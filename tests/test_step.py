@@ -803,9 +803,7 @@ def test_pipeline_with_quality_diversity_and_inspect_has_no_such_warnings():
 
     @step
     def judge(rows):
-        return filter.by_llm_score(
-            rows, model=_StableJudge(), input_field="text", output_field="text"
-        )
+        return filter.by_llm_score(rows, model=_StableJudge(), output_field="text")
 
     @step
     def report_and_dedupe(rows):
