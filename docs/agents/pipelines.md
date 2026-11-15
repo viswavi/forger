@@ -209,21 +209,24 @@ them, and score lists of over 100,000 rows, have none: rerun with `_no_cache=Tru
   step is watched the same way; a model without prices logs at 1M, 2M, 5M, ... token units. With `progress="log"`
   (stderr not a terminal), a batch of 40+ completions also adds "$0.42 so far, ~$1.75 for the batch" to its
   30-second progress lines. `FORGER_SPEND_LOG=0` turns the spend lines off.
-- Limited runs: `FORGER_LIMIT=3 python pipeline.py` (or `@pipeline(limit=3)`) runs every step on at most 3 rows.
-  Run every new pipeline version this way first (a smoke run): it exercises every op in about a minute, so a wrong
-  keyword or a missing argument fails at once instead of minutes into the full run. A larger limit is a pilot:
-  `FORGER_LIMIT=50` shows each filter's yield and the cost per row on a sample before you pay for every row. Inside
-  the pipeline, every `@step` call cuts each rows argument (each of several inputs, `*rows` items too) to its first
-  N rows. These ops also cap their counts: `acquire.sample_from_LLM` (`n`) and `acquire.retrieve` /
-  `retrieve_from_*` (the first N `queries`, `n` at most N). Other ops keep their counts, so a step that makes rows
-  from nothing in some other way still makes all of them. Step reports say `LIMIT: first 3 of 120 rows`, and the
-  summary ends with `LIMITED RUN (limit=3): at most 3 rows per step; outputs are not representative`. A step that
-  drops every row of a limited run is a warning, since the steps after it then check nothing. Limited results are
-  cached under keys that include the limit, so a later full run never reads or overwrites them and recomputes every
-  step. A second limited run of the same code reuses them. The request cache is not keyed on the limit, though, so
-  the full run sends no model request the limited run already sent for the same rows: `generate_from_context` asks
-  only about rows 4 onward, and `sample_from_LLM(n=100)` asks for 97 more samples. `limit=0` turns it off even when
-  the variable is set. The old names `@pipeline(smoke=3)` and `FORGER_SMOKE_ROWS=3` still work.
+- Limited runs: `FORGER_LIMIT=3 python pipeline.py` (or `@pipeline(limit=3)`) runs every step on at most 3 rows. Run
+  every new pipeline version this way first (a smoke run): it exercises every op in about a minute, so a wrong keyword
+  or a missing argument fails at once instead of minutes into the full run. A larger limit is a pilot: `FORGER_LIMIT=50`
+  shows each filter's yield and the cost per row on a sample before you pay for every row. Inside the pipeline, every
+  `@step` call cuts each rows argument (each of several inputs, `*rows` items too) to its first N rows. These ops also
+  cap their counts: `acquire.sample_from_LLM` (`n`) and `acquire.retrieve` / `retrieve_from_*` (the first N `queries`,
+  `n` at most N). Rows a step builds in plain Python (e.g. 1,400 prompts from a list of archetypes) are cut too: an op
+  the step calls directly takes at most N rows, or as many as the step got if more (a step merging three limited inputs
+  keeps all of them), and logs "using the first 3 of its 1,400 input rows; a full run sends all of them, so scale this
+  op's cost by 1,400 / 3". Ops called inside other ops are not cut. Pair an op's results with the rows you passed it,
+  not with a longer list of your own. Step reports say `LIMIT: first 3 of 120 rows`, and the summary ends with `LIMITED
+  RUN (limit=3): at most 3 rows per step; outputs are not representative`. A step that drops every row of a limited run
+  is a warning, since the steps after it then check nothing. Limited results are cached under keys that include the
+  limit, so a later full run never reads or overwrites them and recomputes every step. A second limited run of the same
+  code reuses them. The request cache is not keyed on the limit, though, so the full run sends no model request the
+  limited run already sent for the same rows: `generate_from_context` asks only about rows 4 onward, and
+  `sample_from_LLM(n=100)` asks for 97 more samples. `limit=0` turns it off even when the variable is set. The old names
+  `@pipeline(smoke=3)` and `FORGER_SMOKE_ROWS=3` still work.
 
 ## Composing a pipeline
 

@@ -605,7 +605,10 @@ def op(
     cache key also holds the row limit, so limited results never mix with a
     full run's. ``smoke`` names count parameters capped to the limit: an int
     above it is lowered (``n=100`` → ``n=3``), a list is cut to its first
-    rows, e.g. ``@op(name="acquire.sample_from_LLM", smoke=("n",))``. The
+    rows, e.g. ``@op(name="acquire.sample_from_LLM", smoke=("n",))``. An op
+    the pipeline code calls itself (not one called by another op) also cuts
+    its first argument, when it is a list, to the limit, so rows built in
+    Python inside a step are limited too (see ``_smoke_rows_cut``). The
     request cache is not keyed on the limit, so the full run reuses the
     completions the limited run got for the same rows.
 
@@ -679,6 +682,8 @@ def op(
                     "not apply; put them on the alter or filter op that follows"
                 )
             args, kwargs = _smoke_capped(sig, smoke, args, kwargs)
+            if not is_step:
+                args, kwargs = _smoke_rows_cut(op_name, sig, args, kwargs)
             token = _tracking.enter_op(op_name)
             scope_token = _NO_CACHE_SCOPE.set(True) if _no_cache else None
             state = _CallState()
@@ -1181,6 +1186,52 @@ def _smoke_capped(
         elif isinstance(value, list) and len(value) > limit:
             bound.arguments[param] = value[:limit]
     return bound.args, bound.kwargs
+
+
+def _smoke_rows_cut(
+    op_name: str,
+    sig: inspect.Signature | None,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    """In a limited run, cut a top-level op's input rows to the limit.
+
+    A step's rows arguments are cut already, but rows a step builds in Python
+    (e.g. 1,400 prompts from a list of archetypes) reach its ops whole, so a
+    "limited" run would pay for all of them. An op called by the pipeline
+    code (op depth 0) therefore cuts its first argument, when it is a list
+    longer than both the limit and the rows its step got (a step merging three
+    inputs of 3 rows keeps all 9), and logs it, e.g. "using the first 3 of its
+    1,400 input rows". Ops called by other ops keep their rows: the outer op
+    was cut already and may pair its rows with the inner op's results.
+    """
+    limit = _tracking.smoke_rows()
+    if limit is None or _tracking.op_depth() != 0:
+        return args, kwargs
+    step = _tracking.active_step()
+    if step is not None and step.n_in:
+        limit = max(limit, step.n_in)
+    if args:
+        rows, where = args[0], "args"
+    else:
+        first = next(iter(sig.parameters), None) if sig is not None else None
+        if first is None or first not in kwargs:
+            return args, kwargs
+        rows, where = kwargs[first], first
+    if not isinstance(rows, list) or len(rows) <= limit:
+        return args, kwargs
+    logger.info(
+        "%s: limited run: using the first %s of its %s input rows; a full run "
+        "sends all of them, so scale this op's cost by %s / %s",
+        op_name,
+        f"{limit:,}",
+        f"{len(rows):,}",
+        f"{len(rows):,}",
+        f"{limit:,}",
+    )
+    if where == "args":
+        return (rows[:limit], *args[1:]), kwargs
+    return args, {**kwargs, where: rows[:limit]}
 
 
 def _failed_call(
