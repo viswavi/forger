@@ -48,6 +48,11 @@ def by_topic_frequency(
     ``sample_seed`` picks the subset; changing it does not re-cluster.
     ``topic_field="topic"`` adds each kept row's topic name to it.
 
+    The clustering makes one LLM call per unique ``field`` value (2,000
+    distinct rows are 2,000 calls), each with every topic's description in its
+    prompt, so its cost grows with the rows, and a reasoning model pays for
+    its reasoning on each call.
+
     The clustering is cached by its own op, so changing ``min_frequency``,
     ``max_frequency``, ``sample_seed``, or ``topic_field`` makes no new model
     or embedding calls. In a ``@step`` report each row's score is its topic's

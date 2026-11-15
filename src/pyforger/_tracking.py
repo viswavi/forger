@@ -1,8 +1,9 @@
 """Shared run-time state for ``@op`` calls, ``@step`` reports, and filter scores.
 
 This module imports nothing from the rest of pyforger but ``_spend``,
-``_rowflow``, and ``_phrases`` (which import nothing), so ``op.py``, ``steps.py``,
-``acquire/model.py``, and the filters can all use it without circular imports.
+``_rowflow``, ``_phrases``, and ``utils`` (which import nothing), so
+``op.py``, ``steps.py``, ``acquire/model.py``, and the filters can all use it
+without circular imports.
 
 Context variables do not propagate into ``ThreadPoolExecutor`` workers. Ops
 called from such workers see no active step and are not itemized in its report,
@@ -31,6 +32,7 @@ import json
 import math
 import os
 import threading
+import time
 from collections.abc import Callable, Iterable, Iterator
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
@@ -41,6 +43,9 @@ from pydantic import BaseModel, Field
 from pyforger import _spend
 from pyforger._phrases import Repeat
 from pyforger._rowflow import PipelineFlow, PythonGap, StepFlow
+from pyforger.utils import get_formatted_logger
+
+_spend_logger = get_formatted_logger("Spend")
 
 _CATEGORIES = frozenset({"acquire", "alter", "filter", "inspect"})
 
@@ -600,6 +605,10 @@ class Usage:
         "completion_tokens",
         "cost_usd",
         "token_units",
+        "calls",
+        "started",
+        "next_usd",
+        "next_units",
     )
 
     def __init__(self, kind: str = "", name: str = "") -> None:
@@ -610,6 +619,11 @@ class Usage:
         self.completion_tokens = 0
         self.cost_usd = 0.0
         self.token_units = 0.0
+        # For the live spend lines (see ``_spend_line``).
+        self.calls = 0
+        self.started = time.monotonic()
+        self.next_usd = _SPEND_LOG_FIRST_USD
+        self.next_units = _SPEND_LOG_FIRST_UNITS
 
     def _add(self, prompt: int, completion: int, cost: float, units: float) -> None:
         # Callers hold _USAGE_LOCK.
@@ -632,6 +646,78 @@ class Usage:
                 self.cost_usd,
                 self.token_units,
             )
+
+
+# A step (or an op called outside any step) logs a "Spend so far" line when its
+# spend first reaches $1, $2, $5, $10, $20, $50, ...: about three lines per
+# tenfold spend. A model without prices logs at 1M, 2M, 5M, ... token units.
+# FORGER_SPEND_LOG=0 turns the lines off.
+_SPEND_LOG_FIRST_USD = 1.0
+_SPEND_LOG_FIRST_UNITS = 1_000_000.0
+
+
+def _next_mark(value: float) -> float:
+    """The next of 1, 2, 5, 10, 20, 50, ... (times a power of ten) above ``value``."""
+    scale = 10.0 ** math.floor(math.log10(value)) if value > 0 else 1.0
+    for factor in (1, 2, 5, 10):
+        if factor * scale > value:
+            return factor * scale
+    return 10 * scale  # pragma: no cover - float rounding
+
+
+def _spend_logging() -> bool:
+    return os.environ.get("FORGER_SPEND_LOG", "").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+    )
+
+
+def _spend_text(usage: Usage) -> str:
+    """E.g. ``"$5.03 (2,104,511 token units, 812 calls, 3m 10s)"``."""
+    seconds = int(time.monotonic() - usage.started)
+    if seconds < 60:
+        took = f"{seconds}s"
+    elif seconds < 3600:
+        took = f"{seconds // 60}m {seconds % 60}s"
+    else:
+        took = f"{seconds // 3600}h {seconds % 3600 // 60}m"
+    units = f"{usage.token_units:,.0f} token units, " if usage.token_units else ""
+    calls = "1 call" if usage.calls == 1 else f"{usage.calls:,} calls"
+    return f"${usage.cost_usd:,.2f} ({units}{calls}, {took})"
+
+
+def _spend_line(accumulators: tuple[Usage, ...]) -> str | None:
+    """The "Spend so far" line due after a call, if its step or op passed a mark.
+
+    The step (else the outermost op) is the one watched; the line also names
+    the op the call came from and the pipeline's total. Callers hold
+    ``_USAGE_LOCK``.
+    """
+    watched = next((u for u in accumulators if u.kind == "step"), None)
+    if watched is None:
+        watched = next((u for u in accumulators if u.kind == "op"), None)
+    if watched is None:
+        return None
+    if watched.cost_usd > 0:
+        if watched.cost_usd < watched.next_usd:
+            return None
+        watched.next_usd = _next_mark(watched.cost_usd)
+        next_text = f"${watched.next_usd:,.0f}"
+    else:  # no prices: watch token units
+        if watched.token_units < watched.next_units:
+            return None
+        watched.next_units = _next_mark(watched.token_units)
+        next_text = f"{watched.next_units:,.0f} token units"
+    name = f"step {watched.name}" if watched.kind == "step" else watched.name
+    line = f"Spend so far: {name} {_spend_text(watched)}"
+    op = next((u for u in accumulators if u.kind == "op"), None)
+    if watched.kind == "step" and op is not None:
+        line += f"; now in {op.name}, {_spend_text(op)}"
+    pipeline = next((u for u in accumulators if u.kind == "pipeline"), None)
+    if pipeline is not None:
+        line += f"; pipeline {pipeline.name} ${pipeline.cost_usd:,.2f} in all"
+    return f"{line}. Next line at {next_text}."
 
 
 # The accumulators open in this context, outermost first: e.g. (pipeline,
@@ -1513,7 +1599,9 @@ def add_usage(
     is running it shows on that pipeline's unattributed line, but it is not in
     the pipeline's totals and does not count toward its ``max_cost_usd``
     (the thread may not be the pipeline's). It always counts toward the
-    process total and ``FORGER_MAX_COST_USD``.
+    process total and ``FORGER_MAX_COST_USD``. When the running step (or op
+    outside a step) first passes $1, $2, $5, $10, ... it logs a "Spend so far"
+    line (see ``_spend_line``).
     """
     totals = (
         int(_as_number(prompt_tokens)),
@@ -1530,11 +1618,17 @@ def add_usage(
         with _RUNNING_LOCK:
             if len(_RUNNING_PIPELINES) == 1:
                 unattributed = [_RUNNING_PIPELINES[0].unattributed]
+    line = None
     with _USAGE_LOCK:
         _PROCESS_USAGE._add(*totals)
         if counted:
             for usage in (*accumulators, *unattributed):
                 usage._add(*totals)
+                usage.calls += 1
+            if _spend_logging():
+                line = _spend_line(accumulators)
+    if line is not None:
+        _spend_logger.info(line)
     op = next((u.name for u in accumulators if u.kind == "op"), None)
     _spend.append(
         pipeline=pipeline_usage.name if pipeline_usage is not None else None,
