@@ -380,8 +380,13 @@ completion(model='litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731')
             "your demonstration is effective by generating"
         )
 
+        # Only Native is told that unused generation quota is lost.
+        lost = "- Generation quota left unused when the session ends is simply lost.\n"
+        self.assertNotIn(lost, prompts["coding/FORGER_PROMPT.txt"])
+        self.assertIn(lost, prompts["coding/minimal_scaffold_prompt.txt"])
+
         def shared(text):
-            text = text.replace(framing, "You must generate", 1)
+            text = text.replace(framing, "You must generate", 1).replace(lost, "")
             for start, stop in (
                 ("# Scaffold", "# Data Format"),
                 ("Credentials are provided as", "Web search uses"),
