@@ -17,6 +17,27 @@ Use limited runs for every smoke test and comparison: `FORGER_LIMIT=3` to see a 
 to compare alternatives ([Limited runs](pipelines.md#limited-runs)). Each step's report shows its samples, its yield,
 and its cost; read them before moving on.
 
+## Price the full run before you start it
+
+A small run is also how you learn what the full run will cost. Before scaling up:
+
+- Run a pilot (e.g. `FORGER_LIMIT=50`) of exactly the pipeline you will scale up: every step, with the same models,
+  reasoning effort, `n`, and flags. A step the pilot skips (behind a flag, an `if`, or a model it did not load) has no
+  measured cost: its full-scale cost is unknown, not zero.
+- From each step's report, take its cost per row and multiply by the rows it will get at full scale, e.g. "seeds: $0.40
+  for 50 rows, so about $16 for 2,000". Most ops make a fixed number of calls per row (one per row for
+  `filter.by_topic_frequency`, one per sample and judge for others), so their cost grows with the rows. Add up the
+  steps and compare the total with the quota you have left.
+- Models differ in price several times over, and a reasoning model also pays for its reasoning on every call. Price
+  each model you will use from calls in the pilot, not from its list price alone.
+- Write the projection in your decision log next to the quota left, and compare it with the step reports after the
+  full run.
+
+During the full run, read the `Cost estimate` lines: every uncached batch likely to cost $1 or more logs one once 5%
+of it has finished ([Live spend](pipelines.md#live-spend)). If an estimate is far above your projection, stop the run
+and find out why; finished requests are in the request cache, so a rerun with cheaper settings does not pay for them
+again.
+
 ## Compare alternatives at each decision
 
 At each stage, run two or more options at small or medium scale before choosing one: e.g. compare sources for your
