@@ -80,6 +80,9 @@ dollars in `cost_usd` and is charged to a separate dollar ledger, not to token u
 INFO logs show both totals after the first call and every million units (raw tokens
 when weights are unknown). Dollar costs use provider metadata or LiteLLM pricing;
 unavailable prices warn and contribute zero to `total_cost`.
+While a step runs, a `Spend so far` INFO line appears each time its spend first reaches $1, $2, $5, $10, $20, ...
+(an op called outside a step is watched the same way), with the op it is in and the pipeline's total. A batch's
+30-second progress lines add its spend so far and projected total. `FORGER_SPEND_LOG=0` turns the spend lines off.
 `reset_history()` resets the model's view, but never resets a configured shared quota.
 Cached `@op` results do not make API calls and do not consume the quota again.
 

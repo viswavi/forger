@@ -195,6 +195,12 @@ them, and score lists of over 100,000 rows, have none: rerun with `_no_cache=Tru
   look typical. Finished requests are in the request cache, so after making the op cheaper (fewer samples or judges,
   a cheaper model, shorter outputs, fewer rows) the rerun does not pay for them again. `FORGER_PROJECT_SPEND=0`
   turns the check off.
+- Live spend: while a step runs, it logs a line each time its spend first reaches $1, $2, $5, $10, $20, $50, ...,
+  e.g. "Spend so far: step balance $5.03 (2,104,511 token units, 812 calls, 3m 10s); now in
+  filter.by_topic_frequency, $4.80 (...); pipeline main $31.20 in all. Next line at $10." An op called outside a
+  step is watched the same way; a model without prices logs at 1M, 2M, 5M, ... token units. With `progress="log"`
+  (stderr not a terminal), a batch of 40+ completions also adds "$0.42 so far, ~$1.75 for the batch" to its
+  30-second progress lines. `FORGER_SPEND_LOG=0` turns the spend lines off.
 - Limited runs: `FORGER_LIMIT=3 python pipeline.py` (or `@pipeline(limit=3)`) runs every step on at most 3 rows.
   Run every new pipeline version this way first (a smoke run): it exercises every op in about a minute, so a wrong
   keyword or a missing argument fails at once instead of minutes into the full run. A larger limit is a pilot:

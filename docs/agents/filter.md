@@ -345,9 +345,12 @@ hard = filter.by_judged_difficulty(
 keeps a random subset of `max_frequency` of the input (seeded by `sample_seed`); a topic below `min_frequency` is
 dropped (bounds inclusive). `1 / num_clusters` is the uniform share, and `max_frequency` defaults to twice that.
 `topic_field="topic"` adds each kept row's topic name. `context` is an optional hint for topic names (see
-`topic_based_clustering` in [inspect.md](inspect.md)). The clustering is the expensive part (one LLM call per unique
-value) and is cached as its own op, so trying other bounds makes no new model or embedding calls; use the report's
-histogram of topic shares to choose them.
+`topic_based_clustering` in [inspect.md](inspect.md)). The clustering is the expensive part and is cached as its own
+op, so trying other bounds makes no new model or embedding calls; use the report's histogram of topic shares to choose
+them. It makes one LLM call per unique `field` value (2,000 rows of distinct values are 2,000 calls, plus a few to
+name the topics). Each call's prompt holds every topic's description and the value (up to 1,500 characters), and a
+reasoning model also pays for its reasoning on every call, so the op's cost scales with the number of rows, not with
+`num_clusters`. A run with `FORGER_LIMIT` clusters only the limited rows.
 
 ```python
 balanced = filter.by_topic_frequency(
