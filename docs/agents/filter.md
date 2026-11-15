@@ -199,8 +199,10 @@ pass-rate histogram is the measurement.
 
 `by_topic_frequency` clusters `field` with [`inspect.topic_based_clustering`](inspect.md), downsamples topics above
 `max_frequency` of the rows (default twice the uniform share) and drops topics below `min_frequency`. The clustering
-is cached on its own, so trying other bounds is free; pick them from the report's topic-share histogram. Use
-`context` to say what topics should describe:
+is cached on its own, so trying other bounds is free; pick them from the report's topic-share histogram. It makes
+one LLM call per unique `field` value (2,000 distinct rows are 2,000 calls), each prompt holding every topic's
+description and the value (up to 1,500 characters), so its cost grows with the rows, and a reasoning model pays for
+its reasoning on every call. Use `context` to say what topics should describe:
 
 ```python
 balanced = filter.by_topic_frequency(

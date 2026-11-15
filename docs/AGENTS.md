@@ -111,3 +111,5 @@ costs 4 and 12.5. The judge's DeepSeek-V4.1-Flash costs 1 and 3, on the judge qu
   its holds (`released_calls`): the next ledger read frees them, or after two hours when its death cannot be seen.
 - `TinkerModel` is charged in dollars to a separate ledger (see [`acquire.md`](agents/acquire.md)).
 - Cap a run in units with `@pipeline(max_token_units=...)` or `FORGER_MAX_TOKEN_UNITS`.
+- A step logs `Spend so far` each time its spend first reaches $1, $2, $5, $10, ..., with the op it is in and the
+  pipeline total; batch progress lines add spend so far and the projected total (see "Live spend" in `pipelines.md`).

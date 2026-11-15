@@ -105,6 +105,15 @@ token-unit quota; if not, it raises `pyforger.SpendProjectionError` (a `BudgetEx
 Make the op cheaper (fewer rows, samples, or judges, a cheaper model, shorter outputs) and rerun: finished requests
 come from the request cache. `FORGER_PROJECT_SPEND=0` turns the check off.
 
+### Live spend
+
+While a step runs, it logs a line each time its spend first reaches $1, $2, $5, $10, $20, $50, ..., e.g. "Spend so
+far: step balance $5.03 (2,104,511 token units, 812 calls, 3m 10s); now in filter.by_topic_frequency, $4.80 (...);
+pipeline main $31.20 in all. Next line at $10." An op called outside a step is watched the same way; a model without
+prices logs at 1M, 2M, 5M, ... token units. With `progress="log"` (stderr not a terminal), a batch of 40+ completions
+also adds "$0.42 so far, ~$1.75 for the batch" to its 30-second progress lines. `FORGER_SPEND_LOG=0` turns the spend
+lines off.
+
 ### Concurrent steps and threads
 
 - `my_step.submit(*args)` runs a step in a background thread and returns a `Future`; use it for independent
