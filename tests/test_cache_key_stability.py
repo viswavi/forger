@@ -61,8 +61,13 @@ def keystable_shout(rows: list[dict], suffix: str = "!") -> list[dict]:
 
 @pipeline(limit=1)
 def keystable_limited():
-    """One row of keystable_shout."""
-    return keystable_shout(ROWS, "?")
+    """One row of keystable_shout.
+
+    The row is passed already cut: the base commit kept a limited run's first
+    row, and limited runs now keep rows spread over the list, so passing ROWS
+    would test which row is kept, not how the key is built.
+    """
+    return keystable_shout(ROWS[:1], "?")
 
 
 def _keys(folder: str) -> list[str]:

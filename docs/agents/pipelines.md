@@ -76,7 +76,10 @@ at the end, followed by every `WARNING:` line. **Read these reports after every 
 Run every new pipeline version with `FORGER_LIMIT=3 python pipeline.py` (or `@pipeline(limit=3)`) first. Every step
 gets at most 3 rows per rows argument, so every op runs in about a minute and a wrong keyword fails at once, not
 minutes into the full run. `FORGER_LIMIT=50` is a pilot: it shows each filter's yield and the cost per row before you
-pay for every row.
+pay for every row. A limited run keeps rows spread over each list, not its first rows: the list is split into N
+equal blocks and each gives one row, picked by a hash of its content. So 3 of 50 queries grouped by theme come from
+the first, middle and last third, and 12 of 36 chats written 3 per seed come from 12 seeds, not 4. The same rows
+always give the same picks, so a rerun or an alternative pipeline sharing a step sees the same rows.
 
 A full run of pipeline code that has not finished a limited run refuses to start (`UntestedFullRunError`). Once a
 limited run of the same code finishes, the full run starts. Any edit to the pipeline, its steps, their helpers, or the
@@ -85,9 +88,11 @@ prompts and constants they read is new code and needs a new limited run. Sizes p
 
 - `acquire.sample_from_LLM` (`n`) and `acquire.retrieve*` (`queries`, `n`) also cap their counts. Rows a step builds
   in plain Python (e.g. 1,400 prompts from a list of archetypes, or rows from a dict of row lists) are cut too: an op
-  the step calls directly takes at most N rows (or as many as the step got, if more) and logs "using the first 3 of
-  its 1,400 input rows; a full run sends all of them, so scale this op's cost by 1,400 / 3". Ops called inside other
-  ops are not cut. Pair an op's results with the rows you passed it, not with a longer list of your own.
+  the step calls directly takes at most N rows (or as many as the step got, if more) and logs "using 3 of its 1,400
+  input rows, spread over the list; a full run sends all of them, so scale this op's cost by 1,400 / 3". Its other list
+  arguments of the same length are cut at the same positions, so lists that go together (e.g. `inputs` and
+  `candidate_responses`) stay aligned. Ops called inside other ops are not cut. Pair an op's results with the rows you
+  passed it, not with a longer list of your own.
 - Outputs are not representative. A yield miss on fewer than 20 rows is only `INFO:`; a step that drops every row is a
   warning, since later steps then check nothing.
 - The full run recomputes every step but reuses the limited run's completions from the request cache, e.g.
