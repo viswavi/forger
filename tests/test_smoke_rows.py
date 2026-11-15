@@ -425,3 +425,74 @@ def test_capped_sample_count_keeps_its_samples_for_the_full_run(sent):
     full = build_with(None)
     assert sent == [("Write a riddle.", 3)]  # only the missing slots
     assert [r["text"] for r in full[:2]] == [r["text"] for r in smoke]
+
+
+@op(name="alter.test_smoke_outer")
+def _outer(rows: list[Any]) -> list[Any]:
+    # An op that expands its rows and hands them to another op.
+    doubled = [{**r, "copy": c} for r in rows for c in (0, 1)]
+    return _tag(doubled)
+
+
+@step
+def build_from_nothing(rows: list[dict]) -> list[dict]:
+    """Make many prompts in Python from a few input rows, then tag them."""
+    made = [{"id": 100 + i, "text": f"made {i}"} for i in range(40)]
+    return _tag(made)
+
+
+@step
+def build_by_keyword(rows: list[dict]) -> list[dict]:
+    """Pass the built rows by keyword."""
+    return _tag(rows=[{"id": 200 + i, "text": f"kw {i}"} for i in range(12)])
+
+
+@step
+def expand(rows: list[dict]) -> list[dict]:
+    """An op that expands rows inside itself keeps them all."""
+    return _outer(rows)
+
+
+def test_rows_built_in_a_step_are_cut_too(caplog):
+    """Rows a step builds in Python reach its ops cut to the limit, with a log line."""
+    SEEN.clear()
+
+    @pipeline(limit=3)
+    def build() -> list[dict]:
+        rows = build_from_nothing(_rows(10))
+        return build_by_keyword(rows)
+
+    with caplog.at_level("INFO", logger="forger.op"):
+        out = build()
+    assert SEEN == [3, 3]
+    assert [r["id"] for r in out] == [200, 201, 202]
+    lines = [r.getMessage() for r in caplog.records if "limited run" in r.getMessage()]
+    assert lines[0] == (
+        "alter.test_smoke_tag: limited run: using the first 3 of its 40 input rows; "
+        "a full run sends all of them, so scale this op's cost by 40 / 3"
+    )
+
+
+def test_merged_step_inputs_and_nested_ops_are_not_cut():
+    """A step's own merged inputs stay whole, and an op inside an op is not cut."""
+    SEEN.clear()
+
+    @pipeline(limit=3)
+    def build() -> list[dict]:
+        merge(_rows(5), _rows(5, 10), extra=_rows(5, 30))  # 3 + 3 + 3 rows
+        return expand(_rows(10))
+
+    out = build()
+    assert SEEN == [9, 6]  # merge keeps 9; _outer's 6 doubled rows reach _tag
+    assert len(out) == 6
+
+
+def test_full_run_ops_are_not_cut():
+    """Without a limit, rows built in a step reach the op whole."""
+    SEEN.clear()
+
+    @pipeline
+    def build() -> list[dict]:
+        return build_from_nothing(_rows(2))
+
+    assert len(build()) == 40 and SEEN == [40]
