@@ -1428,7 +1428,7 @@ class TestPublicExports:
 class TestReasoningEffort:
     """reasoning_effort is sent in the form each model family reads."""
 
-    DEEPSEEK = "litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731"
+    DEEPSEEK = "litellm_proxy/azure_ai/DeepSeek-V4.1-Flash"
     GLM = "litellm_proxy/azure_ai/FW-GLM-5.3"
 
     @pytest.mark.parametrize(
@@ -1484,7 +1484,7 @@ class TestReasoningEffortProperty:
     )
     def test_reports_effort(self, kwargs, expected):
         """DeepSeek-V4 stores a dict, but the property reads it back."""
-        model = Model("litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731", **kwargs)
+        model = Model("litellm_proxy/azure_ai/DeepSeek-V4.1-Flash", **kwargs)
         assert model.reasoning_effort == expected
 
 
@@ -1495,7 +1495,7 @@ class TestGatewayEnvironment:
         """Without explicit values, the gateway URL and key come from env."""
         monkeypatch.setenv("LITELLM_BASE_URL", "https://gateway.example")
         monkeypatch.setenv("LITELLM_API_KEY", "env-key")
-        model = Model("litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731")
+        model = Model("litellm_proxy/azure_ai/DeepSeek-V4.1-Flash")
         assert model._kwargs["api_base"] == "https://gateway.example"
         assert model._api_key == "env-key"
 

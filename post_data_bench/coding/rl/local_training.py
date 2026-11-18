@@ -9,9 +9,10 @@ import threading
 from pathlib import Path
 
 from .agent_training import CODING, JUDGE_FLAGS, run  # noqa: ABS101
-from .backends import RL_DEFAULTS  # noqa: ABS101
+from .backends import MODELS, RL_DEFAULTS  # noqa: ABS101
 
-BASE_MODEL = "Qwen/Qwen3-4B"
+# Qwen/Qwen3-4B, or the release's post-trained starting checkpoint (backends.MODELS).
+BASE_MODEL = MODELS["local"]
 # The local RL recipe, with 80 steps x 32 prompts x 8 samples (RL_DEFAULTS;
 # a submitted checkpoint gets at most 80 steps: backends.RL_STEP_BUDGET): lr 3e-6,
 # clip 0.28 above (0.2 below), weight decay 0.1, Adam beta2 0.98, and a checkpoint

@@ -5,7 +5,17 @@ import json
 import os
 from pathlib import Path
 
-MODELS = {"tinker": "Qwen/Qwen3-8B", "local": "Qwen/Qwen3-4B"}
+# The local student is Qwen3-4B unless a release starts agents from a post-trained
+# Qwen3-4B checkpoint, staged in the host's Hugging Face cache under its own id,
+# e.g. PDB_LOCAL_BASE_MODEL=local/Qwen3-4B-clinical-rl80. RL starts from it, the
+# step budget counts from it, and receipts name it.
+MODELS = {
+    "tinker": "Qwen/Qwen3-8B",
+    "local": os.environ.get("PDB_LOCAL_BASE_MODEL") or "Qwen/Qwen3-4B",
+}
+# The model a starting checkpoint was trained from; its validation results are
+# shown next to the starting checkpoint's.
+ORIGINAL_LOCAL_MODEL = "Qwen/Qwen3-4B"
 # Agent RL schedule when --num-rollout etc. are omitted; the local optimizer
 # settings are local_training.RECIPE.
 RL_DEFAULTS = {

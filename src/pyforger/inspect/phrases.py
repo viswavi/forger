@@ -48,7 +48,8 @@ def phrase_frequency(
 
     Args:
         rows: The rows (dicts).
-        fields: Fields to count; default: every field with string values.
+        fields: Fields to count; default: every field with string values or
+            chat messages (counted by their contents).
         ngram_range: Smallest and largest phrase length in words; ``(1, 4)``
             also counts single words.
         top_k: Phrases and names listed per field.
@@ -66,7 +67,7 @@ def phrase_frequency(
         names = [
             k
             for k in dict.fromkeys(k for r in scanned if isinstance(r, dict) for k in r)
-            if any(isinstance(r.get(k), str) for r in scanned if isinstance(r, dict))
+            if any(_phrases.is_text(r.get(k)) for r in scanned if isinstance(r, dict))
         ]
     else:
         names = [fields] if isinstance(fields, str) else list(fields)

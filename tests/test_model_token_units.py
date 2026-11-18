@@ -14,7 +14,7 @@ from pyforger.acquire.model import LocalModel, Model
 from pyforger.op import op
 from pyforger.token_units import TokenUnitQuotaExceeded
 
-DEEPSEEK = "litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731"
+DEEPSEEK = "litellm_proxy/azure_ai/DeepSeek-V4.1-Flash"
 GLM = "litellm_proxy/azure_ai/FW-GLM-5.3"
 
 
@@ -63,7 +63,7 @@ def enable_budget(monkeypatch, tmp_path, limit=100):
     monkeypatch.setenv("FORGER_TOKEN_UNIT_LIMIT", str(limit))
 
 
-@pytest.mark.parametrize("model_id,expected", [(DEEPSEEK, 70), (GLM, 290)])
+@pytest.mark.parametrize("model_id,expected", [(DEEPSEEK, 90), (GLM, 424.9)])
 def test_weights_include_cached_inputs_and_do_not_add_reasoning(
     complete, model_id, expected
 ):
@@ -118,7 +118,7 @@ def test_shared_ledger_records_model_dollars(monkeypatch, tmp_path, complete):
     model.generate("Hello")
     model.generate("Again")
     state = model._token_budget.snapshot()
-    assert state["token_units"] == model.total_token_units == 140
+    assert state["token_units"] == model.total_token_units == 180
     assert state["cost_usd"] == model.total_cost == 0.02
     assert state["models"][DEEPSEEK]["cost_usd"] == 0.02
     assert state["unpriced_calls"] == 0
@@ -139,7 +139,7 @@ def test_unavailable_pricing_preserves_units_and_marks_ledger(
     with pytest.warns(UserWarning, match="Cost unavailable"):
         model.generate("Hello")
     state = model._token_budget.snapshot()
-    assert state["token_units"] == model.total_token_units == 70
+    assert state["token_units"] == model.total_token_units == 90
     assert state["cost_usd"] == model.total_cost == 0
     assert state["unpriced_calls"] == 1
 
@@ -169,7 +169,7 @@ def test_partial_batch_failure_charges_all_successes(monkeypatch, progress):
     model = Model(DEEPSEEK, show_progress=progress)
     with pytest.raises(RuntimeError, match="one call failed"):
         model.generate_batch(["good", "bad", "also good"])
-    assert model.total_token_units == 140
+    assert model.total_token_units == 180
     assert model.total_cost == 0.02
     # history holds only results of calls that return; the totals keep the spend.
     assert model.history == []
@@ -184,7 +184,7 @@ def test_parse_failure_still_charges_response(complete):
     model = Model(DEEPSEEK)
     with pytest.raises(TypeError):
         model.generate("Hello")
-    assert model.total_token_units == 70
+    assert model.total_token_units == 90
     assert model.total_cost == 0.01
 
 
@@ -193,7 +193,7 @@ def test_concurrent_calls_have_consistent_totals(complete):
     model = Model(GLM)
     with ThreadPoolExecutor(max_workers=16) as pool:
         list(pool.map(model.generate, ["Hello"] * 100))
-    assert model.total_token_units == 29_000
+    assert model.total_token_units == pytest.approx(42_490)  # 100 x 424.9
     assert model.total_usage["prompt_tokens"] == 1_000
     assert len(model.history) == 100
 
@@ -219,17 +219,17 @@ def test_model_serialization_preserves_accounting(
     model = Model(DEEPSEEK)
     model.generate("Hello")
     restored = clone(model)
-    assert restored.total_token_units == 70
+    assert restored.total_token_units == 90
     restored.generate("Again")
-    assert restored.total_token_units == 140
-    assert model.total_token_units == 70
+    assert restored.total_token_units == 180
+    assert model.total_token_units == 90
 
 
 def test_shared_budget_keeps_successful_calls_from_failed_batch(
     monkeypatch, tmp_path, complete
 ):
     """Persist partial batch usage for subsequent model instances."""
-    enable_budget(monkeypatch, tmp_path, limit=140)
+    enable_budget(monkeypatch, tmp_path, limit=180)
 
     def completion(messages, **kwargs):
         if messages[0]["content"] == "bad":
@@ -240,7 +240,7 @@ def test_shared_budget_keeps_successful_calls_from_failed_batch(
     model = Model(DEEPSEEK)
     with pytest.raises(RuntimeError, match="failed request"):
         model.generate_batch(["first", "bad", "last"])
-    assert model.total_token_units == 140
+    assert model.total_token_units == 180
     with pytest.raises(TokenUnitQuotaExceeded):
         Model(DEEPSEEK).generate("more")
 
@@ -254,10 +254,10 @@ def test_cached_op_does_not_charge_again(complete):
 
     model = Model(DEEPSEEK)
     original_key = model.cache_key()
-    assert generate(model, "Hello").usage["token_units"] == 70
-    assert generate(model, "Hello").usage["token_units"] == 70
+    assert generate(model, "Hello").usage["token_units"] == 90
+    assert generate(model, "Hello").usage["token_units"] == 90
     assert model.cache_key() == original_key
-    assert model.total_token_units == 70
+    assert model.total_token_units == 90
     complete.assert_called_once()
 
 
@@ -275,7 +275,7 @@ def test_shared_budget_across_instances_survives_history_reset(
         first.generate("Hello")
     assert complete.call_count == 2
     assert first.total_token_units == 0
-    assert second.total_token_units == 70
+    assert second.total_token_units == 90
 
 
 def test_shared_budget_blocks_unknown_models_before_api(
@@ -305,7 +305,7 @@ def test_shared_budget_requires_valid_usage(monkeypatch, tmp_path, complete, cou
 
 def test_shared_budget_records_usage_before_parsing(monkeypatch, tmp_path, complete):
     """Persist charges even when response parsing raises."""
-    enable_budget(monkeypatch, tmp_path, limit=70)
+    enable_budget(monkeypatch, tmp_path, limit=90)
     raw = response()
     raw.choices = None
     complete.side_effect = None
@@ -321,14 +321,14 @@ def test_cost_metadata_failure_does_not_lose_token_charge(
     monkeypatch, tmp_path, complete
 ):
     """Cost metadata failures cannot erase token charges."""
-    enable_budget(monkeypatch, tmp_path, limit=70)
+    enable_budget(monkeypatch, tmp_path, limit=90)
     monkeypatch.setattr(
         "pyforger.acquire.model._extract_cost", Mock(side_effect=ValueError("bad cost"))
     )
     model = Model(DEEPSEEK)
     with pytest.raises(ValueError, match="bad cost"):
         model.generate("Hello")
-    assert model.total_token_units == 70
+    assert model.total_token_units == 90
     with pytest.raises(TokenUnitQuotaExceeded):
         Model(DEEPSEEK).generate("Hello")
     complete.assert_called_once()
@@ -338,7 +338,7 @@ def test_shared_budget_checks_each_queued_batch_request(
     monkeypatch, tmp_path, complete
 ):
     """Stop queued requests once completed calls exhaust the budget."""
-    enable_budget(monkeypatch, tmp_path, limit=70)
+    enable_budget(monkeypatch, tmp_path, limit=90)
     real_executor = ThreadPoolExecutor
     monkeypatch.setattr(
         "pyforger.acquire.model.ThreadPoolExecutor",
@@ -347,7 +347,7 @@ def test_shared_budget_checks_each_queued_batch_request(
     model = Model(DEEPSEEK)
     with pytest.raises(TokenUnitQuotaExceeded):
         model.generate_batch(["first", "second", "third"])
-    assert model.total_token_units == 70
+    assert model.total_token_units == 90
     complete.assert_called_once()
 
 
@@ -375,7 +375,7 @@ def test_pipeline_token_unit_cap_stops_queued_requests(complete, monkeypatch):
     from pyforger.alter import generate_from_context
 
     monkeypatch.setenv("FORGER_STEP_REPORT", "0")
-    model = Model(DEEPSEEK, max_concurrency=1)  # 70 units per request
+    model = Model(DEEPSEEK, max_concurrency=1)  # 90 units per request
 
     @step
     def write(rows, model):
@@ -387,8 +387,8 @@ def test_pipeline_token_unit_cap_stops_queued_requests(complete, monkeypatch):
 
     with pytest.raises(BudgetExceededError, match="max_token_units=100"):
         main([{"q": str(i)} for i in range(5)], model)
-    assert complete.call_count == 2  # 70, then 140 >= 100: the rest never left
-    assert model.total_token_units == 140
+    assert complete.call_count == 2  # 90, then 180 >= 100: the rest never left
+    assert model.total_token_units == 180
 
 
 def test_process_token_unit_cap(complete, monkeypatch):
@@ -397,7 +397,7 @@ def test_process_token_unit_cap(complete, monkeypatch):
 
     model = Model(DEEPSEEK)
     spent = _tracking.usage_snapshot()[3]
-    monkeypatch.setenv("FORGER_MAX_TOKEN_UNITS", str(spent + 70))
+    monkeypatch.setenv("FORGER_MAX_TOKEN_UNITS", str(spent + 90))
     model.generate("Hello")
     with pytest.raises(BudgetExceededError, match="FORGER_MAX_TOKEN_UNITS"):
         model.generate("Again")
@@ -436,11 +436,12 @@ def test_units_reach_step_report_and_spend_ledger(complete, monkeypatch, tmp_pat
         return again(write(rows, model), model)
 
     main([{"q": "a"}, {"q": "b"}], Model(GLM))
-    assert _tracking.step_records()["write"].token_units == 580
-    assert _tracking.last_pipeline().token_units == 1160
+    # 424.9 units per GLM-5.3 call.
+    assert _tracking.step_records()["write"].token_units == pytest.approx(849.8)
+    assert _tracking.last_pipeline().token_units == pytest.approx(1699.6)
     records = _spend.read(tmp_path / "spend.jsonl")
-    assert [r["token_units"] for r in records] == [290.0] * 4
-    assert spend(tmp_path / "spend.jsonl").token_units == 1160
+    assert [r["token_units"] for r in records] == [424.9] * 4
+    assert spend(tmp_path / "spend.jsonl").token_units == pytest.approx(1699.6)
 
 
 def test_agent_usage_gets_token_units(monkeypatch):
@@ -457,7 +458,7 @@ def test_agent_usage_gets_token_units(monkeypatch):
         conversation_stats=SimpleNamespace(get_combined_metrics=lambda: metrics)
     )
     dynamic._record_agent_usage(conversation, DEEPSEEK)
-    assert seen == [((10, 20, 0.5, 70.0), {"model_id": DEEPSEEK})]
+    assert seen == [((10, 20, 0.5, 90.0), {"model_id": DEEPSEEK})]
 
 
 def test_cap_on_part_of_a_fan_out_is_raised_not_short(monkeypatch):
@@ -498,15 +499,15 @@ def test_dynamic_step_agents_use_the_token_unit_quota(monkeypatch, tmp_path):
     model = Model(DEEPSEEK)
     usage = dynamic._AgentUsage(DEEPSEEK, model._token_budget)
     usage.check()  # 0 of 100 units: fine
-    counts = SimpleNamespace(prompt_tokens=10, completion_tokens=20)  # 70 units
+    counts = SimpleNamespace(prompt_tokens=10, completion_tokens=20)  # 90 units
     metrics = SimpleNamespace(accumulated_token_usage=counts, accumulated_cost=0.01)
     usage.record(
         SimpleNamespace(
             conversation_stats=SimpleNamespace(get_combined_metrics=lambda: metrics)
         )
     )
-    assert model._token_budget.snapshot()["token_units"] == 70
-    counts.prompt_tokens, counts.completion_tokens = 20, 40  # 140 units in all
+    assert model._token_budget.snapshot()["token_units"] == 90
+    counts.prompt_tokens, counts.completion_tokens = 20, 40  # 180 units in all
     usage.record(
         SimpleNamespace(
             conversation_stats=SimpleNamespace(get_combined_metrics=lambda: metrics)
@@ -530,9 +531,9 @@ def test_timed_out_attempts_stay_charged(monkeypatch, tmp_path, complete):
     model = Model(DEEPSEEK, num_retries=1, max_tokens=100)
     model.generate("Hello")
     state = model._token_budget.snapshot()
-    # The timed-out attempt: 2 prompt tokens (5 characters / 3) + 100 x 3.
+    # The timed-out attempt: 2 prompt tokens (5 characters / 3) + 100 x 4.
     assert state["unreturned_calls"] == 1
-    assert state["token_units"] == 302 + 70
+    assert state["token_units"] == 402 + 90
     assert state["held_token_units"] == 0
 
 

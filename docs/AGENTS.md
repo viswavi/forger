@@ -59,7 +59,7 @@ Every op's signature and defaults are in [OPS.md](OPS.md), generated from the co
 | `pyforger.alter` | `src/pyforger/alter/` | Transform rows without removing any. |
 | `pyforger.filter` | `src/pyforger/filter/` | Remove rows by criterion. |
 | `pyforger.inspect` | `src/pyforger/inspect/` | Report on rows without modifying them. |
-| `pyforger.utils` | `src/pyforger/utils.py` | `get_field`, `get_formatted_logger`, `canonical`. |
+| `pyforger.utils` | `src/pyforger/utils.py` | `get_field`, `canonical`, `read_jsonl`, `as_text`, logging. |
 
 ## Reference files
 
@@ -93,13 +93,13 @@ result. Its results are placeholders, not from a run; write only comparisons you
   `os.environ.get("LITELLM_API_KEY")`. Never look at, print, or commit a key.
 - Use the model id the user gives (e.g. "base/org_name/gpt-5.6-sol") as the LiteLLM model name. If none is given,
   stop and ask. Other models in the same account are fair to try.
-- Default Azure models: "litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731" (fast, cheap, good for most things) and
+- Default Azure models: "litellm_proxy/azure_ai/DeepSeek-V4.1-Flash" (fast, cheap, good for most things) and
   "litellm_proxy/azure_ai/FW-GLM-5.3" (accurate, strong reasoning, expensive).
 
 ### Cost
 
-Token-unit quotas use fixed weights: DeepSeek-V4-Flash costs 1 unit per input token and 3 per output token; GLM-5.3
-costs 4 and 12.5. The judge's DeepSeek-V4.1-Flash costs 1 and 3, on the judge quota only.
+Token-unit quotas use fixed weights: DeepSeek-V4.1-Flash costs 1 unit per input token and 4 per output token;
+GLM-5.3 costs 5.83 and 18.33. The judge quota has its own weights: DeepSeek-V4.1-Flash costs 1 and 3 there.
 
 - Cached input tokens count at full weight. Completion tokens already include reasoning; do not add it again.
 - Other models report `NaN` units, and budgeted calls to them stop. Local GPU inference is free and exempt.

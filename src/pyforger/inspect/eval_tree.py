@@ -14,7 +14,7 @@ from pyforger import _tracking
 from pyforger.acquire.model import Model, Prompt, _cache_kwargs
 from pyforger.inspect.cluster import _default_embed, _warn_if_heavy_reasoning
 from pyforger.op import op
-from pyforger.utils import get_field, get_formatted_logger
+from pyforger.utils import field_text, get_field, get_formatted_logger
 
 logger = get_formatted_logger(__name__)
 
@@ -96,9 +96,9 @@ def eval_tree(
     if not items:
         return {"tree": None, "weaknesses": [], "capabilities": []}
 
-    inputs = [str(get_field(row, input_field, "eval_tree")) for row in items]
+    inputs = [field_text(row, input_field, "eval_tree") for row in items]
     references = (
-        [str(get_field(row, reference_field, "eval_tree")) for row in items]
+        [field_text(row, reference_field, "eval_tree") for row in items]
         if reference_field is not None
         else None
     )

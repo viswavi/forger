@@ -101,7 +101,7 @@ def _hold(ledger, kwargs, judge=False):
     return ledger.hold(kwargs["model"], units)
 
 
-def _record(ledger, model, result, hold):
+def _record(ledger, model, result, hold, judge):
     try:
         prompt, completion = response_token_counts(result)
     except ValueError:
@@ -113,6 +113,7 @@ def _record(ledger, model, result, hold):
         completion,
         cost_usd=response_cost_usd(result, model),
         hold=hold,
+        judge=judge,
     )
     return result
 
@@ -124,7 +125,7 @@ def completion(*, budget="generation", **kwargs):
     ledger = _prepare(budget, kwargs)
     with _hold(ledger, kwargs, budget == "judge") as hold:
         result = litellm.completion(**kwargs)
-    return _record(ledger, kwargs["model"], result, hold)
+    return _record(ledger, kwargs["model"], result, hold, budget == "judge")
 
 
 async def acompletion(*, budget="generation", **kwargs):
@@ -134,4 +135,4 @@ async def acompletion(*, budget="generation", **kwargs):
     ledger = _prepare(budget, kwargs)
     with _hold(ledger, kwargs, budget == "judge") as hold:
         result = await litellm.acompletion(**kwargs)
-    return _record(ledger, kwargs["model"], result, hold)
+    return _record(ledger, kwargs["model"], result, hold, budget == "judge")

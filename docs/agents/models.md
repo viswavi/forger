@@ -26,7 +26,7 @@ model = Model(
 
 ### Reasoning effort
 
-Set `Model(..., reasoning_effort="low")` (or `"none"`, `"medium"`, `"high"`). Without it, DeepSeek-V4-Flash on the
+Set `Model(..., reasoning_effort="low")` (or `"none"`, `"medium"`, `"high"`). Without it, DeepSeek-V4.1-Flash on the
 gateway does not think at all. Effort controls how long the reasoning trace is, so it drives cost and the chance of
 hitting `max_tokens`. `Model` sends it in the form each model reads, overriding any reasoning setting in
 `**kwargs` or `extra_body`.

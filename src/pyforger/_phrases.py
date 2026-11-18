@@ -43,6 +43,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from pyforger.utils import as_text, is_chat
+
 # A line, or a heading, in at least this share of rows is template text.
 BOILERPLATE_SHARE = 0.8
 # The step report's repeated: line. A phrase in more than PHRASE_SHARE of a
@@ -296,14 +298,19 @@ class _Counts:
         return names[:limit]
 
 
+def is_text(value: Any) -> bool:
+    """True for a string or chat messages, e.g. ``[{"role": "user", ...}]``."""
+    return isinstance(value, str) or is_chat(value)
+
+
 def field_texts(rows: Iterable[Any], field: str) -> list[str]:
-    """The string values of ``field`` in the dict rows."""
+    """The text values of ``field`` in the dict rows; messages give their contents."""
     return [
-        v
+        as_text(v)
         for r in rows
         if isinstance(r, dict)
         for v in [r.get(field)]
-        if isinstance(v, str)
+        if is_text(v)
     ]
 
 
@@ -432,7 +439,7 @@ def step_repeats(rows: list[Any], input_rows: list[Any] | None) -> list[Repeat]:
             base = field_texts(before_scan, key)
         else:  # a new field may restate any input field
             base = [
-                "\n".join(v for v in r.values() if isinstance(v, str))
+                "\n".join(as_text(v) for v in r.values() if is_text(v))
                 for r in before_scan
             ]
         found = field_phrases(

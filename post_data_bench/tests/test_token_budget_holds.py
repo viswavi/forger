@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "coding"))
 
 from rl import token_budget  # noqa: E402
 
-DEEPSEEK = "litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731"
+DEEPSEEK = "litellm_proxy/azure_ai/DeepSeek-V4.1-Flash"
 
 
 class _Timeout(Exception):
@@ -51,12 +51,12 @@ class HoldTests(unittest.TestCase):
         )
 
     def test_timeout_is_charged_at_its_hold(self):
-        """A timed-out call may still be billed, so it costs 2 + 100 x 3 units."""
+        """A timed-out call may still be billed, so it costs 2 + 100 x 4 units."""
         with patch("litellm.completion", side_effect=_Timeout("timed out")):
             with self.assertRaises(_Timeout):
                 self.call()
         state = self.ledger()
-        self.assertEqual((state["token_units"], state["unreturned_calls"]), (302, 1))
+        self.assertEqual((state["token_units"], state["unreturned_calls"]), (402, 1))
         self.assertEqual(state["held_token_units"], 0)
 
     def test_response_replaces_the_hold(self):
@@ -66,7 +66,7 @@ class HoldTests(unittest.TestCase):
         with patch("litellm.completion", return_value=result):
             self.call()
         state = self.ledger()
-        self.assertEqual((state["token_units"], state["held_token_units"]), (70, 0))
+        self.assertEqual((state["token_units"], state["held_token_units"]), (90, 0))
 
     def test_no_max_tokens_is_sent_uncapped_and_held_at_65536(self):
         """With no max_tokens the call is uncapped, as in Forger; it holds 65,536."""
@@ -83,7 +83,7 @@ class HoldTests(unittest.TestCase):
             token_budget.completion(
                 model=DEEPSEEK, messages=[{"role": "user", "content": "abcd"}]
             )
-        self.assertEqual(seen, {"max_tokens": None, "held": 2 + 65_536 * 3})
+        self.assertEqual(seen, {"max_tokens": None, "held": 2 + 65_536 * 4})
 
     def test_sdk_retries_are_refused(self):
         """A retried attempt would be billed but never recorded."""

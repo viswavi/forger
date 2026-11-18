@@ -704,6 +704,7 @@ async def prompt_score(
                     completion_tokens,
                     cost_usd=response_cost_usd(result, model),
                     hold=hold,
+                    judge=True,
                 )
                 if usage["remaining_token_units"] <= 0:
                     state["open"] = state["quota"] = True

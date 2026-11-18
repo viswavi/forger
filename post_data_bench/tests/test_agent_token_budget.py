@@ -56,10 +56,11 @@ class AgentTokenBudgetTests(unittest.TestCase):
             os.environ["JUDGE_REASONING_EFFORT"] = "high"
             configure(directory, "coding")
             generation = TokenUnitBudget(
-                os.environ["FORGER_TOKEN_USAGE_FILE"], 180_000_000
+                os.environ["FORGER_TOKEN_USAGE_FILE"], 264_000_000
             )
             judge = TokenUnitBudget(os.environ["JUDGE_TOKEN_USAGE_FILE"], 50_000_000)
-            generation.record(DEFAULT_JUDGE_MODEL, 10, 20)
+            # Input tokens only: 70 units under the generation and judge weights.
+            generation.record(DEFAULT_JUDGE_MODEL, 70, 0)
             judge.record(DEFAULT_JUDGE_MODEL, 5, 3)
             os.environ.clear()  # Recovery starts in a fresh terminal session.
             configure(directory, "coding")
@@ -110,7 +111,7 @@ class AgentTokenBudgetTests(unittest.TestCase):
                 {
                     "version": 1,
                     "task": "coding",
-                    "generation_token_unit_limit": 180_000_000,
+                    "generation_token_unit_limit": 264_000_000,
                     "judge_token_unit_limit": 50_000_000,
                     "judge_model": DEFAULT_JUDGE_MODEL,
                     "judge_reasoning_effort": "low",
@@ -158,14 +159,14 @@ class AgentTokenBudgetTests(unittest.TestCase):
             first, second = Path(directory) / "first", Path(directory) / "second"
             configure(first, "culture")
             previous = TokenUnitBudget(
-                os.environ["FORGER_TOKEN_USAGE_FILE"], 180_000_000
+                os.environ["FORGER_TOKEN_USAGE_FILE"], 264_000_000
             )
-            previous.record(DEFAULT_JUDGE_MODEL, 1, 1)
+            previous.record(DEFAULT_JUDGE_MODEL, 4, 0)
             configure(second, "culture")
             self.assertEqual(Path(os.environ["FORGER_TOKEN_USAGE_FILE"]).parent, second)
             self.assertEqual(
                 TokenUnitBudget(
-                    os.environ["FORGER_TOKEN_USAGE_FILE"], 180_000_000
+                    os.environ["FORGER_TOKEN_USAGE_FILE"], 264_000_000
                 ).snapshot()["token_units"],
                 0,
             )
@@ -236,7 +237,7 @@ sys.path.insert(0, sys.argv[1])
 sys.modules['litellm'] = SimpleNamespace(completion=lambda **kwargs: {
     'usage': {'prompt_tokens': 10, 'completion_tokens': 4}})
 from rl.token_budget import completion
-completion(model='litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731')
+completion(model='litellm_proxy/azure_ai/DeepSeek-V4.1-Flash')
 """
                 ledger = run / "generation_token_usage.json"
                 result = subprocess.run(
@@ -249,7 +250,9 @@ completion(model='litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731')
                     capture_output=True,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(json.loads(ledger.read_text())["token_units"], 22)
+                self.assertEqual(
+                    json.loads(ledger.read_text())["token_units"], 10 + 4 * 4
+                )
 
     def test_worked_example_reaches_only_the_forger_arm(self):
         """examples/rl_math is copied with src/ and docs/, and hidden with them."""
@@ -334,7 +337,7 @@ completion(model='litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731')
             TASK_DIR="/task",
             STUDENT_MODEL="Qwen/Qwen3-8B",
             MAX_SFT_LENGTH="18800",
-            GENERATION_TOKEN_UNIT_LIMIT="180000000",
+            GENERATION_TOKEN_UNIT_LIMIT="264000000",
             GENERATION_USAGE_PATH="/run/generation_token_usage.json",
             TIMEOUT_HOURS="6",
             GPU_DESCRIPTION="one local GPU, for embeddings and clustering only",
@@ -360,7 +363,7 @@ completion(model='litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731')
                 prompt = prompts[relative] = (
                     (ROOT / relative).read_text().format_map(_Placeholders(values))
                 )
-                self.assertIn("180000000 token units", prompt)
+                self.assertIn("264000000 token units", prompt)
                 self.assertNotIn("llm_spend", prompt)
                 # Agents must never learn benchmark names.
                 self.assertIsNone(BENCHMARK_NAMES.search(prompt))

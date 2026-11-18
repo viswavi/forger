@@ -12,7 +12,9 @@ outputs come back in input order.
 from __future__ import annotations
 
 import atexit
+import gc
 import getpass
+import logging
 import multiprocessing
 import os
 import re
@@ -25,6 +27,8 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Any
+
+_logger = logging.getLogger("pyforger.acquire.model")
 
 
 def visible_gpus() -> list[str]:
@@ -117,6 +121,74 @@ def prepare_in_process_engine() -> None:
     os.environ.update(caches)
     if scratch is not None:
         atexit.register(shutil.rmtree, scratch, True)
+
+
+# In-process `vllm.LLM` engines started and not yet shut down. vLLM's
+# distributed state is per process, so it is torn down only when this is 0.
+_live_engines = 0
+
+
+def start_in_process_engine(llm_class: Any, engine_kwargs: dict[str, Any]) -> Any:
+    """``llm_class(**engine_kwargs)``, e.g. a `vllm.LLM`, in this process."""
+    global _live_engines
+    prepare_in_process_engine()
+    llm = llm_class(**engine_kwargs)
+    _live_engines += 1
+    return llm
+
+
+def shutdown_in_process_engine(llm: Any) -> None:
+    """Stop a `vllm.LLM`'s engine core, which frees its executor and workers.
+
+    With VLLM_ENABLE_V1_MULTIPROCESSING=0 (see `prepare_in_process_engine`)
+    the core runs in this process; with it on, this stops the core's process
+    (and the workers it started for tensor_parallel_size > 1). Errors are
+    logged, not raised: a failed close must not fail a run that has its samples.
+    """
+    global _live_engines
+    _live_engines = max(0, _live_engines - 1)
+    core = getattr(getattr(llm, "llm_engine", None), "engine_core", None)
+    shutdown = getattr(core, "shutdown", None)
+    if callable(shutdown):
+        try:
+            shutdown()
+        except Exception as e:  # noqa: BLE001
+            _logger.warning("vLLM engine shutdown failed: %r", e)
+
+
+def release_in_process_engine() -> None:
+    """Free GPU memory once the last reference to a `vllm.LLM` is dropped.
+
+    Runs vLLM's `cleanup_dist_env_and_memory` (what vLLM's own tests run
+    between engines in one process): it destroys the model-parallel groups
+    and torch.distributed, collects garbage, and empties the CUDA cache.
+    While another in-process engine is running, which still needs those
+    groups, or where vLLM lacks the function, only `gc.collect()` and
+    `torch.cuda.empty_cache()` run. Best effort: memory an object still
+    referenced elsewhere holds, and the CUDA context itself, stay allocated.
+    """
+    if _live_engines == 0:
+        _cleanup_vllm()
+    gc.collect()
+    try:
+        import torch
+    except ImportError:
+        return
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def _cleanup_vllm() -> None:
+    """vLLM's `cleanup_dist_env_and_memory`, when this vLLM has it."""
+    try:
+        from vllm.distributed.parallel_state import cleanup_dist_env_and_memory
+    except Exception:  # noqa: BLE001  # moved or missing in this vLLM
+        cleanup_dist_env_and_memory = None
+    if cleanup_dist_env_and_memory is not None:
+        try:
+            cleanup_dist_env_and_memory()
+        except Exception as e:  # noqa: BLE001
+            _logger.warning("vLLM cleanup_dist_env_and_memory failed: %r", e)
 
 
 def device_groups(

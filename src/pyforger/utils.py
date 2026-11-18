@@ -5,6 +5,7 @@ from __future__ import annotations
 import dis
 import functools
 import inspect
+import json
 import logging
 import os
 import pickle
@@ -105,6 +106,136 @@ def get_field(item: dict, field: str, caller: str) -> Any:
             f"{caller}: item is missing required field '{field}'. "
             f"Available fields: {list(item.keys())}"
         )
+
+
+def is_chat(value: Any) -> bool:
+    """True for chat messages, e.g. ``[{"role": "user", "content": "Hi"}]``."""
+    return (
+        isinstance(value, list)
+        and bool(value)
+        and all(isinstance(m, dict) and ("content" in m or "role" in m) for m in value)
+    )
+
+
+def as_text(value: Any) -> str:
+    """A field value as plain text, for embeddings, n-grams, and phrase counts.
+
+    A string is unchanged. Chat messages give their contents, one message per
+    line, without roles: ``[{"role": "system", "content": "Be brief."},
+    {"role": "user", "content": "Hi"}]`` gives ``"Be brief.\\nHi"``. Any other
+    value gives ``str(value)``.
+    """
+    if isinstance(value, str):
+        return value
+    if is_chat(value):
+        return "\n".join(_content_text(m.get("content")) for m in value)
+    return str(value)
+
+
+def _content_text(content: Any) -> str:
+    """One message's content as text; of a list of parts, the text parts.
+
+    E.g. ``[{"type": "text", "text": "Hi"}, {"type": "image_url", ...}]`` gives
+    ``"Hi"``; ``None`` (a tool-call message) gives ``""``.
+    """
+    if content is None:
+        return ""
+    if isinstance(content, list):
+        return "\n".join(
+            str(p.get("text", "")) if isinstance(p, dict) else str(p)
+            for p in content
+            if not isinstance(p, dict) or "text" in p
+        )
+    return str(content)
+
+
+def field_text(item: dict, field: str, caller: str) -> str:
+    """``as_text`` of ``item[field]``, raising ``get_field``'s error when missing."""
+    return as_text(get_field(item, field, caller))
+
+
+def read_jsonl(path: str | os.PathLike[str]) -> list[dict]:
+    """Read a JSON Lines file of rows, e.g. an earlier dataset to compare against.
+
+    ``rows = read_jsonl("train.jsonl")`` gives one dict per non-blank line.
+
+    Raises:
+        ValueError: A line is not valid JSON or not a JSON object; the error
+            names the file and line number.
+    """
+    rows: list[dict] = []
+    with open(path, encoding="utf-8") as f:
+        for number, line in enumerate(f, 1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"{path}:{number}: not valid JSON ({e})") from None
+            if not isinstance(row, dict):
+                raise ValueError(
+                    f"{path}:{number}: expected a JSON object per line, "
+                    f"got {type(row).__name__}"
+                )
+            rows.append(row)
+    return rows
+
+
+# What makes a cached snapshot usable, for resolve_model_path.
+_WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt", ".pth", ".gguf")
+_TOKENIZER_FILES = ("tokenizer.json", "tokenizer_config.json", "tokenizer.model")
+
+
+def resolve_model_path(
+    model_id: str, *, revision: str | None = None, part: str = "model"
+) -> str:
+    """The Hugging Face cache's snapshot directory for ``model_id``, else ``model_id``.
+
+    E.g. ``"local/Qwen3-4B-x-rl80"``, saved to the cache as
+    ``models--local--Qwen3-4B-x-rl80/snapshots/<rev>/`` but not on the Hub,
+    gives that directory, so loading it needs no Hub lookup (which fails with
+    "repository not found"). ``model_id`` comes back unchanged when it is
+    already a directory, is not in the cache, or its snapshot lacks ``part``:
+    ``"model"`` needs ``config.json`` and weights (every shard an index
+    lists), ``"tokenizer"`` a tokenizer file. So a Hub model whose cache holds
+    only its tokenizer still downloads its weights.
+    """
+    if part not in ("model", "tokenizer"):
+        raise ValueError(f"part must be 'model' or 'tokenizer', not {part!r}")
+    if not isinstance(model_id, str) or not model_id or os.path.isdir(model_id):
+        return model_id
+    try:
+        from huggingface_hub import snapshot_download
+
+        path = snapshot_download(model_id, revision=revision, local_files_only=True)
+    except Exception:  # not cached, not a repo id, or no huggingface_hub
+        return model_id
+    return path if _snapshot_has(str(path), part) else model_id
+
+
+def _snapshot_has(path: str, part: str) -> bool:
+    """True when the snapshot directory ``path`` holds ``part`` (see above)."""
+    try:
+        names = set(os.listdir(path))
+    except OSError:
+        return False
+    if part == "tokenizer":
+        return any(name in names for name in _TOKENIZER_FILES)
+    if "config.json" not in names:
+        return False
+    for index in (n for n in names if n.endswith(".index.json")):
+        try:
+            with open(os.path.join(path, index), encoding="utf-8") as f:
+                shards = set(json.load(f).get("weight_map", {}).values())
+        except (OSError, ValueError, AttributeError):
+            return False
+        # Snapshot files are symlinks into blobs/; isfile is False for a broken one.
+        if not all(os.path.isfile(os.path.join(path, s)) for s in shards):
+            return False
+    return any(
+        name.endswith(_WEIGHT_SUFFIXES) and os.path.isfile(os.path.join(path, name))
+        for name in names
+    )
 
 
 _CODE_T = type((lambda: None).__code__)

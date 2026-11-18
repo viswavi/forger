@@ -185,7 +185,7 @@ class ClinicalDefaultsTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([c.kwargs["judge_sees"] for c in calls], sees)
 
     def test_judge_effort_and_quotas(self):
-        """Clinical: effort none, 200M generation and 300M judge units."""
+        """Clinical: effort none, 293M generation and 300M judge units."""
         sys.path.insert(0, str(ROOT.parent / "src"))
         from pyforger import token_units
 
@@ -193,7 +193,7 @@ class ClinicalDefaultsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             token_units.default_judge_reasoning_effort("algorithmic"), "low"
         )
-        self.assertEqual(token_units.default_generation_limit("clinical"), 200_000_000)
+        self.assertEqual(token_units.default_generation_limit("clinical"), 293_000_000)
         self.assertEqual(token_units.default_rl_limit("clinical"), 300_000_000)
 
     def test_unset_effort_follows_the_task(self):

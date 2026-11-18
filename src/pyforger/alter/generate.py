@@ -24,7 +24,13 @@ from pyforger.acquire._model_utils import (
     _report_provider_failures,
     _RequestFailures,
 )
-from pyforger.acquire.model import Model, Prompt, _cache_kwargs, split_reasoning
+from pyforger.acquire.model import (
+    Model,
+    Prompt,
+    _cache_kwargs,
+    room_for,
+    split_reasoning,
+)
 from pyforger.op import op
 from pyforger.utils import get_field
 
@@ -661,16 +667,17 @@ def self_taught_reasoner(
         """``n`` candidate rows per item, from ``template``'s prompts."""
         # A sub-op, so changing how answers are accepted (a judge, a
         # verifier) reuses these samples instead of drawing new ones.
-        sampled = _star_samples(
-            batch_items,
-            template,
-            model=model,
-            n=n,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            batch_size=batch_size,
-            hint_field=hint_field,
-        )
+        with room_for(model, answer_judge):
+            sampled = _star_samples(
+                batch_items,
+                template,
+                model=model,
+                n=n,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                batch_size=batch_size,
+                hint_field=hint_field,
+            )
         return [
             candidates_for(item, responses, reasoning)
             for item, (responses, reasoning) in zip(batch_items, sampled)
@@ -710,13 +717,14 @@ def self_taught_reasoner(
                 candidates, verifier, answer_field, max_workers or 8, min_score
             )
         if answer_judge is not None:
-            return _judged(
-                candidates,
-                answer_judge,
-                prompt_fn,
-                student_answer_field=student_answer_field,
-                reference_field=reference_field,
-            )
+            with room_for(answer_judge, model):
+                return _judged(
+                    candidates,
+                    answer_judge,
+                    prompt_fn,
+                    student_answer_field=student_answer_field,
+                    reference_field=reference_field,
+                )
         return [
             candidate
             for candidate in candidates

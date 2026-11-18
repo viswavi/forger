@@ -37,7 +37,7 @@ from typing import Literal, Union
 
 from pyforger import _tracking
 from pyforger.acquire._model_utils import _catch_kwargs, _chunk_size, _RequestFailures
-from pyforger.acquire.model import Model, Prompt, _cache_kwargs
+from pyforger.acquire.model import Model, Prompt, _cache_kwargs, room_for
 from pyforger.alter.generate import PromptTemplate, _normalized_equal, _resolve_prompt
 from pyforger.filter._rouge import rouge_l
 from pyforger.op import op
@@ -274,14 +274,15 @@ def by_comparative_difficulty(
     completions: dict[str, list[list[str | None]]] = {}
     stopped: dict[str, Stopped] = {}
     for group, model in (("weak", weak_model), ("strong", strong_model)):
-        completions[group], stopped[group] = _samples(
-            prompts,
-            model=model,
-            n=1,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            batch_size=batch_size,
-        )
+        with room_for(model, weak_model, strong_model):
+            completions[group], stopped[group] = _samples(
+                prompts,
+                model=model,
+                n=1,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                batch_size=batch_size,
+            )
         grades[group] = _grades(
             items,
             completions[group],

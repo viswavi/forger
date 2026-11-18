@@ -10,7 +10,7 @@ from typing import Any
 from pyforger import _tracking
 from pyforger.filter._rouge import rouge_l
 from pyforger.op import op
-from pyforger.utils import canonical, get_field
+from pyforger.utils import canonical, field_text, get_field
 
 
 @op(name="filter.by_exact_agreement")
@@ -78,8 +78,8 @@ def by_rouge_l_agreement(
     """
     scores = [
         rouge_l(
-            get_field(item, field_a, "by_rouge_l_agreement"),
-            get_field(item, field_b, "by_rouge_l_agreement"),
+            field_text(item, field_a, "by_rouge_l_agreement"),
+            field_text(item, field_b, "by_rouge_l_agreement"),
         )
         for item in items
     ]

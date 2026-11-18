@@ -59,6 +59,12 @@ def prepare(data, directory, model=BASE_MODEL, sft=False):
     """Validate rows and compile the training prompts (and SFT targets if `sft`)."""
     from transformers import AutoTokenizer
 
+    if model.startswith("local/"):
+        # A staged starting checkpoint exists only in the HF cache; the sandbox's
+        # shell is online, where the Hub lookup of this id would fail.
+        from huggingface_hub import snapshot_download
+
+        model = snapshot_download(model, local_files_only=True)
     return compile_data(data, directory, AutoTokenizer.from_pretrained(model), sft=sft)
 
 

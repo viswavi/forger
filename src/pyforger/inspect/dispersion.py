@@ -22,7 +22,7 @@ from pyforger.inspect.cluster import (
     _resolve_embedding_model,
 )
 from pyforger.op import op
-from pyforger.utils import get_field
+from pyforger.utils import field_text
 
 _OP = "embedding_dispersion"
 _EXAMPLE_CHARS = 300  # characters of an example row kept in the report
@@ -215,13 +215,13 @@ def embedding_dispersion(
         raise ValueError("max_rows must be at least 2")
     if not -1.0 <= duplicate_threshold <= 1.0:
         raise ValueError("duplicate_threshold must be a cosine similarity in [-1, 1]")
-    texts = [str(get_field(row, field, _OP)) for row in rows]
+    texts = [field_text(row, field, _OP) for row in rows]
     if len(texts) < 2:
         raise ValueError(f"{_OP} needs at least 2 rows, got {len(texts)}")
     ref_texts = None
     if reference is not None:
         ref_field = field if reference_field is None else reference_field
-        ref_texts = [str(get_field(row, ref_field, _OP)) for row in reference]
+        ref_texts = [field_text(row, ref_field, _OP) for row in reference]
         if len(ref_texts) < 2:
             raise ValueError(
                 f"{_OP} needs at least 2 reference rows, got {len(ref_texts)}"

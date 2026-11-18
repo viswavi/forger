@@ -34,6 +34,27 @@ class LowRowsMessageTests(unittest.TestCase):
         self.assertIsNone(low_rows_message(_dataset(10), 0, 3600))
         self.assertIsNone(low_rows_message(_dataset(10), 1000, 29 * 60))
 
+    def test_starting_rows_do_not_count_toward_the_floor(self):
+        """With a starting dataset, only rows outside it count: 472 kept + 50 new is low."""
+        import hashlib
+        import json
+
+        path = Path(tempfile.mkdtemp()) / "generated_raw.jsonl"
+        rows = [{"prompt": [{"role": "user", "content": str(i)}]} for i in range(522)]
+        path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        known = {
+            hashlib.sha256(json.dumps(r["prompt"], sort_keys=True).encode()).hexdigest()
+            for r in rows[:472]
+        }
+        message = low_rows_message(
+            path, 100, 12 * 3600, target=200, starting_prompts=known
+        )
+        self.assertIn("has 522 rows, 50 of them new", message)
+        self.assertIn("about 200 new rows is a good target", message)
+        self.assertIsNone(
+            low_rows_message(path, 50, 12 * 3600, target=200, starting_prompts=known)
+        )
+
     def test_missing_dataset_is_named(self):
         """No dataset file yet: the nudge says so, in minutes when under an hour."""
         missing = Path(tempfile.mkdtemp()) / "generated_raw.jsonl"

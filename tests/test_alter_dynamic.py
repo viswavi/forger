@@ -414,7 +414,7 @@ def test_agent_llm_forwards_deepseek_reasoning(monkeypatch):
     monkeypatch.setitem(sys.modules, "openhands", SimpleNamespace(sdk=sdk))
     monkeypatch.setitem(sys.modules, "openhands.sdk", sdk)
     model = Model(
-        "litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731",
+        "litellm_proxy/azure_ai/DeepSeek-V4.1-Flash",
         api_key="k",
         reasoning_effort="high",
         extra_body={"top_k": 5},

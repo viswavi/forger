@@ -21,7 +21,7 @@ from typing import TextIO, cast
 from agent_boundary import model_cache_bind
 from agent_nudges import low_rows_message
 from backend_prompts import prompt_sections
-from coding.rl.backends import MODELS, RL_DEFAULTS, saved_backend
+from coding.rl.backends import MODELS, ORIGINAL_LOCAL_MODEL, RL_DEFAULTS, saved_backend
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument(
@@ -153,6 +153,8 @@ args.model = args.model or MODELS[args.backend]
 # The algorithmic task recommends a smaller dataset (~500 rows, at most 800);
 # the clinical task asks for at least 400.
 ROW_TARGET = {"frontiercs": 500, "healthbench": 800}.get(args.task, 1250)
+# A starting point sets its own floor, in new rows, unless the flag is given.
+MIN_ROWS_NUDGE_GIVEN = args.min_rows_nudge is not None
 if args.min_rows_nudge is None:
     args.min_rows_nudge = {"frontiercs": 200, "healthbench": 400}.get(args.task, 1000)
 # Time a nudged agent needs to retrain. Set when 80 algorithmic RL steps of 32
@@ -175,6 +177,11 @@ if args.task in ("frontiercs", "healthbench") and args.training_mode != "sft-rl"
     parser.error(
         f"{args.task} runs only in the unified recipe (--training-mode sft-rl)"
     )
+if args.backend == "local":
+    # The sandbox's training helpers and the host's freeze read the local student
+    # from this (rl.backends.MODELS): Qwen/Qwen3-4B, or a release's post-trained
+    # starting checkpoint staged in the HF cache, e.g. local/Qwen3-4B-clinical-rl80.
+    os.environ["PDB_LOCAL_BASE_MODEL"] = args.model
 # The task's name wherever the agent can see it: sandbox paths, the sandbox's
 # PDB_TASK and the run's token-budget policy. The agent must not learn which
 # benchmark it is evaluated on, e.g. frontiercs -> post_data_bench/algorithmic.
@@ -528,6 +535,77 @@ prompt_values = dict(
     TINKER_RL_USAGE_PATH=os.environ.get("TINKER_RL_USAGE_FILE", ""),
 )
 
+# A release can start agents from a post-trained checkpoint instead of the base
+# model. Its benchmark build then ships starting_point/: prompt.txt, the task
+# prompt's paragraph on that checkpoint (its training data, and the test and
+# validation scores before and after), and the files the paragraph names, e.g.
+# dataset.jsonl. Without one, STARTING_POINT is empty and the prompt is unchanged.
+STARTING_POINT_DIR = os.path.join(
+    os.environ.get("PDB_BENCHMARK_DIR", HOST_TASK_DIR), "starting_point"
+)
+if os.path.isdir(STARTING_POINT_DIR) != (
+    args.backend == "local" and args.model != ORIGINAL_LOCAL_MODEL
+):
+    parser.error(
+        "a starting_point/ build needs --backend local with its starting model "
+        "(PDB_LOCAL_BASE_MODEL), and a starting model needs a starting_point/ build"
+    )
+# Where RL starts, in the backend sections; prompt.txt defines "the starting model".
+prompt_values["START_MODEL_NAME"] = (
+    "the starting model" if os.path.isdir(STARTING_POINT_DIR) else "the base model"
+)
+prompt_values["STARTING_POINT"] = ""
+# How the local-GPU sections name the student to sample: a starting model is
+# not on the Hub, so they give its directory instead of its id.
+prompt_values["STUDENT_LOCAL"] = args.model
+# Each task prompt's row-target sentence, which a starting point replaces with
+# its own target in new rows.
+ROW_TARGET_SENTENCES = {
+    "frontiercs": "About 500 rows is a good target that should yield good results, "
+    "and try to generate no fewer than 200 examples.",
+    "healthbench": "Submit at least 400 rows, and more if you can.",
+}
+STARTING_PROMPTS = None
+if os.path.isdir(STARTING_POINT_DIR):
+    import json as _json
+
+    from coding.rl.rubric_data import prompt_id, read_rows
+
+    with open(os.path.join(STARTING_POINT_DIR, "config.json")) as f:
+        _start = _json.load(f)
+    ROW_TARGET = _start["new_rows"]
+    if not MIN_ROWS_NUDGE_GIVEN:
+        args.min_rows_nudge = _start["min_new_rows"]
+    STARTING_PROMPTS = {
+        prompt_id(row)
+        for row in read_rows(os.path.join(STARTING_POINT_DIR, "dataset.jsonl"))
+    }
+    _old = ROW_TARGET_SENTENCES[args.task]
+    if raw_prompt_content.count(_old) != 1:
+        raise ValueError(f"the {args.task} prompt no longer has its row target")
+    raw_prompt_content = raw_prompt_content.replace(
+        _old,
+        "We recommend new rows over rows from the earlier dataset "
+        "(starting_point/dataset.jsonl), which the starting model has already "
+        f"trained on: about {ROW_TARGET:,} new rows is a good target, and reused "
+        "rows count toward the limit.",
+    )
+    # Its weights in the sandbox (the cache bind below), for tools that need a
+    # directory: the id is not on the Hub, so an online lookup of it fails.
+    _cache = "models--" + args.model.replace("/", "--")
+    with open(
+        os.path.join(os.environ["AGENT_HF_HOME"], "hub", _cache, "refs", "main")
+    ) as f:
+        prompt_values[
+            "START_MODEL_PATH"
+        ] = f"{AGENT_DATA_DIR}/.hf/hub/{_cache}/snapshots/{f.read().strip()}"
+    prompt_values[
+        "STUDENT_LOCAL"
+    ] = f"the starting model, at {prompt_values['START_MODEL_PATH']}"
+    with open(os.path.join(STARTING_POINT_DIR, "prompt.txt")) as f:
+        prompt_values["STARTING_POINT"] = (
+            f.read().strip().format(**prompt_values) + "\n\n"
+        )
 prompt_values.update(
     prompt_sections(args.backend, args.hide_forger, prompt_values, task=args.task)
 )
@@ -637,7 +715,7 @@ os.environ["FORGER_CACHE"] = f"{AGENT_DATA_DIR}/.forger_cache"
 # short calls per report, charged to the generation quota like any other call.
 if not args.hide_forger:
     os.environ.setdefault(
-        "FORGER_REPORT_MODEL", "litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731"
+        "FORGER_REPORT_MODEL", "litellm_proxy/azure_ai/DeepSeek-V4.1-Flash"
     )
 
 # No terminal command may block the agent for more than an hour: the agent
@@ -813,9 +891,14 @@ def _task_public_copies(task_dir: str, dest_task_dir: str) -> None:
     if not os.path.isdir(model_outputs_dir):
         model_outputs_dir = os.path.join(task_dir, "model_outputs")
     if os.path.isdir(model_outputs_dir):
+        # A starting checkpoint's validation results, then the original base
+        # model's (Qwen__Qwen3-4B), so agents see what its training changed.
+        shown = [args.model]
+        if args.backend == "local" and args.model != ORIGINAL_LOCAL_MODEL:
+            shown.append(ORIGINAL_LOCAL_MODEL)
         for model_name in [
-            args.model.replace("/", "__")
-            + ("_tinker" if args.backend == "tinker" else "")
+            model.replace("/", "__") + ("_tinker" if args.backend == "tinker" else "")
+            for model in shown
         ]:
             val_dir = os.path.join(model_outputs_dir, model_name, "val")
             if not os.path.isdir(val_dir):
@@ -874,6 +957,14 @@ def _task_public_copies(task_dir: str, dest_task_dir: str) -> None:
                     baseline.get("context", {}).pop("by_label", None)
                     baseline.pop("source", None)
                     copied_metrics.write_text(json.dumps(baseline, indent=2) + "\n")
+
+    # The starting checkpoint's training data, e.g. starting_point/dataset.jsonl;
+    # prompt.txt (the task prompt's paragraph) and config.json (its row targets)
+    # are for the launcher, not the agent.
+    if os.path.isdir(STARTING_POINT_DIR):
+        for path in sorted(Path(STARTING_POINT_DIR).iterdir()):
+            if path.name not in {"prompt.txt", "config.json"} and path.is_file():
+                _copy_into(dest_task_dir, f"starting_point/{path.name}", str(path))
 
 
 def build_agent_mounts(
@@ -1259,6 +1350,7 @@ try:
                 "PDB_TRAIN_BACKEND",
                 "PDB_EVAL_BACKEND",
                 "PDB_STUDENT_MODEL",
+                "PDB_LOCAL_BASE_MODEL",
                 "PDB_RUN_TAG",
                 "TZ",
                 "OH_RUNTIME_IDLE_TIMEOUT_SECONDS",
@@ -1350,6 +1442,7 @@ try:
                     min_seconds_left=NUDGE_SECONDS_LEFT,
                     prompt_draws=schedule["num_rollout"]
                     * schedule["rollout_batch_size"],
+                    starting_prompts=STARTING_PROMPTS,
                 )
                 if nudge is not None:
                     logger.info(f"Low-row nudge sent to the agent: {nudge}")

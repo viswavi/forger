@@ -44,7 +44,7 @@ from pyforger.token_units import (
     response_token_counts,
     token_units,
 )
-from pyforger.utils import get_formatted_logger
+from pyforger.utils import get_formatted_logger, resolve_model_path
 
 # LiteLLM prints "Give Feedback / Get Help: <url>" and a debug hint to stdout before
 # raising each provider error; the raised error already says what went wrong.
@@ -79,6 +79,12 @@ _STRAGGLER_FACTOR = 5.0
 # LiteLLM's own default is 6000s, so a stuck request blocks for 100 minutes.
 _DEFAULT_TIMEOUT_S = 600.0
 _SLOW_TOKENS_PER_S = 25.0
+# Model does not stream, and a gateway can end a request after a fixed time: a
+# LiteLLM gateway returned 504 after 180s (2026-11-17), where DeepSeek-V4.1-Flash
+# wrote ~145 tokens/s, so answers past ~26,000 tokens failed. A max_tokens above
+# this warns once per model and value.
+_LONG_REQUEST_TOKENS = 26_000
+_long_request_warned: set[tuple[str, int]] = set()
 # Model(num_retries=) waits before retry k (0, 1, ...) about this many seconds
 # times 2**k, at most _RETRY_MAX_S: 1s, 2s, 4s, ... A 429's Retry-After header
 # is honoured up to _RETRY_AFTER_MAX_S.
@@ -115,6 +121,25 @@ _QUOTA_MARKERS = (
 )
 
 _logger = get_formatted_logger(__name__)
+
+
+def _warn_long_request(model_id: str, max_tokens: int | None) -> None:
+    """Warn once when max_tokens allows a response a gateway may cut off."""
+    if max_tokens is None or max_tokens <= _LONG_REQUEST_TOKENS:
+        return
+    key = (model_id, max_tokens)
+    if key in _long_request_warned:
+        return
+    _long_request_warned.add(key)
+    _logger.warning(
+        "%s: max_tokens=%d is above %d. Requests are not streamed, and a gateway "
+        "that ends requests after a fixed time fails the longest responses: one "
+        "returned 504 after 180s, about 26,000 tokens at DeepSeek-V4.1-Flash's "
+        "speed. A failed request is retried (num_retries) and may still be billed.",
+        model_id,
+        max_tokens,
+        _LONG_REQUEST_TOKENS,
+    )
 
 
 def _request_timeout(timeout: Any, max_tokens: int | None) -> Any:
@@ -2028,6 +2053,7 @@ class Model:
 
         temperature = temperature if temperature is not None else self._temperature
         max_tokens = max_tokens if max_tokens is not None else self._max_tokens
+        _warn_long_request(self._model_id, max_tokens)
 
         self._check_params(
             temperature=temperature,
@@ -2575,6 +2601,8 @@ class LocalModel(Model):
         self._seed = seed
         self._show_progress = show_progress
         self._llm: Any | None = None
+        # Closed before this model's engine starts; set by `room_for`.
+        self._rivals: list[LocalModel] = []
 
     def cache_key(self) -> tuple:
         """Stable hash key for @op caching from the functional configuration.
@@ -2629,8 +2657,10 @@ class LocalModel(Model):
         """
         if self._llm is None:
             vllm = _import_vllm()  # fails here, with the install hint, without vllm
+            for rival in getattr(self, "_rivals", ()):
+                rival.close()
             engine_kwargs = dict(
-                model=self._model_id,
+                model=self._model_path(),
                 gpu_memory_utilization=self._gpu_memory_utilization,
                 tensor_parallel_size=self._tensor_parallel_size,
                 dtype=self._dtype,
@@ -2638,6 +2668,10 @@ class LocalModel(Model):
                 max_model_len=self._max_model_len,
                 **self._kwargs,
             )
+            if isinstance(engine_kwargs.get("tokenizer"), str):  # e.g. a local id
+                engine_kwargs["tokenizer"] = resolve_model_path(
+                    engine_kwargs["tokenizer"], part="tokenizer"
+                )
             # Scoring (`target_logprobs`) takes a full-vocabulary log-softmax of
             # every prompt token in an engine step, outside the memory vLLM sets
             # aside: for Qwen3 a 16K-token step needs ~10 GB and a 4K one ~2.5 GB,
@@ -2661,15 +2695,39 @@ class LocalModel(Model):
                 )
                 self._llm = _local_dp.DataParallelEngine.start(groups, engine_kwargs)
             else:
-                _local_dp.prepare_in_process_engine()
-                self._llm = vllm.LLM(**engine_kwargs)
+                self._llm = _local_dp.start_in_process_engine(vllm.LLM, engine_kwargs)
         return self._llm
 
+    def _model_path(self) -> str:
+        """What vLLM loads: the cached snapshot of ``model_id`` when it has one.
+
+        E.g. ``"local/Qwen3-4B-x-rl80"``, a checkpoint in the Hugging Face
+        cache but not on the Hub, loads from its snapshot directory. History,
+        logs, and ``cache_key`` keep ``model_id``.
+        """
+        revision = self._kwargs.get("revision")
+        path = resolve_model_path(self._model_id, revision=revision)
+        if path != self._model_id:
+            _logger.info("LocalModel %s: loading snapshot %s", self._model_id, path)
+        return path
+
     def close(self) -> None:
-        """Free the GPUs held by data-parallel engines; the next call restarts them."""
-        if isinstance(self._llm, _local_dp.DataParallelEngine):
-            self._llm.close()
-            self._llm = None
+        """Free the GPUs this model's engine holds; the next call starts it again.
+
+        Data-parallel engines are worker processes, which stop. An in-process
+        ``vllm.LLM`` is shut down and its GPU memory released as far as vLLM
+        allows (see ``_local_dp.release_in_process_engine``): vLLM keeps no
+        reliable teardown, so a little memory may stay held until exit.
+        """
+        llm, self._llm = self._llm, None
+        if llm is None:
+            return
+        if isinstance(llm, _local_dp.DataParallelEngine):
+            llm.close()
+            return
+        _local_dp.shutdown_in_process_engine(llm)
+        del llm  # the last reference, so the collection below frees the weights
+        _local_dp.release_in_process_engine()
 
     def _template_kwargs(self) -> dict[str, Any]:
         """Resolve chat-template kwargs from explicit override or enable_thinking."""
@@ -2864,6 +2922,28 @@ class LocalModel(Model):
             return call(mode == "bar")  # vLLM's own bar, with tokens per second
         with Progress(desc, total, mode) as progress:
             return call(vllm_tqdm(progress.update))
+
+
+@contextlib.contextmanager
+def room_for(model: Any, *others: Any) -> Iterator[None]:
+    """While open, ``model`` closes the other ``LocalModel``s when its engine starts.
+
+    Two vLLM engines at the default ``gpu_memory_utilization=0.9`` do not fit
+    on the same GPUs, so an op that samples a weak, then a strong local model
+    samples the strong one inside ``with room_for(strong, weak):``. The weak
+    model's engine is closed only if the strong one has to start (not on a
+    cache hit, nor when both already run), and restarts on its next call.
+    Nothing happens unless ``model`` is a ``LocalModel``; API models are
+    never closed.
+    """
+    if not isinstance(model, LocalModel):
+        yield
+        return
+    model._rivals = [o for o in others if isinstance(o, LocalModel) and o is not model]
+    try:
+        yield
+    finally:
+        model._rivals = []
 
 
 # Marks the boundary between a reasoning model's thinking block and its answer.

@@ -47,6 +47,22 @@ if [[ -z "${AGENT_HF_HOME:-}" ]]; then
   # the snapshot -> blobs links stay relative.
   rm -rf "$AGENT_HF_HOME/hub/models--Qwen--Qwen3-4B/blobs"
   cp -rL "$model_src/blobs" "$AGENT_HF_HOME/hub/models--Qwen--Qwen3-4B/blobs"
+  # A release that starts from a post-trained checkpoint (PDB_LOCAL_BASE_MODEL)
+  # has its own cache entry, models--local--<name>, whose snapshot holds plain
+  # files (make_starting_point.py stage-model): in GCS under PDB_START_MODEL_URI,
+  # e.g. gs://.../start_models/models--local--Qwen3-4B-clinical-rl80, or else in
+  # the shared cache.
+  if [[ -n "${PDB_LOCAL_BASE_MODEL:-}" && "$PDB_LOCAL_BASE_MODEL" != Qwen/Qwen3-4B ]]; then
+    start_entry="models--${PDB_LOCAL_BASE_MODEL//\//--}"
+    start_src="${PDB_START_MODEL_URI:-${PDB_MODEL_CACHE_SOURCE:-/project/flame/vijayv/hf_cache}/hub/$start_entry}"
+    [[ "$(basename "$start_src")" == "$start_entry" ]] || { echo "PDB_START_MODEL_URI must end in $start_entry" >&2; exit 2; }
+    if [[ "$start_src" == gs://* ]]; then
+      gsutil -q -m cp -r "$start_src" "$AGENT_HF_HOME/hub/"
+    else
+      cp -rL "$start_src" "$AGENT_HF_HOME/hub/"
+    fi
+    [[ -s "$AGENT_HF_HOME/hub/$start_entry/refs/main" ]] || { echo "starting model $PDB_LOCAL_BASE_MODEL is not staged at $start_src" >&2; exit 2; }
+  fi
 fi
 : "${PDB_BENCHMARK_DIR:?Set the verified benchmark build}"
 [[ "${1:-}" == --env-file && -f "${2:-}" ]] || { echo 'Specify --env-file PATH first' >&2; exit 2; }

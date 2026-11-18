@@ -6,6 +6,8 @@ returns None when there is nothing to say, so the session stays finished.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
 # Both RL recipes draw this many prompts (80 steps x 32 prompts), from the
@@ -27,6 +29,29 @@ def count_rows(path: str | Path) -> int | None:
         return None
 
 
+def new_prompt_count(path: str | Path, known: set[str]) -> int | None:
+    """Rows whose prompt is not in ``known`` (rl.rubric_data.prompt_id hashes).
+
+    e.g. a dataset of the 472 starting rows plus 150 new ones counts 150; None
+    when the file does not exist. Unreadable lines count as new.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = [line for line in f if line.strip()]
+    except FileNotFoundError:
+        return None
+    new = 0
+    for line in lines:
+        try:
+            prompt = json.loads(line)["prompt"]
+        except (ValueError, KeyError, TypeError):
+            new += 1
+            continue
+        digest = hashlib.sha256(json.dumps(prompt, sort_keys=True).encode())
+        new += digest.hexdigest() not in known
+    return new
+
+
 def low_rows_message(
     path: str | Path,
     minimum: int,
@@ -34,6 +59,7 @@ def low_rows_message(
     target: int = 1250,
     min_seconds_left: float = MIN_SECONDS_LEFT,
     prompt_draws: int = RL_PROMPT_DRAWS,
+    starting_prompts: set[str] | None = None,
 ) -> str | None:
     """A note for an agent that finished with fewer than ``minimum`` rows.
 
@@ -42,11 +68,17 @@ def low_rows_message(
     dataset as it is. None when ``minimum`` is 0, the dataset has enough rows,
     or under ``min_seconds_left`` are left (leave time for training).
     ``prompt_draws`` is the default RL schedule's steps x prompts per step.
+    With ``starting_prompts`` (a release's starting dataset), ``minimum`` and
+    ``target`` count only new rows, whose prompts are not among them.
     """
     if minimum <= 0 or seconds_left < min_seconds_left:
         return None
     rows = count_rows(path)
-    if rows is not None and rows >= minimum:
+    if starting_prompts is not None:
+        new = new_prompt_count(path, starting_prompts)
+        if new is not None and new >= minimum:
+            return None
+    elif rows is not None and rows >= minimum:
         return None
     hours = seconds_left / 3600
     left = (
@@ -56,6 +88,13 @@ def low_rows_message(
     )
     if rows is None:
         found = f"There is no dataset at {path} yet."
+    elif starting_prompts is not None:
+        found = (
+            f"Your dataset at {path} has {rows} rows, {new} of them new (not in "
+            f"the earlier dataset the starting model trained on); about {target:,} "
+            f"new rows is a good target, and at least {minimum:,} is what we "
+            "expect realistically."
+        )
     else:
         visits = prompt_draws / max(1.0, rows * TRAIN_SHARE)
         found = (

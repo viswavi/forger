@@ -253,9 +253,10 @@ def coding(writer, solver, judge_model):
 
 Common patterns (not a complete list):
 
-- **Retrieval-augmented generation:** retrieve knowledge (e.g. from the web) first and condition generation on it,
-  directly or via [`dynamic_step`](dynamic_step.md) for case-by-case extraction. This is almost always better than
-  relying on the model's parametric knowledge.
+- **Retrieval-augmented generation:** retrieve knowledge (e.g. from the web or a public dataset) first and condition
+  generation on it, directly or via [`dynamic_step`](dynamic_step.md) for case-by-case extraction. Retrieved text can
+  add facts, variety and real tasks a model would not write on its own; it is worth trying, and comparing against
+  generation from the model's own knowledge on the same measurements.
 - **Find the weak spots first:** group a baseline model's failures by skill with `inspect.eval_tree` (or label them
   with `inspect.topic_based_clustering`), then check which topics your own rows cover and rebalance them with
   `filter.by_topic_frequency`.
@@ -272,6 +273,12 @@ Common patterns (not a complete list):
   inside a larger pipeline; slower, but more flexible.
 - **Strong-vs-weak gap:** answer each input with a weak model and several strong ones; keep rows where the strong
   models agree with each other (likely correct) but not with the weak one (not too easy).
+- **Building on an earlier dataset:** when the student already trained on a dataset (`utils.read_jsonl(path)` loads
+  it as rows), measure new rows against it:
+  `inspect.embedding_dispersion(new, field, reference=earlier)` reports how many new rows sit near earlier ones,
+  `filter.by_embedding_similarity(new, field=..., reference=earlier, dedupe=False)` drops the ones that do, and
+  `filter.by_pass_at_k` with the current student shows which rows it already solves. Chat-message fields
+  (`[{"role": ..., "content": ...}]`) are compared by their text.
 - **Programming problems checked by execution:** pair each problem with a reference and a brute-force solution
   (Python or C++); generate inputs with generator programs (tests with `"args"` and no `"output"` record stdout),
   get expected outputs from the brute force, keep problems whose reference agrees (`filter.by_tests`), and score

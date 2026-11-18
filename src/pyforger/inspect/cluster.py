@@ -22,7 +22,7 @@ from pyforger.acquire._model_utils import (
 from pyforger.acquire.model import Message, Model, Prompt, _cache_kwargs
 from pyforger.inspect import _embed_dp
 from pyforger.op import op
-from pyforger.utils import get_field, get_formatted_logger
+from pyforger.utils import as_text, get_field, get_formatted_logger, is_chat
 
 logger = get_formatted_logger("Inspect")
 
@@ -198,6 +198,15 @@ def topic_based_clustering(
     # Resolved outside the cached op, so its code and cache keys stay as before.
     if context is None:
         context = _default_context(field)
+    # Chat messages become their contents here, outside the cached op, so rows
+    # with a string field keep their cache keys and cached LLM calls.
+    if any(isinstance(item, dict) and is_chat(item.get(field)) for item in items):
+        items = [
+            {**item, field: as_text(item[field])}
+            if isinstance(item, dict) and is_chat(item.get(field))
+            else item
+            for item in items
+        ]
     return _topic_based_clustering(
         items,
         field=field,

@@ -12,14 +12,22 @@ import time
 import uuid
 from pathlib import Path
 
-DEFAULT_GENERATION_LIMIT = 180_000_000
+# Quotas scaled by 1.47 when the unit changed (2026-11-17): the old unit was worth
+# $0.44/M (GLM-5.3 at 4/12.5), so they buy the same GLM-5.3 tokens: 180M -> 264M.
+DEFAULT_GENERATION_LIMIT = 264_000_000
 DEFAULT_JUDGE_MODEL = "litellm_proxy/azure_ai/DeepSeek-V4.1-Flash"
 DEFAULT_REASONING_EFFORT = "low"
-_WEIGHTS = {"deepseek-v4-flash": (1, 3), "glm-5.3": (4, 12.5)}
-# The judge's model, weighted only on the judge quota: generation keeps the two
-# models above. Same weights as DeepSeek-V4-Flash, so a judge quota buys the same
-# tokens as before at a lower price ($0.30/$1.20 vs $0.44/$1.32 per 1M, 2026-11-14).
-_JUDGE_WEIGHTS = {"deepseek-v4.1-flash": (1, 3)}
+# Generation weights are the gateway's prices in units of DeepSeek-V4.1-Flash's
+# input price ($0.30/M): its output is $1.20/M, GLM-5.3's $1.75/M in and $5.50/M
+# out (cost headers on the generation key, 2026-11-17).
+_WEIGHTS = {"deepseek-v4.1-flash": (1, 4), "glm-5.3": (5.83, 18.33)}
+# The judge quota keeps its earlier units, so it buys the same judge tokens as
+# before: DeepSeek-V4.1-Flash 1/3, and the fallback judges at their old weights.
+_JUDGE_WEIGHTS = {
+    "deepseek-v4.1-flash": (1, 3),
+    "deepseek-v4-flash": (1, 3),
+    "glm-5.3": (4, 12.5),
+}
 # Completion tokens held for a request sent without max_tokens.
 _DEFAULT_HELD_COMPLETION = 65_536
 # Prompt characters per held token: below the 3-4 real tokenizers give.
@@ -41,17 +49,17 @@ class TokenUnitQuotaExceeded(RuntimeError):
 def model_weights(model_id, judge=False):
     """Return fixed input/output weights for a supported model or alias.
 
-    Generation models are DeepSeek-V4-Flash and GLM-5.3; ``judge=True`` also
-    accepts the judge's DeepSeek-V4.1-Flash.
+    Generation models are DeepSeek-V4.1-Flash and GLM-5.3; ``judge=True`` uses
+    the judge quota's weights, which also accept DeepSeek-V4-Flash.
     """
     if not isinstance(model_id, str):
         raise ValueError("model_id must be a string")
-    table = {**_WEIGHTS, **_JUDGE_WEIGHTS} if judge else _WEIGHTS
+    table = _JUDGE_WEIGHTS if judge else _WEIGHTS
     matches = [weights for name, weights in table.items() if name in model_id.lower()]
     if len(matches) != 1:
         raise ValueError(
-            "Token units require a DeepSeek-V4-Flash or GLM-5.3 model alias"
-            + (" (or the judge's DeepSeek-V4.1-Flash)" if judge else "")
+            "Token units require a DeepSeek-V4.1-Flash or GLM-5.3 model alias"
+            + (" (or, for the judge, DeepSeek-V4-Flash)" if judge else "")
         )
     return matches[0]
 
@@ -161,12 +169,13 @@ def default_generation_limit(task):
     if normalized in ("coding", "culture"):
         return DEFAULT_GENERATION_LIMIT
     if normalized == "algorithmic":
-        return 120_000_000
+        return 176_000_000
     if normalized == "clinical":
         # Mostly DeepSeek-V4-Flash: a 3-call example (question, reference answer,
         # criteria) took ~8,500 units; GLM-5.3 at low effort ~244,000 (2026-11-11).
         # 30M moved to the judge (2026-11-12): agents used ~120-160M of 230M.
-        return 200_000_000
+        # 200M x 1.47 for the new unit (2026-11-17).
+        return 293_000_000
     raise ValueError("Unknown task for the generation token-unit quota")
 
 
@@ -491,12 +500,21 @@ class TokenUnitBudget:
             self._write(state)
 
     def record(
-        self, model_id, prompt_tokens, completion_tokens, *, cost_usd=None, hold=None
+        self,
+        model_id,
+        prompt_tokens,
+        completion_tokens,
+        *,
+        cost_usd=None,
+        hold=None,
+        judge=False,
     ):
-        """Charge tokens and available dollars, replacing the request's ``hold``."""
-        # Callers gate the model (generation refuses the judge-only one); the ledger
-        # charges any weighted model.
-        units = token_units(model_id, prompt_tokens, completion_tokens, judge=True)
+        """Charge tokens and available dollars, replacing the request's ``hold``.
+
+        ``judge=True`` prices with the judge quota's weights, as ``held_units`` does
+        for the hold: DeepSeek-V4.1-Flash costs 1/3 there and 1/4 on generation.
+        """
+        units = token_units(model_id, prompt_tokens, completion_tokens, judge=judge)
         cost = _valid_cost(cost_usd)
         with self._locked():
             state = self._read()

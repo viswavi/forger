@@ -18,7 +18,7 @@ outputs = alter.dynamic_step(
 - Called directly in a `@pipeline`, it counts as a step: it prints a step report, and
   `inspect_step("dynamic_step")` shows it.
 - Needs Python 3.12+ and Unix signal timers; the default install includes the OpenHands SDK.
-- Use a fast agent-friendly model (e.g. DeepSeek-V4-Flash) to avoid timeouts. `max_parallel`, `max_iterations`, and
+- Use a fast agent-friendly model (e.g. DeepSeek-V4.1-Flash) to avoid timeouts. `max_parallel`, `max_iterations`, and
   `execution_timeout_s` bound sessions, agent steps, and each code run.
 - Generated source is `@op`-cached per input, but the code re-executes on every call. Pass a new `source_version` to
   regenerate stale source. `dynamic_step_source(..., _cache_only=True)` or `examples/show_dynamic_step_source.py`

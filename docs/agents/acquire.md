@@ -45,11 +45,14 @@ that contains only the task.
 Use one for the student's own outputs (STaR traces, pass@k difficulty checks); both work with any op taking a `Model`.
 
 `LocalModel(path_or_name, ...)` runs a Hugging Face model or local checkpoint in vLLM on your GPUs, at no API cost.
+A name already in the local Hugging Face cache loads from the cache, so a checkpoint cached under a name that is
+not on the Hub (e.g. `local/my-model-rl80`) works by name or by its snapshot directory.
 
 - By default it starts one engine (a full model copy) per visible GPU and splits prompts among them. Set
   `CUDA_VISIBLE_DEVICES` to use fewer GPUs; set `tensor_parallel_size` only for a model too large for one GPU.
 - The engines hold their GPUs until `model.close()` or process exit: **call `close()` before training on the same
-  GPUs.**
+  GPUs.** Ops that sample two `LocalModel`s (`by_comparative_difficulty`, `rubric_scores` with a local `teacher`,
+  STaR with a local `answer_judge`) close one before starting the other.
 - It defaults to `temperature=0.7` with vLLM's `top_p=1` and no `top_k`; pass `temperature=1.0` to match RL sampling.
 - Each engine, a single in-process one too, gets its own Triton and torch.compile cache directories (under
   `/dev/shm` when writable, deleted on close) unless you set `TRITON_CACHE_DIR` / `TORCHINDUCTOR_CACHE_DIR`, so

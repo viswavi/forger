@@ -102,7 +102,8 @@ did not:
 ## `embedding_dispersion`
 
 `embedding_dispersion(rows, field, *, reference=None, k=5, duplicate_threshold=0.95, ...)` measures how spread out
-`rows` are, ideally against a `reference` you want to resemble (e.g. retrieved documents or a seed dataset):
+`rows` are, ideally against a `reference` you want to resemble (e.g. retrieved documents or a seed dataset) or move
+away from (e.g. an earlier training set, where high coverage and near-reference mean the new rows repeat it):
 
 ```text
   coverage 0.41  12/29 reference rows have a row within their 5-NN radius (29 random rows of each)

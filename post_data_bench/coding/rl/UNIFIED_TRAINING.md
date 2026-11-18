@@ -221,10 +221,11 @@ values, include them in prompts, or pass them on command lines:
   output; failures are never converted into zero rewards. Up to 16 concurrent
   criteria per worker can be in flight when the circuit opens.
 
-DeepSeek-V4-Flash input/output tokens use 1/3 units; GLM-5.3 input/output tokens
-use 4/12.5 units. The judge's DeepSeek-V4.1-Flash uses 1/3 units on the judge quota
-only; generation refuses it. Cached inputs count at full weight and output includes reasoning
-once. Weights do not depend on provider prices. The launcher creates
+For generation, DeepSeek-V4.1-Flash input/output tokens use 1/4 units and GLM-5.3
+input/output tokens use 5.83/18.33 units. The judge quota keeps its own weights:
+DeepSeek-V4.1-Flash 1/3, and fallback judges DeepSeek-V4-Flash 1/3 and GLM-5.3 4/12.5.
+Cached inputs count at full weight and output includes reasoning once. Weights do not depend on
+provider prices. The launcher creates
 `generation_token_usage.json` and `judge_token_usage.json` in the agent's
 persistent directory. Their `token_units` and `remaining_token_units` fields
 show current usage; `cost_usd` records available dollar costs, and

@@ -31,6 +31,15 @@ while (($#)); do
     *) EXTRA+=("$1"); shift ;;
   esac
 done
+# A staged starting checkpoint (a local/* id, e.g. local/Qwen3-4B-clinical-rl80)
+# exists only in the HF cache, and an online server looks ids up on the Hub first:
+# serve its cache snapshot under the id instead.
+SERVE_PATH="$MODEL_PATH"
+SERVE_NAME=()
+if [[ "$MODEL_PATH" == local/* && ! -d "$MODEL_PATH" ]]; then
+  SERVE_PATH="$(python -c 'import sys; from huggingface_hub import snapshot_download; print(snapshot_download(sys.argv[1], local_files_only=True))' "$MODEL_PATH")"
+  SERVE_NAME=(--served-model-name "$MODEL_PATH")
+fi
 [[ "$SPLIT" == val || "$SPLIT" == test ]] || { echo 'Specify --split val|test' >&2; exit 2; }
 [[ "$SERVER_BACKEND" == vllm || "$SERVER_BACKEND" == sglang || "$SERVER_BACKEND" == tinker ]] || { echo 'Unknown server backend' >&2; exit 2; }
 [[ -z "${PDB_EVAL_BACKEND:-}" || "$SERVER_BACKEND" == "$PDB_EVAL_BACKEND" ]] || { echo "Only --server-backend $PDB_EVAL_BACKEND is available here" >&2; exit 2; }
@@ -127,9 +136,9 @@ run_shard() {
   sleep "$((position * ${EVAL_STAGGER_SECONDS:-4}))"
   local command=()
   if [[ "$SERVER_BACKEND" == sglang ]]; then
-    command=(python -m sglang.launch_server --model-path "$MODEL_PATH" --host 127.0.0.1 --port "$port" --api-key "$API_KEY" --context-length "${MAX_MODEL_LEN:-32768}" --max-running-requests "${MAX_NUM_SEQS:-128}" --mem-fraction-static "$GPU_MEM")
+    command=(python -m sglang.launch_server --model-path "$SERVE_PATH" "${SERVE_NAME[@]}" --host 127.0.0.1 --port "$port" --api-key "$API_KEY" --context-length "${MAX_MODEL_LEN:-32768}" --max-running-requests "${MAX_NUM_SEQS:-128}" --mem-fraction-static "$GPU_MEM")
   else
-    command=(vllm serve "$MODEL_PATH" --host 127.0.0.1 --port "$port" --max-model-len "${MAX_MODEL_LEN:-32768}" --max-num-seqs "${MAX_NUM_SEQS:-128}" --gpu-memory-utilization "$GPU_MEM")
+    command=(vllm serve "$SERVE_PATH" "${SERVE_NAME[@]}" --host 127.0.0.1 --port "$port" --max-model-len "${MAX_MODEL_LEN:-32768}" --max-num-seqs "${MAX_NUM_SEQS:-128}" --gpu-memory-utilization "$GPU_MEM")
   fi
   # Each shard compiles into its own cache. Servers sometimes die at startup with
   # IsADirectoryError inside Triton's cache (final evals 166636, 168221); the cause is

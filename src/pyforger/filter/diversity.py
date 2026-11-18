@@ -13,7 +13,7 @@ from pyforger.filter._rouge import RougePool, RougeText
 from pyforger.inspect.cluster import _DEFAULT_EMBEDDING_MODEL, _resolve_embedding_model
 from pyforger.inspect.dispersion import _TOL, _embedding_label, _snippet, _unit_vectors
 from pyforger.op import op
-from pyforger.utils import get_field
+from pyforger.utils import as_text, field_text, get_field, is_chat
 
 _EMBEDDING_OP = "by_embedding_similarity"
 # Entries of one block of the similarity matrix (4M float32 = 16 MB).
@@ -38,6 +38,8 @@ def by_exact_match(
     result: list[dict] = []
     for item in items:
         val = get_field(item, field, "by_exact_match")
+        if is_chat(val):  # a list is unhashable; equal contents are a match
+            val = as_text(val)
         counts[val] = counts.get(val, 0) + 1
         occurrences.append(counts[val])
         if counts[val] <= max_count:
@@ -64,7 +66,7 @@ def by_rouge_l(
     pool = RougePool()
     max_scores: list[float] = []
     for item in items:
-        text = RougeText(get_field(item, field, "by_rouge_l"))
+        text = RougeText(field_text(item, field, "by_rouge_l"))
         # Max similarity to the kept pool; 0.0 for the first item.
         max_score = pool.max_f_measure(text)
         max_scores.append(max_score)
@@ -143,7 +145,7 @@ def by_embedding_similarity(
     ref_texts: list[str] | None = None
     if reference is not None:
         ref_field = field if reference_field is None else reference_field
-        ref_texts = [str(get_field(row, ref_field, _EMBEDDING_OP)) for row in reference]
+        ref_texts = [field_text(row, ref_field, _EMBEDDING_OP) for row in reference]
     # Resolved before the cache lookup, so a TF-IDF result is cached as "tfidf".
     embedding_model = _resolve_embedding_model(embed_fn, embedding_model, _EMBEDDING_OP)
     return _by_embedding_similarity(
@@ -174,7 +176,7 @@ def _by_embedding_similarity(
     """The cached body of ``by_embedding_similarity``, with the embedder resolved."""
     import numpy as np
 
-    texts = [str(get_field(item, field, _EMBEDDING_OP)) for item in items]
+    texts = [field_text(item, field, _EMBEDDING_OP) for item in items]
     refs = ref_texts or []
     n = len(texts)
     # The score of a row with nothing to compare with, as in by_rouge_l.
@@ -272,7 +274,7 @@ def by_n_gram_overlap(
     kept: list[dict] = []
     overlaps: list[float | None] = []
     for item in items:
-        item_ngrams = _word_ngrams(get_field(item, field, "by_n_gram_overlap"), n)
+        item_ngrams = _word_ngrams(field_text(item, field, "by_n_gram_overlap"), n)
         if not item_ngrams:
             overlaps.append(None)
             continue

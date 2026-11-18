@@ -877,7 +877,7 @@ class TestOpScope:
         }
 
 
-DEEPSEEK = "litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731"  # fixed unit weights
+DEEPSEEK = "litellm_proxy/azure_ai/DeepSeek-V4.1-Flash"  # fixed unit weights
 
 
 def resent_warnings(caplog) -> list[str]:
@@ -897,7 +897,7 @@ class TestResentWarning:
     def test_edited_step_template_warns_once_with_earlier_cost(self, fake, caplog):
         """30 rows answered under "Solve", rerun as 60 under "Solve now": 30 warn.
 
-        Each fake answer is 10 prompt + 20 completion tokens, 70 units.
+        Each fake answer is 10 prompt + 20 completion tokens, 90 units.
         """
         model = Model(DEEPSEEK, show_progress=False)
         rows = [{"q": f"q{i}"} for i in range(60)]
@@ -919,7 +919,7 @@ class TestResentWarning:
         message = (
             "alter.generate_from_context: 30 of 60 rows were answered before under "
             "a different prompt or settings and will be asked again (the request "
-            "cache keys on the exact prompt); ~2,100 token units at the earlier "
+            "cache keys on the exact prompt); ~2,700 token units at the earlier "
             "cost per row"
         )
         assert resent_warnings(caplog) == [message]  # once, not per chunk

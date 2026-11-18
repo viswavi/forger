@@ -14,6 +14,7 @@ from rich.text import Text
 
 from pyforger._render import WIDTH, _clean, _console, _emit, _fit_table, _plain, _rule
 from pyforger.op import op
+from pyforger.utils import as_text, resolve_model_path
 
 _OP = "compare_to_reference"
 _MAX_LABELS = 20  # more distinct short strings than this are text, not labels
@@ -171,10 +172,12 @@ def _measure_all(raw: list[list[list[Any]]], tokenizer: Any) -> list[list[list[A
 
 
 def _text(value: Any) -> Any:
-    """Chat messages as their joined contents; other values unchanged."""
-    if isinstance(value, list) and all(isinstance(m, dict) for m in value):
-        return "\n".join(str(m.get("content", "")) for m in value)
-    return value
+    """Chat messages and other lists or dicts as text (``as_text``); the rest unchanged.
+
+    E.g. a prompt ``[{"role": "user", "content": "..."}]`` is measured by its
+    contents' length, and a rubric list by the length of its text.
+    """
+    return as_text(value) if isinstance(value, (list, dict)) else value
 
 
 def _count(texts: list[str], tokenizer: Any) -> list[int]:
@@ -183,7 +186,9 @@ def _count(texts: list[str], tokenizer: Any) -> list[int]:
     if isinstance(tokenizer, str):
         from transformers import AutoTokenizer
 
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer)
+        tokenizer = AutoTokenizer.from_pretrained(
+            resolve_model_path(tokenizer, part="tokenizer")
+        )
     if callable(tokenizer):  # a Hugging Face tokenizer: one batched call
         ids = tokenizer(texts, add_special_tokens=False)["input_ids"]
         return [len(i) for i in ids]

@@ -14,6 +14,7 @@ from rich.padding import Padding
 from rich.text import Text
 
 from pyforger._render import WIDTH, _clean, _console, _emit, _fit_table, _plain, _rule
+from pyforger.acquire.model import room_for
 from pyforger.filter.model_difficulty import _field_prompt, _samples
 from pyforger.filter.rubric import Grade, _grade_column
 from pyforger.op import tracked
@@ -524,14 +525,15 @@ def rubric_scores(
     if teacher is not None and sample:
         report.teacher_id = _model_name(teacher)
         report.teacher_k = teacher_k
-        teacher_replies, _ = _samples(
-            prompts,
-            model=teacher,
-            n=teacher_k,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            batch_size=None,
-        )
+        with room_for(teacher, model):
+            teacher_replies, _ = _samples(
+                prompts,
+                model=teacher,
+                n=teacher_k,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                batch_size=None,
+            )
         columns.append(("teacher", "teacher", teacher_replies))
     for name, probe in probes.items():
         built = [probe(r) for r in sample]

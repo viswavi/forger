@@ -6,7 +6,7 @@ In this setup, a model is given a chat between a physician and an assistant, end
 
 Your data should make the model's replies better as physicians judge them.
 
-The validation set is yours to use however you like. It consists of:
+{STARTING_POINT}The validation set is yours to use however you like. It consists of:
 - {TASK_DIR}/validation_tasks.jsonl: one row per chat, with "id", "messages" (the chat, ending in the physician's message), "rubric_items" (its criteria, each {{"criterion_text", "points"}}), and "physician_response" (a physician's own reply to the chat).
 - {TASK_DIR}/model_outputs/{BASELINE_MODEL}/val/, if present: the baseline model's results, graded with the same judge as `evaluate_model.sh`. metrics.json holds summary scores. In predictions.jsonl, each row's "samples" holds its sampled answers, and each answer's "criteria" gives, for every criterion, whether it was met and the grader's explanation.
 
@@ -52,15 +52,15 @@ This checks the schema, weights, thinking targets, grade() signatures, and Restr
 
 # LLM API Usage
 
-Generation has a shared quota of {GENERATION_TOKEN_UNIT_LIMIT} token units. DeepSeek-V4-Flash costs 1 unit per input token and 3 units per output token; GLM-5.3 costs 4 units per input token and 12.5 units per output token. Count cached inputs at full weight and include reasoning in output tokens. Use `litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731` or `litellm_proxy/azure_ai/FW-GLM-5.3`; other model families have no defined unit weights for this run.
+Generation has a shared quota of {GENERATION_TOKEN_UNIT_LIMIT} token units. DeepSeek-V4.1-Flash costs 1 unit per input token and 4 units per output token; GLM-5.3 costs 5.83 units per input token and 18.33 units per output token. Count cached inputs at full weight and include reasoning in output tokens. Use `litellm_proxy/azure_ai/DeepSeek-V4.1-Flash` or `litellm_proxy/azure_ai/FW-GLM-5.3`; other model families have no defined unit weights for this run.
 
 Read `{GENERATION_USAGE_PATH}` for cumulative `token_units`, `remaining_token_units`, and `cost_usd`. `unpriced_calls` counts responses without dollar pricing; only token units enforce the quota. The quota spans all pipeline iterations and processes. Each call holds its worst case in the shared ledger while it is in flight (its prompt plus `max_tokens` for every completion, or 65,536 tokens per completion without `max_tokens`), and new calls stop once used plus held units reach the quota. A response replaces its hold with its actual usage. A call that times out, loses its connection, or is still running when its process is killed stays charged at its full hold, because the API may still bill it; the ledger counts these in `unreturned_calls` (a killed process's holds move there after two hours). Setting `max_tokens` keeps holds close to real usage. Do not delete/reset the ledger or change its environment settings. The OpenHands model driving your agent turns is accounted separately.
 
 Credentials are provided as `LITELLM_API_KEY` and `LITELLM_BASE_URL`; load them from the environment without printing them. Forger's Model records usage against this quota automatically, so make your generation calls through Forger and do not wrap Model calls a second time. LLM calls you make outside Forger (e.g. with litellm directly) are counted only through `completion` or `acompletion` from `rl.token_budget` (in {TASK_DIR}) with budget="generation"; they make one attempt per call (no `num_retries`), so retry in your own code.
 
-DeepSeek-V4-Flash returns its reasoning separately from its answer, and Forger keeps it: `sample_from_LLM` and `generate_from_context` put it under each output's `thinking_trace` key. Set the effort explicitly, e.g. `Model(..., reasoning_effort="high")`: without it DeepSeek-V4-Flash does not think at all, and the setting controls how long the reasoning is.
+DeepSeek-V4.1-Flash returns its reasoning separately from its answer, and Forger keeps it: `sample_from_LLM` and `generate_from_context` put it under each output's `thinking_trace` key. Set the effort explicitly, e.g. `Model(..., reasoning_effort="high")`: without it DeepSeek-V4.1-Flash does not think at all, and the setting controls how long the reasoning is.
 
-Measured on this gateway: GLM-5.3 still reasons with an effort of "none" (as at "low"); on hard prompts, DeepSeek-V4-Flash at "low" reasoned 10,000-25,000 tokens, and either model can spend all of `max_tokens` on reasoning and return no answer. Long GLM-5.3 requests can time out at the gateway.
+Measured on this gateway (2026-11-17): on a hard competition math problem, DeepSeek-V4.1-Flash reasoned 9,000-25,000 tokens at "low" (4 calls) and 23,000 at "high" (1 call); on two mid-level counting questions it reasoned 200-800 tokens at "low". GLM-5.3 still reasons with an effort of "none": on one easy question it spent all 32,000 `max_tokens` on reasoning and returned no answer. A request that is not streamed and runs past 180 seconds returns 504 at the gateway, for either model.
 
 {BACKEND_STUDENT_USAGE}
 

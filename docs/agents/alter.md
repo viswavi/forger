@@ -83,8 +83,9 @@ that task will be completely omitted. A behavior it never shows is never learned
   the hint are kept. The answer judge sees the original question, not the hint.
   `rationalize=False` turns it off; it is also off with `filter_fn`.
 - **Bootstrapping** a behavior the student never shows: briefly fine-tune on a few seed rows that show it, run STaR on
-  that checkpoint, then train the next checkpoint from the base model on the rows STaR kept. It is a good idea
-  to briefly look at errors made by that checkpoint to make sure it has not learned truly degenerate behavior.
+  that checkpoint, then train the next checkpoint from the model you started from (not the seed-tuned one) on the
+  rows STaR kept. It is a good idea to briefly look at errors made by that checkpoint to make sure it has not
+  learned truly degenerate behavior.
 
 ## Running programs against tests
 

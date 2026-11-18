@@ -52,15 +52,16 @@ rates; see [the unified contract](coding/rl/UNIFIED_TRAINING.md#tinker-dollar-bu
 ## Token-equivalent units and quotas
 
 PostDataBench measures API usage in **token-equivalent units** (called `token_units`
-in code). One DeepSeek-V4-Flash input token is one unit. Other input and output
-tokens receive the fixed weights below, so usage across models adds to one quota.
-These weights are benchmark policy and stay fixed when provider prices change.
+in code). One DeepSeek-V4.1-Flash input token is one unit ($0.30 per million on
+2026-11-17, the gateway's price). Other input and output tokens receive the fixed weights below, their
+prices in that unit, so usage across models adds to one quota. The judge quota keeps
+the weights it had before this unit (DeepSeek-V4.1-Flash 1/3, GLM-5.3 4/12.5).
 
 | Model family | Units per input token | Units per output token |
 |---|---:|---:|
-| DeepSeek-V4-Flash | 1 | 3 |
-| GLM-5.3 | 4 | 12.5 |
-| DeepSeek-V4.1-Flash (judge quota only) | 1 | 3 |
+| DeepSeek-V4.1-Flash | 1 | 4 |
+| GLM-5.3 | 5.83 | 18.33 |
+| DeepSeek-V4.1-Flash (judge quota) | 1 | 3 |
 
 For each LiteLLM response, calculate:
 
@@ -68,14 +69,15 @@ For each LiteLLM response, calculate:
 token_units = usage.prompt_tokens * input_weight + usage.completion_tokens * output_weight
 ```
 
-For example, 1,000 input tokens and 200 output tokens consume 1,600 units on
-DeepSeek-V4-Flash or 6,500 units on GLM-5.3. Count cached inputs at full weight.
+For example, 1,000 input tokens and 200 output tokens consume 1,800 units on
+DeepSeek-V4.1-Flash or 9,496 units on GLM-5.3. Count cached inputs at full weight.
 LiteLLM's aggregate completion count already includes reasoning tokens; do not
-add `reasoning_tokens` again. Generation model aliases must contain `DeepSeek-V4-Flash` or
-`GLM-5.3` (case-insensitive); the judge's must contain `DeepSeek-V4.1-Flash`. There are no defined weights for other models:
+add `reasoning_tokens` again. Generation model aliases must contain `DeepSeek-V4.1-Flash` or
+`GLM-5.3` (case-insensitive); the judge's must contain `DeepSeek-V4.1-Flash`, at 1 and 3 units on the
+judge quota. There are no defined weights for other models:
 Forger reports `NaN` units for them, and budgeted helpers reject them before a call.
 
-Generation/SFT has 180M units. RL has 50M for Impossible-LiveCodeBench and NormAD,
+Generation/SFT has 264M units (293M for HealthBench, 176M for FrontierCS). RL has 50M for Impossible-LiveCodeBench and NormAD,
 and 180M for PRBench and HealthBench. These are separate quotas. The launcher
 currently supports coding and culture; unified RL currently supports coding only.
 
@@ -123,7 +125,7 @@ import os
 from pdb_token_budget import completion, TokenUnitBudget
 
 response = completion(
-    model="litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731",
+    model="litellm_proxy/azure_ai/DeepSeek-V4.1-Flash",
     messages=[{"role": "user", "content": "What is 273 * 149?"}],
     temperature=1.0,
     reasoning={"effort": "none"},

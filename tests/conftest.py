@@ -42,3 +42,15 @@ def _forget_learned_no_n():
     _model._LEARNED_NO_N.clear()
     yield
     _model._LEARNED_NO_N.clear()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_hf_cache(tmp_path, monkeypatch):
+    """An empty Hugging Face cache, so model ids never resolve to your snapshots."""
+    try:
+        from huggingface_hub import constants
+    except ImportError:
+        yield
+        return
+    monkeypatch.setattr(constants, "HF_HUB_CACHE", str(tmp_path / "hf_hub_cache"))
+    yield

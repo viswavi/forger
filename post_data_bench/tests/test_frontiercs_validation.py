@@ -324,6 +324,8 @@ class FrontierValidationTests(unittest.TestCase):
             TASK_PUBLIC_FILES=[],
             VAL_OUTPUT_FILES=("predictions.jsonl", "metrics.json"),
             SHARED_TASK_DIR=str(ROOT / "coding"),
+            ORIGINAL_LOCAL_MODEL="Qwen/Qwen3-4B",
+            STARTING_POINT_DIR=str(Path(self.tmp.name) / "no_starting_point"),
         )
         exec(
             compile(
@@ -368,6 +370,71 @@ class FrontierValidationTests(unittest.TestCase):
         self.assertNotIn("Secret", json.dumps(signature))
         self.assertTrue((self.dest / "problems/val_000/chk.cc").is_file())
 
+    def test_launcher_exports_starting_point(self):
+        """A starting-checkpoint build shows both models' validation results and
+        the checkpoint's dataset, but not the prompt paragraph."""
+        tree = ast.parse((ROOT / "launch_agent.py").read_text())
+        selected = [
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name in {"_copy_into", "_public_source", "_task_public_copies"}
+        ]
+        start = self.data / "starting_point"
+        start.mkdir()
+        (start / "prompt.txt").write_text("This is not a fresh start.")
+        (start / "dataset.jsonl").write_text('{"prompt": [], "rubric": []}\n')
+        namespace = dict(
+            os=os,
+            shutil=shutil,
+            args=SimpleNamespace(
+                training_mode="sft-rl",
+                task="frontiercs",
+                backend="local",
+                model="local/Qwen3-4B-algorithmic-rl80",
+            ),
+            TASK_PUBLIC_FILES=[],
+            VAL_OUTPUT_FILES=("predictions.jsonl", "metrics.json"),
+            SHARED_TASK_DIR=str(ROOT / "coding"),
+            ORIGINAL_LOCAL_MODEL="Qwen/Qwen3-4B",
+            STARTING_POINT_DIR=str(start),
+        )
+        exec(
+            compile(
+                ast.Module(body=selected, type_ignores=[]), "launch_agent.py", "exec"
+            ),
+            namespace,
+        )
+        from coding.eval_state import CONTRACT_VERSION
+        from coding.split_contract import sha256
+
+        for name, score in (
+            ("Qwen__Qwen3-4B", 1.0),
+            ("local__Qwen3-4B-algorithmic-rl80", 2.0),
+        ):
+            val = self.data / "model_outputs" / name / "val"
+            val.mkdir(parents=True)
+            (val / "predictions.jsonl").write_text(
+                json.dumps({"id": "27", "score": score}) + "\n"
+            )
+            (val / "metrics.json").write_text(
+                json.dumps(
+                    {
+                        "evaluation_contract": CONTRACT_VERSION,
+                        "tasks_sha256": sha256(self.data / "validation_tasks.jsonl"),
+                    }
+                )
+            )
+        namespace["_task_public_copies"](str(self.data), str(self.dest))
+        for name, score in (
+            ("Qwen__Qwen3-4B", 1.0),
+            ("local__Qwen3-4B-algorithmic-rl80", 2.0),
+        ):
+            rows = (self.dest / "model_outputs" / name / "val/predictions.jsonl").open()
+            self.assertEqual([json.loads(r)["score"] for r in rows], [score])
+        self.assertTrue((self.dest / "starting_point/dataset.jsonl").is_file())
+        self.assertFalse((self.dest / "starting_point/prompt.txt").exists())
+
     def test_launcher_exports_baseline_from_the_benchmark_build(self):
         """A release's task directory has no model_outputs/; the build's is used."""
         tree = ast.parse((ROOT / "launch_agent.py").read_text())
@@ -389,6 +456,8 @@ class FrontierValidationTests(unittest.TestCase):
             TASK_PUBLIC_FILES=[],
             VAL_OUTPUT_FILES=("predictions.jsonl", "metrics.json"),
             SHARED_TASK_DIR=str(ROOT / "coding"),
+            ORIGINAL_LOCAL_MODEL="Qwen/Qwen3-4B",
+            STARTING_POINT_DIR=str(Path(self.tmp.name) / "no_starting_point"),
         )
         exec(
             compile(
