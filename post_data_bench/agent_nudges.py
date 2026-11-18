@@ -29,8 +29,22 @@ def count_rows(path: str | Path) -> int | None:
         return None
 
 
+def _prompt_hash(prompt) -> str:
+    return hashlib.sha256(json.dumps(prompt, sort_keys=True).encode()).hexdigest()
+
+
+def prompt_hashes(path: str | Path) -> set[str]:
+    """Hashes of each row's raw "prompt", as ``new_prompt_count`` compares them.
+
+    Reads plain JSON without validating rubrics, so the host needs none of the
+    sandbox's packages (e.g. RestrictedPython for code criteria).
+    """
+    with open(path, encoding="utf-8") as f:
+        return {_prompt_hash(json.loads(line)["prompt"]) for line in f if line.strip()}
+
+
 def new_prompt_count(path: str | Path, known: set[str]) -> int | None:
-    """Rows whose prompt is not in ``known`` (rl.rubric_data.prompt_id hashes).
+    """Rows whose prompt is not in ``known`` (``prompt_hashes`` of a dataset).
 
     e.g. a dataset of the 472 starting rows plus 150 new ones counts 150; None
     when the file does not exist. Unreadable lines count as new.
@@ -47,8 +61,7 @@ def new_prompt_count(path: str | Path, known: set[str]) -> int | None:
         except (ValueError, KeyError, TypeError):
             new += 1
             continue
-        digest = hashlib.sha256(json.dumps(prompt, sort_keys=True).encode())
-        new += digest.hexdigest() not in known
+        new += _prompt_hash(prompt) not in known
     return new
 
 

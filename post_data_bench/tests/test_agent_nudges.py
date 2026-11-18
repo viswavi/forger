@@ -7,7 +7,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from agent_nudges import count_rows, low_rows_message  # noqa: E402
+from agent_nudges import (  # noqa: E402
+    count_rows,
+    low_rows_message,
+    new_prompt_count,
+    prompt_hashes,
+)
 
 
 def _dataset(rows: int) -> Path:
@@ -57,6 +62,32 @@ class LowRowsMessageTests(unittest.TestCase):
         self.assertIsNone(
             low_rows_message(path, 50, 12 * 3600, target=200, starting_prompts=known)
         )
+
+    def test_starting_hashes_read_rows_without_validating_rubrics(self):
+        """A code criterion needs no sandbox package to hash its row's prompt.
+
+        2 starting rows (one with code) + 1 new row counts 1 new.
+        """
+        import json
+
+        folder = Path(tempfile.mkdtemp())
+        rubric = [
+            {"criterion": "x", "points": 1, "code": "def score(r, p, t): return 1"}
+        ]
+        start = [
+            {"prompt": [{"role": "user", "content": str(i)}], "rubric": rubric}
+            for i in range(2)
+        ]
+        (folder / "start.jsonl").write_text(
+            "".join(json.dumps(r) + "\n" for r in start)
+        )
+        new = start + [
+            {"prompt": [{"role": "user", "content": "new"}], "rubric": rubric}
+        ]
+        (folder / "new.jsonl").write_text("".join(json.dumps(r) + "\n" for r in new))
+        known = prompt_hashes(folder / "start.jsonl")
+        self.assertEqual(len(known), 2)
+        self.assertEqual(new_prompt_count(folder / "new.jsonl", known), 1)
 
     def test_missing_dataset_is_named(self):
         """No dataset file yet: the nudge says so, in minutes when under an hour."""

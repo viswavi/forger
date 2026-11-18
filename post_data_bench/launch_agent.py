@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TextIO, cast
 
 from agent_boundary import model_cache_bind
-from agent_nudges import low_rows_message
+from agent_nudges import low_rows_message, prompt_hashes
 from backend_prompts import prompt_sections
 from coding.rl.backends import MODELS, ORIGINAL_LOCAL_MODEL, RL_DEFAULTS, saved_backend
 
@@ -569,17 +569,12 @@ STARTING_PROMPTS = None
 if os.path.isdir(STARTING_POINT_DIR):
     import json as _json
 
-    from coding.rl.rubric_data import prompt_id, read_rows
-
     with open(os.path.join(STARTING_POINT_DIR, "config.json")) as f:
         _start = _json.load(f)
     ROW_TARGET = _start["new_rows"]
     if not MIN_ROWS_NUDGE_GIVEN:
         args.min_rows_nudge = _start["min_new_rows"]
-    STARTING_PROMPTS = {
-        prompt_id(row)
-        for row in read_rows(os.path.join(STARTING_POINT_DIR, "dataset.jsonl"))
-    }
+    STARTING_PROMPTS = prompt_hashes(os.path.join(STARTING_POINT_DIR, "dataset.jsonl"))
     _old = ROW_TARGET_SENTENCES[args.task]
     if raw_prompt_content.count(_old) != 1:
         raise ValueError(f"the {args.task} prompt no longer has its row target")
