@@ -371,8 +371,10 @@ class FrontierValidationTests(unittest.TestCase):
         self.assertTrue((self.dest / "problems/val_000/chk.cc").is_file())
 
     def test_launcher_exports_starting_point(self):
-        """A starting-checkpoint build shows both models' validation results and
-        the checkpoint's dataset, but not the prompt paragraph."""
+        """A starting-checkpoint build shows both models' validation results.
+
+        It also shows the checkpoint's dataset, but not the prompt paragraph.
+        """
         tree = ast.parse((ROOT / "launch_agent.py").read_text())
         selected = [
             node

@@ -5,6 +5,7 @@ from pyforger.acquire import model as model_module
 
 
 def test_warns_once_above_the_limit(caplog, monkeypatch):
+    """26,000 tokens or none: no warning; 32,000 twice: one warning."""
     monkeypatch.setattr(model_module, "_long_request_warned", set())
     with caplog.at_level(logging.WARNING):
         model_module._warn_long_request("m", 26_000)

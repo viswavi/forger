@@ -179,7 +179,7 @@ def release_in_process_engine() -> None:
 
 
 def _cleanup_vllm() -> None:
-    """vLLM's `cleanup_dist_env_and_memory`, when this vLLM has it."""
+    """Call vLLM's `cleanup_dist_env_and_memory`, when this vLLM has it."""
     try:
         from vllm.distributed.parallel_state import cleanup_dist_env_and_memory
     except Exception:  # noqa: BLE001  # moved or missing in this vLLM

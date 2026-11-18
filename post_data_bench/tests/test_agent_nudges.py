@@ -35,7 +35,10 @@ class LowRowsMessageTests(unittest.TestCase):
         self.assertIsNone(low_rows_message(_dataset(10), 1000, 29 * 60))
 
     def test_starting_rows_do_not_count_toward_the_floor(self):
-        """With a starting dataset, only rows outside it count: 472 kept + 50 new is low."""
+        """With a starting dataset, only rows outside it count.
+
+        472 kept + 50 new is low.
+        """
         import hashlib
         import json
 

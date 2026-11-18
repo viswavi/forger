@@ -1,4 +1,7 @@
-"""A release that starts agents from a post-trained checkpoint (PDB_LOCAL_BASE_MODEL)."""
+"""A release that starts agents from a post-trained checkpoint.
+
+The checkpoint is named by PDB_LOCAL_BASE_MODEL.
+"""
 import json
 import os
 import subprocess
@@ -23,11 +26,18 @@ CHECK = textwrap.dedent(
     snapshot.mkdir(parents=True)
     out["snapshot_is_base"] = lineage.is_base_snapshot(snapshot)
     out["stages"] = lineage.stages(snapshot)
-    for name, base in (("start", "local/Qwen3-4B-test-rl80"), ("qwen", "Qwen/Qwen3-4B")):
+    for name, base in (
+        ("start", "local/Qwen3-4B-test-rl80"),
+        ("qwen", "Qwen/Qwen3-4B"),
+    ):
         ckpt = tmp / name
         ckpt.mkdir()
-        (ckpt / "rl_submission.json").write_text(json.dumps(
-            {"stage": "rl", "backend": "local", "base_model": base, "completed_steps": 10}))
+        (ckpt / "rl_submission.json").write_text(json.dumps({
+            "stage": "rl",
+            "backend": "local",
+            "base_model": base,
+            "completed_steps": 10,
+        }))
         try:
             check_receipt(ckpt, "local")
             out[name] = "accepted"
@@ -42,6 +52,7 @@ class StartModelTests(unittest.TestCase):
     """The local student, receipts and lineage follow PDB_LOCAL_BASE_MODEL."""
 
     def run_check(self, model):
+        """Run CHECK with PDB_LOCAL_BASE_MODEL set to model, or unset."""
         env = {**os.environ, "PYTHONPATH": str(ROOT)}
         env.pop("PDB_LOCAL_BASE_MODEL", None)
         if model:

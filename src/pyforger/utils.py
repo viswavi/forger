@@ -118,11 +118,11 @@ def is_chat(value: Any) -> bool:
 
 
 def as_text(value: Any) -> str:
-    """A field value as plain text, for embeddings, n-grams, and phrase counts.
+    r"""A field value as plain text, for embeddings, n-grams, and phrase counts.
 
     A string is unchanged. Chat messages give their contents, one message per
     line, without roles: ``[{"role": "system", "content": "Be brief."},
-    {"role": "user", "content": "Hi"}]`` gives ``"Be brief.\\nHi"``. Any other
+    {"role": "user", "content": "Hi"}]`` gives ``"Be brief.\nHi"``. Any other
     value gives ``str(value)``.
     """
     if isinstance(value, str):

@@ -5,12 +5,14 @@ Two steps, both on the host:
 1. stage-model: put the checkpoint into a Hugging Face cache under a local id,
    e.g. local/Qwen3-4B-clinical-rl80, so that snapshot_download(id,
    local_files_only=True) finds it the way it finds Qwen/Qwen3-4B:
-     python make_starting_point.py stage-model --checkpoint <bundle>/initial_checkpoint \
+     python make_starting_point.py stage-model \
+       --checkpoint <bundle>/initial_checkpoint \
        --hf-home <dir> --model-id local/Qwen3-4B-clinical-rl80
    and upload <dir>/hub/models--local--<name> to GCS for PDB_START_MODEL_URI.
 2. build: add the checkpoint's validation results and starting_point/ to a
    benchmark build (PDB_BENCHMARK_DIR):
-     python make_starting_point.py build --build <build> --model-id local/Qwen3-4B-clinical-rl80 \
+     python make_starting_point.py build --build <build> \
+       --model-id local/Qwen3-4B-clinical-rl80 \
        --dataset <run>/rl_trial_1.data/submitted.jsonl --val-dir <val eval dir> \
        --test-before 18.78 --test-after 24.01 --new-rows 2000 --min-new-rows 400
 
@@ -44,7 +46,24 @@ MODEL_FILES = (
     "chat_template.jinja",
 )
 
-PROMPT = """This is not a fresh start. The student model, {{STUDENT_MODEL}} ("the starting model" below), is Qwen3-4B after one round of RL post-training: {steps} RL steps of the recipe under Training and Validation, on an earlier dataset of {rows:,} rows in the same format as yours, which is in {{TASK_DIR}}/starting_point/dataset.jsonl.{history} That round changed the secret test score from {test_before:.2f} (Qwen3-4B) to {test_after:.2f}, and the validation score from {val_before:.2f} to {val_after:.2f}.{score_note} Validation results for both models are in {{TASK_DIR}}/model_outputs/: {original}/val/ before that round and {{BASELINE_MODEL}}/val/ after it. Your job is to improve this model further. Your RL runs start from it, and your submitted checkpoint may add at most 80 RL steps to it. The starting model has already trained on the earlier dataset, so we recommend generating new data rather than reusing those rows; use the earlier dataset as a reference. The model's weights are in {{START_MODEL_PATH}}: pass that directory to any tool that needs the model's files, because {{STUDENT_MODEL}} is not on the Hugging Face Hub."""
+PROMPT = (
+    'This is not a fresh start. The student model, {{STUDENT_MODEL}} ("the '
+    'starting model" below), is Qwen3-4B after one round of RL post-training: '
+    "{steps} RL steps of the recipe under Training and Validation, on an earlier "
+    "dataset of {rows:,} rows in the same format as yours, which is in "
+    "{{TASK_DIR}}/starting_point/dataset.jsonl.{history} That round changed the "
+    "secret test score from {test_before:.2f} (Qwen3-4B) to {test_after:.2f}, and "
+    "the validation score from {val_before:.2f} to {val_after:.2f}.{score_note} "
+    "Validation results for both models are in {{TASK_DIR}}/model_outputs/: "
+    "{original}/val/ before that round and {{BASELINE_MODEL}}/val/ after it. Your "
+    "job is to improve this model further. Your RL runs start from it, and your "
+    "submitted checkpoint may add at most 80 RL steps to it. The starting model "
+    "has already trained on the earlier dataset, so we recommend generating new "
+    "data rather than reusing those rows; use the earlier dataset as a reference. "
+    "The model's weights are in {{START_MODEL_PATH}}: pass that directory to any "
+    "tool that needs the model's files, because {{STUDENT_MODEL}} is not on the "
+    "Hugging Face Hub."
+)
 
 
 def digest(path):
@@ -87,8 +106,11 @@ def stage_model(args):
 
 
 def write(path, text=None, source=None):
-    """Write a new file at path. Builds are hard-linked copies of a release, so
-    writing into an existing file in place would change the release too."""
+    """Write a new file at path.
+
+    Builds are hard-linked copies of a release, so writing into an existing file
+    in place would change the release too.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     path.unlink(missing_ok=True)
     if source is not None:
@@ -129,7 +151,8 @@ def build(args):
         "judge"
     ) != before.get("judge"):
         raise SystemExit(
-            f"validation protocols differ: samples {before.get('n_samples')} vs {after.get('n_samples')}, "
+            "validation protocols differ: "
+            f"samples {before.get('n_samples')} vs {after.get('n_samples')}, "
             f"judge {before.get('judge')} vs {after.get('judge')}"
         )
     out = root / "model_outputs" / args.model_id.replace("/", "__") / "val"
@@ -175,12 +198,14 @@ def build(args):
         + "\n",
     )
     print(
-        f"{root}: {len(rows)} starting rows; validation {before['score']:.2f} -> {after['score']:.2f}; "
+        f"{root}: {len(rows)} starting rows; "
+        f"validation {before['score']:.2f} -> {after['score']:.2f}; "
         f"test {args.test_before:.2f} -> {args.test_after:.2f}"
     )
 
 
 def main():
+    """Run stage-model or build."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
     s = sub.add_parser(
@@ -236,7 +261,8 @@ def main():
     )
     b.add_argument(
         "--base-val-dir",
-        help="Qwen3-4B validation results to ship instead of the build's, scored like --val-dir",
+        help="Qwen3-4B validation results to ship instead of the build's, "
+        "scored like --val-dir",
     )
     b.set_defaults(run=build)
     args = parser.parse_args()

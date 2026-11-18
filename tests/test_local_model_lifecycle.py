@@ -137,7 +137,7 @@ def test_uncached_ids_and_directories_are_unchanged(tmp_path):
 
 
 def test_local_model_loads_snapshot_but_keeps_its_id(events):
-    """vLLM gets the snapshot path; the cache key and history keep the id."""
+    """The snapshot path goes to vLLM; the cache key and history keep the id."""
     snap = _snapshot(LOCAL_ID, _WEIGHTS)
     tok = _snapshot("local/tok", {"tokenizer.json": "{}"})
     model = LocalModel(LOCAL_ID, tokenizer="local/tok")
@@ -186,7 +186,7 @@ def test_close_shuts_down_in_process_engine_and_restarts(events):
 
 
 def test_close_keeps_distributed_state_while_another_engine_runs(events):
-    """vLLM's process-wide cleanup waits until no in-process engine is left."""
+    """The process-wide vLLM cleanup waits until no in-process engine is left."""
     a, b = LocalModel("a"), LocalModel("b")
     a.generate("q")
     b.generate("q")
