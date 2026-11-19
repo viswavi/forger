@@ -19,7 +19,8 @@ If you're a developer, it's recommended to install
 pre-commit hooks before starting your development
 work. These hooks ensure code formatting, linting,
 and type-checking. To install the pre-commit hooks,
-run the following command:
+run the following command. The pinned hooks require Python 3.11 on `PATH`,
+even when the training environment uses another Python version:
 
 ```bash
 pre-commit install
@@ -32,6 +33,18 @@ command to run the tests:
 ```bash
 pytest
 ```
+
+## Op Reference
+
+`docs/OPS.md` lists the signature of every public op and is generated from the code.
+After adding an op or changing an op's signature or docstring, regenerate it:
+
+```bash
+python scripts/gen_op_docs.py
+```
+
+`tests/test_op_docs.py` fails until `docs/OPS.md` is up to date. A new exported class that
+users construct and pass to ops goes in `ENTRY_POINT_CLASSES` in the script.
 
 ## Making a Release
 

@@ -1,13 +1,28 @@
 """Acquire operations: generate or retrieve new data."""
 
-from pyforger.acquire.model import GenerateResult, LocalModel, Model, split_reasoning
+from pyforger.acquire.model import (
+    GenerateResult,
+    LocalModel,
+    Model,
+    PromptTooLongError,
+    ReplayedRowError,
+    TargetLogprobs,
+    split_reasoning,
+)
+from pyforger.acquire.pubmed import PubMedRetrievalSource
 from pyforger.acquire.retrieve import (
     retrieve,
     retrieve_from_arxiv,
     retrieve_from_hf,
+    retrieve_from_pubmed,
     retrieve_from_s2,
     retrieve_from_web,
     retrieve_from_wiki,
+)
+from pyforger.acquire.rubric import (
+    convert_rubric_criteria,
+    generate_custom_rubric,
+    generate_custom_rubric_criteria,
 )
 from pyforger.acquire.sample import sample_from_LLM
 from pyforger.acquire.sources import (
@@ -19,11 +34,18 @@ from pyforger.acquire.sources import (
     WebRetrievalSource,
     WikiRetrievalSource,
 )
+from pyforger.acquire.tinker_model import TinkerModel
+from pyforger.tinker_usage import TinkerBudgetExceeded
 
 __all__ = [
     "GenerateResult",
     "Model",
     "LocalModel",
+    "TinkerModel",
+    "TinkerBudgetExceeded",
+    "PromptTooLongError",
+    "ReplayedRowError",
+    "TargetLogprobs",
     "split_reasoning",
     "retrieve",
     "retrieve_from_web",
@@ -31,12 +53,17 @@ __all__ = [
     "retrieve_from_hf",
     "retrieve_from_arxiv",
     "retrieve_from_s2",
+    "retrieve_from_pubmed",
     "sample_from_LLM",
+    "generate_custom_rubric",
+    "convert_rubric_criteria",
+    "generate_custom_rubric_criteria",
     "RetrievalSource",
     "RetrieveMode",
     "WebRetrievalSource",
     "WikiRetrievalSource",
     "HFRetrievalSource",
+    "PubMedRetrievalSource",
     "ArxivRetrievalSource",
     "S2RetrievalSource",
 ]

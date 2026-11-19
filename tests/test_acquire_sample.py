@@ -10,13 +10,16 @@ from pyforger.acquire._model_utils import _schema_format_instructions
 class TestSchemaFormatInstructions:
     """_schema_format_instructions produces prompt-ready schema instructions."""
 
-    def test_contains_required_keys_and_json_instruction(self):
-        """Output contains required keys list and asks for JSON only."""
+    def test_asks_for_a_final_json_object_with_the_keys(self):
+        """The object goes at the end; text before it is not forbidden."""
         out = _schema_format_instructions({"answer": str, "reason": str})
-        assert "Required keys" in out
-        assert "answer" in out
-        assert "reason" in out
-        assert "JSON object" in out or "json" in out.lower()
+        assert out == (
+            'End your response with a JSON object with these keys: ["answer", '
+            '"reason"], for example {"answer": "<str>", "reason": "<str>"}. '
+            "Put nothing after the JSON object."
+        )
+        # "JSON object only" contradicted prompts asking for reasoning first.
+        assert "only" not in out and "no additional text" not in out
 
     def test_example_format_has_placeholders(self):
         """Example format uses type placeholders like <str>."""
@@ -35,7 +38,7 @@ class TestPromptConstruction:
     """What sample_from_LLM sends to the model's generate_batch."""
 
     def test_string_prompt_includes_schema_instructions(self):
-        """String prompt passed to generate_batch has Required keys."""
+        """String prompt passed to generate_batch ends with the schema instruction."""
         model = RecordingMockModel(responses=['{"answer": "42"}'])
         # Ignore the output of sample_from_LLM; we're just testing the prompts
         # constructed internally.
@@ -47,10 +50,9 @@ class TestPromptConstruction:
         )
         assert len(model.recorded_prompts[0]) == 1
         prompt_text = model.recorded_prompts[0][0]
-        assert isinstance(prompt_text, str)
-        assert "Required keys" in prompt_text
-        assert "answer" in prompt_text
-        assert "JSON object" in prompt_text or "json" in prompt_text.lower()
+        assert prompt_text == "Generate an answer\n\n" + _schema_format_instructions(
+            {"answer": str}
+        )
 
     def test_message_list_prompt_appends_schema_as_user_message(self):
         """Message-list prompt gets an extra user message with schema instructions."""
@@ -74,8 +76,7 @@ class TestPromptConstruction:
         assert recorded[0] == messages[0]
         assert recorded[1] == messages[1]
         assert recorded[2]["role"] == "user"
-        assert "Required keys" in recorded[2]["content"]
-        assert "answer" in recorded[2]["content"]
+        assert recorded[2]["content"] == _schema_format_instructions({"answer": str})
 
     def test_no_schema_string_prompt_unchanged(self):
         """Without output_schema, string prompt is passed through as-is."""
@@ -213,6 +214,15 @@ class TestSchemaValidation:
             max_retries=1,
         )
         assert len(items) == 0
+
+    def test_fenced_json_with_extra_key(self):
+        """A fenced reply parses; a key outside the schema is dropped."""
+        model = MockModel(
+            responses=['```json\n{"answer": "42", "crafted_by": "me"}\n```']
+        )
+        items = sample_from_LLM("Generate", model, n=1, output_schema={"answer": str})
+        assert items == [{"answer": "42"}]
+        assert model._call_count == 1
 
     def test_invalid_json_rejected(self):
         """Non-JSON output is rejected (parse returns None)."""

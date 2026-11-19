@@ -65,3 +65,6 @@ env/
 # OS
 .DS_Store
 Thumbs.db
+
+# API keys
+.env

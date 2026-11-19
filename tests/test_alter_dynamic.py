@@ -404,3 +404,24 @@ def test_real_sdk_corrects_code_and_reexecutes_cached_source(tmp_path, monkeypat
         for entry in trace()
         if entry.op_name == "alter.dynamic_step_source"
     ] == [False, True, True]
+
+
+def test_agent_llm_forwards_deepseek_reasoning(monkeypatch):
+    """Forward DeepSeek's reasoning dict to the SDK through LiteLLM's extra body."""
+    import sys
+
+    sdk = SimpleNamespace(LLM=lambda **config: config)
+    monkeypatch.setitem(sys.modules, "openhands", SimpleNamespace(sdk=sdk))
+    monkeypatch.setitem(sys.modules, "openhands.sdk", sdk)
+    model = Model(
+        "litellm_proxy/azure_ai/DeepSeek-V4.1-Flash",
+        api_key="k",
+        reasoning_effort="high",
+        extra_body={"top_k": 5},
+    )
+    config = dynamic.agent_llm(model)
+    assert config["litellm_extra_body"] == {
+        "top_k": 5,
+        "reasoning": {"effort": "high"},
+    }
+    assert "reasoning_effort" not in config

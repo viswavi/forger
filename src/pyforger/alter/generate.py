@@ -1,13 +1,36 @@
 """Building block for conditional LM generation (conditioned on upstream input)."""
 from __future__ import annotations
 
+import contextvars
 import logging
 import re
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Union
 
-from pyforger.acquire._model_utils import _build_prompt, _parse_output, _reasoning_for
-from pyforger.acquire.model import Model, Prompt, split_reasoning
+from pyforger import _tracking
+from pyforger.acquire._model_utils import (
+    _accepts_kwarg,
+    _build_prompt,
+    _catch_kwargs,
+    _chunk_size,
+    _failure_label,
+    _is_row_error,
+    _is_transient,
+    _parse_output,
+    _quota_spent,
+    _raise_if_systemic,
+    _reasoning_for,
+    _report_provider_failures,
+    _RequestFailures,
+)
+from pyforger.acquire.model import (
+    Model,
+    Prompt,
+    _cache_kwargs,
+    room_for,
+    split_reasoning,
+)
 from pyforger.op import op
 from pyforger.utils import get_field
 
@@ -28,12 +51,33 @@ _ANSWER_PATTERNS = [
     re.compile(_NUMBER),
 ]
 
+# Reasoning that opens by working out the reply format, e.g. "We need answer
+# JSON only with solution_code? User says 'Respond with your reasoning' but...".
+_FORMAT_TALK_RE = re.compile(
+    r"\bjson\b|required keys|output format|response format", re.I
+)
+_FORMAT_TALK_CHARS = 400  # how far into a trace to look
+_FORMAT_TALK_MIN_TRACES = 5
+_FORMAT_TALK_SHARE = 0.2
+
 
 def _get_logger() -> logging.Logger:
     """Lazy logger to avoid circular import with utils."""
     from pyforger.utils import get_formatted_logger as _gf
 
     return _gf(__name__)
+
+
+def _with_hint(prompt: Prompt, hint: str) -> Prompt:
+    """``prompt`` with ``hint`` after its text (a chat's last user message)."""
+    if isinstance(prompt, str):
+        return f"{prompt}\n\n{hint}"
+    messages = [dict(m) for m in prompt]
+    for message in reversed(messages):
+        if message.get("role") == "user" and isinstance(message.get("content"), str):
+            message["content"] = f"{message['content']}\n\n{hint}"
+            return messages  # type: ignore[return-value]
+    return [*messages, {"role": "user", "content": hint}]  # type: ignore[list-item]
 
 
 def _resolve_prompt(template: PromptTemplate, item: dict) -> Prompt:
@@ -47,7 +91,7 @@ def _resolve_prompt(template: PromptTemplate, item: dict) -> Prompt:
     return template(item)
 
 
-@op(name="alter.generate_from_context")
+@op(name="alter.generate_from_context", samples_arg="samples_per_item")
 def generate_from_context(
     items: list[dict],
     prompt_fn: PromptTemplate,
@@ -55,10 +99,13 @@ def generate_from_context(
     *,
     samples_per_item: int = 1,
     output_schema: dict[str, Any] | None = None,
-    temperature: float = 0.7,
+    temperature: float | None = None,
     max_retries: int = 3,
-    batch_size: int = 10,
-) -> list[dict | None]:
+    batch_size: int | None = None,
+    merge: bool = False,
+    output_field: str | None = None,
+    retry_truncated: bool = False,
+) -> list[dict | None] | list[dict]:
     r"""Generate LLM outputs conditioned on upstream input items.
 
     ``prompt_fn`` wraps each input item in a prompt which is passed to ``model`` for
@@ -74,28 +121,62 @@ def generate_from_context(
         model: Model instance used for generation.
         samples_per_item: Number of responses to generate per input item.
         output_schema: Optional dict of expected keys. When set, responses are
-            JSON-parsed and validated; failures are retried. When None, each
-            response is stored as ``{"text": ...}``.
-        temperature: Sampling temperature passed to the model.
-        max_retries: Additional attempts for prompts whose output fails to parse.
-        batch_size: Number of prompts per ``model.generate_batch()`` call.
+            JSON-parsed and validated; parse failures are retried. When None,
+            each response is stored as ``{"text": ...}``. Only the keys are checked:
+            a response needs every key, keys outside the schema are dropped, and
+            the values' types are shown to the model but not checked. A ```json
+            fence or prose around the object is tolerated.
+        temperature: Sampling temperature passed to the model; None (default)
+            uses the model's own default (1.0 for ``Model``, Qwen3's 0.6 for
+            ``TinkerModel``).
+        max_retries: Additional attempts for prompts whose output fails to
+            parse (a reply arrived but did not parse). A request that fails at
+            the provider (e.g. a 504) is retried by ``model`` itself
+            (``Model(num_retries=)``) and not asked again here. A sample that
+            fails to parse because it stopped at the model's max_tokens is not
+            retried unless ``retry_truncated=True``: at the same max_tokens a
+            retry usually stops there again. The step report counts such samples.
+        batch_size: Number of prompts per ``model.generate_batch()`` call for
+            a model that runs one call at a time (``LocalModel``, a duck-typed
+            model). None (default) sends all prompts in one call. A ``Model``
+            or ``TinkerModel`` always gets all prompts in one call, so a slow
+            request never holds up the next batch; its ``max_concurrency``
+            bounds how many requests run at once.
+        merge: Return the input rows with the output attached instead of the
+            bare outputs: ``{**item, **parsed}`` per output (the output wins
+            when keys clash; a warning names them), plus ``sample_idx`` when
+            ``samples_per_item > 1``. Failed slots are dropped.
+        output_field: With ``merge=True``, nest the output under this key
+            instead, e.g. ``"solution"`` gives ``{**item, "solution": parsed}``.
+        retry_truncated: Also retry samples that failed to parse after stopping
+            at max_tokens (see ``max_retries``).
 
     Returns:
-        List of length ``len(items) * samples_per_item`` in input order, grouped
-        by item (item ``i``'s samples occupy slots ``i * samples_per_item`` to
-        ``(i + 1) * samples_per_item``). Each slot holds the parsed output dict,
-        or ``None`` if the prompt failed to parse after ``max_retries``. When the
+        By default, a list of length ``len(items) * samples_per_item`` in input
+        order, grouped by item (item ``i``'s samples occupy slots
+        ``i * samples_per_item`` to ``(i + 1) * samples_per_item``). Each slot
+        holds the parsed output dict, or ``None`` if the prompt failed to parse
+        after ``max_retries`` or failed at the provider after the model's own
+        retries. A row error (the provider's content filter blocked it, or
+        the prompt is longer than the context window) also gives ``None``,
+        unless every prompt (at least 2) hit one: then the first is raised.
+        When any slot failed at the provider, the result is not
+        cached, so a rerun asks again (the request cache replays the
+        completions that arrived). With
+        ``merge=True``, the merged rows of the slots that succeeded. When the
         model returns a reasoning trace separately in `GenerateResult.reasoning`,
         it is included under the `thinking_trace` key. Inline `<think>` traces (e.g.
         from `LocalModel`, which supplies `None` for that metadata) are not extracted;
         use `split_reasoning` to separate them out as needed.
     """
-    if batch_size <= 0:
+    if batch_size is not None and batch_size <= 0:
         raise ValueError("batch_size must be positive")
     if samples_per_item <= 0:
         raise ValueError("samples_per_item must be positive")
     if max_retries < 0:
         raise ValueError("max_retries must be non-negative")
+    if output_field is not None and not merge:
+        raise ValueError("output_field needs merge=True")
 
     log = _get_logger()
 
@@ -105,31 +186,67 @@ def generate_from_context(
 
     results: list[dict | None] = [None] * (len(prompts) * samples_per_item)
 
-    # In order to handle retries while generating multiple samples per item via the n=
-    # parameter of generate_batch, we keep a list of pending prompts with the number of
-    # samples still needed for each, so we can track the amount of computation still
-    # required (up to max_retries).
-    pending: list[tuple[Prompt, list[int]]] = [
-        (p, list(range(i * samples_per_item, (i + 1) * samples_per_item)))
-        for i, p in enumerate(prompts)
+    # A transient provider error (e.g. a 504) comes back in the prompt's slot
+    # instead of failing the whole batch; models whose generate_batch lacks the
+    # keyword raise as before.
+    catch: dict[str, Any] = (
+        {"return_exceptions": True}
+        if _accepts_kwarg(getattr(model, "generate_batch", None), "return_exceptions")
+        else {}
+    )
+
+    # Each pending entry is (item index, slots still needed). Retries re-ask
+    # only the slots that failed to parse, up to max_retries more attempts.
+    pending: list[tuple[int, list[int]]] = [
+        (i, list(range(i * samples_per_item, (i + 1) * samples_per_item)))
+        for i in range(len(prompts))
     ]
+    # Item index -> label of its latest provider failure, e.g.
+    # "InternalServerError" or "content filter". Model already retried the
+    # request (num_retries) if a retry could help, so the op does not ask
+    # again: those slots stay None.
+    provider_errors: dict[int, str] = {}
+    row_errors: dict[int, BaseException] = {}
+    # Item index -> the quota error for a prompt not sent (token-unit quota used up).
+    unsent: dict[int, BaseException] = {}
+    # Slots whose output failed to parse after stopping at max_tokens.
+    cut_off: set[int] = set()
+    # Slots kept although they stopped at max_tokens (e.g. output_schema=None
+    # keeps any text), so their text is cut off.
+    cut_kept: set[int] = set()
+    # Slot -> the start of its reasoning when it talks about the reply format,
+    # else "" (slots without reasoning are left out). Only with output_schema.
+    format_talk: dict[int, str] = {}
 
     for attempt in range(1 + max_retries):
         if not pending:
             break
-        next_pending: list[tuple[Prompt, list[int]]] = []
+        next_pending: list[tuple[int, list[int]]] = []
 
         # generate_batch uses one n per call, so group prompts needing the same
         # number of completions (on the first pass all need samples_per_item).
-        by_count: dict[int, list[tuple[Prompt, list[int]]]] = {}
+        by_count: dict[int, list[tuple[int, list[int]]]] = {}
         for entry in pending:
             by_count.setdefault(len(entry[1]), []).append(entry)
 
         for n, group in by_count.items():
-            for start in range(0, len(group), batch_size):
-                batch = group[start : start + batch_size]
+            chunk = _chunk_size(model, batch_size, len(group))
+            for start in range(0, len(group), chunk):
+                batch = group[start : start + chunk]
+                # Each prompt is keyed on its row, so editing one row re-asks
+                # only that row. A retry (after a parse failure) is salted,
+                # e.g. "retry 1, n=2", and gets new completions, not the same
+                # unparseable ones.
                 batch_results = model.generate_batch(
-                    [p for p, _ in batch], temperature=temperature, n=n
+                    [prompts[i] for i, _ in batch],
+                    temperature=temperature,
+                    n=n,
+                    **_cache_kwargs(
+                        model.generate_batch,
+                        cache_rows=[items[i] for i, _ in batch],
+                        cache_salt=f"retry {attempt}, n={n}" if attempt else None,
+                    ),
+                    **catch,
                 )
                 if len(batch_results) != len(batch):
                     log.warning(
@@ -140,31 +257,185 @@ def generate_from_context(
                     )
                     next_pending.extend(batch)
                     continue
-                for (prompt, slots), completions in zip(batch, batch_results):
-                    unfilled = slots[len(completions) :]  # short batch -> retry
-                    for slot, raw_text, reasoning_text in zip(
-                        slots, completions, _reasoning_for(completions)
+                for (i, slots), completions in zip(batch, batch_results):
+                    if isinstance(completions, BaseException):
+                        # A content-filter block or an over-long prompt fails
+                        # only this row, and so does a prompt not sent because
+                        # the token-unit quota is used up (cached prompts still
+                        # replay); a bad key, unknown model, or other 400 fails
+                        # every retry.
+                        if _is_row_error(completions):
+                            row_errors[i] = completions
+                        elif _quota_spent(completions):
+                            unsent[i] = completions
+                        elif not _is_transient(completions):
+                            raise completions
+                        provider_errors[i] = _failure_label(completions)
+                        continue
+                    unfilled: list[int] = []
+                    if len(completions) < len(slots) and catch:
+                        # Fewer completions than asked: some of the prompt's
+                        # requests failed (return_exceptions keeps the rest).
+                        provider_errors[i] = "missing completions"
+                    elif len(completions) < len(slots):
+                        unfilled = slots[len(completions) :]
+                    reasons = getattr(completions, "finish_reasons", None) or []
+                    for k, (slot, raw_text, reasoning_text) in enumerate(
+                        zip(slots, completions, _reasoning_for(completions))
                     ):
                         parsed = _parse_output(
                             raw_text, output_schema, reasoning=reasoning_text
                         )
-                        if parsed is None:
-                            unfilled.append(slot)
-                        else:
+                        stopped = k < len(reasons) and reasons[k] == "length"
+                        if output_schema is not None:
+                            talk = _format_talk(raw_text, reasoning_text)
+                            if talk is not None:
+                                format_talk[slot] = talk
+                        if parsed is not None:
                             results[slot] = parsed
+                            cut_off.discard(slot)
+                            if stopped:
+                                cut_kept.add(slot)
+                            else:
+                                cut_kept.discard(slot)
+                        elif stopped:
+                            cut_off.add(slot)
+                            if retry_truncated:
+                                unfilled.append(slot)
+                        else:
+                            unfilled.append(slot)
                     if unfilled:
-                        next_pending.append((prompt, unfilled))
+                        next_pending.append((i, unfilled))
         pending = next_pending
 
-    if pending:
-        failed = sum(len(slots) for _, slots in pending)
+    # With merge=True a failed slot's row is dropped; otherwise its slot is None.
+    def lost(n: int) -> str:
+        if merge:
+            return f"{n} row{'' if n == 1 else 's'} dropped"
+        return f"{n} output{'' if n == 1 else 's'} None"
+
+    def kept(n: int) -> str:
+        noun = "row" if merge else "output"
+        return f"{n} {noun}{'' if n == 1 else 's'} kept with cut-off text"
+
+    if cut_off:
         log.warning(
-            "%d sample(s) failed to parse after %d retries; "
+            "%d sample(s) stopped at max_tokens before any parseable output; %s"
             "returning None for those slots",
-            failed,
-            max_retries,
+            len(cut_off),
+            "" if retry_truncated else "not retried (retry_truncated=False); ",
         )
-    return results
+    if cut_off or cut_kept:
+        # Leads the op's max_tokens warning: "20 rows dropped (...), because ...".
+        outcome = []
+        if cut_off:
+            outcome.append(lost(len(cut_off)))
+        if cut_kept:
+            outcome.append(kept(len(cut_kept)))
+        _tracking.add_truncation_outcome(", ".join(outcome))
+    failed_parse = [
+        slot for _, slots in pending for slot in slots if slot not in cut_off
+    ]
+    if failed_parse:
+        n = len(failed_parse)
+        message = (
+            f"alter.generate_from_context: {lost(n)}: {n} sample"
+            f"{'' if n == 1 else 's'} did not parse after {max_retries} retries"
+        )
+        log.warning(message)
+        _tracking.add_op_warning(message, "parse_failure")
+    _report_format_talk(format_talk, log)
+    _raise_if_systemic([*row_errors.values(), *unsent.values()], len(prompts))
+    if provider_errors:
+        _report_provider_failures(
+            f"alter.generate_from_context: {len(provider_errors)} of {len(prompts)} "
+            "prompts failed after the model's retries; their slots are None",
+            list(provider_errors.values()),
+        )
+    if not merge:
+        return results
+    return _merge_outputs(items, results, samples_per_item, output_field, log)
+
+
+def _format_talk(raw_text: str, reasoning_text: str | None) -> str | None:
+    """The start of a completion's reasoning if it talks about the reply format.
+
+    Returns "" for reasoning that does not, and None for a completion without
+    reasoning (neither ``reasoning_text`` nor an inline ``<think>`` block).
+    """
+    if reasoning_text is None:
+        head = raw_text.lstrip()
+        if not head.startswith("<think>"):
+            return None
+        reasoning_text = head[len("<think>") :]
+    start = reasoning_text[:_FORMAT_TALK_CHARS]
+    return " ".join(start.split()) if _FORMAT_TALK_RE.search(start) else ""
+
+
+def _report_format_talk(format_talk: dict[int, str], log: logging.Logger) -> None:
+    """Warn when many reasoning traces open by working out the reply format.
+
+    e.g. "We need answer JSON only? User says 'Respond with your reasoning,
+    then a code block' but ...": the prompt asks for one format and
+    output_schema's instruction for another. Such reasoning is a poor training
+    target, so the warning says so.
+    """
+    talking = [t for t in format_talk.values() if t]
+    if len(format_talk) < _FORMAT_TALK_MIN_TRACES or not talking:
+        return
+    if len(talking) / len(format_talk) < _FORMAT_TALK_SHARE:
+        return
+    example = talking[0][:80] + ("…" if len(talking[0]) > 80 else "")
+    message = (
+        f"alter.generate_from_context: {len(talking)} of {len(format_talk)} "
+        f'reasoning traces open by discussing the output format (e.g. "{example}") '
+        "→ the prompt's own format instructions likely conflict with "
+        "output_schema's; if this reasoning becomes a training target, generate "
+        "without output_schema and parse the answer yourself"
+    )
+    log.warning(message)
+    _tracking.add_op_warning(message, "format_talk")
+
+
+def _merge_outputs(
+    items: list[dict],
+    outputs: list[dict | None],
+    samples_per_item: int,
+    output_field: str | None,
+    log: logging.Logger,
+) -> list[dict]:
+    """Attach each parsed output to its input row; drop failed slots.
+
+    ``{**item, **parsed}``, or ``{**item, output_field: parsed}``, plus
+    ``sample_idx`` (0, 1, ...) when there are several samples per item.
+    """
+    merged: list[dict] = []
+    clashes: set[str] = set()
+    for slot, parsed in enumerate(outputs):
+        if parsed is None:
+            continue
+        item = items[slot // samples_per_item]
+        row: dict[str, Any]
+        if output_field is not None:
+            clashes.update({output_field} & item.keys())
+            row = {**item, output_field: parsed}
+        else:
+            clashes.update(parsed.keys() & item.keys())
+            row = {**item, **parsed}
+        if samples_per_item > 1:
+            # e.g. a sample_idx left by an earlier merge=True step.
+            clashes.update({"sample_idx"} & row.keys())
+            row["sample_idx"] = slot % samples_per_item
+        merged.append(row)
+    if clashes:
+        message = (
+            f"alter.generate_from_context: merge=True replaces the input's "
+            f"{sorted(clashes)}; pass another output_field= (or rename the input "
+            "keys) to keep both"
+        )
+        log.warning(message)
+        _tracking.add_op_warning(message, "merge_clash")
+    return merged
 
 
 def default_extract_answer(text: str) -> str | None:
@@ -206,7 +477,7 @@ def _normalized_equal(a: Any, b: Any) -> bool:
     return _normalize_answer(a) == _normalize_answer(b)
 
 
-@op(name="alter.self_taught_reasoner")
+@op(name="alter.self_taught_reasoner", samples_arg="n")
 def self_taught_reasoner(
     items: list[dict],
     prompt_fn: PromptTemplate,
@@ -217,14 +488,22 @@ def self_taught_reasoner(
     extract_answer: Callable[[str], Any] | None = None,
     match_fn: Callable[[Any, Any], bool] | None = None,
     filter_fn: Callable[[list[dict]], list[dict]] | None = None,
+    verifier: Callable[[str, dict], bool | float | None] | None = None,
+    min_score: float = 1.0,
+    keep: str = "all",
+    max_workers: int | None = None,
+    rationalize: bool = True,
+    hint_fn: PromptTemplate | None = None,
+    rationalized_field: str = "rationalized",
+    answer_judge: Model | None = None,
     response_field: str = "response",
     thinking_field: str = "thinking",
     answer_field: str = "answer",
     student_answer_field: str = "student_final_answer",
     split_thinking: bool = True,
-    temperature: float = 0.7,
+    temperature: float | None = None,
     max_tokens: int | None = None,
-    batch_size: int = 10,
+    batch_size: int | None = None,
 ) -> list[dict]:
     r"""Self-Taught Reasoner (STaR): keep a student model's own correct solutions.
 
@@ -238,11 +517,21 @@ def self_taught_reasoner(
     reference, so the surviving rows carry student-generated reasoning traces that
     arrive at a verified answer.
 
-    Acceptance is decided in one of two ways:
+    Acceptance is decided in one of these ways:
 
     * **Answer matching (default):**  A response is kept when
       ``match_fn(student_answer, item[reference_field])`` is true (default:
       string-normalized equality).
+    * **Verifier:** Pass ``verifier`` -- a ``(answer, row) -> bool | None``
+      callable that sees the whole row, e.g.
+      ``filter.program_verifier("tests")`` to run each answer's code on the
+      row's tests. A response is kept when it returns True. Calls run
+      ``max_workers`` at a time.
+    * **Answer judge:** Pass ``answer_judge``, a model, for free-text answers
+      that no exact match can check. The judge sees the question (the
+      student's prompt), the reference, and the student's answer (not its
+      reasoning), and replies YES when the answer reaches the same conclusion
+      as the reference. A response is kept on YES.
     * **Custom filter:** Pass ``filter_fn`` -- any ``list[dict] -> list[dict]``
       callable.
 
@@ -252,6 +541,27 @@ def self_taught_reasoner(
     the provider's separate reasoning field (``GenerateResult.reasoning``) when
     the model returns one, and otherwise the inline ``<think>`` block split out
     via `pyforger.acquire.split_reasoning`.
+
+    **Rationalization** (the paper's second pass, on by default): every item
+    left with no accepted response (under whichever check above is active) is
+    sampled ``n`` more times from a prompt that also gives a hint, and the
+    accepted responses are kept as if the student had answered the unhinted
+    prompt: rows carry the item's fields, not the hinted prompt. This gives
+    rows for items the student never solves on its own, in the student's own
+    words. The default hint, as in the paper, is the item's reference
+    (``prompt_fn``'s prompt plus "Hint: a correct answer is:
+    <item[reference_field]>"); items without one are not retried. ``hint_fn``
+    gives another hint (e.g. only the final code, or why the task cannot be
+    done). As in the paper, responses that mention the hint are not filtered
+    out. Every row gets ``rationalized_field`` (False for the first pass, True
+    for the second). With ``answer_judge``, the judge sees ``prompt_fn``'s
+    question, not the hinted prompt; under the default hint the reference is
+    in the prompt, so an answer that copies it is accepted. Both passes draw
+    their samples through a cached sub-op, so a new judge or verifier
+    re-draws neither (a newly unsolved item is hinted afresh).
+    ``rationalize=False`` turns this off; with ``filter_fn`` it is off, since
+    the filter judges all candidates together and cannot say which items went
+    unsolved.
 
     Args:
         items: Input rows. Each must contain ``reference_field``.
@@ -268,6 +578,30 @@ def self_taught_reasoner(
             Ignored when ``filter_fn`` is given.
         filter_fn: Optional ``list[dict] -> list[dict]`` acceptance filter over
             candidate rows. Overrides the default answer-matching path.
+        verifier: Optional ``(answer, row) -> bool | float | None`` acceptance
+            check, given ``answer_field`` (the response after its reasoning) and
+            the candidate row (the item's fields plus the response fields). With
+            it, ``reference_field`` is not needed and is left unchanged. A float
+            is a score: the response is kept at ``min_score`` or above, and
+            ``verifier_score`` holds it.
+        min_score: The lowest kept score when ``verifier`` returns floats.
+        keep: ``"all"`` keeps every accepted response; ``"best"`` keeps one per
+            item, its highest-scoring accepted response (the first on a tie).
+        max_workers: Verifier calls at a time (default 8).
+        rationalize: Re-sample unsolved items with a hint (default True).
+        hint_fn: Format string or ``(dict) -> Prompt`` for the hinted prompt;
+            None (default) appends the item's ``reference_field`` as the hint.
+            Needs answer matching or ``verifier``, not ``filter_fn``.
+        rationalized_field: Output key marking rationalized rows (set when
+            rationalization runs).
+        answer_judge: Model that judges each answer against its row's
+            reference; None (default) leaves it off. Any ``Model`` works, e.g.
+            a ``LocalModel`` on your own GPUs or an API model. Without
+            ``extract_answer``, the answer judged is ``answer_field``. An
+            empty answer, a failed request, and a reply with no YES or NO are
+            rejections. Identical (question, reference, answer) triples are
+            judged once. Kept rows keep their ``reference_field``. Not
+            combinable with ``match_fn``, ``verifier``, or ``filter_fn``.
         response_field: Output key for the raw student response.
         thinking_field: Output key for the split-out reasoning trace.
         answer_field: Output key for the answer portion of the response.
@@ -277,54 +611,83 @@ def self_taught_reasoner(
             or by splitting an inline ``<think>`` block when there is none.
             When False, the whole response is stored in ``answer_field`` and
             ``thinking_field`` is left empty.
-        temperature: Sampling temperature passed to the model.
+        temperature: Sampling temperature passed to the model; None (default)
+            uses the model's own default (1.0 for ``Model``, Qwen3's 0.6 for
+            ``TinkerModel``).
         max_tokens: Max tokens per response (model default when None).
-        batch_size: Number of items per ``model.generate_batch()`` call.
+        batch_size: Number of items per ``model.generate_batch()`` call for
+            a model that runs one call at a time (``LocalModel``). None
+            (default) sends all items in one call, as a ``Model`` always does.
 
     Returns:
         Output rows, in item order, one per accepted response.
     """
     if n <= 0:
         raise ValueError("n must be positive")
-    if batch_size <= 0:
+    if batch_size is not None and batch_size <= 0:
         raise ValueError("batch_size must be positive")
     if not items:
         return []
 
     log = _get_logger()
+    if filter_fn is not None and verifier is not None:
+        raise ValueError("pass filter_fn or verifier, not both")
+    if keep not in ("all", "best"):
+        raise ValueError(f'keep must be "all" or "best", not {keep!r}')
+    if answer_judge is not None:
+        others = {"match_fn": match_fn, "verifier": verifier, "filter_fn": filter_fn}
+        given = [name for name, value in others.items() if value is not None]
+        if given:
+            raise ValueError(f"pass answer_judge or {given[0]}, not both")
+    if max_workers is not None and max_workers < 1:
+        raise ValueError("max_workers must be at least 1")
     if extract_answer is not None and filter_fn is not None:
         log.warning(
             "self_taught_reasoner: extract_answer still runs when filter_fn is "
             "given; it fills %r on the candidate rows filter_fn receives.",
             student_answer_field,
         )
-    extract = extract_answer if extract_answer is not None else default_extract_answer
+    extract: Callable[[str], Any] | None = extract_answer
+    if extract is None and answer_judge is None:
+        extract = default_extract_answer
     match = match_fn if match_fn is not None else _normalized_equal
 
-    prompts: list[Prompt] = [_resolve_prompt(prompt_fn, item) for item in items]
-
-    # Sample n responses per item, batching items together for throughput.
-    item_responses: list[tuple[dict, list[str]]] = []
-    for start in range(0, len(prompts), batch_size):
-        batch = prompts[start : start + batch_size]
-        batch_results = model.generate_batch(
-            batch, n=n, temperature=temperature, max_tokens=max_tokens
+    if hint_fn is not None and filter_fn is not None:
+        raise ValueError(
+            "hint_fn needs answer matching or verifier: filter_fn judges all "
+            "candidates together, so the unsolved items are unknown"
         )
-        if len(batch_results) != len(batch):
-            log.warning(
-                "generate_batch returned %d results for %d prompts",
-                len(batch_results),
-                len(batch),
-            )
-        # zip drops items left without results; they contribute no rows.
-        item_responses.extend(zip(items[start : start + batch_size], batch_results))
+    if hint_fn is not None and not rationalize:
+        raise ValueError("hint_fn is only used with rationalize=True")
+    rationalizing = rationalize and filter_fn is None
 
-    # Build one candidate row per generated response.
-    candidates: list[dict] = []
-    for item, responses in item_responses:
-        # Providers that return reasoning separately (GenerateResult.reasoning)
-        # leave it out of the content; otherwise it is inline as <think>...</think>.
-        reasoning = getattr(responses, "reasoning", None) or []
+    def sample(
+        batch_items: list[dict], template: PromptTemplate, hint_field: str | None
+    ) -> list[list[dict]]:
+        """``n`` candidate rows per item, from ``template``'s prompts."""
+        # A sub-op, so changing how answers are accepted (a judge, a
+        # verifier) reuses these samples instead of drawing new ones.
+        with room_for(model, answer_judge):
+            sampled = _star_samples(
+                batch_items,
+                template,
+                model=model,
+                n=n,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                batch_size=batch_size,
+                hint_field=hint_field,
+            )
+        return [
+            candidates_for(item, responses, reasoning)
+            for item, (responses, reasoning) in zip(batch_items, sampled)
+        ]
+
+    def candidates_for(
+        item: dict, responses: list[str], reasoning: list[str | None]
+    ) -> list[dict]:
+        """One candidate row per generated response."""
+        rows = []
         for i, raw in enumerate(responses):
             api_thinking = reasoning[i] if i < len(reasoning) else None
             if not split_thinking:
@@ -333,20 +696,36 @@ def self_taught_reasoner(
                 thinking, answer = api_thinking.strip(), raw.strip()
             else:
                 thinking, answer = split_reasoning(raw)
-            candidate = {
-                **item,
-                response_field: raw,
-                thinking_field: thinking,
-                answer_field: answer,
-                student_answer_field: extract(raw),
-            }
-            candidates.append(candidate)
+            rows.append(
+                {
+                    **item,
+                    response_field: raw,
+                    thinking_field: thinking,
+                    answer_field: answer,
+                    # The answer judge sees the answer itself by default.
+                    student_answer_field: answer if extract is None else extract(raw),
+                }
+            )
+        return rows
 
-    # Decide which candidates to keep.
-    if filter_fn is not None:
-        kept = filter_fn(candidates)
-    else:
-        kept = [
+    def accept(candidates: list[dict]) -> list[dict]:
+        """The candidates to keep, in order."""
+        if filter_fn is not None:
+            return filter_fn(candidates)
+        if verifier is not None:
+            return _verified(
+                candidates, verifier, answer_field, max_workers or 8, min_score
+            )
+        if answer_judge is not None:
+            with room_for(answer_judge, model):
+                return _judged(
+                    candidates,
+                    answer_judge,
+                    prompt_fn,
+                    student_answer_field=student_answer_field,
+                    reference_field=reference_field,
+                )
+        return [
             candidate
             for candidate in candidates
             if candidate[student_answer_field] is not None
@@ -356,8 +735,57 @@ def self_taught_reasoner(
             )
         ]
 
-    # The student-generated answer becomes the ground truth for kept rows.
-    for candidate in kept:
+    def accept_per_item(per_item: list[list[dict]]) -> list[list[dict]]:
+        """`accept` over all candidates at once, regrouped by item."""
+        kept_ids = {id(c) for c in accept([c for cs in per_item for c in cs])}
+        regrouped = [[c for c in cs if id(c) in kept_ids] for cs in per_item]
+        if keep == "best":
+            return [[_best(cs)] if cs else [] for cs in regrouped]
+        return regrouped
+
+    first = sample(items, prompt_fn, None)
+    n_candidates = sum(len(cs) for cs in first)
+    if not rationalizing:
+        kept = [c for cs in accept_per_item(first) for c in cs]
+    else:
+        # "Solved" is whatever accept() uses: matching, verifier, or the judge.
+        kept_per_item = accept_per_item(first)
+        # The default hint is the reference, so items without one are not retried.
+        unsolved = [
+            i
+            for i, cs in enumerate(kept_per_item)
+            if not cs
+            and (hint_fn is not None or items[i].get(reference_field) is not None)
+        ]
+        for cs in kept_per_item:
+            for candidate in cs:
+                candidate[rationalized_field] = False
+        if unsolved:
+            # Also a sub-op call: a new threshold that leaves the same items
+            # unsolved reuses the hinted samples too.
+            hinted = sample(
+                [items[i] for i in unsolved],
+                prompt_fn if hint_fn is None else hint_fn,
+                reference_field if hint_fn is None else None,
+            )
+            n_candidates += sum(len(cs) for cs in hinted)
+            for i, cs in zip(unsolved, accept_per_item(hinted)):
+                for candidate in cs:
+                    candidate[rationalized_field] = True
+                kept_per_item[i] = cs
+        kept = [c for cs in kept_per_item for c in cs]
+        log.info(
+            "self_taught_reasoner: rationalization kept %d responses for %d of %d "
+            "unsolved items",
+            sum(len(kept_per_item[i]) for i in unsolved),
+            sum(1 for i in unsolved if kept_per_item[i]),
+            len(unsolved),
+        )
+
+    # The student-generated answer becomes the ground truth for kept rows; a
+    # judged answer does not replace the reference.
+    overwrite = verifier is None and answer_judge is None
+    for candidate in kept if overwrite else []:
         student_answer = candidate.get(student_answer_field)
         if student_answer is not None:
             candidate[reference_field] = student_answer
@@ -365,7 +793,247 @@ def self_taught_reasoner(
     log.info(
         "self_taught_reasoner: kept %d/%d responses across %d items",
         len(kept),
-        len(candidates),
+        n_candidates,
         len(items),
     )
+    return kept
+
+
+# A sampler, not an alter: it returns completions, not rows.
+@op(name="alter.self_taught_reasoner.samples", samples_arg="n", category="other")
+def _star_samples(
+    items: list[dict],
+    prompt_fn: PromptTemplate,
+    *,
+    model: Model,
+    n: int,
+    temperature: float | None,
+    max_tokens: int | None,
+    batch_size: int | None,
+    hint_field: str | None = None,
+) -> list[tuple[list[str], list[str | None]]]:
+    """Return each item's ``n`` completions and their API reasoning (or None).
+
+    With ``hint_field`` (rationalization's default hint), each prompt also says
+    "Hint: a correct answer is: <item[hint_field]>". An item the model returned
+    no result for gets no completions (a warning is logged).
+    """
+    prompts: list[Prompt] = [_resolve_prompt(prompt_fn, item) for item in items]
+    if hint_field is not None:
+        prompts = [
+            _with_hint(prompt, f"Hint: a correct answer is:\n{item[hint_field]}")
+            for prompt, item in zip(prompts, items)
+        ]
+    sampled: list[tuple[list[str], list[str | None]]] = []
+    chunk = _chunk_size(model, batch_size, len(prompts))
+    for start in range(0, len(prompts), chunk):
+        batch = prompts[start : start + chunk]
+        batch_results = model.generate_batch(
+            batch,
+            n=n,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            **_cache_kwargs(
+                model.generate_batch, cache_rows=items[start : start + chunk]
+            ),
+        )
+        if len(batch_results) != len(batch):
+            _get_logger().warning(
+                "generate_batch returned %d results for %d prompts",
+                len(batch_results),
+                len(batch),
+            )
+        for responses in batch_results[: len(batch)]:
+            # Providers that return reasoning separately (GenerateResult.reasoning)
+            # leave it out of the content; otherwise it is inline as <think>...</think>.
+            reasoning = list(getattr(responses, "reasoning", None) or [])
+            texts = list(responses)
+            sampled.append((texts, reasoning + [None] * (len(texts) - len(reasoning))))
+        # Items left without results contribute no rows.
+        sampled += [([], [])] * (len(batch) - len(batch_results))
+    return sampled
+
+
+_JUDGE_PROMPT = """\
+You are checking a student's answer to a question against a reference answer.
+
+<question>
+{question}
+</question>
+
+<reference_answer>
+{reference}
+</reference_answer>
+
+<student_answer>
+{answer}
+</student_answer>
+
+Does the student's answer reach the same conclusion as the reference answer? \
+Compare what the question asks for: the verdict (e.g. yes or no, acceptable or \
+not), and the values, names, and facts the answer gives. Wording, length, and \
+extra explanation do not matter. A different verdict, a wrong value or fact, or \
+a missing final answer does. Reply with one word: YES or NO."""
+
+# The judge's verdict: the last standalone YES or NO, e.g. "**YES**".
+_VERDICT_RE = re.compile(r"\b(yes|no)\b", re.I)
+
+
+def _judged(
+    candidates: list[dict],
+    judge: Model,
+    prompt_fn: PromptTemplate,
+    *,
+    student_answer_field: str,
+    reference_field: str,
+) -> list[dict]:
+    """The candidates whose answer ``judge`` says matches the reference."""
+    from pyforger.filter.judge import _prompt_text
+
+    prompts: list[str | None] = []
+    for candidate in candidates:
+        answer = _answer_text(candidate[student_answer_field])
+        reference = _answer_text(
+            get_field(candidate, reference_field, "alter.self_taught_reasoner")
+        )
+        if not answer or not reference:
+            prompts.append(None)
+            continue
+        question = _prompt_text(_resolve_prompt(prompt_fn, candidate)).strip()
+        prompts.append(
+            _JUDGE_PROMPT.format(question=question, reference=reference, answer=answer)
+        )
+    distinct = list(dict.fromkeys(p for p in prompts if p is not None))
+    replies = dict(zip(distinct, _judge_answers(distinct, judge=judge)))
+    verdicts = [None if p is None else _verdict(replies[p]) for p in prompts]
+    _log_judgments(prompts, replies, verdicts, len(distinct))
+    return [c for c, ok in zip(candidates, verdicts) if ok is True]
+
+
+def _answer_text(value: Any) -> str:
+    """An answer as the text to judge; None is empty."""
+    return "" if value is None else str(value).strip()
+
+
+# Applying the verdicts outside keeps other acceptance settings from asking again.
+@op(name="alter.self_taught_reasoner.judgments", category="other")
+def _judge_answers(prompts: list[str], *, judge: Model) -> list[str | None]:
+    """One raw judge reply per prompt; None for a request that failed.
+
+    As in ``filter.by_llm_score``: a request that still fails after the
+    model's retries gives None, one warning names the count, and the result is
+    not cached; failures on every prompt raise.
+    """
+    if not prompts:
+        return []
+    results = judge.generate_batch(
+        list[Prompt](prompts),
+        n=1,
+        **_cache_kwargs(judge.generate_batch, cache_rows=list(prompts)),
+        **_catch_kwargs(judge),
+    )
+    failures = _RequestFailures()
+    replies = [
+        None if failures.failed(result) else (result[0] if result else "")
+        for result in results
+    ]
+    failures.raise_if_systemic(len(prompts))
+    failures.report(
+        f"self_taught_reasoner: {len(failures)} of {len(prompts)} answer-judge "
+        "requests failed after retries; their answers are rejected"
+    )
+    return replies
+
+
+def _verdict(reply: str | None) -> bool | None:
+    """True for YES, False for NO, None for no reply or no verdict.
+
+    Only the text after a closed thinking block counts, as in
+    ``filter.by_llm_score``.
+    """
+    from pyforger.filter.judge import _answer_text as _after_thinking
+
+    text = _after_thinking(reply)
+    found = _VERDICT_RE.findall(text or "")
+    return found[-1].lower() == "yes" if found else None
+
+
+def _log_judgments(
+    prompts: list[str | None],
+    replies: dict[str, str | None],
+    verdicts: list[bool | None],
+    distinct: int,
+) -> None:
+    """Log how the judge decided, and warn about replies with no verdict."""
+    empty = sum(p is None for p in prompts)
+    unclear = [
+        reply
+        for p, v in zip(prompts, verdicts)
+        if p is not None and v is None and (reply := replies[p]) is not None
+    ]
+    _get_logger().info(
+        "self_taught_reasoner: the answer judge accepted %d of %d answers "
+        "(%d distinct judged)%s",
+        sum(v is True for v in verdicts),
+        len(prompts),
+        distinct,
+        f"; {empty} rejected for an empty answer or reference" if empty else "",
+    )
+    if unclear:
+        _get_logger().warning(
+            "self_taught_reasoner: %d answer-judge replies had no YES or NO and "
+            "were rejected (raise the judge's max_tokens if it stops mid-thought); "
+            "e.g. %r",
+            len(unclear),
+            unclear[0][-300:],
+        )
+
+
+def _context_run() -> Callable[..., Any]:
+    """A copy of this context's run, typed for Executor.submit (as in model.py)."""
+    run: Callable[..., Any] = contextvars.copy_context().run
+    return run
+
+
+def _best(candidates: list[dict]) -> dict:
+    """The highest ``verifier_score`` (1 when absent), the first on a tie."""
+    return max(candidates, key=lambda c: c.get("verifier_score", 1.0))
+
+
+def _verified(
+    candidates: list[dict],
+    verifier: Callable[[str, dict], bool | float | None],
+    answer_field: str,
+    workers: int,
+    min_score: float = 1.0,
+) -> list[dict]:
+    """The candidates ``verifier`` accepts, in order; ``workers`` calls at a time.
+
+    ``True`` accepts; a float score accepts at ``min_score`` or above and is
+    stored as ``verifier_score``.
+    """
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [
+            pool.submit(
+                _context_run(),
+                verifier,
+                candidate[answer_field],
+                candidate,
+            )
+            for candidate in candidates
+        ]
+        try:
+            verdicts = [f.result() for f in futures]
+        except BaseException:
+            for f in futures:
+                f.cancel()
+            raise
+    kept = []
+    for candidate, verdict in zip(candidates, verdicts):
+        if isinstance(verdict, bool) or verdict is None:
+            if verdict is True:
+                kept.append(candidate)
+        elif verdict >= min_score:
+            candidate["verifier_score"] = float(verdict)
+            kept.append(candidate)
     return kept

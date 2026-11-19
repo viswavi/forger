@@ -1,0 +1,2273 @@
+"""Tests for @step / @pipeline reports, yield checks, and filter score histograms."""
+
+from __future__ import annotations
+
+import contextvars
+import io
+import json
+import re
+from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import pytest
+from pydantic import BaseModel
+from rich.console import Console
+
+import pyforger
+from pyforger import _tracking, acquire, alter, filter, op
+from pyforger._render import _histogram, fmt_num, pipeline_renderable, step_renderable
+from pyforger._rowflow import group_calls
+from pyforger._tracking import PipelineRecord, ScoreRecord, StepRecord
+from pyforger.acquire import Model
+from pyforger.alter import dynamic
+from pyforger.inspect import inspect_step
+from pyforger.op import skip_cache_write, trace
+from pyforger.steps import (
+    _NON_QUALITY_FILTERS,
+    PipelineContractError,
+    StepContractError,
+    pipeline,
+    render_pipeline,
+    render_scores,
+    render_step,
+    step,
+)
+
+
+@pytest.fixture(autouse=True)
+def _quiet_and_fresh(monkeypatch):
+    """Silence reports unless a test opts in, and forget earlier step records."""
+    monkeypatch.setenv("FORGER_STEP_REPORT", "0")
+    _tracking.clear_step_records()
+    yield
+    _tracking.clear_step_records()
+
+
+def _rows(*texts: str) -> list[dict]:
+    return [{"text": t} for t in texts]
+
+
+@op(name="alter.test_upper", category="alter")
+def _upper(rows: list[dict]) -> list[dict]:
+    return [{**r, "text": r["text"].upper()} for r in rows]
+
+
+@op(name="alter.test_costly", category="alter")
+def _costly(rows: list[dict]) -> list[dict]:
+    _tracking.add_usage(100, 50, 0.25)
+    return list(rows)
+
+
+@op(name="alter.test_strings", category="alter")
+def _strings(rows: list[dict]) -> list[str]:
+    return [r["text"] for r in rows]
+
+
+@op(name="inspect.test_report", category="inspect")
+def _report(rows: list[dict]) -> list[str]:
+    return ["topic" for _ in rows]
+
+
+class _StableJudge:
+    """Judge that scores by response length and has a stable cache key."""
+
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    def cache_key(self) -> tuple:
+        return ("_StableJudge",)
+
+    def generate_batch(self, prompts, *, n=1, temperature=None, max_tokens=None):
+        return [self._generate(prompt, n) for prompt in prompts]
+
+    def _generate(self, prompt, n):
+        self.call_count += 1
+        output = prompt.split("<output>\n")[1].split("\n")[0]
+        if output == "garbled":
+            return ["not json"] * n
+        return [json.dumps({"score": min(5, len(output))})] * n
+
+
+def _length_filter(rows, **kwargs):
+    return filter.by_length(rows, instruction_field="text", min_len=2, **kwargs)
+
+
+TEXTS = ("one two", "three four five", "six", "seven eight", "nine")
+
+
+# --------------------------------------------------------------------------- #
+# @step records
+# --------------------------------------------------------------------------- #
+
+
+def test_step_records_ops_counts_and_categories():
+    """A step records each top-level op with rows in/out, yield, and category."""
+
+    @step
+    def clean(rows):
+        rows = _upper(rows)
+        return _length_filter(rows)
+
+    out = clean(_rows(*TEXTS))
+    assert [r["text"] for r in out] == ["ONE TWO", "THREE FOUR FIVE", "SEVEN EIGHT"]
+    rec = _tracking.step_records()["clean"]
+    assert (rec.n_in, rec.n_out, rec.cache_hit) == (5, 3, False)
+    assert [c.op_name for c in rec.ops] == ["alter.test_upper", "filter.by_length"]
+    assert [c.category for c in rec.ops] == ["alter", "filter"]
+    upper, length = rec.ops
+    assert (upper.n_in, upper.n_out, upper.yield_ratio) == (5, 5, 1.0)
+    assert (length.n_in, length.n_out) == (5, 3)
+    assert length.yield_ratio == pytest.approx(0.6)
+    assert length.scores is not None
+    assert length.scores.values == [2, 3, 1, 2, 1]
+    assert (length.scores.keep, length.scores.lower) == ("between", 2)
+    assert rec.warnings == []
+    assert rec.sample[0] == {"text": "ONE TWO"}
+
+
+def test_usage_attributed_to_op_and_step():
+    """Usage added inside an op lands on that op's call and on the step totals."""
+
+    @step
+    def costly(rows):
+        return _length_filter(_costly(rows))
+
+    costly(_rows(*TEXTS))
+    rec = _tracking.step_records()["costly"]
+    call = rec.ops[0]
+    assert (call.prompt_tokens, call.completion_tokens) == (100, 50)
+    assert call.cost_usd == pytest.approx(0.25)
+    assert rec.ops[1].prompt_tokens == 0
+    assert (rec.prompt_tokens, rec.completion_tokens) == (100, 50)
+    assert rec.cost_usd == pytest.approx(0.25)
+
+
+def test_nan_cost_counts_as_zero_and_is_never_printed(capsys, monkeypatch):
+    """A NaN cost adds nothing and no report prints NaN."""
+    monkeypatch.delenv("FORGER_STEP_REPORT")
+
+    @op(name="alter.test_nan_cost", category="alter")
+    def nan_cost(rows):
+        _tracking.add_usage(None, float("nan"), float("nan"))
+        return list(rows)
+
+    @step
+    def nan_step(rows):
+        return _length_filter(nan_cost(rows))
+
+    nan_step(_rows(*TEXTS))
+    rec = _tracking.step_records()["nan_step"]
+    assert rec.cost_usd == 0.0 and rec.prompt_tokens == 0
+    assert not re.search(r"\bnan\b", capsys.readouterr().out, re.IGNORECASE)
+
+
+def test_min_yield_violation_is_a_printed_warning(capsys, monkeypatch):
+    """A filter below its min_yield adds a warning that the report prints."""
+    monkeypatch.delenv("FORGER_STEP_REPORT")
+
+    @step
+    def picky(rows):
+        return _length_filter(rows, min_yield=0.9)
+
+    assert len(picky(_rows(*TEXTS))) == 3
+    rec = _tracking.step_records()["picky"]
+    expected = "filter.by_length: yield 0.60 below min_yield 0.90"
+    assert rec.warnings == [expected]
+    out = capsys.readouterr().out
+    assert expected in out
+    assert "LOW · min 0.90" in out
+
+
+def test_min_yield_violation_raises_when_strict(capsys, monkeypatch):
+    """strict=True raises after printing and storing the report, on every run."""
+    monkeypatch.delenv("FORGER_STEP_REPORT")
+
+    @step(strict=True)
+    def picky(rows):
+        return _length_filter(rows, min_yield=0.9)
+
+    with pytest.raises(StepContractError, match="below min_yield 0.90"):
+        picky(_rows(*TEXTS))
+    out = capsys.readouterr().out
+    assert "step picky" in out and "5 → 3 rows" in out
+    assert inspect_step("picky").warnings == [
+        "filter.by_length: yield 0.60 below min_yield 0.90"
+    ]
+    # The failing result was not cached, so the second run fails the same way.
+    with pytest.raises(StepContractError, match="below min_yield 0.90"):
+        picky(_rows(*TEXTS))
+    assert not _tracking.step_records()["picky"].cache_hit
+
+
+def test_strict_applies_to_cached_steps():
+    """A result cached without strict still fails a strict step on a cache hit."""
+
+    def picky(rows):
+        return _length_filter(rows, min_yield=0.9)
+
+    step(name="picky")(picky)(_rows(*TEXTS))
+    strict_picky = step(name="picky", strict=True)(picky)
+    with pytest.raises(StepContractError, match="below min_yield 0.90"):
+        strict_picky(_rows(*TEXTS))
+    assert _tracking.step_records()["picky"].cache_hit
+
+
+def test_yield_bounds_on_acquire_ops_raise():
+    """Acquire ops take no input rows, so yield bounds are rejected up front."""
+    calls = []
+
+    @op(name="acquire.test_fake_gen", category="acquire")
+    def fake_gen(prompt, n):
+        calls.append(1)
+        return [{"text": f"{prompt} {i}"} for i in range(n)]
+
+    with pytest.raises(ValueError, match="takes no input rows"):
+        fake_gen("hello", 2, min_yield=0.5)
+    assert calls == []
+
+
+def test_yield_bounds_with_no_input_rows_warn():
+    """An empty input misses min_yield; a non-list op cannot be checked."""
+
+    @op(name="inspect.test_count", category="inspect")
+    def count(rows):
+        return {"n": len(rows)}
+
+    @step
+    def empty(rows):
+        count(rows, max_yield=0.5)
+        return _length_filter(rows, min_yield=0.5)
+
+    empty([])
+    assert _tracking.step_records()["empty"].warnings == [
+        "inspect.test_count: yield unchecked; min_yield / max_yield need a list of "
+        "rows in and a list out",
+        "filter.by_length: no input rows, so yield is 0 and below min_yield 0.50",
+    ]
+    assert "LOW · min 0.50" in render_step(_tracking.step_records()["empty"])
+
+
+def test_max_yield_violation():
+    """A filter above its max_yield adds a warning."""
+
+    @step
+    def lenient(rows):
+        return _length_filter(rows, max_yield=0.5)
+
+    lenient(_rows(*TEXTS))
+    rec = _tracking.step_records()["lenient"]
+    assert rec.warnings == ["filter.by_length: yield 0.60 above max_yield 0.50"]
+    assert rec.ops[0].max_yield == 0.5
+
+
+def test_yield_bounds_outside_steps_log_a_warning(caplog):
+    """Outside a step, a yield violation is logged."""
+    with caplog.at_level("WARNING", logger="forger.op"):
+        _length_filter(_rows(*TEXTS), min_yield=0.9)
+    assert "below min_yield 0.90" in caplog.text
+
+
+def test_yield_bounds_are_not_part_of_the_cache_key():
+    """min_yield / max_yield do not change the cache key."""
+    _length_filter(_rows(*TEXTS))
+    _length_filter(_rows(*TEXTS), min_yield=0.1, max_yield=0.9)
+    hits = [r.cache_hit for r in trace()]
+    assert hits == [False, True]
+
+
+@pytest.mark.parametrize(
+    "bounds",
+    [{"min_yield": 1.5}, {"max_yield": -0.1}, {"min_yield": 0.8, "max_yield": 0.2}],
+)
+def test_invalid_yield_bounds_raise(bounds):
+    """Bounds outside [0, 1] or min above max raise ValueError."""
+    with pytest.raises(ValueError, match="yield"):
+        _length_filter(_rows(*TEXTS), **bounds)
+
+
+@pytest.mark.parametrize("reserved", ["min_yield", "max_yield"])
+def test_yield_names_are_reserved_at_decoration(reserved):
+    """An op or step that declares min_yield / max_yield fails at decoration."""
+    namespace: dict = {}
+    exec(f"def fn(rows, {reserved}=None):\n    return rows", namespace)
+    with pytest.raises(TypeError, match=f"reserved argument name '{reserved}'"):
+        op(namespace["fn"])
+    with pytest.raises(TypeError, match=f"reserved argument name '{reserved}'"):
+        step(namespace["fn"])
+
+
+# --------------------------------------------------------------------------- #
+# @step contract
+# --------------------------------------------------------------------------- #
+
+
+def test_step_calling_hash_gets_a_suggestion(monkeypatch):
+    """A step whose rows depend on hash() of a str is told why its cache misses."""
+    monkeypatch.delenv("PYTHONHASHSEED", raising=False)
+
+    @step
+    def assign(rows):
+        rows = [{**r, "fmt": "a" if hash(r["text"]) % 2 else "b"} for r in rows]
+        return filter.by_exact_match(rows, field="text")
+
+    assign(_rows(*TEXTS))
+    rec = _tracking.step_records()["assign"]
+    assert rec.warnings == []
+    assert any("calls hash()" in s and "zlib.crc32" in s for s in rec.suggestions)
+
+
+def test_step_without_ops_warns():
+    """A step that calls no Forger op gets a suggestion; strict=True raises."""
+
+    @step
+    def plain(rows):
+        return [r for r in rows if r["text"]]
+
+    assert plain(_rows(*TEXTS)) == _rows(*TEXTS)
+    rec = _tracking.step_records()["plain"]
+    assert rec.warnings == []
+    assert "called no Forger operations" in rec.suggestions[0]
+
+    @step
+    def dropping(rows):
+        return rows[:2]
+
+    dropping(_rows(*TEXTS))
+    assert "rows went 5 → 2 in plain Python" in (
+        _tracking.step_records()["dropping"].suggestions[0]
+    )
+
+    @step(strict=True)
+    def strict_plain(rows):
+        return list(rows)
+
+    with pytest.raises(StepContractError, match="called no Forger operations"):
+        strict_plain(_rows(*TEXTS))
+
+
+def test_nested_step_raises():
+    """Calling a step inside another step is an error."""
+
+    @step
+    def inner(rows):
+        return _length_filter(rows)
+
+    @step
+    def outer(rows):
+        return inner(_upper(rows))
+
+    with pytest.raises(StepContractError, match="inside step outer"):
+        outer(_rows(*TEXTS))
+
+
+def test_step_returning_non_list_raises():
+    """A step must return a list."""
+
+    @step
+    def counts(rows):
+        return {"n": len(_length_filter(rows))}
+
+    with pytest.raises(StepContractError, match="returned dict"):
+        counts(_rows(*TEXTS))
+    # The failing result was not cached, so a second call fails the same way.
+    with pytest.raises(StepContractError, match="returned dict"):
+        counts(_rows(*TEXTS))
+
+
+class Row(BaseModel):
+    """Input row model."""
+
+    text: str
+
+
+class Scored(BaseModel):
+    """Output row model."""
+
+    text: str
+    score: int
+
+
+def test_row_model_hints_validate_input_and_output():
+    """list[Model] hints check every row and name the first bad one."""
+
+    @step
+    def score_rows(rows: list[Row]) -> list[Scored]:
+        return _length_filter(_upper(rows))
+
+    with pytest.raises(StepContractError, match=r"input row 1 does not match Row"):
+        score_rows([{"text": "ok fine"}, {"txt": "missing"}])
+    with pytest.raises(
+        StepContractError, match=r"output row 0 does not match Scored: score"
+    ):
+        score_rows(_rows(*TEXTS))
+
+
+def test_row_model_hints_pass_and_rows_stay_dicts():
+    """Valid rows pass the schema check and are returned unchanged as dicts."""
+
+    @step
+    def keep(rows: list[Row]) -> list[Row]:
+        return _length_filter(rows)
+
+    out = keep(_rows(*TEXTS))
+    assert all(type(r) is dict for r in out)
+    rec = _tracking.step_records()["keep"]
+    assert (rec.input_type, rec.output_type) == ("list[Row]", "list[Row]")
+
+
+def test_non_dict_rows_warn_instead_of_failing():
+    """A step may return non-dict rows; schema checks and samples are skipped."""
+
+    @step
+    def texts(rows):
+        return _strings(_length_filter(rows))
+
+    assert texts(_rows(*TEXTS)) == ["one two", "three four five", "seven eight"]
+    rec = _tracking.step_records()["texts"]
+    assert "rows are not dicts; schema checks and samples skipped" in rec.suggestions
+    assert rec.sample == []
+
+
+def test_step_without_a_filter_is_a_pipeline_note_not_a_warning(capsys, monkeypatch):
+    """No filter in a step, or a filter that removed nothing, is a pipeline note."""
+    monkeypatch.delenv("FORGER_STEP_REPORT")
+
+    @step(strict=True)
+    def shout(rows):
+        return _upper(rows)
+
+    @step
+    def check(rows):
+        _report(_upper(rows))
+        return filter.by_keyword_blocklist(rows, response_field="text", blocklist=["z"])
+
+    @pipeline(strict=True)
+    def main(rows):
+        return _dedupe_step(check(shout(rows)))
+
+    main(_rows(*TEXTS))
+    assert _tracking.step_records()["shout"].warnings == []
+    rec = _tracking.last_pipeline()
+    assert rec.no_filter_steps == ["shout"]
+    # Summed per op and step; one entry each.
+    assert rec.noop_filters == [
+        ("filter.by_keyword_blocklist", "check", 5),
+        ("filter.by_exact_match", "_dedupe_step", 5),
+    ]
+    # Notes are not warnings: strict=True did not raise on them.
+    assert not any("filter" in w and "removed" in w for w in rec.warnings)
+    out = capsys.readouterr().out
+    pipeline_text = out[out.index("pipeline main") :]
+    assert "steps without a filter: shout" in pipeline_text
+    assert "filters that removed nothing:" in pipeline_text
+    assert "filter.by_keyword_blocklist in check · 5 rows" in pipeline_text
+    assert "ends without a filter" not in out
+
+
+def test_filter_notes_skip_empty_filters_and_count_repeated_steps():
+    """A filter that saw no rows is not listed; a step that ran twice is one entry."""
+
+    @step
+    def keep(rows):
+        return _length_filter(rows)
+
+    @pipeline
+    def main(rows):
+        keep([])
+        keep(rows[:1])
+        return keep(rows[1:2])
+
+    main(_rows("one two", "three four"))
+    rec = _tracking.last_pipeline()
+    assert rec.no_filter_steps == []
+    assert rec.noop_filters == [("filter.by_length", "keep", 2)]
+
+
+def test_prod_and_env_silence_the_report(capsys, monkeypatch):
+    """prod=True and FORGER_STEP_REPORT=0/false/no print nothing."""
+
+    @step(prod=True)
+    def quiet(rows):
+        return _length_filter(rows)
+
+    @step
+    def loud(rows):
+        return _length_filter(rows)
+
+    monkeypatch.delenv("FORGER_STEP_REPORT")
+    quiet(_rows(*TEXTS))
+    assert capsys.readouterr().out == ""
+    for value in ("0", "False", "no"):
+        monkeypatch.setenv("FORGER_STEP_REPORT", value)
+        loud(_rows(*TEXTS), _no_cache=True)
+        assert capsys.readouterr().out == ""
+    monkeypatch.setenv("FORGER_STEP_REPORT", "1")
+    loud(_rows(*TEXTS), _no_cache=True)
+    out = capsys.readouterr().out
+    assert "step loud" in out and "5 → 3 rows" in out
+
+
+def test_cached_step_reports_its_ops_as_cached(capsys, monkeypatch):
+    """A cache hit runs no ops but lists the ops of the run that cached it."""
+    monkeypatch.delenv("FORGER_STEP_REPORT")
+    calls = []
+
+    @op(name="alter.test_counted", category="alter")
+    def counted(rows):
+        calls.append(1)
+        return list(rows)
+
+    @step
+    def cached_step(rows):
+        return _length_filter(counted(rows))
+
+    cached_step(_rows(*TEXTS))
+    capsys.readouterr()
+    out_rows = cached_step(_rows(*TEXTS))
+    assert len(out_rows) == 3 and calls == [1]
+    rec = _tracking.step_records()["cached_step"]
+    assert rec.cache_hit
+    assert [(c.op_name, c.n_in, c.n_out, c.cache_hit) for c in rec.ops] == [
+        ("alter.test_counted", 5, 5, True),
+        ("filter.by_length", 5, 3, True),
+    ]
+    assert all(c.duration_s == 0.0 for c in rec.ops)
+    # The filter's scores are those of the run that cached the step.
+    assert rec.ops[1].scores is not None and len(rec.ops[1].scores.values) == 5
+    full = render_step(rec, full=True)
+    assert re.search(r"filter\.by_length\s+5\s+3\s+0\.60\s+-\s+cached", full)
+    assert "filter.by_length (cached run) · words · keeps 2 to 10k: 3 of 5" in full
+    assert "no score histogram" not in full
+
+
+def test_cached_filter_op_keeps_its_histogram():
+    """An op cache hit in a fresh step shows the scores of the run that cached it."""
+
+    @step
+    def first(rows):
+        return _length_filter(_upper(rows))
+
+    @step
+    def second(rows):
+        return _length_filter(_upper(rows))
+
+    first(_rows(*TEXTS))
+    second(_rows(*TEXTS))
+    before = _tracking.step_records()["first"].ops[1].scores
+    rec = _tracking.step_records()["second"]
+    assert [c.cache_hit for c in rec.ops] == [True, True]
+    assert rec.ops[1].scores == before
+    text = render_step(rec)
+    assert "filter.by_length (cached run) · words · keeps 2 to 10k: 3 of 5" in text
+    assert re.search(r"words\s+rows", text) and "no score histogram" not in text
+
+
+def test_partly_cached_chunks_pool_their_scores():
+    """Chunks of which some came from the op cache: one histogram, marked."""
+
+    @step
+    def head(rows):
+        return _length_filter(rows[:2])
+
+    @step
+    def chunks(rows):
+        return _length_filter(rows[:2]) + _length_filter(rows[2:])
+
+    head(_rows(*TEXTS))
+    chunks(_rows(*TEXTS))
+    text = render_step(_tracking.step_records()["chunks"])
+    assert "filter.by_length ×2 (1 cached) · words · keeps 2 to 10k: 3 of 5" in text
+    assert "not in the histogram" not in text
+
+
+def test_too_many_scores_are_not_stored(monkeypatch):
+    """Score lists past MAX_STORED_SCORES stay out of the cache; the report says so."""
+    monkeypatch.setattr(_tracking, "MAX_STORED_SCORES", 4)
+
+    @step
+    def big(rows):
+        return _length_filter(rows)
+
+    @step
+    def again(rows):
+        return _length_filter(rows)
+
+    big(_rows(*TEXTS))
+    assert big(_rows(*TEXTS)) and _tracking.step_records()["big"].cache_hit
+    again(_rows(*TEXTS))
+    for name in ("big", "again"):
+        rec = _tracking.step_records()[name]
+        assert rec.ops[0].cache_hit and rec.ops[0].scores is None
+        text = render_step(rec, full=True)
+        assert "no score histogram for a cached result" in text
+
+
+def test_op_time_and_step_time_use_one_clock(monkeypatch):
+    """A wall-clock jump (a laptop asleep) does not make an op outlast its step.
+
+    Ops timed themselves with time.time() and steps with perf_counter(), which
+    on macOS stops while the machine sleeps: a 2m 34s step listed a 3m 14s op.
+    """
+    import time
+
+    real_time = time.time
+    jump = [0.0]
+    monkeypatch.setattr(time, "time", lambda: real_time() + jump[0])
+
+    @op(name="alter.test_sleepy")
+    def sleepy(rows):
+        jump[0] += 120.0  # the wall clock moves on; perf_counter does not
+        return list(rows)
+
+    @step
+    def napping(rows):
+        return _length_filter(sleepy(rows))
+
+    napping(_rows(*TEXTS))
+    rec = _tracking.step_records()["napping"]
+    assert rec.duration_s < 60
+    assert sum(c.duration_s for c in rec.ops) <= rec.duration_s
+
+
+def test_cached_step_prints_one_line(capsys, monkeypatch):
+    """A cache hit prints one line; inspect_step prints the whole report."""
+    monkeypatch.delenv("FORGER_STEP_REPORT")
+
+    @step
+    def costly(rows):
+        return _length_filter(_costly(rows), min_yield=0.9)
+
+    costly(_rows(*TEXTS))
+    capsys.readouterr()
+    costly(_rows(*TEXTS))
+    out = capsys.readouterr().out.strip()
+    assert len(out.splitlines()) == 1
+    assert re.match(
+        r"step costly · 5 → 3 rows · cached · originally \d+\.\ds · \$0\.25 · "
+        r"⚠ 1 warning ─+$",
+        out,
+    )
+    assert "below min_yield" not in out and "sample rows" not in out
+    inspect_step("costly")
+    full = capsys.readouterr().out
+    assert "below min_yield 0.90" in full and "sample rows" in full
+    assert "cached (originally" in full
+
+
+def test_cached_step_replays_yield_warnings():
+    """Warnings of the run that cached a step come back on every cache hit."""
+
+    @step
+    def picky(rows):
+        return _length_filter(rows, min_yield=0.9)
+
+    for _ in range(2):
+        picky(_rows(*TEXTS))
+        rec = _tracking.step_records()["picky"]
+        assert rec.warnings == ["filter.by_length: yield 0.60 below min_yield 0.90"]
+    assert rec.cache_hit
+
+
+# --------------------------------------------------------------------------- #
+# @pipeline
+# --------------------------------------------------------------------------- #
+
+
+@step
+def _shout_step(rows):
+    return _length_filter(_upper(rows))
+
+
+@step
+def _dedupe_step(rows):
+    return filter.by_exact_match(rows, field="text")
+
+
+def test_pipeline_without_steps_raises():
+    """A pipeline that calls no step is an error, even with bare ops."""
+
+    @pipeline
+    def bare_only(rows):
+        return _length_filter(rows)
+
+    with pytest.raises(PipelineContractError, match="called no steps"):
+        bare_only(_rows(*TEXTS))
+
+
+def test_nested_pipeline_raises():
+    """Pipelines cannot nest."""
+
+    @pipeline
+    def inner(rows):
+        return _shout_step(rows)
+
+    @pipeline
+    def outer(rows):
+        return inner(rows)
+
+    with pytest.raises(PipelineContractError, match="inside pipeline outer"):
+        outer(_rows(*TEXTS))
+
+
+def test_pipeline_records_steps_and_warns(capsys, monkeypatch):
+    """A pipeline records each step; one step and missing filters are suggestions."""
+    monkeypatch.delenv("FORGER_STEP_REPORT")
+
+    @pipeline
+    def one_step(rows):
+        return _shout_step(rows)
+
+    one_step(_rows(*TEXTS))
+    rec = _tracking.last_pipeline()
+    assert rec is not None and [s.name for s in rec.steps] == ["_shout_step"]
+    assert rec.warnings == []
+    joined = " | ".join(rec.suggestions)
+    assert "only one step ran" in joined
+    assert "no quality filter ran" in joined
+    assert "no diversity filter ran" in joined
+    assert "no inspect op ran" in joined
+    out = capsys.readouterr().out
+    assert "pipeline one_step" in out and "1 step · 5 → 3 rows" in out
+    assert "INFO: no inspect op ran" in out
+    assert "WARNING" not in out
+
+
+def test_pipeline_summary_ends_with_data_problems(capsys, monkeypatch):
+    """INFO lines print first; warnings are the summary's last lines."""
+    monkeypatch.delenv("FORGER_STEP_REPORT")
+
+    @step
+    def strict_dedupe(rows):
+        return filter.by_exact_match(rows, field="text", min_yield=0.99)
+
+    @pipeline
+    def run(rows):
+        return strict_dedupe(_shout_step(rows))
+
+    run(_rows("a b", "a b", "c d e", "f g h i"))  # one duplicate: yield 0.75
+    out = capsys.readouterr().out
+    summary = out[out.index("pipeline run") :].rstrip().splitlines()
+    assert (
+        summary[-1]
+        .strip()
+        .startswith("WARNING: strict_dedupe: filter.by_exact_match: yield")
+    )
+    first_info = next(i for i, line in enumerate(summary) if "INFO:" in line)
+    assert first_info < len(summary) - 2
+
+
+def test_pipeline_bare_op_warns():
+    """An op called in the pipeline outside a step is listed with a suggestion."""
+
+    @pipeline
+    def with_bare(rows):
+        rows = _shout_step(rows)
+        rows = filter.by_exact_match(rows, field="text")
+        return _dedupe_step(rows)
+
+    with_bare(_rows(*TEXTS))
+    rec = _tracking.last_pipeline()
+    assert rec is not None
+    names = [s.name for s in rec.steps]
+    assert names == ["_shout_step", "(bare) filter.by_exact_match", "_dedupe_step"]
+    assert rec.steps[1].suggestions == ["called outside a @step"]
+    assert "1 op call outside a @step: filter.by_exact_match" in rec.suggestions
+    assert not any("only one step" in w for w in rec.suggestions)
+
+
+def test_dynamic_step_in_pipeline_counts_as_step(monkeypatch):
+    """alter.dynamic_step called directly in a pipeline is a real step."""
+    monkeypatch.setattr(dynamic, "_generate", lambda *args: "code")
+    monkeypatch.setattr(dynamic, "_execute", lambda code, item, timeout: [item["text"]])
+
+    @pipeline
+    def with_dynamic(rows):
+        outputs = alter.dynamic_step(rows, "goal", SimpleNamespace(_model_id="test"))
+        return _shout_step([{"text": o[0]} for o in outputs])
+
+    with_dynamic(_rows(*TEXTS))
+    rec = _tracking.last_pipeline()
+    assert rec is not None
+    assert [(s.name, s.kind) for s in rec.steps] == [
+        ("dynamic_step", "dynamic_step"),
+        ("_shout_step", "step"),
+    ]
+    assert rec.steps[0].ops[0].op_name == "alter.dynamic_step"
+    assert not any("outside a @step" in w for w in rec.warnings)
+    assert not any("only one step" in w for w in rec.warnings)
+
+
+def test_pipeline_with_quality_diversity_and_inspect_has_no_such_warnings():
+    """Quality, diversity, and inspect ops anywhere silence those warnings."""
+
+    @step
+    def judge(rows):
+        return filter.by_llm_score(rows, model=_StableJudge(), output_field="text")
+
+    @step
+    def report_and_dedupe(rows):
+        _report(rows)
+        return filter.by_exact_match(rows, field="text")
+
+    @pipeline
+    def complete(rows):
+        return report_and_dedupe(judge(rows))
+
+    complete(_rows("abcdef", "abc", "ab"))
+    rec = _tracking.last_pipeline()
+    assert rec is not None and rec.warnings == []
+
+
+def test_pipeline_strict_raises():
+    """strict=True turns pipeline warnings into a PipelineContractError."""
+
+    @pipeline(strict=True)
+    def strict_one(rows):
+        return _shout_step(rows)
+
+    with pytest.raises(PipelineContractError, match="only one step ran"):
+        strict_one(_rows(*TEXTS))
+
+
+def test_pipeline_of_cached_steps_keeps_its_warnings():
+    """Cached steps replay their op names, so a strict pipeline fails every run."""
+
+    @pipeline(strict=True)
+    def twice(rows):
+        return _dedupe_step(_shout_step(rows))
+
+    for _ in range(2):
+        with pytest.raises(PipelineContractError, match="no inspect op ran"):
+            twice(_rows(*TEXTS))
+    rec = _tracking.last_pipeline()
+    assert rec is not None and all(s.cache_hit for s in rec.steps)
+
+
+def test_user_op_named_like_a_filter_is_not_a_filter():
+    """A user op's name prefix gives it no category, so a no-op pipeline still warns."""
+
+    @op(name="filter.keep_all")
+    def keep_all(rows):
+        return rows
+
+    @op(name="inspect.nothing")
+    def look(rows):
+        return ["ok"] * len(rows)
+
+    @step
+    def make_rows(seeds):
+        return keep_all([{"id": s, "text": f"row {s}"} for s in seeds])
+
+    @step
+    def finish(rows):
+        look(rows)
+        return filter.by_exact_match(rows, field="id", max_count=1)
+
+    @pipeline(strict=True)
+    def gamed(seeds):
+        return finish(make_rows(seeds))
+
+    with pytest.raises(PipelineContractError) as err:
+        gamed(list(range(5)))
+    assert "no quality filter ran" in str(err.value)
+    assert "no inspect op ran" in str(err.value)
+    assert "no diversity filter ran" not in str(err.value)
+    rec = _tracking.last_pipeline()
+    assert rec is not None
+    assert [c.category for s in rec.steps for c in s.ops] == [
+        "other",
+        "other",
+        "filter",
+    ]
+    assert rec.no_filter_steps == ["make_rows"]
+
+
+def test_library_helper_ops_have_the_right_categories():
+    """The pass@k sampler is no filter; by_predicate is a non-quality filter."""
+    import pyforger.filter.model_difficulty  # noqa: F401  registers its ops
+
+    assert _tracking.category_of("filter.model_difficulty.predictions") == "other"
+    assert _tracking.category_of("filter.by_predicate") == "filter"
+    assert "filter.by_predicate" in _NON_QUALITY_FILTERS
+
+
+def test_user_op_with_declared_category_counts():
+    """@op(category=...) is a deliberate declaration, so it satisfies the checks."""
+
+    @op(name="my_judge", category="filter")
+    def my_judge(rows):
+        return rows[:-1]
+
+    @op(category="inspect")
+    def my_report(rows):
+        return len(rows)
+
+    @step
+    def judge(rows):
+        return my_judge(rows)
+
+    @step
+    def report_and_dedupe(rows):
+        my_report(rows)
+        return filter.by_exact_match(rows, field="text")
+
+    @pipeline
+    def declared(rows):
+        return report_and_dedupe(judge(rows))
+
+    declared(_rows("a", "b", "c"))
+    rec = _tracking.last_pipeline()
+    assert rec is not None and rec.warnings == []
+
+
+def test_op_categories_come_from_the_registry():
+    """Library ops get their package's category; unknown categories are rejected."""
+    assert _tracking.category_of("filter.by_length") == "filter"
+    assert _tracking.category_of("acquire.retrieve") == "acquire"
+    assert _tracking.category_of("alter.generate_from_context") == "alter"
+    assert _tracking.category_of("inspect.topic_based_clustering") == "inspect"
+    assert _tracking.category_of("never.registered") == "other"
+    with pytest.raises(ValueError, match="unknown op category 'filters'"):
+        op(lambda rows: rows, name="typo", category="filters")
+
+
+def test_step_cached_without_op_record_skips_which_ops_ran_checks(tmp_path):
+    """A step cached before op records were stored skips the which-ops-ran checks."""
+
+    @pipeline
+    def twice(rows):
+        return _dedupe_step(_shout_step(rows))
+
+    twice(_rows(*TEXTS))
+    first = _tracking.last_pipeline()
+    assert first is not None and any(
+        "no inspect op ran" in s for s in first.suggestions
+    )
+    for meta in tmp_path.rglob("*.step.json"):
+        meta.unlink()
+    twice(_rows(*TEXTS))
+    second = _tracking.last_pipeline()
+    assert second is not None and second.steps[0].cache_hit
+    assert second.steps[0].ops == []
+    assert second.warnings == [] and second.suggestions == []
+
+
+def test_pyforger_exports_step_and_pipeline():
+    """The package exports the decorators; the pipeline module still works."""
+    from pyforger.pipeline import optimize, run
+
+    assert pyforger.step is step and pyforger.pipeline is pipeline
+    assert pyforger.run is run and pyforger.optimize is optimize
+
+
+# --------------------------------------------------------------------------- #
+# inspect_step and rendering
+# --------------------------------------------------------------------------- #
+
+
+def test_inspect_step_returns_latest_record_and_prints_full(capsys):
+    """inspect_step prints the full report of a step's latest run."""
+
+    @step
+    def first(rows):
+        return _length_filter(rows)
+
+    first(_rows(*TEXTS))
+    first(_rows("alpha beta", "gamma"))
+    rec = inspect_step("first")
+    assert isinstance(rec, StepRecord) and rec.n_in == 2
+    assert inspect_step() is rec
+    out = capsys.readouterr().out
+    assert "step first" in out and "2 → 1 rows" in out
+    assert re.search(r"\n\s+text\s+alpha beta\n", out)
+
+
+def test_inspect_step_unknown_name_lists_known_steps():
+    """An unknown name raises KeyError naming the steps that ran."""
+
+    @step
+    def known(rows):
+        return _length_filter(rows)
+
+    with pytest.raises(KeyError, match="no @step has run"):
+        inspect_step("known")
+    known(_rows(*TEXTS))
+    with pytest.raises(KeyError, match="known steps: known"):
+        inspect_step("missing")
+
+
+class Blob:
+    """A row value that is not JSON."""
+
+    def __repr__(self) -> str:
+        """Show as Blob()."""
+        return "Blob()"
+
+
+def test_inspect_step_reads_a_run_from_another_process(capsys):
+    """A step saved under FORGER_CACHE is found once this process forgets it."""
+
+    @step
+    def elsewhere(rows):
+        return _length_filter(rows)
+
+    elsewhere(_rows("alpha beta", "gamma") + [{"text": "one two", "obj": Blob()}])
+    ran = _tracking.step_records()["elsewhere"]
+    _tracking.clear_step_records()  # as in a new process
+    capsys.readouterr()
+    rec = inspect_step("elsewhere")
+    assert (rec.n_in, rec.n_out, rec.ops[0].op_name) == (
+        ran.n_in,
+        ran.n_out,
+        ran.ops[0].op_name,
+    )
+    assert inspect_step().name == "elsewhere"
+    assert "step elsewhere" in capsys.readouterr().out
+    with pytest.raises(KeyError, match="known steps: elsewhere"):
+        inspect_step("missing")
+
+
+def test_inspect_step_rows_loads_the_whole_output_after_a_later_step_fails():
+    """rows=True returns the cached output of a step whose pipeline died later."""
+    long_text = "word " * 5000  # 25K chars: stored as a blob
+
+    @step
+    def keep(rows):
+        return _length_filter(rows)
+
+    @step
+    def explode(rows):
+        _upper(rows)
+        raise RuntimeError("quota exhausted")
+
+    @pipeline
+    def run(rows):
+        return explode(keep(rows))
+
+    with pytest.raises(RuntimeError, match="quota exhausted"):
+        run(_rows(*TEXTS) + [{"text": long_text}])
+    expected = _rows("one two", "three four five", "seven eight", long_text)
+    assert inspect_step("keep", rows=True) == expected
+    _tracking.clear_step_records()  # as in a new process
+    assert inspect_step("keep", rows=True) == expected
+    assert inspect_step(rows=True) == expected  # the latest step that finished
+
+
+def test_inspect_step_rows_after_a_cache_hit_and_when_not_cached(tmp_path):
+    """A cached rerun points at the same entry; an uncached run cannot be loaded."""
+
+    @step
+    def first(rows):
+        return _upper(rows)
+
+    first(_rows("alpha beta"))
+    first(_rows("alpha beta"))
+    assert _tracking.step_records()["first"].cache_hit
+    assert inspect_step("first", rows=True) == [{"text": "ALPHA BETA"}]
+
+    @step(cache=False)
+    def fresh(rows):
+        return _upper(rows)
+
+    fresh(_rows("gamma delta"))
+    with pytest.raises(FileNotFoundError, match="was not cached"):
+        inspect_step("fresh", rows=True)
+
+    (tmp_path / _tracking.step_records()["first"].cache_file).unlink()
+    with pytest.raises(FileNotFoundError, match="FORGER_CACHE cleared"):
+        inspect_step("first", rows=True)
+
+
+def test_inspect_step_rows_of_a_run_kept_out_of_the_cache(tmp_path, caplog):
+    """A run kept out of the cache saves its rows for inspect_step, never to replay."""
+    runs: list[int] = []
+    flaky = [True]
+
+    @op(name="alter.test_maybe_skip", category="alter")
+    def maybe_skip(rows):
+        runs.append(len(rows))
+        if flaky[0]:
+            _tracking.add_op_warning("2 of 2 requests timed out", "provider_failure")
+            skip_cache_write()
+        return [{**r, "text": r["text"].upper()} for r in rows]
+
+    @step
+    def partial(rows):
+        return maybe_skip(rows)
+
+    expected = [{"text": "ALPHA"}, {"text": "BETA"}]
+    assert partial(_rows("alpha", "beta")) == expected
+    rec = _tracking.step_records()["partial"]
+    assert not rec.cache_hit
+    assert rec.cache_file.endswith(".uncached.pkl")
+    _tracking.clear_step_records()  # as in a new process
+    with caplog.at_level("WARNING", logger="pyforger.inspect.report"):
+        assert inspect_step("partial", rows=True) == expected
+    assert "step 'partial' was not cached, so its rows may be partial" in caplog.text
+    assert "2 of 2 requests timed out" in caplog.text
+
+    # The saved rows are never replayed: the step runs again, then is cached.
+    flaky[0] = False
+    assert partial(_rows("alpha", "beta")) == expected
+    assert runs == [2, 2]
+    cache_file = _tracking.step_records()["partial"].cache_file
+    assert not cache_file.endswith(".uncached.pkl")
+    assert not list(tmp_path.rglob("*.uncached.pkl"))  # the stale copy is gone
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="pyforger.inspect.report"):
+        assert inspect_step("partial", rows=True) == expected
+    assert "was not cached" not in caplog.text
+    partial(_rows("alpha", "beta"))
+    assert runs == [2, 2]  # a cache hit
+
+
+def _bins(scores):
+    """(label, count, cut, kept, share, current) per histogram bin."""
+    return [
+        (b.label, b.count, b.cut, b.kept, b.share, b.current)
+        for b in _histogram(scores).bins
+    ]
+
+
+def _flat(text):
+    """Report text with box characters removed and whitespace collapsed."""
+    return " ".join(re.sub(r"[│║╭╮╰╯╔╗╚╝─═]", " ", text).split())
+
+
+def test_render_int_scores_histogram():
+    """Int scores get one bin per value; each bin says what a cut there keeps."""
+    scores = ScoreRecord(
+        label="score", values=[1, 2, 3, 3, 5, None], keep="ge", threshold=3
+    )
+    # Shares are of all rows; the unparsed row is never kept.
+    assert _bins(scores) == [
+        ("1", 1, "≥ 1", 5, pytest.approx(5 / 6), False),
+        ("2", 1, "≥ 2", 4, pytest.approx(4 / 6), False),
+        ("3", 2, "≥ 3", 3, pytest.approx(3 / 6), True),
+        ("5", 1, "≥ 5", 1, pytest.approx(1 / 6), False),
+    ]
+    hist = _histogram(scores)
+    assert hist.unparsed == 1
+    assert hist.title == "score · keeps ≥ 3: 3 of 6 (0.50)"
+    text = render_scores(scores, "filter.by_llm_score")
+    assert "filter.by_llm_score · score · keeps ≥ 3: 3 of 6 (0.50)" in text
+    assert re.search(r"▶\s+3\s+2\s+█+\s+≥ 3\s+3\s+0\.50\s+◀ current threshold", text)
+    assert re.search(r"unparsed\s+1\s+never kept", text)
+
+
+def test_render_judge_fractions_get_one_bin_each():
+    """Three judges give scores 0, 1/3, 2/3, 1: one bin each, the cut marked."""
+    values = [0.0] * 4 + [1 / 3] * 3 + [2 / 3] * 2 + [1.0] * 1
+    scores = ScoreRecord(label="approval >=3", values=values, keep="ge", threshold=1.0)
+    bins = _bins(scores)
+    assert [(b[0], b[1]) for b in bins] == [("0", 4), ("1/3", 3), ("2/3", 2), ("1", 1)]
+    assert [b[5] for b in bins] == [False, False, False, True]
+    assert _histogram(scores).label == "judges ≥3"
+
+
+def test_render_float_scores_histogram():
+    """Many float scores in [0, 1] get ten bins of 0.1; < cuts sit at upper edges."""
+    values = [round(i / 20 + 0.01, 2) for i in range(20)]  # two per bin
+    bins = _bins(ScoreRecord(label="rouge_l", values=values, keep="lt", threshold=0.7))
+    assert [b[0] for b in bins] == [f"{i / 10:g}–{(i + 1) / 10:g}" for i in range(10)]
+    assert [b[1] for b in bins] == [2] * 10
+    assert bins[6] == ("0.6–0.7", 2, "< 0.7", 14, pytest.approx(0.7), True)
+    assert bins[4][2:5] == ("< 0.5", 10, pytest.approx(0.5))
+
+
+def test_render_threshold_inside_a_bin_marks_that_bin():
+    """A threshold in the middle of a bin marks it and shows the real cut."""
+    values = [round(i / 20 + 0.01, 2) for i in range(20)]
+    bins = _bins(ScoreRecord(label="rouge_l", values=values, keep="lt", threshold=0.65))
+    marked = [b for b in bins if b[5]]
+    # 0.01, 0.06, ..., 0.61 are below 0.65: 13 of 20 rows.
+    assert marked == [("0.6–0.7", 2, "< 0.65", 13, pytest.approx(0.65), True)]
+
+
+def test_render_float_scores_outside_unit_range_and_between():
+    """Many distinct ints get round-width bins; between marks bins kept or not."""
+    values = list(range(0, 200, 10))
+    scores = ScoreRecord(
+        label="words", values=values, keep="between", lower=20, upper=100
+    )
+    bins = _histogram(scores).bins
+    assert [b.label for b in bins] == [f"{i}–{i + 19}" for i in range(0, 200, 20)]
+    assert [b.count for b in bins] == [2] * 10
+    assert [b.status for b in bins][:6] == ["no", "yes", "yes", "yes", "yes", "partly"]
+    assert _histogram(scores).title == "words · keeps 20 to 100: 9 of 20 (0.45)"
+
+
+def test_render_outlier_gets_an_overflow_row():
+    """One huge value does not stretch the bins; it gets a ≥ row of its own."""
+    values = list(range(20, 420)) + [21_000]
+    bins = _histogram(
+        ScoreRecord(label="words", values=values, keep="between", lower=50, upper=300)
+    ).bins
+    assert bins[-1].label.startswith("≥ ") and bins[-1].count == 1
+    assert sum(b.count for b in bins) == len(values)
+    assert len(bins) <= 12
+
+
+def test_render_many_int_scores_uses_round_bins():
+    """Ints with more than 12 values get round bins, and every value is counted."""
+    values = list(range(3, 17))  # 14 distinct values
+    bins = _bins(
+        ScoreRecord(label="occurrence", values=values, keep="le", threshold=11)
+    )
+    assert [b[0] for b in bins] == ["2–3", "4–5", "6–7", "8–9", "10–11", "12–13"] + [
+        "14–15",
+        "16–17",
+    ]
+    assert [b[1] for b in bins] == [1, 2, 2, 2, 2, 2, 2, 1]
+    # "<= 11" keeps the 10–11 bin and everything below it: 9 of 14 rows.
+    assert bins[4] == ("10–11", 2, "≤ 11", 9, pytest.approx(9 / 14), True)
+
+
+def test_render_empty_bins_are_merged():
+    """Runs of empty bins fold into one row; an empty marked bin stays."""
+    values = [0.01 + i * 0.001 for i in range(10)] + [
+        0.95 + i * 0.001 for i in range(5)
+    ]
+    bins = _histogram(
+        ScoreRecord(label="overlap", values=values, keep="lt", threshold=0.5)
+    ).bins
+    assert [(b.label, b.count, b.empty_run, b.current) for b in bins] == [
+        ("0–0.1", 10, 0, False),
+        ("0.1–0.4", 0, 3, False),
+        ("0.4–0.5", 0, 0, True),
+        ("0.5–0.9", 0, 4, False),
+        ("0.9–1", 5, 0, False),
+    ]
+
+
+def test_render_pooled_scores_shows_only_the_current_threshold():
+    """Pool-based scores (by_rouge_l) do not claim what other thresholds keep."""
+    scores = ScoreRecord(
+        label="rouge_l",
+        values=[0.0, 0.55, 0.65, 0.9],
+        keep="lt",
+        threshold=0.7,
+        pooled=True,
+    )
+    assert all(b[2] == "" and b[3] is None for b in _bins(scores))
+    hist = _histogram(scores)
+    assert hist.mode == "pooled"
+    assert hist.title == "rouge_l · keeps < 0.7: 3 of 4 (0.75)"
+    text = render_scores(scores, "filter.by_rouge_l")
+    assert "if cut at" not in text
+    assert "◀ current threshold" in text
+    assert "Rerun to compare" in _flat(text)
+
+
+def test_render_bool_scores():
+    """Boolean scores show kept / dropped counts and a bar on one line."""
+    text = render_scores(
+        ScoreRecord(label="kept", values=[True, False, True], keep="true"),
+        "filter.by_syntax",
+    )
+    bar = "█" * 13 + "░" * 7
+    assert text == f"filter.by_syntax · kept 2 of 3 (0.67) · dropped 1  {bar}"
+
+
+def test_render_bool_scores_name_the_check_and_never_hide_a_side():
+    """A named check leads the line; one dropped row of many still gets a ░."""
+    text = render_scores(
+        ScoreRecord(label="has papers", values=[True] * 999 + [False], keep="true"),
+        "filter.by_predicate",
+    )
+    assert text.startswith("filter.by_predicate · has papers · kept 999 of 1,000")
+    assert text.endswith("█" * 19 + "░")
+
+
+def test_sample_values_keep_line_breaks():
+    """Compact samples mark line breaks; the full view keeps them."""
+    rec = StepRecord(
+        name="code",
+        n_in=1,
+        n_out=1,
+        sample=[{"solution": "def f(n):\n    return n"}],
+    )
+    assert "def f(n): ⏎ return n" in render_step(rec)
+    assert re.search(r"def f\(n\):\n\s+    return n", render_step(rec, full=True))
+
+
+def test_report_fits_a_narrow_terminal():
+    """At 80 columns only the op name is cut; numbers and checks stay whole."""
+    call = _tracking.OpCall(
+        op_name="filter.a_really_long_custom_operation_name",
+        category="filter",
+        n_in=12345,
+        n_out=6000,
+        yield_ratio=0.49,
+        min_yield=0.8,
+        cache_hit=False,
+        duration_s=12.0,
+        prompt_tokens=1234567,
+        completion_tokens=7654321,
+        cost_usd=12.34,
+    )
+    rec = StepRecord(name="x", n_in=12345, n_out=6000, ops=[call, _renamed(call)])
+    console = Console(file=io.StringIO(), width=80, color_system=None)
+    console.print(step_renderable(rec, width=80))
+    text = console.file.getvalue()
+    assert all(len(line) <= 80 for line in text.splitlines())
+    assert "LOW · min 0.80" in text and "12,345" in text and "$12.34" in text
+
+
+def test_report_text_is_not_parsed_as_markup():
+    """Sample rows and docstrings print literally, brackets and all."""
+    rec = StepRecord(
+        name="markup",
+        doc="Doc with [bold]brackets[/bold].",
+        n_in=1,
+        n_out=1,
+        sample=[{"text": "[red]not red[/red] :smile:"}],
+    )
+    text = render_step(rec)
+    assert "[bold]brackets[/bold]" in text
+    assert "[red]not red[/red] :smile:" in text
+
+
+def test_render_step_lines_fit_and_cached_op_shows_its_scores():
+    """Report lines stay within 120 columns; cached ops print (cached)."""
+    scores = ScoreRecord(label="score", values=[1, 2, 3], keep="ge", threshold=2)
+    call = _tracking.OpCall(
+        op_name="filter.by_llm_score",
+        category="filter",
+        n_in=1234,
+        n_out=617,
+        yield_ratio=0.5,
+        min_yield=0.3,
+        cache_hit=True,
+        duration_s=12.0,
+        prompt_tokens=4120,
+        completion_tokens=38900,
+        cost_usd=0.0412,
+        scores=scores,
+    )
+    rec = StepRecord(
+        name="long",
+        doc="Doc line.",
+        n_in=1234,
+        n_out=617,
+        ops=[call],
+        sample=[{"text": "x" * 500, "other": "y" * 500}],
+        prompt_tokens=4120,
+        completion_tokens=38900,
+        cost_usd=0.0412,
+    )
+    for full in (False, True):
+        text = render_step(rec, full=full)
+        assert all(len(line) <= 120 for line in text.splitlines())
+        assert re.search(r"4,120\s+38\.9K", text) and "$0.041" in text
+        assert re.search(r"cached\s+ok · min 0\.30", text)
+        assert "filter.by_llm_score (cached run) · score · keeps ≥ 2" in text
+        assert "if cut at" in text and "no score histogram" not in text
+    # Cached before scores were stored with results: say so.
+    rec.ops = [call.model_copy(update={"scores": None})]
+    text = render_step(rec)
+    assert "no score histogram for a cached result" in text
+    assert "if cut at" not in text
+
+
+# --------------------------------------------------------------------------- #
+# Threads, dynamic_step, retrieval, usage, and per-filter scores
+# --------------------------------------------------------------------------- #
+
+
+def test_step_with_ops_in_worker_threads_warns_instead_of_failing():
+    """Ops run in a thread pool are not itemized, but the step is not an error."""
+
+    @step
+    def threaded(rows):
+        with ThreadPoolExecutor(2) as pool:
+            parts = list(pool.map(lambda r: _length_filter([r]), rows))
+        return [row for part in parts for row in part]
+
+    assert len(threaded(_rows(*TEXTS))) == 3
+    rec = _tracking.step_records()["threaded"]
+    assert rec.ops == []
+    assert rec.suggestions[0].startswith("its ops ran in worker threads")
+
+
+def test_step_ops_submitted_with_a_copied_context_are_itemized():
+    """Submitting with contextvars.copy_context().run attributes worker ops."""
+
+    @step
+    def threaded(rows):
+        with ThreadPoolExecutor(2) as pool:
+            futures = [
+                pool.submit(contextvars.copy_context().run, _length_filter, [row])
+                for row in rows
+            ]
+            return [row for future in futures for row in future.result()]
+
+    threaded(_rows(*TEXTS))
+    rec = _tracking.step_records()["threaded"]
+    assert [c.op_name for c in rec.ops] == ["filter.by_length"] * 5
+    assert rec.warnings == []
+
+
+def test_steps_called_from_worker_threads_join_the_pipeline():
+    """Steps run in a thread pool still count as the pipeline's steps."""
+
+    @pipeline
+    def parallel(rows):
+        with ThreadPoolExecutor(2) as pool:
+            parts = list(pool.map(_shout_step, [rows[:2], rows[2:]]))
+        return _dedupe_step([row for part in parts for row in part])
+
+    parallel(_rows(*TEXTS))
+    rec = _tracking.last_pipeline()
+    assert rec is not None
+    assert sorted(s.name for s in rec.steps) == [
+        "_dedupe_step",
+        "_shout_step",
+        "_shout_step",
+    ]
+
+
+def test_dynamic_step_in_pipeline_is_stored_and_printed(capsys, monkeypatch):
+    """dynamic_step called in a pipeline prints a report and works with inspect_step."""
+    monkeypatch.delenv("FORGER_STEP_REPORT")
+    monkeypatch.setattr(dynamic, "_generate", lambda *args: "code")
+    monkeypatch.setattr(dynamic, "_execute", lambda code, item, timeout: [item["text"]])
+
+    @pipeline
+    def with_dynamic(rows):
+        outputs = alter.dynamic_step(rows, "goal", SimpleNamespace(_model_id="test"))
+        return _shout_step([{"text": o[0]} for o in outputs])
+
+    with_dynamic(_rows(*TEXTS))
+    out = capsys.readouterr().out
+    assert "step dynamic_step" in out and "5 → 5 rows" in out
+    assert out.index("step dynamic_step") < out.index("step _shout_step")
+    assert inspect_step("dynamic_step").kind == "dynamic_step"
+
+
+class _FakeStats:
+    """Stands in for an OpenHands ConversationStats."""
+
+    def get_combined_metrics(self):
+        usage = SimpleNamespace(prompt_tokens=30, completion_tokens=7)
+        return SimpleNamespace(accumulated_cost=0.5, accumulated_token_usage=usage)
+
+
+class _FakeConversation:
+    """Stands in for an OpenHands Conversation after it ran."""
+
+    conversation_stats = _FakeStats()
+
+
+@op(name="alter.test_agent", category="alter")
+def _agent(rows):
+    dynamic._record_agent_usage(_FakeConversation())
+    dynamic._record_agent_usage(SimpleNamespace())  # no stats: ignored
+    return list(rows)
+
+
+def test_dynamic_step_agent_usage_is_counted():
+    """The OpenHands conversation's tokens and cost reach the step totals."""
+    agent = _agent
+
+    @step
+    def with_agent(rows):
+        return _length_filter(agent(rows))
+
+    with_agent(_rows(*TEXTS))
+    rec = _tracking.step_records()["with_agent"]
+    assert (rec.ops[0].prompt_tokens, rec.ops[0].completion_tokens) == (30, 7)
+    assert rec.cost_usd == pytest.approx(0.5)
+
+
+def test_model_generate_batch_usage_reaches_the_step_report():
+    """Model.generate_batch adds each response's tokens and cost to the op."""
+    message = SimpleNamespace(content="hello there", reasoning_content=None)
+    response = SimpleNamespace(
+        choices=[SimpleNamespace(message=message)],
+        usage=SimpleNamespace(
+            prompt_tokens=10, completion_tokens=20, completion_tokens_details=None
+        ),
+        _hidden_params={"response_cost": 0.001},
+    )
+    model = Model("openai/test-model")
+
+    @step
+    def write(rows):
+        return _length_filter(alter.generate_from_context(rows, "Say {text}", model))
+
+    with patch("pyforger.acquire.model.litellm") as mock_litellm:
+        mock_litellm.completion.return_value = response
+        write(_rows("one two"))
+    rec = _tracking.step_records()["write"]
+    generate = rec.ops[0]
+    assert generate.op_name == "alter.generate_from_context"
+    assert (generate.prompt_tokens, generate.completion_tokens) == (10, 20)
+    assert generate.cost_usd == pytest.approx(0.001)
+    assert (rec.prompt_tokens, rec.completion_tokens) == (10, 20)
+
+
+def test_retrieval_step_records_the_retrieve_call():
+    """acquire.retrieve is listed in the step report."""
+
+    class _Source(acquire.RetrievalSource):
+        def cache_key(self):
+            return "test-source"
+
+        def fetch(self, mode, *, query=None, n=10, seed=None, **kwargs):
+            return [{"text": f"{query} result {i}"} for i in range(n)]
+
+    @step
+    def find(queries):
+        return _length_filter(acquire.retrieve(_Source(), queries=queries, n=2))
+
+    assert len(find(["a", "b"])) == 4
+    rec = _tracking.step_records()["find"]
+    assert [(c.op_name, c.n_in, c.n_out) for c in rec.ops] == [
+        ("acquire.retrieve", None, 4),
+        ("filter.by_length", 4, 4),
+    ]
+
+
+def test_row_model_hints_defined_in_a_function_resolve():
+    """A row model defined in the enclosing function still validates rows."""
+
+    class Local(BaseModel):
+        text: str
+
+    @step
+    def local_typed(rows: list[Local]) -> list[Local]:
+        return _length_filter(rows)
+
+    with pytest.raises(StepContractError, match="input row 0 does not match Local"):
+        local_typed([{"nope": 1}])
+    local_typed(_rows(*TEXTS))
+    assert _tracking.step_records()["local_typed"].input_type == "list[Local]"
+
+
+def test_unresolvable_row_model_hints_warn():
+    """Hints that cannot be resolved are a suggestion, not a silent skip."""
+
+    @step
+    def unknown(rows: list[Missing]) -> list[Missing]:  # type: ignore[name-defined]  # noqa: F821, E501
+        return _length_filter(rows)
+
+    unknown(_rows(*TEXTS))
+    warning = _tracking.step_records()["unknown"].suggestions[0]
+    assert warning.startswith("type hints could not be resolved (NameError")
+    assert warning.endswith("schema checks skipped")
+
+
+def test_long_names_and_totals_fit_in_120_columns():
+    """Headers, op tables, and the pipeline summary stay within 120 columns."""
+    call = _tracking.OpCall(
+        op_name="filter.a_really_long_custom_operation_name_for_testing_widths",
+        category="filter",
+        n_in=12345,
+        n_out=6000,
+        yield_ratio=0.49,
+        min_yield=0.8,
+        cache_hit=False,
+        duration_s=12.0,
+        prompt_tokens=1234567,
+        completion_tokens=7654321,
+        cost_usd=12.34,
+    )
+    warnings = ["filter.by_llm_score: yield 0.43 below min_yield 0.50", "ends w/o"]
+    rec = StepRecord(
+        name="generate_candidate_solutions_for_every_competition_problem_with_traces",
+        n_in=12345,
+        n_out=6000,
+        duration_s=12345.6,
+        ops=[call],
+        warnings=warnings,
+        prompt_tokens=1234567,
+        completion_tokens=7654321,
+        cost_usd=12.34,
+    )
+    step_text = render_step(rec)
+    assert all(len(line) <= 120 for line in step_text.splitlines())
+    assert "1,234,567 in / 7,654,321 out tokens · $12.34" in step_text
+    assert "LOW · min 0.80" in step_text
+    assert "WARNING: filter.by_llm_score: yield 0.43 below min_yield 0.50" in step_text
+    pipe = PipelineRecord(name="p" * 40, steps=[rec], duration_s=1.0, cost_usd=12.34)
+    pipe_text = render_pipeline(pipe)
+    assert all(len(line) <= 120 for line in pipe_text.splitlines())
+    flat = _flat(pipe_text)
+    name = rec.name
+    assert (
+        f"WARNING: {name}: filter.by_llm_score: yield 0.43 below min_yield 0.50" in flat
+    )
+    assert f"WARNING: {name}: ends w/o" in flat
+
+
+_FILTER_SCORE_CASES = [
+    (
+        lambda rows: filter.by_rouge_l(rows, field="text", threshold=0.7),
+        [{"text": "a b c"}, {"text": "a b c"}, {"text": "x y z"}],
+        ("rouge_l", "lt", 0.7, [0.0, 1.0, 0.0], True),
+    ),
+    (
+        lambda rows: filter.by_n_gram_overlap(rows, field="text", threshold=0.7),
+        [{"text": "a b c"}, {"text": ""}, {"text": "a b c"}, {"text": "d e f"}],
+        ("overlap", "lt", 0.7, [0.0, None, 1.0, 0.0], True),
+    ),
+    (
+        lambda rows: filter.by_exact_match(rows, field="text", max_count=2),
+        [{"text": "a"}, {"text": "a"}, {"text": "b"}, {"text": "a"}],
+        ("occurrence", "le", 2, [1, 2, 1, 3], False),
+    ),
+    (
+        lambda rows: filter.by_rouge_l_agreement(
+            rows, field_a="a", field_b="b", threshold=0.5
+        ),
+        [{"a": "x y", "b": "x y"}, {"a": "x y", "b": "p q"}],
+        ("rouge_l", "ge", 0.5, [1.0, 0.0], False),
+    ),
+    (
+        lambda rows: filter.by_rouge_l_agreement(
+            rows, field_a="a", field_b="b", threshold=0.5, disagree=True
+        ),
+        [{"a": "x y", "b": "x y"}, {"a": "x y", "b": "p q"}],
+        ("rouge_l", "lt", 0.5, [1.0, 0.0], False),
+    ),
+    (
+        lambda rows: filter.by_exact_agreement(rows, field_a="a", field_b="b"),
+        [{"a": 1, "b": 1}, {"a": 1, "b": 2}],
+        ("kept", "true", None, [True, False], False),
+    ),
+    (
+        lambda rows: filter.by_group_agreement(
+            rows, group_by_input_field="q", match_output_field="a"
+        ),
+        [
+            {"q": 1, "a": "x"},
+            {"q": 1, "a": "x"},
+            {"q": 2, "a": "y"},
+            {"q": 2, "a": "z"},
+        ],
+        ("kept", "true", None, [True, True, False, False], False),
+    ),
+    (
+        lambda rows: filter.by_invalid_response(
+            rows, instruction_field="i", response_field="r"
+        ),
+        [{"i": "what is it", "r": "a different answer"}, {"i": "q", "r": " "}],
+        ("kept", "true", None, [True, False], False),
+    ),
+    (
+        lambda rows: filter.by_keyword_blocklist(
+            rows, response_field="r", blocklist=["bad"]
+        ),
+        [{"r": "good"}, {"r": "bad thing"}],
+        ("kept", "true", None, [True, False], False),
+    ),
+    (
+        lambda rows: filter.by_syntax(rows, lang="json", field="j"),
+        [{"j": "{}"}, {"j": "{"}],
+        ("kept", "true", None, [True, False], False),
+    ),
+]
+
+
+@pytest.mark.parametrize("run, rows, expected", _FILTER_SCORE_CASES)
+def test_filters_record_per_row_scores(run, rows, expected):
+    """Each filter records one score per row and the rule it kept rows by."""
+
+    @step(name="scored")
+    def scored(items):
+        return run(items)
+
+    kept = scored(rows)
+    call = _tracking.step_records()["scored"].ops[0]
+    assert call.scores is not None
+    label, keep, threshold, values, pooled = expected
+    got = call.scores
+    assert (got.label, got.keep, got.threshold, got.pooled) == (
+        label,
+        keep,
+        threshold,
+        pooled,
+    )
+    assert got.values == [
+        pytest.approx(v) if isinstance(v, float) else v for v in values
+    ]
+    if keep == "true":
+        assert sum(got.values) == len(kept)
+
+
+def test_by_rouge_l_keeps_the_first_item_at_threshold_zero():
+    """With threshold <= 0 the first item is still kept, as before."""
+    out = filter.by_rouge_l(_rows("a b", "c d", "a b"), field="text", threshold=0.0)
+    assert out == [{"text": "a b"}]
+
+
+def test_token_units_are_attributed_and_shown():
+    """Token units recorded by a model land on the op, the step, and the reports."""
+
+    @op(name="alter.fake_generate", category="alter")
+    def fake_generate(rows):
+        _tracking.add_usage(100, 50, 0.0, 250.0)
+        return rows
+
+    @step
+    def gen(rows):
+        return _length_filter(fake_generate(rows))
+
+    @pipeline
+    def main():
+        return gen([{"text": "one two three"}])
+
+    main()
+    rec = _tracking.step_records()["gen"]
+    assert rec.ops[0].token_units == 250.0
+    assert rec.token_units == 250.0
+    assert _tracking.last_pipeline().token_units == 250.0
+    text = render_step(rec)
+    assert "250 units" in text
+    assert re.search(r"\n\s+op\s+in\s+out.*units", text)
+    assert "units" in render_pipeline(_tracking.last_pipeline())
+
+
+def test_units_column_hidden_without_units():
+    """Steps whose models report no token units have no units column."""
+
+    @step
+    def plain(rows):
+        return _length_filter(rows)
+
+    plain([{"text": "one two three"}])
+    assert "units" not in render_step(_tracking.step_records()["plain"])
+
+
+def _floats_0_to_1():
+    """200 scores in [0, 1], ten in each 0.05 slice, none on a 0.1 edge."""
+    return [round(i / 200 + 0.0025, 4) for i in range(200)]
+
+
+@pytest.mark.parametrize(
+    ("keep", "threshold", "marked_label", "kept"),
+    [
+        ("ge", 0.5, "0.5–0.6", 100),
+        ("le", 0.5, "0.4–0.5", 100),
+        ("lt", 0.5, "0.4–0.5", 100),
+        ("ge", 0.55, "0.5–0.6", 90),
+    ],
+)
+def test_marker_on_a_float_bin_edge(keep, threshold, marked_label, kept):
+    """A threshold on a bin edge marks the bin at the edge of the kept rows."""
+    bins = _bins(
+        ScoreRecord(label="s", values=_floats_0_to_1(), keep=keep, threshold=threshold)
+    )
+    marked = [b for b in bins if b[5]]
+    assert [(b[0], b[3]) for b in marked] == [(marked_label, kept)]
+    # No other row repeats the current cut.
+    cuts = [b[2] for b in bins]
+    assert len(cuts) == len(set(cuts))
+
+
+def test_number_labels_never_collide_or_dangle():
+    """0.999 is not '1.', tiny values are not '0.', and huge values stay short."""
+    assert fmt_num(0.999) == "1" and fmt_num(0.001) == "0.001"
+    assert fmt_num(1e12) == "1e+12" and fmt_num(7.65e6) == "7.65M"
+    assert fmt_num(float("nan")) == "nan"
+    values = [0.5, 0.95, 0.999, 0.999, 1.0]
+    bins = _bins(ScoreRecord(label="s", values=values, keep="ge", threshold=0.999))
+    labels = [b[0] for b in bins]
+    assert len(labels) == len(set(labels))
+    assert [b[2] for b in bins if b[5]] == ["≥ 0.999"]
+
+
+def _render_at(renderable, width):
+    console = Console(file=io.StringIO(), width=width, color_system=None)
+    console.print(renderable)
+    return console.file.getvalue()
+
+
+@pytest.mark.parametrize("width", [40, 60, 80, 100])
+def test_narrow_widths_keep_numbers_and_checks(width):
+    """Narrow consoles drop optional columns instead of cropping numbers."""
+    call = _tracking.OpCall(
+        op_name="filter.by_llm_score",
+        category="filter",
+        n_in=200,
+        n_out=90,
+        yield_ratio=0.45,
+        min_yield=0.6,
+        cache_hit=False,
+        duration_s=61.0,
+        prompt_tokens=412_500,
+        completion_tokens=1_200_000,
+        cost_usd=12.5,
+        token_units=24e6,
+        scores=ScoreRecord(
+            label="score", values=_floats_0_to_1(), keep="ge", threshold=0.55
+        ),
+    )
+    rec = StepRecord(name="judge", n_in=200, n_out=90, ops=[call, _renamed(call)])
+    pipe = PipelineRecord(name="p", steps=[rec, rec], warnings=["no inspect op ran"])
+    step_text = _render_at(step_renderable(rec, width=width), width)
+    pipe_text = _render_at(pipeline_renderable(pipe, width=width), width)
+    for text in (step_text, pipe_text):
+        assert all(len(line) <= width for line in text.splitlines()), text
+        # Row counts are never cut: a table row, or the one-line view.
+        assert re.search(r"\b200\s+90\s+0\.45\b|200 → 90 · yield\s+0\.45", text), text
+    assert "▶" in step_text and "LOW" in step_text
+
+
+def test_control_characters_never_reach_the_report():
+    """ANSI escapes and tabs in names, docs, warnings, and keys are neutralized."""
+    bad = "\x1b[31mRED\x1b[0m\ttab\x07"
+    call = _tracking.OpCall(
+        op_name=f"filter.{bad}",
+        category="filter",
+        n_in=2,
+        n_out=1,
+        yield_ratio=0.5,
+        cache_hit=False,
+        duration_s=0.1,
+        scores=ScoreRecord(label=bad, values=[1, 2], keep="ge", threshold=2),
+    )
+    rec = StepRecord(
+        name=bad,
+        doc=bad,
+        n_in=2,
+        n_out=1,
+        ops=[call, call],
+        warnings=[bad],
+        sample=[{bad: bad}],
+    )
+    pipe = PipelineRecord(name=bad, steps=[rec], warnings=[bad])
+    for text in (render_step(rec), render_step(rec, full=True), render_pipeline(pipe)):
+        assert "\x1b" not in text and "\x07" not in text and "\t" not in text
+        assert all(len(line) <= 120 for line in text.splitlines())
+
+
+def test_long_sample_keys_leave_room_for_values():
+    """A long field name is cut so its value still shows in the block view."""
+    row = {"k" * 200: "visible value", "a": 1, "b": 2, "c": 3, "d": 4}
+    rec = StepRecord(name="keys", n_in=1, n_out=1, sample=[row])
+    assert "visible value" in render_step(rec)
+
+
+def test_colliding_sample_keys_use_the_block_view():
+    """Keys 1 and '1' both show their values."""
+    row = {1: "int key", "1": "str key"}
+    text = render_step(StepRecord(name="keys", n_in=1, n_out=1, sample=[row]))
+    assert "int key" in text and "str key" in text
+
+
+def test_nan_yield_is_not_reported_as_high():
+    """A NaN yield or bound gives no verdict instead of a wrong one."""
+    call = _tracking.OpCall(
+        op_name="filter.x",
+        category="filter",
+        n_in=2,
+        n_out=1,
+        yield_ratio=float("nan"),
+        max_yield=float("inf"),
+        min_yield=float("nan"),
+        cache_hit=False,
+        duration_s=0.1,
+    )
+    text = render_step(StepRecord(name="n", ops=[call, call]))
+    assert "HIGH" not in text and "LOW" not in text and "nan" not in text.lower()
+
+
+def _renamed(call):
+    """The same call under another op name, so two calls stay two table rows."""
+    return call.model_copy(update={"op_name": call.op_name + "_b"})
+
+
+# --------------------------------------------------------------------------- #
+# Collapsed op rows, fields line, sample=, show=
+# --------------------------------------------------------------------------- #
+
+
+def test_repeated_op_calls_share_one_row_and_one_histogram():
+    """Calls of one op sum into one row (in first-call order) and one histogram."""
+
+    @step
+    def chunked(rows):
+        kept = []
+        for start in range(0, len(rows), 2):
+            chunk = _upper(rows[start : start + 2])
+            kept += _length_filter(chunk, min_yield=0.6)
+        _report(kept)
+        return kept
+
+    chunked(_rows(*TEXTS))
+    rec = _tracking.step_records()["chunked"]
+    assert [c.op_name for c in rec.ops] == [
+        "alter.test_upper",
+        "filter.by_length",
+    ] * 3 + ["inspect.test_report"]
+    # Two chunks miss min_yield 0.6 with the same yield: one warning line each.
+    assert rec.warnings == [
+        "filter.by_length: yield 0.50 below min_yield 0.60",
+        "filter.by_length: yield 0.00 below min_yield 0.60",
+    ]
+    text = render_step(rec)
+    rows = [
+        line.split() for line in text.splitlines() if re.match(r"\s+\S+ ×3\s+\d", line)
+    ]
+    assert [r[:5] for r in rows] == [
+        ["alter.test_upper", "×3", "5", "5", "-"],
+        ["filter.by_length", "×3", "5", "3", "0.60"],
+    ]
+    assert re.search(r"filter\.by_length ×3 .* LOW 2/3 · min 0\.60", text)
+    assert text.index("alter.test_upper ×3") < text.index("filter.by_length ×3")
+    assert re.search(r"inspect\.test_report\s+3", text)
+    # One histogram over all 5 rows, headed with the call count.
+    assert text.count("filter.by_length ×3 · words · keeps 2 to 10k: 3 of 5") == 1
+    assert len(re.findall(r"WARNING: filter\.by_length: yield 0\.50", text)) == 1
+
+
+def test_differing_score_rules_get_one_histogram_each():
+    """Calls with different thresholds are not pooled; equal ones are."""
+
+    def call(threshold, values):
+        return _tracking.OpCall(
+            op_name="filter.by_llm_score",
+            category="filter",
+            n_in=len(values),
+            n_out=sum(v >= threshold for v in values),
+            yield_ratio=None,
+            cache_hit=False,
+            duration_s=1.0,
+            scores=ScoreRecord(
+                label="score", values=values, keep="ge", threshold=threshold
+            ),
+        )
+
+    rec = StepRecord(
+        name="judge",
+        ops=[call(3, [1, 4]), call(4, [5, 2]), call(3, [3, 3])],
+    )
+    text = render_step(rec)
+    assert "filter.by_llm_score ×3" in text  # the op table row
+    assert "filter.by_llm_score ×2 · score · keeps ≥ 3: 3 of 4 (0.75)" in text
+    assert "filter.by_llm_score · score · keeps ≥ 4: 1 of 2 (0.50)" in text
+
+
+def test_long_op_name_keeps_its_call_count_when_cut():
+    """A cut op name keeps its ×N suffix."""
+    call = _tracking.OpCall(
+        op_name="alter.a_really_long_custom_operation_name_for_testing_widths",
+        category="alter",
+        n_in=10,
+        n_out=10,
+        yield_ratio=1.0,
+        cache_hit=False,
+        duration_s=1.0,
+        cost_usd=1.5,
+        min_yield=0.5,
+    )
+    rec = StepRecord(name="x", ops=[call] * 12)
+    text = _render_at(step_renderable(rec, width=60), 60)
+    assert re.search(r"alter\.a_r\S*… ×12", text), text
+
+
+def test_fields_line_lists_types_optional_fields_and_changes():
+    """The fields line shows each field's types, ? for optional ones, and +/-."""
+
+    @op(name="alter.test_reshape", category="alter")
+    def reshape(rows):
+        out = []
+        for i, r in enumerate(rows):
+            row = {"text": r["text"], "score": i if i % 2 else None, "tags": [i]}
+            if i == 0:
+                row["twist"] = "x"
+            out.append(row)
+        return out
+
+    @step
+    def shaped(rows):
+        return _length_filter(reshape(rows))
+
+    shaped([{**r, "draft": "d"} for r in _rows("one two", "three four", "five six")])
+    rec = _tracking.step_records()["shaped"]
+    assert [(f.name, f.types, f.optional) for f in rec.fields] == [
+        ("text", ["str"], False),
+        ("score", ["int", "None"], False),
+        ("tags", ["list"], False),
+        ("twist", ["str"], True),
+    ]
+    assert (rec.fields_added, rec.fields_removed) == (
+        ["score", "tags", "twist"],
+        ["draft"],
+    )
+    text = render_step(rec)
+    line = next(line for line in text.splitlines() if "fields:" in line)
+    assert line.strip() == (
+        "fields: text str · score int|None · tags list · twist str?  "
+        "(+ score, tags, twist; − draft)"
+    )
+    # Right after the header line.
+    lines = text.splitlines()
+    assert "rows (yield" in lines[lines.index(line) - 1]
+
+
+def test_fields_line_without_dict_input_has_no_changes():
+    """A step whose input is not rows of dicts lists fields without +/-."""
+
+    @op(name="acquire.test_rows", category="acquire")
+    def make(prompt, n):
+        return [{"text": f"{prompt} {i}"} for i in range(n)]
+
+    @step
+    def gen(prompt):
+        return _length_filter(make(prompt, 3))
+
+    gen("hello there")
+    rec = _tracking.step_records()["gen"]
+    assert rec.fields_added == [] and rec.fields_removed == []
+    assert "fields: text str\n" in render_step(rec) + "\n"
+
+
+def test_fields_of_a_huge_list_come_from_a_bounded_sample():
+    """Above 5000 rows the fields line reads 5000 evenly spaced rows."""
+    from pyforger.steps import _field_infos, _spread
+
+    rows = [{"a": i} for i in range(12_000)]
+    assert len(_spread(rows)) == 5000
+    rows[-1] = {"a": None, "b": 1}
+    infos = _field_infos(rows)
+    assert [(f.name, f.types, f.optional) for f in infos][0] == ("a", ["int"], False)
+
+
+def test_sample_defaults_to_one_row(capsys, monkeypatch):
+    """The report shows one sample row; sample=3 shows three; inspect_step all."""
+    monkeypatch.delenv("FORGER_STEP_REPORT")
+
+    @step
+    def one(rows):
+        return _length_filter(rows)
+
+    @step(sample=3)
+    def three(rows):
+        return _length_filter(rows)
+
+    one(_rows(*TEXTS))
+    assert _tracking.step_records()["one"].sample_shown == 1
+    assert "sample rows (1 of 3)" in capsys.readouterr().out
+    three(_rows(*TEXTS))
+    assert "sample rows (3 of 3)" in capsys.readouterr().out
+    inspect_step("one")
+    assert "sample rows (3 of 3)" in capsys.readouterr().out
+
+
+LONG_BODY = "\n".join(f"line {i}: " + "word " * 15 for i in range(40))
+
+
+def test_show_prints_fields_in_full_under_the_row(capsys, monkeypatch):
+    """show= fields print whole and indented under their row; others stay short."""
+    monkeypatch.delenv("FORGER_STEP_REPORT")
+
+    @op(name="alter.test_body", category="alter")
+    def add_body(rows):
+        return [{**r, "body": LONG_BODY, "other": "y" * 300} for r in rows]
+
+    @step(show=["body"], sample=2)
+    def shown(rows):
+        return _length_filter(add_body(rows))
+
+    shown(_rows(*TEXTS))
+    out = capsys.readouterr().out
+    rec = _tracking.step_records()["shown"]
+    assert rec.sample[0]["body"] == LONG_BODY  # kept whole, not cut to 500 chars
+    samples = out[out.index("sample rows (2 of 3)") :]
+    # Every line of the body, as is, indented under its row.
+    for line in LONG_BODY.splitlines()[::13]:
+        assert f"\n        {line.rstrip()}" in samples
+    assert samples.count("line 39:") == 2
+    # The table keeps the other fields, summarized; body is not a column.
+    header = samples.splitlines()[1].split()
+    assert header == ["#", "text", "other"]
+    assert "yyy…" in samples or "300 chars" in samples
+    assert all(len(line) <= 120 for line in out.splitlines())
+
+
+def test_show_in_the_block_view_and_inspect_step(capsys):
+    """With many fields, or in inspect_step, show= fields follow the other fields."""
+
+    @op(name="alter.test_wide", category="alter")
+    def wide(rows):
+        return [
+            {**r, "a": 1, "b": 2, "c": 3, "e": 4, "f": 5, "d": {"k": [1, 2]}}
+            for r in rows
+        ]
+
+    @step(show=["d", "text"])
+    def wide_step(rows):
+        return _length_filter(wide(rows))
+
+    wide_step(_rows(*TEXTS))
+    rec = inspect_step("wide_step")
+    full = capsys.readouterr().out
+    assert re.search(r"\[0\]\n\s+a\s+1\n(.*\n){4}\s+text\n\s+one two\n\s+d\n", full)
+    assert '\n    d\n      {"k": [1, 2]}\n' in full + "\n"  # other values as JSON
+    assert "\n  [0]\n" in render_step(rec)
+    assert rec.warnings == []
+
+
+def test_show_warns_about_unknown_fields():
+    """A show= name that no output row has is a suggestion (strict raises)."""
+
+    @step(show="nope")
+    def typo(rows):
+        return _length_filter(rows)
+
+    typo(_rows(*TEXTS))
+    assert _tracking.step_records()["typo"].suggestions == [
+        "show= names fields no output row has: nope"
+    ]
+
+
+def test_chained_calls_of_one_op_keep_their_own_rows():
+    """Two passes in a row (5 → 3 → 1) are two rows with their own histograms."""
+
+    @step
+    def rubric(rows):
+        rows = filter.by_length(rows, instruction_field="text", min_len=2)
+        return filter.by_length(rows, instruction_field="text", min_len=3)
+
+    rubric(_rows(*TEXTS))
+    rec = _tracking.step_records()["rubric"]
+    assert [c.after for c in rec.ops] == [[], [0]]
+    text = render_step(rec)
+    assert "×2" not in text
+    assert re.search(r"filter\.by_length\s+5\s+3\s+0\.60", text)
+    assert re.search(r"filter\.by_length\s+3\s+1\s+0\.33", text)
+    assert "keeps 2 to 10k: 3 of 5" in text and "keeps 3 to 10k: 1 of 3" in text
+
+
+def test_chain_through_another_op_gets_its_own_row():
+    """A refine pass over generated rows (through a filter) is its own row."""
+
+    @step
+    def refine(rows):
+        drafts = _upper(rows)
+        kept = _length_filter(drafts)
+        return _upper(kept[:1]) + _upper(kept[1:])
+
+    refine(_rows(*TEXTS))
+    rec = _tracking.step_records()["refine"]
+    assert [(c.op_name, c.after) for c in rec.ops] == [
+        ("alter.test_upper", []),
+        ("filter.by_length", [0]),
+        ("alter.test_upper", [0, 1]),
+        ("alter.test_upper", [0, 1]),
+    ]
+    text = render_step(rec)
+    rows = [line.split()[:4] for line in text.splitlines() if "test_upper" in line]
+    assert rows == [
+        ["alter.test_upper", "5", "5", "-"],
+        ["alter.test_upper", "×2", "3", "3"],
+    ]
+    # filter.by_length sits between the two upper rows, in call order.
+    assert text.index("filter.by_length") < text.index("alter.test_upper ×2")
+
+
+def test_two_filters_on_the_same_rows_are_not_summed():
+    """Filtering the same rows twice is a chain, not two chunks."""
+
+    @step
+    def twice(rows):
+        a = _length_filter(rows)
+        b = _length_filter(rows)
+        return [r for r in a if r in b]
+
+    twice(_rows(*TEXTS))
+    rec = _tracking.step_records()["twice"]
+    assert rec.ops[1].after == [0]
+    assert render_step(rec).count("filter.by_length   ") >= 2
+
+
+def test_calls_with_other_labels_over_rebuilt_rows_get_their_own_rows():
+    """Two checks with a {**r} rebuild between them are not chunks (T5)."""
+
+    @step
+    def verify(rows):
+        rows = filter.by_predicate(rows, lambda r: r["text"] != "six", label="runs")
+        rows = [{**r, "n": len(r["text"])} for r in rows]
+        return filter.by_predicate(rows, lambda r: r["n"] > 4, label="long enough")
+
+    verify(_rows(*TEXTS))
+    rec = _tracking.step_records()["verify"]
+    assert rec.ops[1].after == [] and rec.ops[1].new_rows is True
+    text = render_step(rec)
+    assert "×2" not in text
+    assert re.search(r"filter\.by_predicate\s+5\s+4\s+0\.80", text)
+    assert re.search(r"filter\.by_predicate\s+4\s+3\s+0\.75", text)
+
+
+def test_same_label_after_a_rebuild_gets_its_own_row():
+    """Known rows, then rows rebuilt in Python: a chain even with one label."""
+
+    @step
+    def chain(rows):
+        rows = _length_filter(rows)
+        return _length_filter([{**r, "x": 1} for r in rows])
+
+    chain(_rows(*TEXTS))
+    rec = _tracking.step_records()["chain"]
+    assert [c.new_rows for c in rec.ops] == [False, True]
+    text = render_step(rec)
+    assert "×2" not in text
+    assert re.search(r"filter\.by_length\s+5\s+3\s+0\.60", text)
+    assert re.search(r"filter\.by_length\s+3\s+3\s+1\.00", text)
+
+
+def test_chunks_with_one_label_still_share_a_row():
+    """A loop over batches, of known or of rebuilt rows, is one row."""
+
+    def keep(rows):
+        return filter.by_predicate(rows, lambda r: r["text"] != "six", label="ok")
+
+    @step
+    def batches(rows):
+        return keep(rows[:2]) + keep(rows[2:4]) + keep(rows[4:])
+
+    @step
+    def rebuilt_batches(rows):
+        rows = [{**r, "x": 1} for r in rows]
+        return keep(rows[:2]) + keep(rows[2:4]) + keep(rows[4:])
+
+    batches(_rows(*TEXTS))
+    rebuilt_batches(_rows(*TEXTS))
+    for name in ("batches", "rebuilt_batches"):
+        text = render_step(_tracking.step_records()[name])
+        assert re.search(r"filter\.by_predicate ×3\s+5\s+4\s+0\.80", text), text
+    # Per-chunk labels with no rows to tell them apart (e.g. a cached step
+    # from before new_rows was kept) still merge.
+    assert group_calls(["a", "a"], [[], []], [None, "x"], [None, None]) == [[0, 1]]
+    assert group_calls(["a", "a"], [[], []], ["x", "y"], [None, None]) == [[0], [1]]
+
+
+def test_raised_call_marks_its_collapsed_row():
+    """A chunk that raised marks the row RAISED k/n; its cost is in the row."""
+
+    @op(name="alter.test_flaky", category="alter")
+    def flaky(rows):
+        _tracking.add_usage(10, 5, 0.5)
+        if rows and rows[0]["text"] == "six":
+            raise ValueError("bad JSON")
+        return list(rows)
+
+    @step
+    def chunks(rows):
+        out = []
+        for start in range(0, len(rows), 2):
+            try:
+                out += flaky(rows[start : start + 2])
+            except ValueError:
+                pass
+        return _length_filter(out)
+
+    chunks(_rows(*TEXTS))
+    rec = _tracking.step_records()["chunks"]
+    text = render_step(rec)
+    assert re.search(r"alter\.test_flaky ×3 .*\$1\.50 .*RAISED 1/3", text), text
+    assert "alter.test_flaky raised ValueError: bad JSON" in text

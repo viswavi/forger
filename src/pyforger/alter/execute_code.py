@@ -19,6 +19,8 @@ def execute_code(
 ) -> list[dict]:
     """Compile each item's code and call it with ``arg_field``'s value.
 
+    Runs in this process, unlike ``run_programs``, which runs programs in subprocesses.
+
     The Sandbox caches by source string, so a snippet reused across items
     pays compile cost once. Exceptions land in ``error_field`` (set to
     ``None`` to omit) rather than raising, so one bad row doesn't kill
@@ -29,6 +31,11 @@ def execute_code(
     ``error_field`` like any other exception. ``None`` falls back to
     the Sandbox's ``default_timeout_s``. SIGALRM-based, so Unix only
     and main thread only.
+
+    Returns:
+        Copies of the rows, in input order, with ``output_field`` set to the
+        call's return value (``None`` on error) and ``error_field`` set to
+        ``"ExcType: message"`` or ``None``.
     """
     sb = sandbox if sandbox is not None else Sandbox()
     out: list[dict] = []

@@ -14,6 +14,7 @@ from pyforger.acquire.model import (
     _VALUE_CONSTRAINTS,
     GenerateResult,
     Model,
+    _batch_completion_with_progress,
     _extract_cost,
     _extract_reasoning,
     _extract_usage,
@@ -63,6 +64,21 @@ def make_litellm_response(
     return response
 
 
+def by_content(responses: dict):
+    """Fake completion answering each request by its first message's content.
+
+    An exception value is raised for that request, e.g. {"Q2": RuntimeError()}.
+    """
+
+    def fake_completion(messages, **kwargs):
+        response = responses[messages[0]["content"]]
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    return fake_completion
+
+
 class TestConstructor:
     """Model constructor stores configuration."""
 
@@ -72,9 +88,9 @@ class TestConstructor:
         assert model._model_id == "gpt-4o"
 
     def test_default_temperature(self):
-        """Default temperature is 0.7."""
+        """Default temperature is 1.0."""
         model = Model("gpt-4o")
-        assert model._temperature == 0.7
+        assert model._temperature == 1.0
 
     def test_custom_temperature(self):
         """Custom temperature is stored."""
@@ -152,7 +168,7 @@ class TestToMessages:
 
 
 class TestGenerateBatch:
-    """generate_batch calls litellm.batch_completion for parallel execution."""
+    """generate_batch sends one litellm.completion per prompt, concurrently."""
 
     @patch("pyforger.acquire.model.litellm")
     def test_single_prompt_n1(self, mock_litellm):
@@ -175,10 +191,9 @@ class TestGenerateBatch:
     @patch("pyforger.acquire.model.litellm")
     def test_multiple_prompts(self, mock_litellm):
         """Multiple prompts each get their own response list."""
-        mock_litellm.batch_completion.return_value = [
-            make_litellm_response(["r1"]),
-            make_litellm_response(["r2"]),
-        ]
+        mock_litellm.completion.side_effect = by_content(
+            {"Q1": make_litellm_response(["r1"]), "Q2": make_litellm_response(["r2"])}
+        )
         model = Model("gpt-4o", api_key="sk-test")
         result = model.generate_batch(["Q1", "Q2"], n=1)
         assert result == [["r1"], ["r2"]]
@@ -197,7 +212,7 @@ class TestGenerateBatch:
     @patch("pyforger.acquire.model.litellm")
     def test_forwards_parameters(self, mock_litellm):
         """Model parameters are forwarded to litellm.completion."""
-        mock_litellm.completion.return_value = make_litellm_response(["ok"])
+        mock_litellm.completion.return_value = make_litellm_response(["ok", "ok"])
         model = Model(
             "gpt-4o",
             api_key="sk-test",
@@ -212,7 +227,7 @@ class TestGenerateBatch:
         assert call_args.kwargs["api_key"] == "sk-test"
         assert call_args.kwargs["temperature"] == 0.5
         assert call_args.kwargs["max_tokens"] == 100
-        assert call_args.kwargs["num_retries"] == 3
+        assert call_args.kwargs["num_retries"] == 0  # Model retries, not LiteLLM
         assert call_args.kwargs["n"] == 2
         assert call_args.kwargs["api_base"] == "http://localhost:8080"
 
@@ -299,7 +314,7 @@ class TestGenerate:
     @patch("pyforger.acquire.model.litellm")
     def test_delegates_to_generate_batch(self, mock_litellm):
         """Generate forwards all parameters to litellm.completion."""
-        mock_litellm.completion.return_value = make_litellm_response(["ok"])
+        mock_litellm.completion.return_value = make_litellm_response(["ok", "ok"])
         model = Model("gpt-4o", api_key="sk-test")
         model.generate("Hi", n=2, temperature=0.3, max_tokens=50)
         call_args = mock_litellm.completion.call_args
@@ -320,6 +335,20 @@ class TestGenerate:
 
 class TestErrorHandling:
     """Model surfaces errors from litellm."""
+
+    def test_litellm_feedback_banner_suppressed(self, capsys):
+        """Mapping a provider error prints no "Give Feedback / Get Help" banner."""
+        import litellm
+        from litellm.utils import exception_type
+
+        assert litellm.suppress_debug_info is True
+        with pytest.raises(Exception):
+            exception_type(
+                model="gpt-4o",
+                original_exception=RuntimeError("upstream 504"),
+                custom_llm_provider="openai",
+            )
+        assert "Give Feedback" not in capsys.readouterr().out
 
     @patch("pyforger.acquire.model.litellm")
     def test_litellm_exception_propagates(self, mock_litellm):
@@ -372,7 +401,7 @@ class TestErrorHandling:
             "max_tokens",
             "stop",
         ]
-        mock_litellm.batch_completion.side_effect = RuntimeError("API error on batch")
+        mock_litellm.completion.side_effect = RuntimeError("API error on batch")
         model = Model("gpt-4o", api_key="sk-test")
         with pytest.raises(RuntimeError, match="API error on batch"):
             model.generate_batch(["Q1", "Q2"])
@@ -382,19 +411,20 @@ class TestErrorHandling:
     def test_batch_request_exception_is_raised(self, mock_litellm):
         """An exception returned for one batch request is raised as-is."""
         error = ValueError("context window exceeded: 200000 > 128000 tokens")
-        mock_litellm.batch_completion.return_value = [
-            make_litellm_response(["r1"]),
-            error,
-        ]
+        mock_litellm.completion.side_effect = by_content(
+            {"Q1": make_litellm_response(["r1"]), "Q2": error}
+        )
         model = Model("gpt-4o", api_key="sk-test")
         with pytest.raises(ValueError) as excinfo:
             model.generate_batch(["Q1", "Q2"])
         assert excinfo.value is error
+        # history gets only returned results, but Q1's spend still counts.
         assert model.history == []
+        assert model.total_cost == pytest.approx(0.001)
 
 
 class TestShowProgress:
-    """show_progress=True runs calls in a thread pool instead of batch_completion."""
+    """Calls run in a thread pool; show_progress picks bar, log line, or off."""
 
     @patch("pyforger.acquire.model.litellm")
     def test_out_of_order_completions_keep_prompt_order(self, mock_litellm):
@@ -413,7 +443,6 @@ class TestShowProgress:
         model = Model("gpt-4o", api_key="sk-test")
         result = model.generate_batch(["Q1", "Q2"], show_progress=True)
         assert result == [["r-Q1"], ["r-Q2"]]
-        mock_litellm.batch_completion.assert_not_called()
 
     @patch("pyforger.acquire.model.litellm")
     def test_worker_exception_is_raised(self, mock_litellm):
@@ -433,17 +462,20 @@ class TestShowProgress:
 
     @patch("pyforger.acquire.model.litellm")
     def test_per_call_override_beats_instance_setting(self, mock_litellm):
-        """show_progress=False on the call falls back to batch_completion."""
-        mock_litellm.batch_completion.return_value = [
-            make_litellm_response(["r1"]),
-            make_litellm_response(["r2"]),
-        ]
+        """show_progress=False on the call turns progress off."""
+        mock_litellm.completion.side_effect = by_content(
+            {"Q1": make_litellm_response(["r1"]), "Q2": make_litellm_response(["r2"])}
+        )
         model = Model("gpt-4o", api_key="sk-test", show_progress=True)
-        assert model.generate_batch(["Q1", "Q2"], show_progress=False) == [
-            ["r1"],
-            ["r2"],
-        ]
-        mock_litellm.batch_completion.assert_called_once()
+        with patch(
+            "pyforger.acquire.model._batch_completion_with_progress",
+            wraps=_batch_completion_with_progress,
+        ) as send:
+            assert model.generate_batch(["Q1", "Q2"], show_progress=False) == [
+                ["r1"],
+                ["r2"],
+            ]
+        assert send.call_args.kwargs["progress"] == "off"
 
     @patch("pyforger.acquire.model.litellm")
     def test_instance_setting_used_when_call_omits_it(self, mock_litellm):
@@ -453,7 +485,6 @@ class TestShowProgress:
         )
         model = Model("gpt-4o", api_key="sk-test", show_progress=True)
         assert model.generate_batch(["Q1", "Q2"]) == [["r-Q1"], ["r-Q2"]]
-        mock_litellm.batch_completion.assert_not_called()
 
 
 class TestEdgeCases:
@@ -472,7 +503,7 @@ class TestEdgeCases:
         result = model.generate_batch([])
         assert result == []
         assert model.history == []
-        mock_litellm.batch_completion.assert_not_called()
+        mock_litellm.completion.assert_not_called()
 
     @patch("pyforger.acquire.model.litellm")
     def test_empty_prompt_list_skips_validation(self, mock_litellm):
@@ -589,6 +620,61 @@ class TestGenerateResult:
         assert copied.usage == {"cost_usd": 0.01}
         assert copied.model_id == "gpt-4o"
 
+    def test_texts_is_plain_list(self):
+        """The texts property returns the completions as a plain list."""
+        result = GenerateResult(
+            ["a", "b"], usage={}, reasoning=[None, None], model_id="gpt-4o", raw=None
+        )
+        assert result.texts == ["a", "b"]
+        assert type(result.texts) is list
+
+    @pytest.mark.parametrize("name", ["completions", "text", "choices"])
+    def test_unknown_attribute_hint(self, name):
+        """A guessed attribute name raises AttributeError naming the real ones."""
+        result = GenerateResult(
+            ["a"], usage={}, reasoning=[None], model_id="gpt-4o", raw=None
+        )
+        with pytest.raises(AttributeError) as excinfo:
+            getattr(result, name)
+        message = str(excinfo.value)
+        assert f"GenerateResult has no attribute {name!r}" in message
+        assert "list of completion strings" in message
+        assert "result[0]" in message
+        for attr in (".texts", ".usage", ".reasoning", ".model_id", ".raw"):
+            assert attr in message
+        assert not hasattr(result, name)
+
+    @pytest.mark.parametrize("name", ["__array__", "__deepcopy__", "_private"])
+    def test_private_names_fail_plainly(self, name):
+        """Dunder and private names get a plain AttributeError, no hint."""
+        result = GenerateResult(
+            ["a"], usage={}, reasoning=[None], model_id="gpt-4o", raw=None
+        )
+        with pytest.raises(AttributeError) as excinfo:
+            getattr(result, name)
+        assert "completion strings" not in str(excinfo.value)
+
+    def test_pickle_and_copy_keep_texts_and_metadata(self):
+        """Pickle, copy and deepcopy round-trip with texts and metadata intact."""
+        result = GenerateResult(
+            ["a", "b"],
+            usage={"cost_usd": 0.01},
+            reasoning=["r1", None],
+            model_id="gpt-4o",
+            raw={"id": "x"},
+        )
+        for restored in (
+            pickle.loads(pickle.dumps(result)),
+            copy.copy(result),
+            copy.deepcopy(result),
+        ):
+            assert isinstance(restored, GenerateResult)
+            assert restored.texts == ["a", "b"]
+            assert restored.usage == {"cost_usd": 0.01}
+            assert restored.reasoning == ["r1", None]
+            assert restored.model_id == "gpt-4o"
+            assert restored.raw == {"id": "x"}
+
 
 class TestFamily:
     """_family normalizes model_id to a constraint-table key prefix."""
@@ -628,14 +714,14 @@ class TestFamily:
 class TestValueConstraints:
     """_VALUE_CONSTRAINTS table contents."""
 
-    def test_o_series_require_temp_1_n_1(self):
-        """O series require temp 1 n 1."""
+    def test_o_series_require_temp_1(self):
+        """O series require temp 1; n > 1 fans out instead of raising."""
         for key in ("o1", "o3", "o4", "gpt-5"):
-            assert _VALUE_CONSTRAINTS[key] == {"temperature": 1.0, "n": 1}
+            assert _VALUE_CONSTRAINTS[key] == {"temperature": 1.0}
 
-    def test_gemini_3_requires_temp_1_n_1(self):
-        """Gemini 3 requires temp 1 n 1."""
-        assert _VALUE_CONSTRAINTS["gemini-3"] == {"temperature": 1.0, "n": 1}
+    def test_gemini_3_requires_temp_1(self):
+        """Gemini 3 requires temp 1; n > 1 fans out instead of raising."""
+        assert _VALUE_CONSTRAINTS["gemini-3"] == {"temperature": 1.0}
 
     def test_no_constraint_for_gpt_4o(self):
         """No constraint for gpt 4o."""
@@ -662,16 +748,15 @@ class TestValidateParams:
             _validate_params("openai/o1", temperature=0.5, n=1)
 
     @patch("pyforger.acquire.model.litellm")
-    def test_value_constraint_violation_n(self, mock_litellm):
-        """Value constraint violation n."""
+    def test_n_is_not_constrained(self, mock_litellm):
+        """No n constraint: generate_batch fans n > 1 out instead of raising."""
         mock_litellm.get_supported_openai_params.return_value = [
             "temperature",
             "n",
             "max_tokens",
             "stop",
         ]
-        with pytest.raises(ValueError, match="requires n=1"):
-            _validate_params("gemini/gemini-3.5-flash", temperature=1.0, n=2)
+        _validate_params("gemini/gemini-3.5-flash", temperature=1.0, n=2)
 
     @patch("pyforger.acquire.model.litellm")
     def test_value_constraint_satisfied_passes(self, mock_litellm):
@@ -859,43 +944,43 @@ class TestExtractCost:
         """Clear the once-per-process warning set so each test starts fresh."""
         _COST_WARNING_SEEN.clear()
 
-    @patch("pyforger.acquire.model.litellm")
+    @patch("litellm.completion_cost")
     def test_reads_hidden_params(self, mock_litellm):
         """Reads hidden params."""
         response = MagicMock()
         response._hidden_params = {"response_cost": 0.0042}
         assert _extract_cost(response, "gpt-4o") == 0.0042
 
-    @patch("pyforger.acquire.model.litellm")
+    @patch("litellm.completion_cost")
     def test_falls_back_to_completion_cost(self, mock_litellm):
         """Falls back to completion cost."""
         response = MagicMock()
         response._hidden_params = {}
-        mock_litellm.completion_cost.return_value = 0.005
+        mock_litellm.return_value = 0.005
         assert _extract_cost(response, "gpt-4o") == 0.005
 
-    @patch("pyforger.acquire.model.litellm")
+    @patch("litellm.completion_cost")
     def test_completion_cost_raises_returns_zero(self, mock_litellm):
         """Completion cost raises returns zero."""
         response = MagicMock()
         response._hidden_params = {}
-        mock_litellm.completion_cost.side_effect = RuntimeError("nope")
+        mock_litellm.side_effect = RuntimeError("nope")
         with pytest.warns(UserWarning, match="pricing registry"):
             assert _extract_cost(response, "unknown/model") == 0.0
 
-    @patch("pyforger.acquire.model.litellm")
+    @patch("litellm.completion_cost")
     def test_warning_emitted_once_per_model_id(self, mock_litellm):
         """Warning emitted once per model id."""
         response = MagicMock()
         response._hidden_params = {}
-        mock_litellm.completion_cost.return_value = None
+        mock_litellm.return_value = None
         with pytest.warns(UserWarning) as caught:
             _extract_cost(response, "litellm_proxy/x/y")
             _extract_cost(response, "litellm_proxy/x/y")
             _extract_cost(response, "litellm_proxy/x/y")
         assert len([w for w in caught if "pricing registry" in str(w.message)]) == 1
 
-    @patch("pyforger.acquire.model.litellm")
+    @patch("litellm.completion_cost")
     def test_zero_cost_not_treated_as_missing(self, mock_litellm):
         """Free models (cost_usd == 0.0) must not trigger the registry-miss warning."""
         response = MagicMock()
@@ -906,7 +991,7 @@ class TestExtractCost:
             warnings_mod.simplefilter("error")
             assert _extract_cost(response, "free/model") == 0.0
 
-    @patch("pyforger.acquire.model.litellm")
+    @patch("litellm.completion_cost")
     def test_no_warning_when_cost_present(self, mock_litellm):
         """No warning when cost present."""
         response = MagicMock()
@@ -1059,10 +1144,9 @@ class TestGenerateBatchReturnType:
             "max_tokens",
             "stop",
         ]
-        mock_litellm.batch_completion.return_value = [
-            make_litellm_response(["r1"]),
-            make_litellm_response(["r2"]),
-        ]
+        mock_litellm.completion.side_effect = by_content(
+            {"q1": make_litellm_response(["r1"]), "q2": make_litellm_response(["r2"])}
+        )
         model = Model("gpt-4o", api_key="sk-test")
         results = model.generate_batch(["q1", "q2"])
         assert len(results) == 2
@@ -1135,11 +1219,13 @@ class TestGenerateBatchReturnType:
             "max_tokens",
             "stop",
         ]
-        mock_litellm.batch_completion.return_value = [
-            make_litellm_response(["r1"]),
-            make_litellm_response(["r2"]),
-        ]
-        mock_litellm.completion.return_value = make_litellm_response(["r3"])
+        mock_litellm.completion.side_effect = by_content(
+            {
+                "q1": make_litellm_response(["r1"]),
+                "q2": make_litellm_response(["r2"]),
+                "q3": make_litellm_response(["r3"]),
+            }
+        )
         model = Model("gpt-4o", api_key="sk-test")
         model.generate_batch(["q1", "q2"])
         model.generate_batch(["q3"])
@@ -1246,17 +1332,27 @@ class TestPerCallValidation:
             model.generate("Hi", temperature=0.5)
 
     @patch("pyforger.acquire.model.litellm")
-    def test_per_call_n_violates_constraint(self, mock_litellm):
-        """Per call n violates constraint."""
+    def test_per_call_n_fans_out(self, mock_litellm):
+        """Per call n > 1 on gemini-3 fans out instead of raising."""
         mock_litellm.get_supported_openai_params.return_value = [
             "temperature",
             "n",
             "max_tokens",
             "stop",
         ]
-        model = Model("gemini/gemini-3.5-flash", api_key="sk-test", temperature=1.0)
-        with pytest.raises(ValueError, match="requires n=1"):
-            model.generate("Hi", n=3)
+        mock_litellm.completion.side_effect = [
+            make_litellm_response([f"r{i}"]) for i in range(3)
+        ]
+        # One request in flight at a time, so they are answered in order.
+        model = Model(
+            "gemini/gemini-3.5-flash",
+            api_key="sk-test",
+            temperature=1.0,
+            max_concurrency=1,
+        )
+        assert model.generate("Hi", n=3) == ["r0", "r1", "r2"]
+        assert mock_litellm.completion.call_count == 3
+        assert mock_litellm.completion.call_args.kwargs["n"] == 1
 
     @patch("pyforger.acquire.model.litellm")
     def test_per_call_unconstrained_passes(self, mock_litellm):
@@ -1267,7 +1363,7 @@ class TestPerCallValidation:
             "max_tokens",
             "stop",
         ]
-        mock_litellm.completion.return_value = make_litellm_response(["ok"])
+        mock_litellm.completion.return_value = make_litellm_response(["ok", "ok"])
         model = Model("gpt-4o", api_key="sk-test")
         model.generate("Hi", temperature=0.2, n=2)  # no raise
 
@@ -1302,10 +1398,16 @@ class TestUsageOnResult:
             "max_tokens",
             "stop",
         ]
-        mock_litellm.batch_completion.return_value = [
-            make_litellm_response(["r1"], prompt_tokens=10, completion_tokens=20),
-            make_litellm_response(["r2"], prompt_tokens=30, completion_tokens=40),
-        ]
+        mock_litellm.completion.side_effect = by_content(
+            {
+                "Q1": make_litellm_response(
+                    ["r1"], prompt_tokens=10, completion_tokens=20
+                ),
+                "Q2": make_litellm_response(
+                    ["r2"], prompt_tokens=30, completion_tokens=40
+                ),
+            }
+        )
         model = Model("gpt-4o", api_key="sk-test")
         model.generate_batch(["Q1", "Q2"])
         assert model.total_usage["prompt_tokens"] == 40
@@ -1321,3 +1423,94 @@ class TestPublicExports:
         from pyforger.acquire import GenerateResult as Exported
 
         assert Exported is GenerateResult
+
+
+class TestReasoningEffort:
+    """reasoning_effort is sent in the form each model family reads."""
+
+    DEEPSEEK = "litellm_proxy/azure_ai/DeepSeek-V4.1-Flash"
+    GLM = "litellm_proxy/azure_ai/FW-GLM-5.3"
+
+    @pytest.mark.parametrize(
+        "model_id,sent",
+        [
+            # The gateway's DeepSeek ignores reasoning_effort entirely.
+            (DEEPSEEK, {"reasoning": {"effort": "high"}}),
+            # GLM is served by Fireworks, which reads reasoning_effort.
+            (GLM, {"reasoning_effort": "high"}),
+            # Unmapped models get LiteLLM's standard parameter.
+            ("gpt-4o", {"reasoning_effort": "high"}),
+        ],
+    )
+    @patch("pyforger.acquire.model.litellm")
+    def test_sent_in_family_form(self, mock_litellm, model_id, sent):
+        """The effort reaches litellm under the name the provider honors."""
+        mock_litellm.get_supported_openai_params.return_value = []
+        mock_litellm.completion.return_value = make_litellm_response(["ok"])
+        Model(model_id, reasoning_effort="high").generate("Hi")
+        kwargs = mock_litellm.completion.call_args.kwargs
+        for name in ("reasoning", "reasoning_effort"):
+            assert kwargs.get(name) == sent.get(name)
+
+    def test_overrides_kwargs_and_extra_body(self):
+        """An explicit effort replaces reasoning settings passed any other way."""
+        model = Model(
+            self.DEEPSEEK,
+            reasoning_effort="low",
+            reasoning={"effort": "high"},
+            extra_body={"reasoning_effort": "high", "top_k": 5},
+        )
+        assert model._kwargs == {
+            "reasoning": {"effort": "low"},
+            "extra_body": {"top_k": 5},
+        }
+
+    def test_without_effort_kwargs_pass_through(self):
+        """With no explicit effort, caller kwargs are sent unchanged."""
+        model = Model(self.DEEPSEEK, reasoning={"effort": "none"})
+        assert model._kwargs == {"reasoning": {"effort": "none"}}
+
+
+class TestReasoningEffortProperty:
+    """Model.reasoning_effort reports the effort however it was passed."""
+
+    @pytest.mark.parametrize(
+        "kwargs,expected",
+        [
+            ({"reasoning_effort": "high"}, "high"),
+            ({"reasoning": {"effort": "low"}}, "low"),
+            ({}, None),
+        ],
+    )
+    def test_reports_effort(self, kwargs, expected):
+        """DeepSeek-V4 stores a dict, but the property reads it back."""
+        model = Model("litellm_proxy/azure_ai/DeepSeek-V4.1-Flash", **kwargs)
+        assert model.reasoning_effort == expected
+
+
+class TestGatewayEnvironment:
+    """litellm_proxy/ models read the LiteLLM gateway environment."""
+
+    def test_reads_base_url_and_key(self, monkeypatch):
+        """Without explicit values, the gateway URL and key come from env."""
+        monkeypatch.setenv("LITELLM_BASE_URL", "https://gateway.example")
+        monkeypatch.setenv("LITELLM_API_KEY", "env-key")
+        model = Model("litellm_proxy/azure_ai/DeepSeek-V4.1-Flash")
+        assert model._kwargs["api_base"] == "https://gateway.example"
+        assert model._api_key == "env-key"
+
+    def test_explicit_values_win(self, monkeypatch):
+        """Explicit api_base and api_key override the environment."""
+        monkeypatch.setenv("LITELLM_BASE_URL", "https://gateway.example")
+        monkeypatch.setenv("LITELLM_API_KEY", "env-key")
+        model = Model(
+            "litellm_proxy/x", api_key="mine", api_base="https://other.example"
+        )
+        assert model._kwargs["api_base"] == "https://other.example"
+        assert model._api_key == "mine"
+
+    def test_other_providers_unchanged(self, monkeypatch):
+        """Direct provider models keep litellm's own environment handling."""
+        monkeypatch.setenv("LITELLM_BASE_URL", "https://gateway.example")
+        model = Model("gpt-4o")
+        assert "api_base" not in model._kwargs
