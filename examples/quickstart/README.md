@@ -1,6 +1,7 @@
-# Quick start: a trivia dataset in two versions
+# Quick start: Claude through Forger
 
-Two small pipelines that use Claude through LiteLLM. Each run costs about $0.16 and takes under a minute.
+A script that calls Claude through Forger's `Model`, then two small pipelines that build a trivia dataset. Each
+pipeline run costs about $0.16 and takes under a minute.
 
 ## Setup
 
@@ -12,6 +13,28 @@ cd examples/quickstart
 ```
 
 Haiku 5.5 writes the questions, and Sonnet 5.5 judges or checks them.
+
+## Calling Claude directly: `claude_model.py`
+
+Before any pipeline: what Forger's `Model` does on its own. One prompt, several samples, a batch of prompts, a
+system prompt, and the running cost, for well under a cent.
+
+```bash
+python claude_model.py
+```
+
+```text
+1. The sky appears blue because sunlight is scattered by air molecules in the atmosphere (Rayleigh scattering), ...
+   cost $0.00005, finish reason stop
+2. ['Io', 'Europa', 'Io', 'Io']
+3. Mercury: 0
+3. Venus: 0
+3. Mars: 2
+4. Arr, a light-year be the distance light sails in one full year, roughly 9.46 trillion kilometers ...
+5. total $0.00011 for {'prompt_tokens': 244, 'completion_tokens': 172, 'reasoning_tokens': 0}
+```
+
+Every Forger op takes a `Model` like this one and sends it all its prompts in one batch.
 
 ## Version 1: `trivia_v1.py`
 
