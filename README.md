@@ -35,8 +35,9 @@ Optional extras:
 
 Every LLM call goes through `pyforger.acquire.Model`, a wrapper around [LiteLLM](https://docs.litellm.ai/). So any
 model id that LiteLLM knows works, for example `"anthropic/claude-haiku-5-5"`. Put the provider's key in the
-environment (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, ...) or in a `.env` file. For a LiteLLM proxy, use a
-`litellm_proxy/...` id and set `LITELLM_API_KEY` and `LITELLM_BASE_URL`.
+environment (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, ...), or in a `.env` file that your script loads with
+`dotenv.load_dotenv()` (Forger does not read `.env` by itself). For a LiteLLM proxy, use a `litellm_proxy/...` id
+and set `LITELLM_API_KEY` and `LITELLM_BASE_URL`.
 
 ```python
 from pyforger.acquire import Model
@@ -54,6 +55,8 @@ clear.
 ```python
 # trivia.py
 import json
+
+from dotenv import load_dotenv
 from pyforger import acquire, filter, pipeline, step
 from pyforger.acquire import Model
 
@@ -90,6 +93,7 @@ def main(model: Model, judge: Model) -> list[dict]:
 
 
 if __name__ == "__main__":
+    load_dotenv()  # reads ANTHROPIC_API_KEY from .env
     rows = main(Model("anthropic/claude-haiku-5-5"), Model("anthropic/claude-sonnet-5-5"))
     with open("trivia.jsonl", "w") as f:
         f.writelines(json.dumps(r) + "\n" for r in rows)

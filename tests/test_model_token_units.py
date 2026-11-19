@@ -107,7 +107,10 @@ def test_logs_units_and_dollars_on_first_call_and_milestones(
     assert len(logs) == 2
     assert "$0.010000 USD" in logs[0]
     assert "$0.020000 USD" in logs[1]
-    assert ("1200000.0" if model_id == DEEPSEEK else "NaN") + " token units" in logs[1]
+    if model_id == DEEPSEEK:
+        assert "1200000.0 token units" in logs[1]
+    else:  # no weights: dollars only
+        assert "token units" not in logs[1]
     assert model.total_cost == 0.03
 
 

@@ -1826,14 +1826,16 @@ class Model:
                 )
             )
             if self._usage_log_progress >= self._next_usage_log:
+                # Units only for a model with token-unit weights; else dollars.
+                units_part = (
+                    ""
+                    if math.isnan(self._total_token_units)
+                    else f"{self._total_token_units:.1f} token units, "
+                )
                 _logger.info(
-                    "%s cumulative usage: %s token units, $%.6f USD recorded cost",
+                    "%s cumulative usage: %s$%.6f USD recorded cost",
                     self._model_id,
-                    (
-                        "NaN"
-                        if math.isnan(self._total_token_units)
-                        else f"{self._total_token_units:.1f}"
-                    ),
+                    units_part,
                     self._total_cost,
                 )
                 self._next_usage_log = (
