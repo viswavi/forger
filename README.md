@@ -18,7 +18,7 @@ keep the measurement next to the choice. [`docs/agents/methodology.md`](docs/age
 Forger needs Python 3.12 or later.
 
 ```bash
-git clone https://github.com/viswavi/forger.git
+git clone -b release https://github.com/viswavi/forger.git
 cd forger
 pip install -e .
 ```

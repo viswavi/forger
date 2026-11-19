@@ -5,7 +5,8 @@ Two small pipelines that use Claude through LiteLLM. Each run costs about $0.16 
 ## Setup
 
 ```bash
-pip install -e .                                   # from the repository root
+git clone -b release https://github.com/viswavi/forger.git && cd forger
+pip install -e .
 echo "ANTHROPIC_API_KEY=sk-ant-..." > .env         # in the repository root; .env is gitignored
 cd examples/quickstart
 ```
