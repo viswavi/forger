@@ -131,8 +131,10 @@ something. Pass `_no_cache=True` to an op for a fresh result.
 **Yield contracts.** Give a filter the share of rows you expect it to keep, for example `min_yield=0.3`. A miss is
 a warning in the step report, so a broken prompt shows up at once and not three steps later.
 
-**Spend.** Forger estimates the cost of each large batch after the first 5% of it, and logs spend as it goes. Cap a
-run with `@pipeline(max_token_units=...)`. See "Spending caps" in [`docs/agents/pipelines.md`](docs/agents/pipelines.md).
+**Spend.** Forger records the dollar cost of every call, estimates the cost of each large batch after the first 5%
+of it, and logs spend as it goes. Cap a run with `@pipeline(max_cost_usd=5)`. If you budget in tokens instead, give
+your models token-unit weights (see "Cost" in [`docs/AGENTS.md`](docs/AGENTS.md#cost)) and cap the run with
+`@pipeline(max_token_units=...)`.
 
 ## A worked example: an RL dataset of math problems
 

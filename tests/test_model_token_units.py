@@ -406,6 +406,49 @@ def test_process_token_unit_cap(complete, monkeypatch):
         model.generate("Again")
 
 
+def test_without_weights_only_dollars_are_tracked(complete):
+    """Forger's default: no weights, so units are NaN and dollars still add up."""
+    from pyforger import token_units
+
+    token_units.set_weights(None)
+    model = Model(DEEPSEEK)
+    result = model.generate("Hello")
+    assert math.isnan(result.usage["token_units"])
+    assert math.isnan(model.total_token_units)
+    assert model.total_cost == pytest.approx(0.01)
+
+
+@pytest.mark.parametrize("where", ["process", "pipeline"])
+def test_token_unit_caps_refuse_models_without_weights(complete, monkeypatch, where):
+    """A unit cap cannot count an unweighted model's spend, so it refuses the call."""
+    from pyforger import _tracking, pipeline, step
+
+    monkeypatch.setenv("FORGER_STEP_REPORT", "0")
+    model = Model("anthropic/claude-haiku-5-5")
+    if where == "process":
+        spent = _tracking.usage_snapshot()[3]  # earlier tests' units
+        monkeypatch.setenv("FORGER_MAX_TOKEN_UNITS", str(spent + 1000))
+        with pytest.raises(ValueError, match="No token-unit weights"):
+            model.generate("Hello")
+    else:
+
+        @step
+        def ask(rows, model):
+            return [{**r, "a": model.generate(r["q"]).texts[0]} for r in rows]
+
+        @pipeline(max_token_units=1000)
+        def main(rows, model):
+            return ask(rows, model)
+
+        with pytest.raises(ValueError, match="No token-unit weights"):
+            main([{"q": "Hello"}], model)
+    complete.assert_not_called()
+    # Without a unit cap the same model runs, priced in dollars only.
+    monkeypatch.delenv("FORGER_MAX_TOKEN_UNITS", raising=False)
+    model.generate("Hello")
+    assert complete.call_count == 1
+
+
 def test_pipeline_rejects_negative_token_unit_cap():
     """max_token_units must be a number >= 0."""
     from pyforger import pipeline

@@ -12,7 +12,7 @@ request as it finishes, ``LocalModel`` each batch when it returns)::
      "prompt_tokens": 812, "completion_tokens": 240, "cost_usd": 0.0031,
      "token_units": null}
 
-``token_units`` is null for a model without fixed token-unit weights (see
+``token_units`` is null for a model without token-unit weights (see
 ``pyforger.token_units``).
 
 The file is ``$FORGER_SPEND_LEDGER`` if set, else ``$FORGER_CACHE/spend.jsonl``
@@ -80,7 +80,7 @@ def append(
 ) -> None:
     """Append one usage record to the ledger; never raises.
 
-    ``token_units`` is None for a model without fixed token-unit weights.
+    ``token_units`` is None for a model without token-unit weights.
 
     Each line is written under a lock (also across processes where ``fcntl``
     exists) and flushed before the call returns.

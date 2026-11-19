@@ -14,19 +14,17 @@ from unittest.mock import patch
 import pytest
 
 from pyforger.token_units import (
-    DEFAULT_GENERATION_LIMIT,
-    DEFAULT_JUDGE_MODEL,
+    WEIGHTS_ENV,
     TokenUnitBudget,
     TokenUnitQuotaExceeded,
-    default_generation_limit,
-    default_rl_limit,
+    has_weights,
     held_units,
     model_weights,
     response_cost_usd,
     response_token_counts,
+    set_weights,
     token_units,
-    validate_judge_model,
-    validate_reasoning_effort,
+    weights,
 )
 
 DEEPSEEK = "litellm_proxy/azure_ai/DeepSeek-V4.1-Flash"
@@ -118,88 +116,54 @@ def test_unknown_models_rejected():
     """Unspecified models have no implicit unit weight."""
     with pytest.raises(ValueError):
         token_units("gpt-example", 10, 20)
-    with pytest.raises(ValueError):
-        token_units("DeepSeek-V4.1-Flash-GLM-5.3", 10, 20)
-    # DeepSeek-V4-Flash is a judge fallback only, not a generation model.
+    # The name must appear in the id: DeepSeek-V4-Flash is not V4.1.
     with pytest.raises(ValueError):
         token_units("litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731", 10, 20)
 
 
-def test_judge_policy():
-    """Only the specified judge family and reasoning levels are accepted."""
-    assert validate_judge_model("account/DeepSeek-V4.1-Flash-custom")
-    for model in (
-        "DeepSeek-V4-Pro",
-        "FW-GLM-5.3",
-        "DeepSeek-R1",
-        "DeepSeek-V4-Flash-0731",
-    ):
-        with pytest.raises(ValueError):
-            validate_judge_model(model)
-    for effort in ("none", "low", "high"):
-        assert validate_reasoning_effort(effort) == effort
-    with pytest.raises(ValueError):
-        validate_reasoning_effort("medium")
+def test_no_weights_by_default(monkeypatch):
+    """Forger ships without weights: every model has NaN units, i.e. dollars only."""
+    set_weights(None)
+    assert weights() == {}
+    assert not has_weights(DEEPSEEK)
+    with pytest.raises(ValueError, match="set_weights"):
+        token_units(DEEPSEEK, 1, 1)
 
 
-def test_judge_weights_are_separate_from_generation(tmp_path):
-    """The judge quota keeps its old units; generation has its own weights."""
-    judge = "litellm_proxy/azure_ai/DeepSeek-V4.1-Flash"
-    assert DEFAULT_JUDGE_MODEL == judge
-    assert model_weights(judge, judge=True) == (1, 3)
-    assert token_units(judge, 10, 2, judge=True) == 16
-    assert model_weights(judge) == (1, 4)
-    assert token_units(judge, 10, 2) == 18
-    # DeepSeek-V4-Flash: a judge fallback at 1/3, refused for generation; the
-    # 0731 name does not collide with V4.1.
-    old = "litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731"
-    assert model_weights(old, judge=True) == (1, 3)
-    with pytest.raises(ValueError):
-        model_weights(old)
-    glm = "litellm_proxy/azure_ai/FW-GLM-5.3"
-    assert model_weights(glm, judge=True) == (4, 12.5)
-    assert model_weights(glm) == (5.83, 18.33)
-    ledger = TokenUnitBudget(tmp_path / "judge.json", 100)
-    ledger.record(judge, 10, 2, judge=True)
-    assert ledger.check()["token_units"] == 16
+def test_weights_from_the_environment(monkeypatch):
+    """FORGER_TOKEN_UNIT_WEIGHTS gives weights to every process that reads it."""
+    set_weights(None)
+    monkeypatch.setenv(WEIGHTS_ENV, '{"Claude-Haiku": [1, 5]}')
+    assert weights() == {"claude-haiku": (1.0, 5.0)}
+    assert token_units("anthropic/claude-haiku-5-5", 10, 2) == 20
+    assert not has_weights("anthropic/claude-sonnet-5-5")
+    for bad in ("[1, 5]", '{"x": [1]}', '{"x": [1, -5]}', '{"x": "15"}', "not json"):
+        monkeypatch.setenv(WEIGHTS_ENV, bad)
+        with pytest.raises(ValueError, match=WEIGHTS_ENV):
+            weights()
 
 
-def test_record_and_hold_price_with_the_same_table(tmp_path):
-    """Generation records V4.1-Flash at 1/4 and the judge at 1/3, as holds do."""
-    model = "litellm_proxy/azure_ai/DeepSeek-V4.1-Flash"
-    messages = [{"role": "user", "content": "x" * 30}]  # 10 held prompt tokens
-    for judge, output_weight in ((False, 4), (True, 3)):
-        ledger = TokenUnitBudget(tmp_path / f"judge-{judge}.json", 1000)
-        held = held_units(model, messages, max_tokens=10, judge=judge)
-        assert (
-            held == token_units(model, 10, 10, judge=judge) == 10 + 10 * output_weight
-        )
-        with ledger.hold(model, held) as hold:
-            assert ledger.snapshot()["held_token_units"] == held
-        state = ledger.record(model, 10, 10, hold=hold, judge=judge)
-        assert (state["token_units"], state["held_token_units"]) == (held, 0)
-    # DeepSeek-V4-Flash is only a judge model: generation records refuse it.
-    old = "litellm_proxy/azure_ai/DeepSeek-V4-Flash-0731"
-    ledger = TokenUnitBudget(tmp_path / "old.json", 1000)
-    with pytest.raises(ValueError):
-        ledger.record(old, 10, 10)
-    assert ledger.record(old, 10, 10, judge=True)["token_units"] == 40
+def test_set_weights_overrides_the_environment(monkeypatch):
+    """set_weights wins in this process; None goes back to the variable."""
+    monkeypatch.setenv(WEIGHTS_ENV, '{"claude-haiku": [1, 5]}')
+    set_weights({"claude": (3, 15)})
+    assert token_units("anthropic/claude-haiku-5-5", 1, 1) == 18
+    set_weights(None)
+    assert token_units("anthropic/claude-haiku-5-5", 1, 1) == 6
+    with pytest.raises(ValueError, match="set_weights"):
+        set_weights({"claude": (1, 2, 3)})
 
 
-def test_task_quotas():
-    """The policy covers the launcher task names."""
-    assert DEFAULT_GENERATION_LIMIT == 264_000_000
-    for task in ("coding", "culture", " Coding "):
-        assert default_rl_limit(task) == 50_000_000
-    assert default_rl_limit("algorithmic") == 150_000_000
-    with pytest.raises(ValueError):
-        default_rl_limit("unknown")
-    for task in ("coding", "culture"):
-        assert default_generation_limit(task) == DEFAULT_GENERATION_LIMIT
-    assert default_generation_limit("algorithmic") == 176_000_000
-    assert default_generation_limit("clinical") == 293_000_000
-    with pytest.raises(ValueError):
-        default_generation_limit("unknown")
+def test_longest_matching_name_wins():
+    """A specific name beats a general one; equal names that disagree are refused."""
+    set_weights({"claude": (3, 15), "claude-haiku": (1, 5), "haiku-5": (2, 2)})
+    assert model_weights("anthropic/claude-sonnet-5-5") == (3, 15)
+    assert model_weights("anthropic/claude-haiku-5-5") == (1, 5)
+    set_weights({"claude-haiku": (1, 5), "haiku-5-5-x": (1, 5), "aude-haiku": (1, 5)})
+    assert model_weights("claude-haiku-5-5-x") == (1, 5)
+    set_weights({"claude-haiku": (1, 5), "laude-haiku-": (2, 2)})
+    with pytest.raises(ValueError, match="ambiguous"):
+        model_weights("claude-haiku-5")
 
 
 def test_quota_survives_restarts_and_records_inflight_calls(tmp_path):
@@ -313,7 +277,10 @@ for _ in range(10):
 """
     path = tmp_path / "usage.json"
     processes = [
-        subprocess.Popen([sys.executable, "-c", program, str(source), str(path)])
+        subprocess.Popen(
+            [sys.executable, "-c", program, str(source), str(path)],
+            env={**os.environ, WEIGHTS_ENV: '{"glm-5.3": [5.83, 18.33]}'},
+        )
         for _ in range(4)
     ]
     for process in processes:
@@ -447,7 +414,6 @@ def test_held_units_assume_long_prompts_and_full_completions():
     messages = [{"role": "user", "content": "x" * 101}]
     assert held_units(DEEPSEEK, messages, n=2, max_tokens=10) == 34 + 4 * 20
     assert held_units(DEEPSEEK, [], max_tokens=None) == 4 * 65_536
-    assert held_units(DEEPSEEK, [], max_tokens=None, judge=True) == 3 * 65_536
 
 
 def test_stale_holds_are_released(tmp_path, monkeypatch):

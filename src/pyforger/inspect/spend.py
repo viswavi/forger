@@ -28,7 +28,7 @@ class SpendTotal(BaseModel):
     """What one step (or a pipeline outside its steps) spent in one run.
 
     ``pipeline`` and ``step`` are None for LLM calls made outside them.
-    ``token_units`` counts only calls to models with fixed token-unit weights.
+    ``token_units`` counts only calls to models with token-unit weights.
     ``first`` and ``last`` are the ISO timestamps of its first and last call.
     """
 

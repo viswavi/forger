@@ -103,12 +103,12 @@ prompts and constants they read is new code and needs a new limited run. Sizes p
 - `@pipeline(max_cost_usd=20)` / `@pipeline(max_token_units=2e6)` cap one pipeline run; `FORGER_MAX_COST_USD` and
   `FORGER_MAX_TOKEN_UNITS` cap all spend in the process. At a cap the next request raises
   `pyforger.BudgetExceededError`; in-flight requests finish, so spend can pass a cap slightly.
-- Gateway models without LiteLLM pricing add $0: cap them in token units.
+- Models without provider or LiteLLM pricing add $0: give them token-unit weights and cap them in units.
 - Caps are separate from the shared quotas (`FORGER_TOKEN_UNIT_LIMIT`, Tinker's dollar ledger), which also apply.
 - Every model call is appended to the spend ledger (`$FORGER_SPEND_LEDGER`, default `$FORGER_CACHE/spend.jsonl`) as
   it happens, so killed runs keep their record. `pyforger.inspect.spend(since="2026-10-16")` totals it by run,
   pipeline, and step.
-- Reports show a `units` column for models with token-unit weights (see the Cost section of [AGENTS.md](../AGENTS.md)).
+- Reports show a `units` column only for models you gave token-unit weights (Cost in [AGENTS.md](../AGENTS.md)).
 
 ### Spend projection
 

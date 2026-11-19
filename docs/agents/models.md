@@ -70,7 +70,8 @@ Turn it off with `show_progress=False` or `FORGER_PROGRESS=0`.
 `.truncated` (how many hit it), `.model_id`, and `.raw`. `generate_batch` returns one per prompt.
 
 `result.usage["token_units"]` and `["cost_usd"]` are per call; `model.total_token_units`, `model.total_cost`, and
-`model.total_usage` are cumulative. Unknown model weights give `NaN` units (see [AGENTS.md](../AGENTS.md#cost)).
+`model.total_usage` are cumulative. A model without token-unit weights (the default) gives `NaN` units; see
+[AGENTS.md](../AGENTS.md#cost).
 
 ### `n` fan-out
 

@@ -1196,9 +1196,9 @@ def pipeline(
         max_cost_usd: Stop when this run has spent this many dollars: the next
             model request raises ``BudgetExceededError``. Requests already in
             flight finish, so spend can pass the cap by what they cost.
-        max_token_units: The same cap in token units (``pyforger.token_units``),
-            for models priced in units rather than dollars. Calls to models
-            without fixed weights add no units.
+        max_token_units: The same cap in token units, for models you gave
+            token-unit weights (``pyforger.token_units.set_weights``). Under
+            it, requests to a model without weights are refused.
         limit: Run on at most this many rows per step: every step's rows
             arguments are cut to their first ``limit`` rows, and
             ``acquire.sample_from_LLM`` / ``acquire.retrieve*`` cap their counts

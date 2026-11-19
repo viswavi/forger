@@ -1,8 +1,16 @@
-"""Fixed token-unit weights and a process-safe, persistent usage ledger."""
+"""Token-unit weights you choose, and a process-safe, persistent usage ledger.
+
+Forger always records dollars. Token units are an optional second measure: a
+weighted token count, e.g. a model's prices in units of the cheapest price.
+No model has weights until you give it some, with `set_weights` or the
+``FORGER_TOKEN_UNIT_WEIGHTS`` environment variable; until then a model's
+units are NaN and reports show dollars only.
+"""
 
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
 import math
 import os
@@ -10,24 +18,12 @@ import socket
 import tempfile
 import time
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
 
-# Quotas scaled by 1.47 when the unit changed (2026-11-17): the old unit was worth
-# $0.44/M (GLM-5.3 at 4/12.5), so they buy the same GLM-5.3 tokens: 180M -> 264M.
-DEFAULT_GENERATION_LIMIT = 264_000_000
-DEFAULT_JUDGE_MODEL = "litellm_proxy/azure_ai/DeepSeek-V4.1-Flash"
-DEFAULT_REASONING_EFFORT = "low"
-# Generation weights are the gateway's prices in units of DeepSeek-V4.1-Flash's
-# input price ($0.30/M): its output is $1.20/M, GLM-5.3's $1.75/M in and $5.50/M
-# out (cost headers on the generation key, 2026-11-17).
-_WEIGHTS = {"deepseek-v4.1-flash": (1, 4), "glm-5.3": (5.83, 18.33)}
-# The judge quota keeps its earlier units, so it buys the same judge tokens as
-# before: DeepSeek-V4.1-Flash 1/3, and the fallback judges at their old weights.
-_JUDGE_WEIGHTS = {
-    "deepseek-v4.1-flash": (1, 3),
-    "deepseek-v4-flash": (1, 3),
-    "glm-5.3": (4, 12.5),
-}
+WEIGHTS_ENV = "FORGER_TOKEN_UNIT_WEIGHTS"
+# Weights given with set_weights; None means "read WEIGHTS_ENV".
+_set_weights: dict[str, tuple[float, float]] | None = None
 # Completion tokens held for a request sent without max_tokens.
 _DEFAULT_HELD_COMPLETION = 65_536
 # Prompt characters per held token: below the 3-4 real tokenizers give.
@@ -46,22 +42,93 @@ class TokenUnitQuotaExceeded(RuntimeError):
     """No more calls may start under this token-unit quota."""
 
 
-def model_weights(model_id, judge=False):
-    """Return fixed input/output weights for a supported model or alias.
+def _parse_weights(table, source):
+    """``{"name": (input, output)}`` with lowercase names and float weights."""
+    if not isinstance(table, Mapping):
+        raise ValueError(f"{source} must map model names to [input, output] weights")
+    parsed = {}
+    for name, pair in table.items():
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(f"{source}: model names must be nonempty strings")
+        try:
+            if isinstance(pair, (str, bytes)) or isinstance(pair, Mapping):
+                raise TypeError
+            input_weight, output_weight = (float(w) for w in pair)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"{source}: {name!r} needs two weights, [input, output]"
+            ) from None
+        if not all(math.isfinite(w) and w >= 0 for w in (input_weight, output_weight)):
+            raise ValueError(f"{source}: {name!r} weights must be finite and >= 0")
+        parsed[name.strip().lower()] = (input_weight, output_weight)
+    return parsed
 
-    Generation models are DeepSeek-V4.1-Flash and GLM-5.3; ``judge=True`` uses
-    the judge quota's weights, which also accept DeepSeek-V4-Flash.
+
+def set_weights(weights):
+    """Give models token-unit weights, or ``None`` to go back to the environment.
+
+    ``weights`` maps part of a model id (any case) to its ``(input, output)``
+    units per token, e.g. ``{"claude-haiku": (1, 5), "claude-sonnet": (3, 15)}``.
+    A model id takes the weights of the longest name it contains. Models no
+    name matches have no units (NaN). This replaces ``FORGER_TOKEN_UNIT_WEIGHTS``
+    in this process only; set that variable (a JSON object of the same form)
+    for weights that other processes sharing a ledger also see.
+    """
+    global _set_weights
+    _set_weights = None if weights is None else _parse_weights(weights, "set_weights")
+
+
+@functools.lru_cache(maxsize=8)
+def _env_weights(raw):
+    try:
+        table = json.loads(raw)
+    except json.JSONDecodeError:
+        raise ValueError(
+            f"{WEIGHTS_ENV} must be a JSON object, e.g. " '{"claude-haiku": [1, 5]}'
+        ) from None
+    return _parse_weights(table, WEIGHTS_ENV)
+
+
+def weights():
+    """The weights in force: `set_weights`'s, else ``FORGER_TOKEN_UNIT_WEIGHTS``'s.
+
+    Empty unless you gave some.
+    """
+    if _set_weights is not None:
+        return dict(_set_weights)
+    raw = os.environ.get(WEIGHTS_ENV, "").strip()
+    return dict(_env_weights(raw)) if raw else {}
+
+
+def model_weights(model_id):
+    """Return the ``(input, output)`` weights for ``model_id``.
+
+    Raises ValueError when no weights name matches it, or when two names of the
+    same length match with different weights.
     """
     if not isinstance(model_id, str):
         raise ValueError("model_id must be a string")
-    table = _JUDGE_WEIGHTS if judge else _WEIGHTS
-    matches = [weights for name, weights in table.items() if name in model_id.lower()]
-    if len(matches) != 1:
+    lowered = model_id.lower()
+    matches = [(name, w) for name, w in weights().items() if name in lowered]
+    if not matches:
         raise ValueError(
-            "Token units require a DeepSeek-V4.1-Flash or GLM-5.3 model alias"
-            + (" (or, for the judge, DeepSeek-V4-Flash)" if judge else "")
+            f"No token-unit weights for {model_id!r}; give them with "
+            f"pyforger.token_units.set_weights or {WEIGHTS_ENV}"
         )
-    return matches[0]
+    longest = max(len(name) for name, _ in matches)
+    best = {w for name, w in matches if len(name) == longest}
+    if len(best) != 1:
+        raise ValueError(f"Token-unit weights for {model_id!r} are ambiguous")
+    return best.pop()
+
+
+def has_weights(model_id):
+    """Whether ``model_id`` has token-unit weights."""
+    try:
+        model_weights(model_id)
+    except ValueError:
+        return False
+    return True
 
 
 def _count(value):
@@ -70,9 +137,12 @@ def _count(value):
     return value
 
 
-def token_units(model_id, prompt_tokens, completion_tokens, judge=False):
-    """Weight all input tokens and output tokens, including reasoning once."""
-    input_weight, output_weight = model_weights(model_id, judge)
+def token_units(model_id, prompt_tokens, completion_tokens):
+    """Weight all input tokens and output tokens, including reasoning once.
+
+    Raises ValueError for a model without weights (see `set_weights`).
+    """
+    input_weight, output_weight = model_weights(model_id)
     return float(
         _count(prompt_tokens) * input_weight + _count(completion_tokens) * output_weight
     )
@@ -144,70 +214,7 @@ def _normalize_cost_metadata(state):
     return changed
 
 
-def validate_judge_model(model):
-    """Accept only aliases identifying DeepSeek-V4.1-Flash."""
-    if not isinstance(model, str) or "deepseek-v4.1-flash" not in model.lower():
-        raise ValueError("JUDGE_MODEL must contain DeepSeek-V4.1-Flash")
-    model_weights(model, judge=True)
-    return model
-
-
-def validate_reasoning_effort(effort):
-    """Validate the supported DeepSeek judge reasoning levels."""
-    if effort not in ("none", "low", "high"):
-        raise ValueError("JUDGE_REASONING_EFFORT must be none, low, or high")
-    return effort
-
-
-def default_generation_limit(task):
-    """Return the generation quota for a task name.
-
-    The algorithmic task recommends ~500 rows (800 at most) instead of ~1,250,
-    so its quota shrinks to match.
-    """
-    normalized = str(task).strip().lower()
-    if normalized in ("coding", "culture"):
-        return DEFAULT_GENERATION_LIMIT
-    if normalized == "algorithmic":
-        return 176_000_000
-    if normalized == "clinical":
-        # Mostly DeepSeek-V4-Flash: a 3-call example (question, reference answer,
-        # criteria) took ~8,500 units; GLM-5.3 at low effort ~244,000 (2026-11-11).
-        # 30M moved to the judge (2026-11-12): agents used ~120-160M of 230M.
-        # 200M x 1.47 for the new unit (2026-11-17).
-        return 293_000_000
-    raise ValueError("Unknown task for the generation token-unit quota")
-
-
-def default_judge_reasoning_effort(task):
-    """The judge's reasoning effort when JUDGE_REASONING_EFFORT is not set.
-
-    "none" for the clinical task: on its gold and weak answers it separated them
-    nearly as well as "low" (0.958 vs 0.475, against 0.992 vs 0.398) at about half
-    the units per call (2026-11-12 run); "low" elsewhere.
-    """
-    if str(task).strip().lower() == "clinical":
-        return "none"
-    return DEFAULT_REASONING_EFFORT
-
-
-def default_rl_limit(task):
-    """Return the fixed RL quota for a task name."""
-    normalized = str(task).strip().lower()
-    if normalized in ("coding", "culture"):
-        return 50_000_000
-    if normalized == "algorithmic":
-        # Responses run ~15K tokens, so judging them costs more per rollout.
-        return 150_000_000
-    if normalized == "clinical":
-        # Every answer is judged per criterion, and validation evaluations use this
-        # quota too. In the first runs (2026-11-12) one judge call cost ~3,200 units
-        # at low effort with answer_only, so 80 steps at ~3.7 criteria needed ~240M.
-        return 300_000_000
-    raise ValueError("Unknown task for RL token-unit quota")
-
-
-def held_units(model_id, messages, n=1, max_tokens=None, judge=False):
+def held_units(model_id, messages, n=1, max_tokens=None):
     """Worst-case units of one request: its prompt and ``n`` full completions.
 
     The prompt counts 1 token per 3 characters (more than real tokenizers
@@ -218,9 +225,7 @@ def held_units(model_id, messages, n=1, max_tokens=None, judge=False):
         for m in messages
     )
     completion = max_tokens or _DEFAULT_HELD_COMPLETION
-    return token_units(
-        model_id, -(-chars // _HELD_CHARS_PER_TOKEN), n * completion, judge
-    )
+    return token_units(model_id, -(-chars // _HELD_CHARS_PER_TOKEN), n * completion)
 
 
 def billed_on_error(exc):
@@ -507,14 +512,9 @@ class TokenUnitBudget:
         *,
         cost_usd=None,
         hold=None,
-        judge=False,
     ):
-        """Charge tokens and available dollars, replacing the request's ``hold``.
-
-        ``judge=True`` prices with the judge quota's weights, as ``held_units`` does
-        for the hold: DeepSeek-V4.1-Flash costs 1/3 there and 1/4 on generation.
-        """
-        units = token_units(model_id, prompt_tokens, completion_tokens, judge=judge)
+        """Charge tokens and available dollars, replacing the request's ``hold``."""
+        units = token_units(model_id, prompt_tokens, completion_tokens)
         cost = _valid_cost(cost_usd)
         with self._locked():
             state = self._read()

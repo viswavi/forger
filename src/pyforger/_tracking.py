@@ -1729,6 +1729,18 @@ def _fmt_units(units: float) -> str:
     return f"{units:,.0f} token units"
 
 
+def token_unit_cap_in_force() -> bool:
+    """Whether a token-unit cap applies here.
+
+    That is ``FORGER_MAX_TOKEN_UNITS`` or the running pipeline's
+    ``max_token_units``. Models need token-unit weights under one.
+    """
+    if _env_cap("FORGER_MAX_TOKEN_UNITS") is not None:
+        return True
+    running = _running_for_context()
+    return running is not None and running.rec.max_token_units is not None
+
+
 def check_budget() -> None:
     """Raise ``BudgetExceededError`` when a spending cap is reached.
 

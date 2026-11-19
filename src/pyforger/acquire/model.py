@@ -818,7 +818,7 @@ def _zero_usage() -> dict[str, int]:
 
 
 def _units_or_nan(model_id: str, prompt_tokens: int, completion_tokens: int) -> float:
-    """Token units for this usage; NaN for a model without fixed weights."""
+    """Token units for this usage; NaN for a model without token-unit weights."""
     try:
         return token_units(model_id, prompt_tokens, completion_tokens)
     except ValueError:
@@ -1253,7 +1253,7 @@ def _merge_responses(
     `hits` maps slot -> cached entry; `fresh` pairs each successful response
     with the slots it was asked for, e.g. ([2, 3], response with 2 choices).
     Usage, cost, and token units sum the fresh responses only: a cache hit
-    costs nothing. Token units are NaN for a model without fixed weights, or
+    costs nothing. Token units are NaN for a model without token-unit weights, or
     when a response lacks usage. A short response fills the first of its slots
     (the rest are refilled or stay missing); choices beyond the slots asked
     come after the slotted ones, so the completion-count check still sees the
@@ -1714,7 +1714,7 @@ class Model:
     def _calculate_token_units(
         self, prompt_tokens: int, completion_tokens: int
     ) -> float:
-        """Token units for this model's usage; NaN without fixed weights."""
+        """Token units for this model's usage; NaN without token-unit weights."""
         return _units_or_nan(self._model_id, prompt_tokens, completion_tokens)
 
     @property
@@ -1796,8 +1796,10 @@ class Model:
         `max_concurrency` slot), so requests queued behind a cap never start.
         """
         _tracking.check_budget()
+        if self._token_budget is not None or _tracking.token_unit_cap_in_force():
+            # A model without weights could not be charged: refuse, not overspend.
+            token_units(self._model_id, 0, 0)
         if self._token_budget is not None:
-            token_units(self._model_id, 0, 0)  # unweighted models fail closed
             self._token_budget.check()
         projection = _PROJECTION.get()
         if projection is not None:
@@ -2039,8 +2041,9 @@ class Model:
                 used up. Checked before each request, like the caps.
             ValueError: If a prompt whose requests all succeeded gets other
                 than n completions. Usage is recorded in history before
-                raising. With the token-unit quota, also a model without fixed
-                token-unit weights, or a response without valid usage.
+                raising. With a token-unit quota or cap, also a model
+                without token-unit weights; with a quota, a response without
+                valid usage.
         """
         if not prompts:
             return []

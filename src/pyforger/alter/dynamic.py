@@ -164,12 +164,14 @@ class _AgentUsage:
     def check(self) -> None:
         """Raise at a spending cap or when the token-unit quota is used up.
 
-        With a quota, a model without fixed token-unit weights is refused
-        (ValueError), as ``Model`` refuses it: its usage could not be charged.
+        With a token-unit quota or cap, a model without token-unit weights is
+        refused (ValueError), as ``Model`` refuses it: its usage could not be
+        charged.
         """
         _tracking.check_budget()
-        if self.budget is not None:
+        if self.budget is not None or _tracking.token_unit_cap_in_force():
             token_units(self.model_id or "", 0, 0)
+        if self.budget is not None:
             self.budget.check()
 
     def record(self, conversation: Any = None) -> None:

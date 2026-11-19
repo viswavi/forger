@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import pytest
 
+from pyforger import token_units
 from pyforger.acquire import model as _model
 from pyforger.op import clear_trace
 
@@ -26,6 +27,21 @@ def _isolate_op_cache(tmp_path, monkeypatch):
     monkeypatch.setenv("FORGER_FULL_RUN", "1")
     clear_trace()
     yield
+
+
+# Forger ships without token-unit weights. Tests of unit accounting use these:
+# DeepSeek-V4.1-Flash and GLM-5.3 at their 2026-11 gateway prices in units of
+# DeepSeek's input price. Tests of the default call set_weights({}).
+TEST_WEIGHTS = {"deepseek-v4.1-flash": (1, 4), "glm-5.3": (5.83, 18.33)}
+
+
+@pytest.fixture(autouse=True)
+def _test_token_unit_weights(monkeypatch):
+    """Give every test TEST_WEIGHTS, whatever FORGER_TOKEN_UNIT_WEIGHTS holds."""
+    monkeypatch.delenv(token_units.WEIGHTS_ENV, raising=False)
+    token_units.set_weights(TEST_WEIGHTS)
+    yield
+    token_units.set_weights(None)
 
 
 @pytest.fixture(autouse=True)

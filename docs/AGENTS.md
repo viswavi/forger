@@ -98,20 +98,31 @@ result. Its results are placeholders, not from a run; write only comparisons you
 
 ### Cost
 
-Token-unit quotas use fixed weights: DeepSeek-V4.1-Flash costs 1 unit per input token and 4 per output token;
-GLM-5.3 costs 5.83 and 18.33. The judge quota has its own weights: DeepSeek-V4.1-Flash costs 1 and 3 there.
+Forger records the dollar cost of every call (provider pricing, else LiteLLM's price table). Cap dollars with
+`@pipeline(max_cost_usd=...)` or `FORGER_MAX_COST_USD`.
 
+Token units are an optional second measure, for budgets set in tokens rather than dollars. No model has weights by
+default; give them per model as `(input, output)` units per token, matched by part of the model id:
+
+```python
+from pyforger import token_units
+token_units.set_weights({"claude-haiku": (1, 5), "claude-sonnet": (3, 15)})
+```
+
+or `FORGER_TOKEN_UNIT_WEIGHTS='{"claude-haiku": [1, 5]}'` for every process (the longest matching name wins).
+
+- Models without weights report `NaN` units, and reports show dollars only. Local GPU inference is free and exempt.
 - Cached input tokens count at full weight. Completion tokens already include reasoning; do not add it again.
-- Other models report `NaN` units, and budgeted calls to them stop. Local GPU inference is free and exempt.
-- Check spend with `model.total_token_units`. Cached `@op` results cost nothing.
+- Check spend with `model.total_cost` and `model.total_token_units`. Cached `@op` results cost nothing.
+- Cap a run in units with `@pipeline(max_token_units=...)` or `FORGER_MAX_TOKEN_UNITS`. Under a unit cap or quota,
+  a request to a model without weights raises `ValueError` before it is sent, since its spend could not be counted.
 - `FORGER_TOKEN_USAGE_FILE` (a JSON ledger) and `FORGER_TOKEN_UNIT_LIMIT` share one quota across models and
   processes; `reset_history()` never resets it. Each request holds its worst case (prompt plus `max_tokens` per
   completion, 65,536 without it) until its response replaces it with actual usage; new calls stop once used plus
   held units reach the quota. A request that times out or loses its connection stays charged at its hold, since
-  the gateway may still bill it (`unreturned_calls`). A process that dies or is interrupted mid-request releases
+  the provider may still bill it (`unreturned_calls`). A process that dies or is interrupted mid-request releases
   its holds (`released_calls`): the next ledger read frees them, or after two hours when its death cannot be seen.
 - `TinkerModel` is charged in dollars to a separate ledger (see [`acquire.md`](agents/acquire.md)).
-- Cap a run in units with `@pipeline(max_token_units=...)` or `FORGER_MAX_TOKEN_UNITS`.
 - Every uncached batch of 40+ completions likely to cost $1 or more logs one `Cost estimate` line once 5% of it has
   finished, e.g. "the first 102 of 2,040 completions cost $0.21, so all 2,040 will likely cost about $4.20". A step
   also logs `Spend so far` at $1, $2, $5, $10, ... (see "Live spend" in `pipelines.md`).
