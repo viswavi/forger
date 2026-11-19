@@ -63,7 +63,7 @@ from pyforger.acquire import Model
 
 @step
 def write_questions(model: Model, topic: str) -> list[dict]:
-    """Fifty questions about one topic, each with a short answer, without near-duplicates."""
+    """Fifty questions on one topic, with short answers and no near-duplicates."""
     rows = acquire.sample_from_LLM(
         f"Write one hard trivia question about {topic}, and its short answer.",
         model,
@@ -75,13 +75,13 @@ def write_questions(model: Model, topic: str) -> list[dict]:
 
 @step
 def keep_good(rows: list[dict], judge: Model) -> list[dict]:
-    """Keep questions the judge rates 4 or 5 of 5 for a correct answer and one clear reading."""
+    """Keep questions the judge rates 4+ of 5: a correct answer, one clear reading."""
     return filter.by_llm_score(
         rows,
         model=judge,
         input_field="question",
         output_field="answer",
-        criteria="the answer is correct, and the question has exactly one reasonable answer",
+        criteria="the answer is correct, and the question has one reasonable answer",
         score_threshold=4,
         min_yield=0.3,
     )
@@ -89,6 +89,7 @@ def keep_good(rows: list[dict], judge: Model) -> list[dict]:
 
 @pipeline
 def main(model: Model, judge: Model) -> list[dict]:
+    """Write questions, then judge them."""
     return keep_good(write_questions(model, "astronomy"), judge)
 
 
