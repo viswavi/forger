@@ -1,0 +1,996 @@
+"""Difficulty filters that ask models to solve each row and grade the answers.
+
+``by_comparative_difficulty`` keeps rows a strong model solves and a weak model
+does not. ``by_pass_at_k`` samples one model ``k`` times and keeps rows whose
+pass rate falls within ``[min_rate, max_rate]``.
+
+No answer format is imposed: the prompt is the task itself (text, or a list
+of chat messages) unless ``prompt_template`` is given, and each completion is
+graded on what ``extract_answer`` takes from it. The default,
+``answer_segment``, is the text after a closed ``<think>...</think>`` block
+with surrounding whitespace stripped; pass another function, e.g. one reading
+an ``ANSWER:`` line, to replace it.
+
+Grades are stored as ``{group: [True | False | None, ...]}``, one list per
+model (``"model"``, or ``"weak"`` and ``"strong"``) with one grade per sample,
+where ``None`` is a grade that could not be made (an empty answer, a
+``<think>`` block that never closes, ``extract_answer`` returning ``None``, or a
+verifier returning ``None``) and is excluded, not failed. A truncated
+completion (an opening ``<think>`` and no ``</think>``, or an empty answer
+that stopped at ``max_tokens``, e.g. a model returning its reasoning
+separately that spent every token on it) is the exception when
+``truncated="fail"``, the default for ``by_pass_at_k``: it grades ``False``
+without being extracted or verified.
+Completions are
+stored in the same shape. Predictions and grades are cached in separate inner
+ops, so changing only the rate bounds makes no model calls, and changing only
+the metric regrades the cached predictions.
+"""
+from __future__ import annotations
+
+import contextvars
+import logging
+import math
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from typing import Literal, Union
+
+from pyforger import _tracking
+from pyforger.acquire._model_utils import _catch_kwargs, _chunk_size, _RequestFailures
+from pyforger.acquire.model import Model, Prompt, _cache_kwargs, room_for
+from pyforger.alter.generate import PromptTemplate, _normalized_equal, _resolve_prompt
+from pyforger.filter._rouge import rouge_l
+from pyforger.op import op
+from pyforger.utils import get_field, get_formatted_logger
+
+# A verifier gets the prediction (what extract_answer takes from the
+# completion) and the full row, e.g. to run tests against generated code.
+# None means "could not grade" (excluded, not failed). by_pass_at_k also takes a
+# score in [0, 1], e.g. a partial-credit grader.
+Verifier = Callable[[str, dict], Union[bool, float, None]]
+Metric = Union[Literal["exact_match", "rouge_l"], Verifier]
+
+
+def _logger() -> logging.Logger:
+    # Looked up per call: a module-level logger read inside an @op body would
+    # trigger @op's "reads globals" warning.
+    return get_formatted_logger("ModelDifficulty")
+
+
+def answer_segment(text: str) -> str | None:
+    r"""Default ``extract_answer``: the stripped text after a ``<think>`` block.
+
+    E.g. ``"<think>try 3</think>\n 4 \n"`` gives ``"4"``. None when the block
+    never closes (``"<think>try 3"``: the model ran out of tokens) or nothing
+    follows it.
+    """
+    if "</think>" in text:
+        text = text.rsplit("</think>", 1)[1]
+    elif "<think>" in text:
+        return None
+    return text.strip() or None
+
+
+def _is_truncated(completion: str | None) -> bool:
+    """True for ``"<think>try 3"``: thinking that never closes (out of tokens)."""
+    return (
+        completion is not None
+        and "<think>" in completion
+        and "</think>" not in completion
+    )
+
+
+# Per sample: True when its answer is empty and it stopped at max_tokens.
+Stopped = list[list[bool]]
+
+
+def _cut_off(
+    completions: list[list[str | None]], stopped: Stopped | None
+) -> list[list[bool]]:
+    """Per sample: truncated, by an unclosed ``<think>`` or ``stopped``.
+
+    E.g. a model that returns its reasoning separately and spends max_tokens
+    on it gives an empty answer with finish_reason "length".
+    """
+    return [
+        [_is_truncated(c) or bool(stopped and stopped[i][j]) for j, c in enumerate(row)]
+        for i, row in enumerate(completions)
+    ]
+
+
+def _truncation_note(
+    completions: list[list[str | None]],
+    truncated: Literal["fail", "exclude"],
+    stopped: Stopped | None = None,
+) -> str | None:
+    """Say how many samples were cut off, e.g. for the step report.
+
+    E.g. "34 of 47 samples truncated (stopped at max_tokens before any
+    answer), graded failed; raise max_tokens if that is too many", or with
+    both kinds "(3 with <think> never closed, 2 stopped at ...)".
+    """
+    total = sum(len(row) for row in completions)
+    unclosed = sum(_is_truncated(c) for row in completions for c in row)
+    empty = sum(
+        cut and not _is_truncated(c)
+        for row, cuts in zip(completions, _cut_off(completions, stopped))
+        for c, cut in zip(row, cuts)
+    )
+    if not unclosed + empty:
+        return None
+    unclosed_why, empty_why = (
+        "<think> never closed",
+        "stopped at max_tokens before any answer",
+    )
+    if unclosed and empty:
+        why = f"{unclosed} with {unclosed_why}, {empty} {empty_why}"
+    else:
+        why = unclosed_why if unclosed else empty_why
+    graded = "graded failed" if truncated == "fail" else "excluded"
+    return (
+        f"{unclosed + empty} of {total} samples truncated ({why}), {graded}; "
+        "raise max_tokens if that is too many"
+    )
+
+
+def _unscored_note(
+    rates: list[float | None],
+    grades: list[list[bool | float | None]],
+    cuts: list[list[bool]],
+) -> str | None:
+    """Split the rows without a pass rate ("unparsed" in the histogram) by cause.
+
+    E.g. "30 of 47 rows have no pass rate (unparsed in the histogram): 28
+    lost samples to truncation (excluded by truncated="exclude"), 2 had
+    answers that did not grade (empty, extract_answer gave None, or the
+    verifier gave None)". A truncated sample graded failed is not ``None``, so
+    by default every such row is the second kind.
+    """
+    unscored = [i for i, rate in enumerate(rates) if rate is None]
+    if not unscored:
+        return None
+    cut_rows = sum(
+        any(g is None and cut for g, cut in zip(grades[i], cuts[i])) for i in unscored
+    )
+    parts = []
+    if cut_rows:
+        parts.append(
+            f"{cut_rows} lost samples to truncation (excluded by "
+            'truncated="exclude")'
+        )
+    if len(unscored) - cut_rows:
+        parts.append(
+            f"{len(unscored) - cut_rows} had answers that did not grade (empty, "
+            "extract_answer gave None, or the verifier gave None)"
+        )
+    return (
+        f"{len(unscored)} of {len(rates)} rows have no pass rate (unparsed in "
+        f"the histogram): {', '.join(parts)}"
+    )
+
+
+@op(name="filter.by_comparative_difficulty")
+def by_comparative_difficulty(
+    items: list[dict],
+    *,
+    weak_model: Model,
+    strong_model: Model,
+    input_field: str,
+    ground_truth_field: str | None = None,
+    metric: Metric = "exact_match",
+    rouge_l_threshold: float = 0.7,
+    extract_answer: Callable[[str], str | None] = answer_segment,
+    prompt_template: PromptTemplate | None = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    batch_size: int | None = None,
+    outcomes_field: str | None = None,
+    completions_field: str | None = None,
+    verifier_workers: int = 8,
+    truncated: Literal["fail", "exclude"] = "exclude",
+) -> list[dict]:
+    r"""Keep rows the strong model answers correctly and the weak model does not.
+
+    Each model makes one prediction per row. A row whose weak or strong grade is
+    ``None`` is dropped: e.g. by default a weak model that ran out of tokens has
+    not shown the row is hard (``truncated="fail"`` counts it as wrong).
+
+    The prompt is the task text unless ``prompt_template`` is given, and by
+    default the whole answer segment (the completion after its closed
+    ``<think>`` block, stripped) is compared. So for ``"exact_match"`` the task
+    or ``prompt_template`` should ask for a bare answer, or ``extract_answer``
+    should pick it out.
+
+    In a ``@step`` report the per-row score is ``strong - weak``: ``1`` (kept),
+    ``0`` (both right or both wrong), ``-1`` (only the weak model right), or
+    ``None`` when either grade is missing. Many ``-1`` rows suggest a wrong
+    ground truth or a metric that is too strict.
+
+    Args:
+        items: Input rows.
+        weak_model: Model expected to fail on hard rows.
+        strong_model: Model expected to succeed on rows worth keeping.
+        input_field: Key holding the task, the default prompt: text, or a list
+            of chat messages (``{"role", "content"}`` dicts) sent as the
+            conversation. Any other value raises ``ValueError``.
+        ground_truth_field: Key holding the reference answer. Required for
+            ``"exact_match"`` and ``"rouge_l"``; a verifier reads the row
+            itself, so it may be left out.
+        metric: ``"exact_match"`` (normalized prediction equals the
+            reference), ``"rouge_l"`` (ROUGE-L F1 of the prediction against the
+            reference >= ``rouge_l_threshold``), or a verifier
+            ``(prediction, row) -> bool | None``, e.g.
+            ``filter.program_verifier("tests")``, which runs generated programs
+            on the row's tests. Verifiers run ``verifier_workers`` at a time,
+            so one must be safe to call from several threads.
+        rouge_l_threshold: Pass threshold for ``metric="rouge_l"``.
+        extract_answer: Takes the prediction from each raw completion;
+            returning ``None`` grades ``None``. The default,
+            ``answer_segment``, returns the text after a closed ``<think>``
+            block, stripped, and ``None`` when the block never closes or
+            nothing follows it. A replacement sees the thinking too; e.g.
+            ``lambda t: t.rsplit("ANSWER:", 1)[-1].strip()`` keeps what
+            follows the last ``ANSWER:``.
+        prompt_template: Format string or ``(row) -> Prompt`` callable replacing
+            the default prompt (the task text), e.g. to ask for a final
+            ``ANSWER: ...`` line.
+        temperature: Sampling temperature (each model's default when None).
+        max_tokens: Max tokens per completion (each model's default when None).
+        batch_size: Prompts per ``model.generate_batch()`` call for a model
+            that runs one call at a time (``LocalModel``); None (default) sends
+            all of them in one call, as a ``Model`` always does (up to its
+            concurrency cap).
+        outcomes_field: When set, kept rows carry
+            ``{"weak": [bool], "strong": [bool]}`` under this key, replacing any
+            value already there.
+        completions_field: When set, kept rows carry each model's raw
+            completion as ``{"weak": [str | None], "strong": [str | None]}``
+            under this key (``None`` for an empty completion).
+        verifier_workers: Verifier calls run at a time when ``metric`` is a
+            verifier; 1 runs them one by one.
+        truncated: What a completion cut off at ``max_tokens`` (its
+            ``<think>`` block never closes, or its answer is empty and it
+            stopped at ``max_tokens``) grades: ``"exclude"`` (default)
+            grades it ``None``, so the row is dropped; ``"fail"`` grades it
+            ``False`` without calling ``extract_answer`` or the verifier.
+
+    Returns:
+        The kept rows, in input order.
+    """
+    _check_common(
+        metric,
+        rouge_l_threshold,
+        batch_size,
+        ground_truth_field,
+        outcomes_field,
+        completions_field,
+        verifier_workers,
+        truncated,
+    )
+    prompts = _prompts(
+        items, input_field, prompt_template, "filter.by_comparative_difficulty"
+    )
+    grades: dict[str, list[list[bool | float | None]]] = {}
+    completions: dict[str, list[list[str | None]]] = {}
+    stopped: dict[str, Stopped] = {}
+    for group, model in (("weak", weak_model), ("strong", strong_model)):
+        with room_for(model, weak_model, strong_model):
+            completions[group], stopped[group] = _samples(
+                prompts,
+                model=model,
+                n=1,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                batch_size=batch_size,
+            )
+        grades[group] = _grades(
+            items,
+            completions[group],
+            ground_truth_field=ground_truth_field,
+            metric=metric,
+            rouge_l_threshold=rouge_l_threshold,
+            extract_answer=extract_answer,
+            verifier_workers=verifier_workers,
+            truncated=truncated,
+            stopped=stopped[group],
+        )
+
+    kept: list[dict] = []
+    gaps: list[int | None] = []
+    both_right = 0
+    for i, (item, weak_row, strong_row) in enumerate(
+        zip(items, grades["weak"], grades["strong"])
+    ):
+        weak, strong = weak_row[0], strong_row[0]
+        if any(g is not None and not isinstance(g, bool) for g in (weak, strong)):
+            raise TypeError(
+                "by_comparative_difficulty needs a pass/fail metric; a scored "
+                "metric works with by_pass_at_k"
+            )
+        if weak is None or strong is None:
+            gaps.append(None)
+            continue
+        gaps.append(int(strong) - int(weak))
+        both_right += bool(weak and strong)
+        if strong and not weak:
+            kept.append(
+                _annotate(
+                    item,
+                    outcomes_field,
+                    {"weak": weak_row, "strong": strong_row},
+                    completions_field,
+                    {g: completions[g][i] for g in ("weak", "strong")},
+                )
+            )
+    # "between 1 and 1" rather than ">= 1": the report then marks each value
+    # kept or not, without what-if columns for thresholds this filter lacks.
+    notes = [
+        f"{group}: {note}"
+        for group in ("weak", "strong")
+        if (note := _truncation_note(completions[group], truncated, stopped[group]))
+    ]
+    _tracking.record_scores(
+        "strong - weak",
+        gaps,
+        keep="between",
+        lower=1,
+        upper=1,
+        note="; ".join(notes) or None,
+    )
+    _logger().info(
+        "by_comparative_difficulty: kept %d of %d rows (%d both right, %d ungraded)",
+        len(kept),
+        len(items),
+        both_right,
+        gaps.count(None),
+    )
+    return kept
+
+
+@op(name="filter.by_pass_at_k", report_arg="histogram")
+def by_pass_at_k(
+    items: list[dict],
+    *,
+    model: Model,
+    input_field: str,
+    ground_truth_field: str | None = None,
+    k: int = 4,
+    min_rate: float = 0.1,
+    max_rate: float = 0.9,
+    min_valid: int | None = None,
+    metric: Metric = "exact_match",
+    rouge_l_threshold: float = 0.7,
+    extract_answer: Callable[[str], str | None] = answer_segment,
+    prompt_template: PromptTemplate | None = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    batch_size: int | None = None,
+    outcomes_field: str | None = None,
+    completions_field: str | None = None,
+    verifier_workers: int = 8,
+    truncated: Literal["fail", "exclude"] = "fail",
+    histogram: bool = False,
+) -> list[dict]:
+    """Keep rows whose pass rate over ``k`` samples is within the bounds.
+
+    Each prompt is sent once with ``n=k``. The pass rate is the mean of the
+    valid grades (``True`` counts 1, ``False`` 0; a verifier may also return a
+    score in [0, 1], e.g. a partial-credit grader, making the rate its mean
+    score), and a row is kept when ``min_rate <= rate <= max_rate``. All
+    ``k`` grades must be valid unless ``min_valid`` allows exclusions, and a
+    row with no valid grade never passes.
+    E.g. with ``k=4``, grades ``[True, False, None, False]`` are dropped by
+    default, and kept with ``min_valid=3`` (rate 1/3).
+
+    A sample cut off at ``max_tokens`` grades ``False`` by default: a task the
+    model thinks itself to death on is hard, not ungradable. That is a
+    ``<think>`` block that never closes, or an empty answer that stopped at
+    ``max_tokens`` (a model returning its reasoning separately that spent
+    every token on it). This changed: such samples used to grade ``None``
+    (excluded), which ``truncated="exclude"`` restores.
+
+    In a ``@step`` report the per-row score is the pass rate, or ``None`` when
+    too few grades are valid; ``histogram=True`` prints the same histogram
+    outside a step. Lines under it count the truncated samples, split the
+    rows with no pass rate ("unparsed") into those that lost samples to
+    truncation and those whose answers did not grade, and count the rows
+    whose samples all got the same grade (all 0, all 1, or one partial score),
+    which give GRPO-style RL no gradient, e.g. "31 of 120 rows gave every
+    sample the same grade (22 all 0, 9 all 1)". The bounds can keep such
+    rows: under a partial-credit grader, a row whose samples all score 0.6 has
+    rate 0.6. A further line counts them among the kept rows, e.g. "of the 220
+    kept rows, 61 gave every sample the same grade (52 all 0.6, 9 all 0.3)",
+    and a warning is logged when they are at least 20% of the kept rows (and
+    at least 5 rows). Under a partial-credit grader another line histograms
+    every sample's grade before filtering, with the highest and most common
+    grade, since a rate is a mean and hides where samples land, e.g. "sample
+    grades (640, before filtering): 0 22% | ... | (0.4, 0.6] 61% | ... | 1 0%;
+    highest 0.64, most common 0.6 (36%)".
+
+    The prompt and answer extraction work as in ``by_comparative_difficulty``:
+    by default the whole answer segment is compared.
+
+    For STaR-style targets, ``completions_field`` keeps the sampled
+    completions, aligned with the grades in ``outcomes_field``, e.g.
+    ``[c for c, ok in zip(row["samples"]["model"], row["grades"]["model"])
+    if ok]`` are a kept row's passing samples.
+
+    Args:
+        items: Input rows.
+        model: Model to sample from.
+        input_field: Key holding the task, the default prompt: text or chat
+            messages; see ``by_comparative_difficulty``.
+        ground_truth_field: Key holding the reference answer; may be left out
+            when ``metric`` is a verifier.
+        k: Samples per row.
+        min_rate: Lowest pass rate kept (inclusive); raise it to drop rows the
+            model cannot solve.
+        max_rate: Highest pass rate kept (inclusive); lower it to drop rows the
+            model always solves.
+        min_valid: Fewest valid grades a row needs, at most ``k``. None
+            requires all ``k``.
+        metric: ``"exact_match"``, ``"rouge_l"``, or a verifier
+            ``(prediction, row) -> bool | None`` such as
+            ``filter.program_verifier("tests")``; see
+            ``by_comparative_difficulty``.
+        rouge_l_threshold: Pass threshold for ``metric="rouge_l"``.
+        extract_answer: Takes the prediction from each raw completion
+            (default ``answer_segment``); see ``by_comparative_difficulty``.
+        prompt_template: Format string or ``(row) -> Prompt`` callable replacing
+            the default prompt (the task text).
+        temperature: Sampling temperature; must be > 0 when ``k > 1``. None
+            (default) uses the model's own default (1.0 for ``Model``, Qwen3's
+            0.6 for ``TinkerModel``, which matches the evaluator).
+        max_tokens: Max tokens per completion (the model's default when None).
+        batch_size: Prompts per ``model.generate_batch()`` call for a model
+            that runs one call at a time (``LocalModel``); None (default) sends
+            all of them in one call, as a ``Model`` always does (up to its
+            concurrency cap).
+        outcomes_field: When set, kept rows carry
+            ``{"model": [bool | float | None] * k}`` under this key, replacing
+            any value already there, so a later filter can re-select them
+            without new model calls.
+        completions_field: When set, kept rows carry the ``k`` raw completions
+            as ``{"model": [str | None] * k}`` under this key, in the same
+            order as the grades (``None`` for an empty completion).
+        verifier_workers: Verifier calls run at a time when ``metric`` is a
+            verifier; 1 runs them one by one.
+        truncated: What a sample cut off at ``max_tokens`` (its ``<think>``
+            block never closes, or its answer is empty and it stopped at
+            ``max_tokens``) grades: ``"fail"`` (default) grades it ``False``
+            without calling ``extract_answer`` or the verifier; ``"exclude"``
+            grades it ``None``, like an empty answer.
+        histogram: Print the pass-rate histogram when the filter returns, on a
+            cache hit too. Not part of the cache key.
+
+    Returns:
+        The kept rows, in input order.
+    """
+    _check_common(
+        metric,
+        rouge_l_threshold,
+        batch_size,
+        ground_truth_field,
+        outcomes_field,
+        completions_field,
+        verifier_workers,
+        truncated,
+    )
+    if k < 1:
+        raise ValueError("k must be at least 1")
+    for name, bound in (("min_rate", min_rate), ("max_rate", max_rate)):
+        if not (math.isfinite(bound) and 0.0 <= bound <= 1.0):
+            raise ValueError(f"{name} must be in [0, 1], got {bound}")
+    if min_rate > max_rate:
+        raise ValueError("min_rate must not exceed max_rate")
+    if min_valid is not None and not (1 <= min_valid <= k):
+        # A row has only k grades, so min_valid > k would keep nothing.
+        raise ValueError(f"min_valid must be between 1 and k ({k}), got {min_valid}")
+    # None samples at the model's default; duck-typed models may not have one.
+    effective = (
+        temperature if temperature is not None else getattr(model, "_temperature", None)
+    )
+    if k > 1 and effective is not None and not effective > 0.0:
+        raise ValueError(
+            "temperature must be > 0.0 when k > 1; identical samples make the "
+            "pass rate 0 or 1"
+        )
+
+    prompts = _prompts(items, input_field, prompt_template, "filter.by_pass_at_k")
+    completions, stopped = _samples(
+        prompts,
+        model=model,
+        n=k,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        batch_size=batch_size,
+    )
+    grades = _grades(
+        items,
+        completions,
+        ground_truth_field=ground_truth_field,
+        metric=metric,
+        rouge_l_threshold=rouge_l_threshold,
+        extract_answer=extract_answer,
+        verifier_workers=verifier_workers,
+        truncated=truncated,
+        stopped=stopped,
+    )
+
+    kept: list[dict] = []
+    kept_grades: list[list[bool | float | None]] = []
+    rates: list[float | None] = []
+    for item, row_grades, row_completions in zip(items, grades, completions):
+        rate = _pass_rate(row_grades, min_valid)
+        rates.append(rate)
+        if rate is not None and min_rate <= rate <= max_rate:
+            kept_grades.append(row_grades)
+            kept.append(
+                _annotate(
+                    item,
+                    outcomes_field,
+                    {"model": row_grades},
+                    completions_field,
+                    {"model": row_completions},
+                )
+            )
+    kept_note, kept_warning = _kept_spread(kept_grades, k)
+    if kept_warning:
+        _logger().warning(kept_warning)
+        _tracking.add_op_warning(kept_warning, "kept_same_grade")
+    notes = [
+        _truncation_note(completions, truncated, stopped),
+        _unscored_note(rates, grades, _cut_off(completions, stopped)),
+        _spread_note(grades),
+        _grade_note(grades),
+        kept_note,
+    ]
+    _tracking.record_scores(
+        "pass rate",
+        rates,
+        keep="between",
+        lower=min_rate,
+        upper=max_rate,
+        note="\n".join(n for n in notes if n) or None,
+    )
+    return kept
+
+
+def _grade_note(grades: list[list[bool | float | None]]) -> str | None:
+    """Histogram of every sample's grade before filtering, for partial credit.
+
+    A row's rate is a mean, so it hides where single samples land: rates of
+    0.45 can be samples at 0, 0.6, 0.6, 0.6, with none above 0.6. E.g.
+    "sample grades (640, before filtering): 0 22% | (0, 0.2] 6% | (0.2, 0.4] 4%
+    | (0.4, 0.6] 61% | (0.6, 0.8] 7% | (0.8, 1) 0% | 1 0%; highest 0.64, most
+    common 0.6 (36%)". None when every grade is pass/fail: the rate histogram
+    then says the same.
+    """
+    values = [float(g) for row in grades for g in row if g is not None]
+    if not values or all(v in (0.0, 1.0) for v in values):
+        return None
+    eps = 1e-9
+    bins = [
+        ("0", lambda v: v <= eps),
+        ("(0, 0.2]", lambda v: eps < v <= 0.2 + eps),
+        ("(0.2, 0.4]", lambda v: 0.2 + eps < v <= 0.4 + eps),
+        ("(0.4, 0.6]", lambda v: 0.4 + eps < v <= 0.6 + eps),
+        ("(0.6, 0.8]", lambda v: 0.6 + eps < v <= 0.8 + eps),
+        ("(0.8, 1)", lambda v: 0.8 + eps < v < 1 - eps),
+        ("1", lambda v: v >= 1 - eps),
+    ]
+    n = len(values)
+    parts = [f"{label} {sum(map(test, values)) / n:.0%}" for label, test in bins]
+    counts: dict[float, int] = {}
+    for v in values:
+        counts[round(v, 2)] = counts.get(round(v, 2), 0) + 1
+    common, times = max(counts.items(), key=lambda kv: (kv[1], kv[0]))
+    return (
+        f"sample grades ({n}, before filtering): {' | '.join(parts)}; "
+        f"highest {max(values):.2f}, most common {common:g} ({times / n:.0%})"
+    )
+
+
+def _spread_note(grades: list[list[bool | float | None]]) -> str | None:
+    """Count rows whose valid grades all match: GRPO gets no gradient from them.
+
+    E.g. "31 of 120 rows gave every sample the same grade (22 all 0, 9 all 1)".
+    Rows with fewer than 2 valid grades are not compared.
+    """
+    compared = [
+        [float(g) for g in row if g is not None]
+        for row in grades
+        if sum(g is not None for g in row) >= 2
+    ]
+    if not compared:
+        return None
+    same = [row for row in compared if max(row) - min(row) <= 1e-9]
+    at_0 = sum(row[0] <= 1e-9 for row in same)
+    at_1 = sum(row[0] >= 1 - 1e-9 for row in same)
+    parts = [f"{at_0} all 0", f"{at_1} all 1"]
+    if len(same) - at_0 - at_1:
+        parts.append(f"{len(same) - at_0 - at_1} one partial score")
+    return (
+        f"{len(same)} of {len(compared)} rows gave every sample the same grade "
+        f"({', '.join(parts)}): no GRPO gradient there"
+    )
+
+
+# Warn when at least this share of the kept rows, and this many, gave every
+# sample one grade.
+KEPT_SAME_GRADE_WARN_SHARE = 0.2
+KEPT_SAME_GRADE_WARN_ROWS = 5
+
+
+def _kept_spread(
+    kept_grades: list[list[bool | float | None]], k: int
+) -> tuple[str | None, str | None]:
+    """Count kept rows whose valid grades all match, as (note, warning).
+
+    The rate bounds keep a row whose samples all scored one partial value,
+    e.g. every sample 0.6 under a partial-credit grader, since its rate is
+    that value. E.g. note "of the 220 kept rows, 61 gave every sample the same
+    grade (52 all 0.6, 9 all 0.3)"; the warning comes when such rows are at
+    least ``KEPT_SAME_GRADE_WARN_SHARE`` of the kept rows and at least
+    ``KEPT_SAME_GRADE_WARN_ROWS`` rows.
+    """
+    compared = [
+        [float(g) for g in row if g is not None]
+        for row in kept_grades
+        if sum(g is not None for g in row) >= 2
+    ]
+    same = [row[0] for row in compared if max(row) - min(row) <= 1e-9]
+    if not same:
+        return None, None
+    by_value: dict[str, int] = {}
+    for value in same:
+        label = f"{value:.2f}".rstrip("0").rstrip(".")
+        by_value[label] = by_value.get(label, 0) + 1
+    ranked = sorted(by_value.items(), key=lambda kv: -kv[1])
+    parts = [f"{n} all {label}" for label, n in ranked[:3]]
+    if len(ranked) > 3:
+        parts.append(f"{sum(n for _, n in ranked[3:])} at other values")
+    note = (
+        f"of the {len(kept_grades)} kept rows, {len(same)} gave every sample "
+        f"the same grade ({', '.join(parts)})"
+    )
+    if (
+        len(same) < KEPT_SAME_GRADE_WARN_SHARE * len(kept_grades)
+        or len(same) < KEPT_SAME_GRADE_WARN_ROWS
+    ):
+        return note, None
+    warning = (
+        f"filter.by_pass_at_k: {len(same)} of {len(kept_grades)} kept rows "
+        f"({len(same) / len(kept_grades):.0%}) gave all {k} samples the same "
+        f"grade ({', '.join(parts)}): the rate bounds keep them, but GRPO gets "
+        "no gradient from a row whose samples all score alike"
+    )
+    return note, warning
+
+
+# A sampler, not a filter: its first argument is prompts, and it drops nothing.
+@op(name="filter.model_difficulty.predictions", samples_arg="n", category="other")
+def _samples(
+    prompts: list[Prompt],
+    *,
+    model: Model,
+    n: int,
+    temperature: float | None,
+    max_tokens: int | None,
+    batch_size: int | None,
+) -> tuple[list[list[str | None]], Stopped]:
+    """Return ``n`` completions per prompt (``None`` for empty ones) and stops.
+
+    The second list is True for an empty completion whose finish_reason is
+    "length": it ran out of tokens before answering, e.g. a model that
+    returns its reasoning separately and spent max_tokens on it.
+
+    Raises ``ValueError`` when the model returns a different number of results
+    than prompts, or of completions than ``n`` (e.g. a provider that ignores
+    ``n``): a missing sample is not an empty answer, so it is never padded.
+    The exception is a request that still fails after the model's retries
+    with a transient error (a 504, a timeout), or that hits a row error (the
+    content filter, a prompt longer than the context window): its samples are
+    ``None`` (graded ``None``, so excluded), one warning names the count and
+    the last error, and the result is not cached. Other errors propagate, as
+    does a row error on every prompt.
+    """
+    catch = _catch_kwargs(model)
+    failures = _RequestFailures()
+    lost = 0  # samples missing because their requests failed
+    completions: list[list[str | None]] = []
+    stopped: Stopped = []
+    size = _chunk_size(model, batch_size, len(prompts))
+    for start in range(0, len(prompts), size):
+        batch = prompts[start : start + size]
+        # Each prompt is its own row: changing one task re-asks only its samples.
+        results = model.generate_batch(
+            batch,
+            n=n,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            **_cache_kwargs(model.generate_batch, cache_rows=list(batch)),
+            **catch,
+        )
+        if len(results) != len(batch):
+            raise ValueError(
+                f"{model!r}.generate_batch returned {len(results)} results for "
+                f"{len(batch)} prompts (prompts {start} to {start + len(batch) - 1})"
+            )
+        for i, result in enumerate(results):
+            if failures.failed(result):
+                completions.append([None] * n)
+                stopped.append([False] * n)
+                lost += n
+                continue
+            samples: list[str | None] = list(result)
+            reasons = list(getattr(result, "finish_reasons", None) or [])
+            if catch and len(samples) < n:
+                # Some of the prompt's n requests failed (n fan-out or n > 16);
+                # return_exceptions keeps the completions that arrived.
+                failures.missing(n - len(samples))
+                lost += n - len(samples)
+                samples += [None] * (n - len(samples))
+            if len(samples) != n:
+                raise ValueError(
+                    f"{model!r} returned {len(samples)} completions for prompt "
+                    f"{start + i}, but n={n} were requested"
+                )
+            row = [c if isinstance(c, str) and c.strip() else None for c in samples]
+            completions.append(row)
+            stopped.append(
+                [
+                    c is None and j < len(reasons) and reasons[j] == "length"
+                    for j, c in enumerate(row)
+                ]
+            )
+    failures.raise_if_systemic(len(prompts))
+    failures.report(
+        f"difficulty filter: {lost} of {len(prompts) * n} samples from {model!r} "
+        "are missing (requests failed after retries); they grade None (excluded)"
+    )
+    return completions, stopped
+
+
+@op(name="filter.model_difficulty.grades")
+def _grades(
+    items: list[dict],
+    completions: list[list[str | None]],
+    *,
+    ground_truth_field: str | None,
+    metric: Metric,
+    rouge_l_threshold: float,
+    extract_answer: Callable[[str], str | None],
+    verifier_workers: int = 1,
+    truncated: Literal["fail", "exclude"] = "exclude",
+    stopped: Stopped | None = None,
+) -> list[list[bool | float | None]]:
+    """Grade each row's completions against its ground truth or a verifier.
+
+    A completion grades ``None`` when ``extract_answer`` returns ``None`` for
+    it, e.g. by default a reasoning model cut off mid-thought, unless
+    ``truncated="fail"``, which grades such a completion ``False`` first;
+    so does an empty one that ``stopped`` at max_tokens (see ``_samples``).
+    """
+    cut = [
+        [truncated == "fail" and is_cut for is_cut in row]
+        for row in _cut_off(completions, stopped)
+    ]
+    predictions = [
+        [
+            None if c is None or is_cut else extract_answer(c)
+            for c, is_cut in zip(row, cuts)
+        ]
+        for row, cuts in zip(completions, cut)
+    ]
+    grades = _grade_predictions(
+        items,
+        predictions,
+        ground_truth_field=ground_truth_field,
+        metric=metric,
+        rouge_l_threshold=rouge_l_threshold,
+        verifier_workers=verifier_workers,
+    )
+    return [
+        [False if is_cut else g for g, is_cut in zip(row, cuts)]
+        for row, cuts in zip(grades, cut)
+    ]
+
+
+def _grade_predictions(
+    items: list[dict],
+    predictions: list[list[str | None]],
+    *,
+    ground_truth_field: str | None,
+    metric: Metric,
+    rouge_l_threshold: float,
+    verifier_workers: int,
+) -> list[list[bool | float | None]]:
+    """Grade extracted predictions; a ``None`` prediction grades ``None``."""
+    if callable(metric):
+        return _verify(items, predictions, metric, verifier_workers)
+    assert ground_truth_field is not None  # checked by _check_common
+    out: list[list[bool | float | None]] = []
+    for item, row in zip(items, predictions):
+        reference = get_field(item, ground_truth_field, "filter.model_difficulty")
+        row_grades: list[bool | float | None] = []
+        for prediction in row:
+            if prediction is None:
+                row_grades.append(None)
+            elif metric == "rouge_l":
+                f1 = rouge_l(str(reference), str(prediction))
+                row_grades.append(f1 >= rouge_l_threshold)
+            else:
+                row_grades.append(_normalized_equal(prediction, reference))
+        out.append(row_grades)
+    return out
+
+
+def _verify(
+    items: list[dict],
+    predictions: list[list[str | None]],
+    verifier: Verifier,
+    workers: int,
+) -> list[list[bool | float | None]]:
+    """Run ``verifier`` on every prediction, ``workers`` calls at a time.
+
+    E.g. 111 rows x 4 samples of a verifier that runs tests take minutes one by
+    one. Each call runs in a copy of the caller's context, so ops it calls are
+    cached and reported as they would be without threads.
+    """
+    out: list[list[bool | float | None]] = [[None] * len(row) for row in predictions]
+    jobs = [
+        (i, j)
+        for i, row in enumerate(predictions)
+        for j, prediction in enumerate(row)
+        if prediction is not None
+    ]
+
+    def grade(i: int, j: int) -> bool | float | None:
+        result = verifier(predictions[i][j], items[i])  # type: ignore[arg-type]
+        if result is not None and not isinstance(result, bool):
+            if not isinstance(result, (int, float)) or not 0 <= result <= 1:
+                raise TypeError(
+                    "metric must return bool, a score in [0, 1], or None, "
+                    f"got {result!r}"
+                )
+            result = float(result)
+        return result
+
+    def grade_in(context: contextvars.Context, i: int, j: int) -> bool | float | None:
+        return context.run(grade, i, j)
+
+    if workers <= 1 or len(jobs) <= 1:
+        for i, j in jobs:
+            out[i][j] = grade(i, j)
+        return out
+    with ThreadPoolExecutor(max_workers=min(workers, len(jobs))) as pool:
+        futures = [
+            pool.submit(grade_in, contextvars.copy_context(), i, j) for i, j in jobs
+        ]
+        try:
+            for (i, j), future in zip(jobs, futures):
+                out[i][j] = future.result()
+        except BaseException:
+            for future in futures:
+                future.cancel()  # the rest would be thrown away
+            raise
+    return out
+
+
+def _pass_rate(
+    grades: list[bool | float | None], min_valid: int | None
+) -> float | None:
+    """Mean valid grade (True 1, False 0, scores as given), or None per ``min_valid``.
+
+    None when no grade is valid or fewer than ``min_valid`` (default: all) are.
+    """
+    valid = [g for g in grades if g is not None]
+    if not valid or len(valid) < (min_valid or len(grades)):
+        return None
+    for g in valid:
+        if not isinstance(g, bool) and not 0 <= g <= 1:
+            raise ValueError(
+                f"a by_pass_at_k grade must be a bool or in [0, 1], not {g!r}"
+            )
+    return sum(float(g) for g in valid) / len(valid)
+
+
+def _annotate(
+    item: dict,
+    outcomes_field: str | None,
+    grades: dict[str, list[bool | float | None]],
+    completions_field: str | None,
+    completions: dict[str, list[str | None]],
+) -> dict:
+    """Return ``item``, or a copy carrying its grades and completions.
+
+    E.g. ``{**item, "ev": {"model": [True, False]}, "samples": {"model":
+    ["4", "5"]}}``; fields left as None are not added.
+    """
+    if outcomes_field is None and completions_field is None:
+        return item
+    out = dict(item)
+    if outcomes_field is not None:
+        out[outcomes_field] = {g: list(v) for g, v in grades.items()}
+    if completions_field is not None:
+        out[completions_field] = {g: list(v) for g, v in completions.items()}
+    return out
+
+
+def _prompts(
+    items: list[dict],
+    input_field: str,
+    prompt_template: PromptTemplate | None,
+    caller: str,
+) -> list[Prompt]:
+    if prompt_template is not None:
+        return [_resolve_prompt(prompt_template, item) for item in items]
+    return [_field_prompt(item, input_field, caller) for item in items]
+
+
+def _field_prompt(
+    item: dict, input_field: str, caller: str, arg: str = "input_field"
+) -> Prompt:
+    """Return the task under ``input_field`` as a prompt: text or chat messages.
+
+    E.g. an RL row's ``[{"role": "system", ...}, {"role": "user", ...}]`` is sent
+    as that conversation, not as the repr of the list. A number is sent as its
+    text, as before. Errors name ``caller`` and ``arg``, the op the user called
+    and its parameter, e.g. ``"inspect.rubric_scores"`` and ``"prompt_field"``.
+    """
+    value = get_field(item, input_field, caller)
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float)):  # bool too: e.g. 7 → "7"
+        return str(value)
+    if (
+        isinstance(value, list)
+        and value
+        and all(isinstance(m, dict) and "role" in m and "content" in m for m in value)
+    ):
+        return value
+    # rubric_scores has no prompt_template to suggest
+    hint = (
+        "; pass prompt_template to build the prompt from other fields"
+        if arg == "input_field"
+        else ""
+    )
+    raise ValueError(
+        f"{caller}: {arg} {input_field!r} must hold text or a list of chat "
+        f'messages ({{"role": ..., "content": ...}} dicts), got '
+        f"{type(value).__name__}{hint}"
+    )
+
+
+def _check_common(
+    metric: Metric,
+    rouge_l_threshold: float,
+    batch_size: int | None,
+    ground_truth_field: str | None,
+    outcomes_field: str | None,
+    completions_field: str | None,
+    verifier_workers: int,
+    truncated: str,
+) -> None:
+    if truncated not in ("fail", "exclude"):
+        raise ValueError(f"truncated must be 'fail' or 'exclude', got {truncated!r}")
+    if not callable(metric) and metric not in ("exact_match", "rouge_l"):
+        raise ValueError(
+            f"metric must be 'exact_match', 'rouge_l', or a callable, got {metric!r}"
+        )
+    if not callable(metric) and ground_truth_field is None:
+        raise ValueError(
+            f"metric={metric!r} compares with a reference answer, so "
+            "ground_truth_field is required (a verifier metric does not need it)"
+        )
+    if not 0.0 <= rouge_l_threshold <= 1.0:
+        raise ValueError(
+            f"rouge_l_threshold must be in [0, 1], got {rouge_l_threshold}"
+        )
+    if batch_size is not None and batch_size <= 0:
+        raise ValueError("batch_size must be positive or None")
+    if verifier_workers < 1:
+        raise ValueError("verifier_workers must be at least 1")
+    if outcomes_field is not None and outcomes_field == completions_field:
+        raise ValueError("outcomes_field and completions_field must differ")

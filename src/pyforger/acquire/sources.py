@@ -1,10 +1,12 @@
 """Retrieval sources for acquire.retrieve: abstract base and concrete backends.
 
-Concrete sources: web, Wikipedia, Hugging Face, ArXiv, Semantic Scholar.
+Concrete sources: web, Wikipedia, Hugging Face, ArXiv, Semantic Scholar
+(PubMed lives in pubmed.py).
 """
 
 from __future__ import annotations
 
+import os
 import random
 from abc import ABC, abstractmethod
 from enum import Enum, auto
@@ -31,6 +33,10 @@ class RetrievalSource(ABC):
 
     Segments may be passages, docs, or rows. Subclasses implement fetch()
     to return a list of items (e.g. dicts with "text", "id").
+    For use with cached ``retrieve()``, custom sources with mutable runtime
+    state should define ``cache_key()`` containing their type and configuration
+    while excluding clients, sessions, and counters. Direct ``fetch()`` calls
+    are not cached.
     """
 
     @abstractmethod
@@ -88,6 +94,16 @@ class WebRetrievalSource(RetrievalSource):
     _BRAVE_MAX_RESULTS = 50  # API caps count / maximum_number_of_urls at 50
     _DEFAULT_TIMEOUT = 5  # seconds
 
+    def cache_key(self) -> tuple:
+        """Identify source configuration independently of runtime client state."""
+        return (
+            type(self).__module__,
+            type(self).__qualname__,
+            self.base_url,
+            self._api_key,
+            self._kwargs,
+        )
+
     def __init__(
         self,
         base_url: str | None = None,
@@ -100,13 +116,14 @@ class WebRetrievalSource(RetrievalSource):
         Args:
             base_url: Optional domain to restrict results to.  When set,
                 ``site:{base_url}`` is prepended to every query.
-            api_key: Brave Search API subscription token.  Required for
-                actual API calls; omitting it will cause a 401 error.
+            api_key: Brave Search API subscription token.  Defaults to the
+                ``BRAVE_API_KEY`` environment variable; fetch() raises
+                ``ValueError`` if neither is set.
             **kwargs: Session overrides.  ``timeout`` (float) -- per-request
                 timeout in seconds (default 5).
         """
         self.base_url = base_url
-        self._api_key = api_key
+        self._api_key = api_key or os.environ.get("BRAVE_API_KEY")
         self._kwargs = kwargs
         self._session: requests.Session | None = None
 
@@ -201,6 +218,10 @@ class WebRetrievalSource(RetrievalSource):
             )
         if n <= 0:
             raise ValueError("n must be greater than 0")
+        if not self._api_key:
+            raise ValueError(
+                "Brave Search needs an API key: pass api_key or set BRAVE_API_KEY"
+            )
 
         merged = {**self._kwargs, **kwargs}
         session = self._get_session()
@@ -226,7 +247,7 @@ class WebRetrievalSource(RetrievalSource):
 
             return [self._result_to_item(r) for r in generic_results]
 
-        return []
+        raise ValueError(f"unsupported mode: {mode!r}")
 
 
 class WikiRetrievalSource(RetrievalSource):
@@ -237,6 +258,10 @@ class WikiRetrievalSource(RetrievalSource):
     article sampling). Returns item dicts in the DPR/BEIR standard format:
     "id" (page ID), "title" (article title), "text" (intro extract), and
     "summary" (same as text, for arXiv schema compatibility).
+
+    ``full_text=True`` returns the whole article as plain text instead of the
+    intro. Wikipedia sends whole articles one page per request (intros come 20
+    at a time), so it takes about one request per result.
 
     Note: RANDOM mode is inherently non-deterministic because the MediaWiki
     ``list=random`` endpoint does not support a seed parameter. The ``seed``
@@ -252,6 +277,15 @@ class WikiRetrievalSource(RetrievalSource):
     _API_LIMIT = 500
     _EXTRACT_BATCH_SIZE = 20
     _DEFAULT_TIMEOUT = 5
+
+    def cache_key(self) -> tuple:
+        """Identify source configuration independently of runtime client state."""
+        return (
+            type(self).__module__,
+            type(self).__qualname__,
+            self.language,
+            self._kwargs,
+        )
 
     def __init__(self, language: str = "en", **kwargs: Any) -> None:
         """Store config for Wikipedia retrieval.
@@ -313,7 +347,7 @@ class WikiRetrievalSource(RetrievalSource):
                 "title", and optionally "extract".
 
         Returns:
-            Dict with "text" (intro extract only), "id" (page ID as string),
+            Dict with "text" (intro, or whole article), "id" (page ID as string),
             "title", and "summary" (mirrors text).
         """
         title = page.get("title", "")
@@ -330,7 +364,10 @@ class WikiRetrievalSource(RetrievalSource):
         titles: list[str],
         merged: dict[str, Any],
     ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
-        """Fetch intro extracts for a list of page titles, batched by 20.
+        """Fetch extracts for a list of page titles: intros 20 per request.
+
+        With ``merged["full_text"]``, whole articles, one per request: the
+        MediaWiki extracts API returns only one whole-article extract per request.
 
         Args:
             titles: Wikipedia page titles to fetch extracts for.
@@ -347,22 +384,22 @@ class WikiRetrievalSource(RetrievalSource):
         title_map: dict[str, dict[str, Any]] = {}
         id_map: dict[str, dict[str, Any]] = {}
 
-        for i in range(0, len(titles), self._EXTRACT_BATCH_SIZE):
-            batch = titles[i : i + self._EXTRACT_BATCH_SIZE]
-            resp = session.get(
-                base_url,
-                params={
-                    "action": "query",
-                    "format": "json",
-                    "prop": "extracts",
-                    "exintro": "true",
-                    "explaintext": "true",
-                    "redirects": "true",
-                    "titles": "|".join(batch),
-                    "exlimit": str(len(batch)),
-                },
-                **timeout_kw,
-            )
+        full_text = bool(merged.get("full_text", False))
+        batch_size = 1 if full_text else self._EXTRACT_BATCH_SIZE
+        for i in range(0, len(titles), batch_size):
+            batch = titles[i : i + batch_size]
+            params = {
+                "action": "query",
+                "format": "json",
+                "prop": "extracts",
+                "explaintext": "true",
+                "redirects": "true",
+                "titles": "|".join(batch),
+                "exlimit": str(len(batch)),
+            }
+            if not full_text:
+                params["exintro"] = "true"
+            resp = session.get(base_url, params=params, **timeout_kw)
             resp.raise_for_status()
             query = resp.json().get("query", {})
             pages = query.get("pages", {})
@@ -402,18 +439,19 @@ class WikiRetrievalSource(RetrievalSource):
 
         Mode behavior:
         - QUERY: Searches Wikipedia with srsearch={query} and srlimit={n},
-          then fetches intro extracts for each result. Empty or None query
+          then fetches extracts (intros, or whole articles with
+          ``full_text=True``) for each result. Empty or None query
           defaults to "Wikipedia". Redirects are resolved so search titles
           still match extracts.
         - RANDOM: Fetches n random articles from the main namespace via
-          ``list=random`` and returns their intro extracts. The server
+          ``list=random`` and returns their extracts. The server
           controls randomness; seed is ignored (see class docstring).
 
         Per-call **kwargs are merged with constructor kwargs (e.g. timeout for
-        requests.get on every HTTP call).
+        requests.get on every HTTP call, ``full_text=True`` for whole articles).
 
         Returns:
-            List of dicts in DPR/BEIR format; each has "text" (intro extract),
+            List of dicts in DPR/BEIR format; each has "text" (intro or whole article),
             "id" (page ID), "title", "summary" (same as text).
         """
         # Per-call kwargs override constructor kwargs (e.g. timeout).
@@ -498,6 +536,18 @@ class HFRetrievalSource(RetrievalSource):
     Both modes produce the same output shape: a list of flat dicts with
     ``row_idx``, ``dataset_id``, and the dataset's column values.
     """
+
+    def cache_key(self) -> tuple:
+        """Identify source configuration independently of runtime client state."""
+        return (
+            type(self).__module__,
+            type(self).__qualname__,
+            self.dataset,
+            self.config,
+            self.split,
+            self._token,
+            self._kwargs,
+        )
 
     def __init__(
         self,
@@ -640,6 +690,10 @@ class ArxivRetrievalSource(RetrievalSource):
         _client: Lazy-initialized arxiv.Client, reused across fetch() calls.
     """
 
+    def cache_key(self) -> tuple:
+        """Identify source configuration independently of runtime client state."""
+        return (type(self).__module__, type(self).__qualname__, self._kwargs)
+
     def __init__(self, **kwargs: Any) -> None:
         """Store options for arXiv retrieval.
 
@@ -777,22 +831,34 @@ class S2RetrievalSource(RetrievalSource):
 
     # Default query when QUERY mode is called with empty query
     _DEFAULT_QUERY = "machine learning"
-    # Relevance search returns at most 1000 results; 100 per request
+    # Relevance search returns at most 1000 results; at most 100 per request.
+    # A request asks for no more than it needs (e.g. 4 for n=4): a full page of
+    # 100 papers with abstracts takes seconds longer to return.
     _PAGE_LIMIT = 100
     _RELEVANCE_CAP = 1000
     _RANDOM_POOL_MAX_BULK = 10_000
+
+    def cache_key(self) -> tuple:
+        """Identify source configuration independently of runtime client state."""
+        return (
+            type(self).__module__,
+            type(self).__qualname__,
+            self._api_key,
+            self._kwargs,
+        )
 
     def __init__(self, api_key: str | None = None, **kwargs: Any) -> None:
         """Store options for Semantic Scholar retrieval.
 
         Args:
             api_key: Optional API key for Semantic Scholar (forwarded to
-                SemanticScholar(api_key=...)). Without a key the client uses
+                SemanticScholar(api_key=...)). Defaults to the ``S2_API_KEY``
+                environment variable. Without a key the client uses
                 unauthenticated access, which has lower rate limits.
             **kwargs: Passed to SemanticScholar (timeout, api_url, retry)
                 and to fetch() overrides (e.g. fields_of_study for RANDOM).
         """
-        self._api_key = api_key
+        self._api_key = api_key or os.environ.get("S2_API_KEY")
         self._kwargs = kwargs
         self._client: SemanticScholar | None = None
 
@@ -863,10 +929,10 @@ class S2RetrievalSource(RetrievalSource):
         """Return items from Semantic Scholar by mode (QUERY or RANDOM).
 
         QUERY: When query is empty, uses default "machine learning". Paginates
-        (100 per request) up to n or 1000. RANDOM: Builds pool via relevance
-        search (paginated, up to 1000) or bulk when requested pool size (n*10)
-        exceeds 1000; bulk pool is capped at 10,000. Then samples n with seed.
-        Effective max for QUERY: 1000.
+        (min(n, 100) per request) up to n or 1000. RANDOM: Builds pool via
+        relevance search (paginated, up to 1000) or bulk when requested pool
+        size (n*10) exceeds 1000; bulk pool is capped at 10,000. Then samples n
+        with seed. Effective max for QUERY: 1000.
 
         Returns:
             List of dicts; each has "text", "id", "title", "summary".
@@ -881,8 +947,10 @@ class S2RetrievalSource(RetrievalSource):
                     f"of {self._RELEVANCE_CAP}. Use RANDOM mode for larger "
                     f"result sets."
                 )
+            if n <= 0:
+                return []
             q = query or self._DEFAULT_QUERY
-            results = client.search_paper(q, limit=self._PAGE_LIMIT)
+            results = client.search_paper(q, limit=min(n, self._PAGE_LIMIT))
             accumulated = self._collect_paginated(results, n)
             return [self._result_to_item(p) for p in accumulated]
 
@@ -912,7 +980,9 @@ class S2RetrievalSource(RetrievalSource):
                     accumulated = new_items
                 pool = accumulated[:pool_size]
             else:
-                results = client.search_paper(query_str, limit=self._PAGE_LIMIT)
+                results = client.search_paper(
+                    query_str, limit=max(1, min(pool_size, self._PAGE_LIMIT))
+                )
                 pool = self._collect_paginated(results, pool_size)
             rng = random.Random(seed)
             sample_size = min(n, len(pool))

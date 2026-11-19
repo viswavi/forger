@@ -7,6 +7,7 @@ Python runs without terminal, filesystem, network, or unrestricted Python access
 
 from __future__ import annotations
 
+import contextvars
 import json
 import math
 import os
@@ -16,10 +17,14 @@ import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
-from pyforger.acquire.model import LocalModel, Model
+from pyforger import _tracking
+from pyforger.acquire.model import LocalModel, Model, _units_or_nan
+from pyforger.acquire.tinker_model import TinkerModel
 from pyforger.alter._dynamic_resources import prepare_input
 from pyforger.op import op
+from pyforger.token_units import token_units
 
 _SOURCE_VERSION = (
     "resource-v4-record"  # Bump when the agent or output contract changes.
@@ -123,17 +128,103 @@ def agent_llm(model):
     for option in ("timeout", "reasoning_effort"):
         if option in model._kwargs:
             config[option] = model._kwargs[option]
-    if "extra_body" in model._kwargs:
-        config["litellm_extra_body"] = model._kwargs["extra_body"]
+    extra_body = dict(model._kwargs.get("extra_body") or {})
+    # Model sends DeepSeek's effort as reasoning={"effort": ...}; see model.py.
+    if "reasoning" in model._kwargs:
+        extra_body.setdefault("reasoning", model._kwargs["reasoning"])
+    if extra_body:
+        config["litellm_extra_body"] = extra_body
     for option in ("api_mode", "capability_overrides"):
         if option in model._kwargs:
             config[option] = model._kwargs[option]
     return LLM(**config)
 
 
+class _AgentUsage:
+    """Adds an OpenHands conversation's LLM usage to Forger's totals as it grows.
+
+    The agent calls LiteLLM through OpenHands, not ``Model.generate_batch``, so
+    its usage only reaches ``@step`` reports, the spend ledger, the spending
+    caps, and the shared token-unit quota (``budget``, the Model's
+    ``FORGER_TOKEN_USAGE_FILE`` ledger) through this hook. ``on_event`` is an
+    OpenHands callback: after each event it records the usage added since the
+    last record and checks the caps and quota, raising (once) to stop the run
+    when one is reached.
+    """
+
+    def __init__(self, model_id: str | None, budget: Any = None) -> None:
+        """Start with nothing recorded, in a copy of the caller's context."""
+        self.model_id = model_id
+        self.budget = budget
+        self.conversation: Any = None
+        self.error: Exception | None = None
+        self._recorded = (0, 0, 0.0)
+        self._context = contextvars.copy_context()
+
+    def check(self) -> None:
+        """Raise at a spending cap or when the token-unit quota is used up.
+
+        With a quota, a model without fixed token-unit weights is refused
+        (ValueError), as ``Model`` refuses it: its usage could not be charged.
+        """
+        _tracking.check_budget()
+        if self.budget is not None:
+            token_units(self.model_id or "", 0, 0)
+            self.budget.check()
+
+    def record(self, conversation: Any = None) -> None:
+        """Record the conversation's usage since the last call; never raises."""
+        try:
+            conversation = conversation or self.conversation
+            metrics = conversation.conversation_stats.get_combined_metrics()
+            usage = getattr(metrics, "accumulated_token_usage", None)
+            now = (
+                int(getattr(usage, "prompt_tokens", 0) or 0),
+                int(getattr(usage, "completion_tokens", 0) or 0),
+                float(getattr(metrics, "accumulated_cost", 0.0) or 0.0),
+            )
+            prompt = now[0] - self._recorded[0]
+            completion = now[1] - self._recorded[1]
+            cost = now[2] - self._recorded[2]
+            if prompt or completion or cost:
+                self._recorded = now
+                units = _units_or_nan(self.model_id or "", prompt, completion)
+                _tracking.add_usage(
+                    prompt, completion, cost, units, model_id=self.model_id
+                )
+                if self.budget is not None:
+                    if usage is None:  # paid, but no token counts: fail closed
+                        self.budget.mark_unmetered()
+                    else:
+                        self.budget.record(
+                            self.model_id, prompt, completion, cost_usd=cost
+                        )
+        except Exception:  # usage is reporting only; never fail the agent on it
+            return
+
+    def on_event(self, event: Any) -> None:
+        """Record usage and stop the agent at a spending cap."""
+        if self.conversation is not None:
+            self._context.run(self._record_and_check)
+
+    def _record_and_check(self) -> None:
+        self.record()
+        if self.error is None:
+            try:
+                self.check()
+            except Exception as exc:
+                self.error = exc
+                raise
+
+
+def _record_agent_usage(conversation, model_id: str | None = None) -> None:
+    """Add a finished OpenHands conversation's tokens and cost to Forger's totals."""
+    _AgentUsage(model_id).record(conversation)
+
+
 def _generate(goal, item, model, max_iterations, execution_timeout_s):
     _require_dynamic_platform()
-    if isinstance(model, LocalModel):
+    if isinstance(model, (LocalModel, TinkerModel)):
         raise TypeError("dynamic_step requires a LiteLLM-backed Model")
     try:
         from openhands.sdk import Agent, Conversation
@@ -151,6 +242,10 @@ def _generate(goal, item, model, max_iterations, execution_timeout_s):
     executor = PythonExecutor(item, execution_timeout_s)
     # Surface bad URLs before constructing an agent or spending LLM calls.
     executor.prepared_input()
+    agent_usage = _AgentUsage(
+        getattr(model, "_model_id", None), getattr(model, "_token_budget", None)
+    )
+    agent_usage.check()  # a spending cap or the token-unit quota stops it here
     session_id = register_executor(executor)
 
     try:
@@ -174,7 +269,9 @@ def _generate(goal, item, model, max_iterations, execution_timeout_s):
                 workspace=workspace,
                 visualizer=None,
                 max_iteration_per_run=max_iterations,
+                callbacks=[agent_usage.on_event],
             )
+            agent_usage.conversation = conversation
             try:
                 conversation.send_message(
                     "Build a reusable Python sub-pipeline for this goal and input. "
@@ -197,14 +294,19 @@ def _generate(goal, item, model, max_iterations, execution_timeout_s):
                 remaining = max_iterations
                 seen_responses = set()
                 while remaining:
+                    agent_usage.check()
                     conversation.max_iteration_per_run = remaining
                     try:
                         conversation.run()
-                    except Exception:
+                    except Exception as exc:
                         if not executor.accepted:
+                            if agent_usage.error is not None:  # stopped at a cap
+                                raise agent_usage.error from exc
                             raise
                     if executor.accepted:
                         break
+                    if agent_usage.error is not None:
+                        raise agent_usage.error
                     responses = {
                         event.llm_response_id
                         for event in conversation.state.events
@@ -219,6 +321,7 @@ def _generate(goal, item, model, max_iterations, execution_timeout_s):
                             "Use the python tool with submit=true after testing."
                         )
             finally:
+                agent_usage.record()
                 conversation.close()
     finally:
         unregister_executor(session_id)
@@ -243,6 +346,10 @@ def dynamic_step_source(
 
     Call with ``_cache_only=True`` to inspect cached source without launching
     an agent when there is a cache miss.
+
+    Returns:
+        The accepted Python source. Its last defined function takes one dict
+        and returns a list of strings.
     """
     if not isinstance(goal, str) or not goal.strip():
         raise ValueError("goal must be a nonempty string")
@@ -260,7 +367,7 @@ def dynamic_step_source(
     return _generate(goal, item, model, max_iterations, execution_timeout_s)
 
 
-@op(cache=False)
+@op(name="alter.dynamic_step", cache=False)
 def dynamic_step(
     inputs: list[dict],
     goal: str,
@@ -271,7 +378,12 @@ def dynamic_step(
     execution_timeout_s: float = 10.0,
     source_version: str = _SOURCE_VERSION,
 ) -> list[list[str]]:
-    """Build source per unique input and return one string list per input."""
+    """Build source per unique input and return one string list per input.
+
+    Returns:
+        One list of strings per input, aligned with ``inputs``; a list may be
+        empty. Equal inputs get equal lists.
+    """
     if not isinstance(inputs, list):
         raise TypeError("inputs must be a list of dicts")
     keys = [_record_key(item) for item in inputs]
@@ -295,7 +407,16 @@ def dynamic_step(
         )
         return _execute(code, item, execution_timeout_s)
 
+    def run_in(context, item):
+        return context.run(run, item)
+
     unique = dict(zip(keys, inputs))
     with ThreadPoolExecutor(max_workers=min(max_parallel, len(unique))) as pool:
-        outputs = dict(zip(unique, pool.map(run, unique.values())))
+        # Each worker runs in a copy of this context, so the agents' usage
+        # counts toward this op and its step.
+        futures = [
+            pool.submit(run_in, contextvars.copy_context(), item)
+            for item in unique.values()
+        ]
+        outputs = dict(zip(unique, (future.result() for future in futures)))
     return [outputs[key].copy() for key in keys]

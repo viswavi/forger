@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import json
+import math
+import os
+import subprocess
 import sys
 import types
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
+from pyforger.acquire import _local_dp
 from pyforger.acquire.model import GenerateResult, LocalModel, split_reasoning
 from pyforger.alter.generate import self_taught_reasoner
 
@@ -65,6 +71,7 @@ def engines(monkeypatch):
     module.LLM = FakeLLM
     module.SamplingParams = FakeSamplingParams
     monkeypatch.setitem(sys.modules, "vllm", module)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")  # one in-process engine
     return created
 
 
@@ -119,7 +126,14 @@ class TestLazyEngine:
             "max_model_len": 40960,
             "max_num_seqs": 8,
             "revision": "abc123",
+            "max_num_batched_tokens": 1024,
         }
+
+    def test_step_tokens_default_and_override(self, engines):
+        """max_num_batched_tokens: 1024, at least max_num_seqs, or as given."""
+        LocalModel("m", max_num_seqs=4096).generate("a")
+        LocalModel("m", max_num_batched_tokens=512).generate("a")
+        assert [e.init_kwargs["max_num_batched_tokens"] for e in engines] == [4096, 512]
 
     def test_max_model_len_defaults_to_none(self, engines):
         """Without max_model_len, vLLM gets None (its own default)."""
@@ -184,7 +198,7 @@ class TestChatCall:
 
     def test_enable_thinking_default(self, engines):
         """By default the chat template enables thinking; nothing else is sent."""
-        LocalModel("Qwen/Qwen3-4B").generate("a")
+        LocalModel("Qwen/Qwen3-4B", show_progress=False).generate("a")
         assert engines[0].chat_calls[0].kwargs == {
             "chat_template_kwargs": {"enable_thinking": True},
             "use_tqdm": False,
@@ -205,11 +219,17 @@ class TestChatCall:
         kwargs = engines[0].chat_calls[0].kwargs
         assert kwargs["chat_template_kwargs"] == template_kwargs
 
-    @pytest.mark.parametrize("show_progress", [False, True])
-    def test_progress_bar_follows_show_progress(self, engines, show_progress):
-        """use_tqdm mirrors show_progress."""
-        LocalModel("Qwen/Qwen3-4B", show_progress=show_progress).generate("a")
-        assert engines[0].chat_calls[0].kwargs["use_tqdm"] is show_progress
+    def test_progress_bar_follows_show_progress(self, engines, monkeypatch):
+        """Off: no bar. In a terminal: vLLM's bar. Redirected: a counting factory."""
+        monkeypatch.delenv("FORGER_PROGRESS", raising=False)
+        LocalModel("Qwen/Qwen3-4B", show_progress=False).generate("a")
+        assert engines[-1].chat_calls[-1].kwargs["use_tqdm"] is False
+        monkeypatch.setattr(sys.stderr, "isatty", lambda: True, raising=False)
+        LocalModel("Qwen/Qwen3-4B").generate("a")
+        assert engines[-1].chat_calls[-1].kwargs["use_tqdm"] is True
+        monkeypatch.setattr(sys.stderr, "isatty", lambda: False, raising=False)
+        LocalModel("Qwen/Qwen3-4B").generate("a")
+        assert callable(engines[-1].chat_calls[-1].kwargs["use_tqdm"])
 
     def test_per_call_show_progress_overrides_instance(self, engines):
         """show_progress passed to generate_batch beats the instance setting."""
@@ -273,7 +293,8 @@ class TestGenerateResults:
                 f"<think>t{i}.0</think>a{i}.0",
                 f"<think>t{i}.1</think>a{i}.1",
             ]
-            assert result.usage == {
+            assert math.isnan(result.usage["token_units"])
+            assert {k: v for k, v in result.usage.items() if k != "token_units"} == {
                 "prompt_tokens": i + 3,
                 "completion_tokens": 2 * i + 3,  # (i + 1) + (i + 2) token ids
                 "reasoning_tokens": 0,
@@ -345,6 +366,8 @@ class TestCacheKey:
         [
             {"gpu_memory_utilization": 0.5},
             {"tensor_parallel_size": 4},
+            {"data_parallel_size": 4},
+            {"data_parallel_size": 1},
             {"show_progress": True},
         ],
     )
@@ -393,6 +416,355 @@ class TestCacheKey:
         assert len(engines) == 1
         self_taught_reasoner(items, "{prompt}", LocalModel("m", revision="b"), n=1)
         assert len(engines) == 2
+
+
+class TestDataParallel:
+    """With several GPUs, LocalModel runs one engine per GPU and splits the prompts."""
+
+    @pytest.mark.parametrize(
+        "env, expected",
+        [("0,1,3", ["0", "1", "3"]), ("", []), ("-1", []), (" 2 , 5 ", ["2", "5"])],
+    )
+    def test_visible_gpus_follow_cuda_visible_devices(self, monkeypatch, env, expected):
+        """CUDA_VISIBLE_DEVICES decides which GPUs are visible when it is set."""
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", env)
+        assert _local_dp.visible_gpus() == expected
+
+    @pytest.mark.parametrize(
+        "gpus, tp, dp, expected",
+        [
+            (list("01234567"), 1, "auto", [[g] for g in "01234567"]),
+            (
+                list("01234567"),
+                2,
+                "auto",
+                [["0", "1"], ["2", "3"], ["4", "5"], ["6", "7"]],
+            ),
+            (list("012"), 2, "auto", []),  # one group: in-process engine
+            (["0"], 1, "auto", []),
+            ([], 1, "auto", []),
+            (list("01234567"), 1, 3, [["0"], ["1"], ["2"]]),
+            (list("01234567"), 1, 1, []),
+        ],
+    )
+    def test_device_groups(self, gpus, tp, dp, expected):
+        """'auto' fills every visible GPU; an int asks for that many engines."""
+        assert _local_dp.device_groups(gpus, tp, dp) == expected
+
+    @pytest.mark.parametrize("dp", [5, 0, "all"])
+    def test_device_groups_reject_impossible_requests(self, dp):
+        """More engines than GPUs, or a non-count, raise ValueError."""
+        with pytest.raises(ValueError):
+            _local_dp.device_groups(list("0123"), 1, dp)
+
+    def test_chat_deals_round_robin_and_restores_order(self):
+        """Prompt i goes to engine i % k; outputs come back in input order."""
+
+        class Echo:
+            def __init__(self):
+                self.calls = []
+
+            def chat(self, messages, sampling_params, **kwargs):
+                self.calls.append((messages, kwargs))
+                return [f"out:{m}" for m in messages]
+
+        echoes = [Echo(), Echo(), Echo()]
+        engine = _local_dp.DataParallelEngine(echoes)
+        outputs = engine.chat([f"p{i}" for i in range(7)], "params", use_tqdm=True)
+        assert outputs == [f"out:p{i}" for i in range(7)]
+        assert [e.calls[0][0] for e in echoes] == [
+            ["p0", "p3", "p6"],
+            ["p1", "p4"],
+            ["p2", "p5"],
+        ]
+        assert [e.calls[0][1]["use_tqdm"] for e in echoes] == [False] * 3
+        engine.close()
+
+    def test_progress_counts_every_engine(self):
+        """Each engine's counts reach the one progress object."""
+
+        class Counting:
+            def chat(self, messages, sampling_params, on_progress=None, **kwargs):
+                for _ in messages:
+                    on_progress(1)
+                return messages
+
+        class Seen:
+            done = 0
+
+            def update(self, n=1):
+                self.done += n
+
+        seen = Seen()
+        engine = _local_dp.DataParallelEngine([Counting(), Counting()])
+        engine.chat(list("abcde"), "params", progress=seen)
+        assert seen.done == 5
+        engine.close()
+
+    def test_engines_with_no_prompts_are_not_called(self):
+        """Fewer prompts than engines leaves the extra engines idle."""
+
+        class Echo:
+            def __init__(self):
+                self.calls = 0
+
+            def chat(self, messages, sampling_params, **kwargs):
+                self.calls += 1
+                return list(messages)
+
+        echoes = [Echo() for _ in range(4)]
+        assert _local_dp.DataParallelEngine(echoes).chat(["a"], None) == ["a"]
+        assert [e.calls for e in echoes] == [1, 0, 0, 0]
+
+    def test_local_model_uses_one_engine_per_gpu(self, engines, monkeypatch):
+        """Two visible GPUs give two engines, each sampling half the prompts."""
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+        started = []
+
+        def start(groups, engine_kwargs):
+            started.append(groups)
+            fakes = [sys.modules["vllm"].LLM(**engine_kwargs) for _ in groups]
+            return _local_dp.DataParallelEngine(fakes)
+
+        monkeypatch.setattr(_local_dp.DataParallelEngine, "start", staticmethod(start))
+        model = LocalModel("Qwen/Qwen3-4B")
+        results = model.generate_batch(["a", "b", "c"], n=1)
+        assert started == [[["0"], ["1"]]]
+        assert [len(e.chat_calls[0].messages) for e in engines] == [2, 1]
+        assert len(results) == 3 and model.history == results
+        model.close()
+        assert model._llm is None
+
+    def test_unguarded_script_runs_worker_processes(self, tmp_path):
+        """A script with no __main__ guard starts real workers, one per GPU, once.
+
+        Workers are fresh processes, so the caller's script is not re-imported
+        (multiprocessing's "spawn" would rerun it and start engines recursively).
+        Each runs its engine core in-process (VLLM_ENABLE_V1_MULTIPROCESSING=0).
+        """
+        fake = tmp_path / "vllm"
+        fake.mkdir()
+        (fake / "__init__.py").write_text(
+            "import os\n"
+            "from types import SimpleNamespace as N\n"
+            "class SamplingParams:\n"
+            "    def __init__(self, **kw): self.kw = kw\n"
+            "class LLM:\n"
+            "    def __init__(self, **kw):\n"
+            "        env = os.environ\n"
+            "        self.gpu = env['CUDA_VISIBLE_DEVICES'] + '/' + env.get(\n"
+            "            'VLLM_ENABLE_V1_MULTIPROCESSING', 'unset')\n"
+            "    def chat(self, messages, sp, **kw):\n"
+            "        return [N(prompt_token_ids=[1], outputs=[N(\n"
+            "            text=m[0]['content'] + '@' + self.gpu, token_ids=[1],\n"
+            "            finish_reason='stop')]) for m in messages]\n"
+        )
+        script = tmp_path / "unguarded.py"
+        script.write_text(
+            "from pyforger.acquire.model import LocalModel\n"
+            "m = LocalModel('x')\n"
+            "print([r[0] for r in m.generate_batch(['a', 'b', 'c'])])\n"
+            "m.close()\n"
+        )
+        src = str(Path(__file__).resolve().parents[1] / "src")
+        env = dict(
+            os.environ, CUDA_VISIBLE_DEVICES="4,5", PYTHONPATH=f"{tmp_path}:{src}"
+        )
+        env.pop("VLLM_ENABLE_V1_MULTIPROCESSING", None)
+        done = subprocess.run(
+            [sys.executable, str(script)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert done.returncode == 0, done.stderr[-2000:]
+        assert done.stdout.strip().splitlines()[-1] == "['a@4/0', 'b@5/0', 'c@4/0']"
+
+    def test_data_parallel_size_one_keeps_one_engine(self, engines, monkeypatch):
+        """data_parallel_size=1 runs in this process even with several GPUs visible."""
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2,3")
+        model = LocalModel("Qwen/Qwen3-4B", data_parallel_size=1)
+        model.generate("a")
+        assert len(engines) == 1 and not isinstance(
+            model._llm, _local_dp.DataParallelEngine
+        )
+
+
+class FakePopen:
+    """Stands in for the worker process: records its env, holds its pipe end."""
+
+    started: list = []
+
+    def __init__(self, args, pass_fds, env):
+        """Keep the worker's pipe end open, as the real worker would."""
+        self.env = env
+        self.fd = os.dup(pass_fds[0])
+        FakePopen.started.append(self)
+
+    def poll(self):
+        """Still running until waited on."""
+        return None if self.fd is not None else 0
+
+    def wait(self, timeout=None):
+        """Exit: close the pipe end."""
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+        return 0
+
+
+class TestCompileCaches:
+    """Each engine gets its own Triton and Inductor caches and no forked child.
+
+    Eight workers sharing /tmp/torchinductor_root failed with IsADirectoryError
+    on a Triton temp file, and vLLM's forked engine-core child failed with
+    "CUDA driver initialization failed" in an apptainer container.
+    """
+
+    CACHES = ("TRITON_CACHE_DIR", "TORCHINDUCTOR_CACHE_DIR")
+
+    def test_fresh_directories_unless_set(self):
+        """Both variables get one new directory; set ones are kept."""
+        caches, scratch = _local_dp.own_compile_caches({})
+        try:
+            assert sorted(caches) == sorted(self.CACHES)
+            assert os.path.isdir(scratch)
+            assert all(os.path.dirname(d) == scratch for d in caches.values())
+            assert caches["TRITON_CACHE_DIR"] != caches["TORCHINDUCTOR_CACHE_DIR"]
+        finally:
+            os.rmdir(scratch)
+        assert _local_dp.own_compile_caches(
+            {"TRITON_CACHE_DIR": "/mine", "TORCHINDUCTOR_CACHE_DIR": "/also"}
+        ) == ({}, None)
+        caches, scratch = _local_dp.own_compile_caches({"TRITON_CACHE_DIR": "/mine"})
+        os.rmdir(scratch)
+        assert list(caches) == ["TORCHINDUCTOR_CACHE_DIR"]
+
+    def test_torch_default_inductor_dir_counts_as_unset(self):
+        """Torch writes its default back to os.environ; that is not the user's."""
+        default = _local_dp._torch_default_cache_dir()
+        caches, scratch = _local_dp.own_compile_caches(
+            {"TRITON_CACHE_DIR": "/mine", "TORCHINDUCTOR_CACHE_DIR": default}
+        )
+        os.rmdir(scratch)
+        assert list(caches) == ["TORCHINDUCTOR_CACHE_DIR"]
+        assert caches["TORCHINDUCTOR_CACHE_DIR"] != default
+
+    def test_prefers_dev_shm_and_falls_back(self, monkeypatch, tmp_path):
+        """/dev/shm when writable; the temp dir when /dev/shm cannot be used."""
+        asked = []
+
+        def mkdtemp(prefix, dir):
+            asked.append(dir)
+            if dir == "/dev/shm" and len(asked) > 1:
+                raise OSError("No space left on device")
+            return str(tmp_path / f"scratch{len(asked)}")
+
+        monkeypatch.setattr(_local_dp.os.path, "isdir", lambda p: True)
+        monkeypatch.setattr(_local_dp.os, "access", lambda p, mode: True)
+        monkeypatch.setattr(_local_dp.tempfile, "mkdtemp", mkdtemp)
+        _, first = _local_dp.own_compile_caches({})
+        assert asked == ["/dev/shm"] and first == str(tmp_path / "scratch1")
+        _, second = _local_dp.own_compile_caches({})
+        assert asked == ["/dev/shm", "/dev/shm", None]
+        assert second == str(tmp_path / "scratch3")
+
+    def test_each_worker_gets_its_own_caches(self, monkeypatch):
+        """Two workers: distinct cache dirs, no forked engine core, removed on close."""
+        for name in (*self.CACHES, "VLLM_ENABLE_V1_MULTIPROCESSING"):
+            monkeypatch.delenv(name, raising=False)
+        FakePopen.started = []
+        monkeypatch.setattr(_local_dp.subprocess, "Popen", FakePopen)
+        workers = [_local_dp.EngineProcess([gpu], {}) for gpu in ("0", "1")]
+        envs = [p.env for p in FakePopen.started]
+        assert [e["CUDA_VISIBLE_DEVICES"] for e in envs] == ["0", "1"]
+        assert all(e["VLLM_ENABLE_V1_MULTIPROCESSING"] == "0" for e in envs)
+        dirs = [e[name] for e in envs for name in self.CACHES]
+        assert len(set(dirs)) == 4
+        scratches = {os.path.dirname(d) for d in dirs}
+        assert all(os.path.isdir(d) for d in scratches)
+        for worker in workers:
+            worker.close()
+        assert not any(os.path.exists(d) for d in scratches)
+
+    def test_user_settings_reach_workers(self, monkeypatch):
+        """Variables the user set are passed through unchanged."""
+        monkeypatch.setenv("TRITON_CACHE_DIR", "/fast/triton")
+        monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", "/fast/inductor")
+        monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
+        FakePopen.started = []
+        monkeypatch.setattr(_local_dp.subprocess, "Popen", FakePopen)
+        worker = _local_dp.EngineProcess(["0"], {})
+        [env] = [p.env for p in FakePopen.started]
+        assert env["TRITON_CACHE_DIR"] == "/fast/triton"
+        assert env["TORCHINDUCTOR_CACHE_DIR"] == "/fast/inductor"
+        assert env["VLLM_ENABLE_V1_MULTIPROCESSING"] == "1"
+        worker.close()
+
+    def test_in_process_engine_is_set_up_like_a_worker(self, engines):
+        """One GPU: the engine core stays in this process, with its own caches."""
+        with patch.dict(os.environ):
+            for name in (*self.CACHES, "VLLM_ENABLE_V1_MULTIPROCESSING"):
+                os.environ.pop(name, None)
+            LocalModel("Qwen/Qwen3-4B").generate("a")
+            assert os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] == "0"
+            dirs = [os.environ[name] for name in self.CACHES]
+            assert len(set(dirs)) == 2
+            assert os.path.isdir(os.path.dirname(dirs[0]))
+            # A second model in the same process keeps the same directories.
+            LocalModel("Qwen/Qwen3-4B", seed=1).generate("a")
+            assert [os.environ[name] for name in self.CACHES] == dirs
+        assert len(engines) == 2
+
+    def test_real_workers_get_distinct_caches(self, tmp_path):
+        """Real worker processes (fake vllm): each sees its own cache directories.
+
+        They are gone once the model is closed.
+        """
+        fake = tmp_path / "vllm"
+        fake.mkdir()
+        (fake / "__init__.py").write_text(
+            "import os\n"
+            "from types import SimpleNamespace as N\n"
+            "class SamplingParams:\n"
+            "    def __init__(self, **kw): self.kw = kw\n"
+            "class LLM:\n"
+            "    def __init__(self, **kw):\n"
+            "        self.dirs = '|'.join(os.environ[n] for n in (\n"
+            "            'TRITON_CACHE_DIR', 'TORCHINDUCTOR_CACHE_DIR'))\n"
+            "    def chat(self, messages, sp, **kw):\n"
+            "        return [N(prompt_token_ids=[1], outputs=[N(\n"
+            "            text=self.dirs, token_ids=[1],\n"
+            "            finish_reason='stop')]) for m in messages]\n"
+        )
+        script = tmp_path / "workers.py"
+        script.write_text(
+            "import json, os\n"
+            "from pyforger.acquire.model import LocalModel\n"
+            "m = LocalModel('x')\n"
+            "dirs = [r[0].split('|') for r in m.generate_batch(['a', 'b'])]\n"
+            "m.close()\n"
+            "gone = not any(os.path.exists(d) for pair in dirs for d in pair)\n"
+            "print(json.dumps({'dirs': dirs, 'gone': gone}))\n"
+        )
+        src = str(Path(__file__).resolve().parents[1] / "src")
+        env = dict(
+            os.environ, CUDA_VISIBLE_DEVICES="4,5", PYTHONPATH=f"{tmp_path}:{src}"
+        )
+        for name in self.CACHES:
+            env.pop(name, None)
+        done = subprocess.run(
+            [sys.executable, str(script)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert done.returncode == 0, done.stderr[-2000:]
+        report = json.loads(done.stdout.strip().splitlines()[-1])
+        flat = [d for pair in report["dirs"] for d in pair]
+        assert len(set(flat)) == 4 and report["gone"]
 
 
 class TestSplitReasoning:

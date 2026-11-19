@@ -4,6 +4,7 @@ from __future__ import annotations
 import pytest
 from fixtures import MockModel, RecordingMockModel
 
+from pyforger.acquire._model_utils import _schema_format_instructions
 from pyforger.alter import generate_from_context
 from pyforger.alter.generate import _resolve_prompt
 
@@ -186,8 +187,9 @@ class TestPromptBuilding:
         sent_prompt = model.recorded_prompts[0][0]
         assert isinstance(sent_prompt, str)
         # Check that the final prompt sent to the model includes schema instructions.
-        assert "Required keys" in sent_prompt
-        assert "answer" in sent_prompt
+        assert sent_prompt == "Question: hi\n\n" + _schema_format_instructions(
+            {"answer": str}
+        )
 
     def test_schema_instructions_appended_to_message_list_prompt(self):
         """Schema instructions are still added when prompt is a list of messages."""
@@ -208,8 +210,7 @@ class TestPromptBuilding:
         # Last message should be a user message with schema instructions
         last_message = sent_prompt[-1]
         assert last_message["role"] == "user"
-        assert "Required keys" in last_message["content"]
-        assert "answer" in last_message["content"]
+        assert last_message["content"] == _schema_format_instructions({"answer": str})
 
     def test_samples_per_item_requests_n_completions(self):
         """samples_per_item completions of the filled prompt are requested."""
@@ -265,6 +266,136 @@ class TestOutputSchemaHandling:
             "p: {text}",
             model,
             output_schema={"answer": str, "reason": str},
+            max_retries=0,
+        )
+        assert result == [None]
+
+
+class TestTolerantSchemaParsing:
+    """A JSON object wrapped in a fence or prose parses; extra keys are dropped."""
+
+    @pytest.mark.parametrize(
+        "response",
+        [
+            '```json\n{"answer": "42"}\n```',
+            '```\n{"answer": "42"}\n```',
+            'Here is the JSON:\n```json\n{"answer": "42"}\n```\nHope this helps.',
+            'Sure! {"answer": "42"} Let me know if you need more.',
+            '<think>maybe {"answer": "41"}?</think>\n{"answer": "42"}',
+            # Reasoning, then the final object.
+            'Since 6*7 = 42, the answer is 42.\n{"answer": "42"}',
+            # An example object in the reasoning, then the final object.
+            'The format is {"answer": "<str>"}. 6*7 = 42.\n{"answer": "42"}',
+            '```json\n{"answer": "<str>"}\n```\nSo:\n```json\n{"answer": "42"}\n```',
+            # The last object lacks "answer"; the one before it has it.
+            'Draft: {"answer": "41"} Final: {"answer": "42"} Notes: {"note": "x"}',
+        ],
+    )
+    def test_object_is_found(self, response):
+        """The last object with every schema key is parsed, without a retry."""
+        model = MockModel(responses=[response])
+        result = generate_from_context(
+            [{"text": "a"}], "p: {text}", model, output_schema={"answer": str}
+        )
+        assert result == [{"answer": "42"}]
+        assert model._call_count == 1
+
+    def test_fence_then_trailing_prose(self):
+        """A fenced final object followed by prose without objects still parses."""
+        model = MockModel(
+            responses=[
+                'Work: 6*7 = 42.\n```json\n{"answer": "42"}\n```\nHope this helps!'
+            ]
+        )
+        result = generate_from_context(
+            [{"text": "a"}], "p: {text}", model, output_schema={"answer": str}
+        )
+        assert result == [{"answer": "42"}]
+
+    def test_code_block_then_object(self):
+        """A code block with braces before the final object is skipped."""
+        response = (
+            "Reasoning first.\n```python\ndef f(d):\n    return {k: 1 for k in d}\n"
+            '```\n{"solution_code": "def f(d):\\n    return {k: 1 for k in d}"}'
+        )
+        model = MockModel(responses=[response])
+        result = generate_from_context(
+            [{"text": "a"}], "p: {text}", model, output_schema={"solution_code": str}
+        )
+        assert result == [{"solution_code": "def f(d):\n    return {k: 1 for k in d}"}]
+
+    def test_raw_newline_in_string(self):
+        """A value with unescaped newlines (multi-line code) parses."""
+        model = MockModel(
+            responses=['```json\n{"code": "def f():\n    return 1"}\n```']
+        )
+        result = generate_from_context(
+            [{"text": "a"}], "p: {text}", model, output_schema={"code": str}
+        )
+        assert result == [{"code": "def f():\n    return 1"}]
+
+    def test_nested_object_is_not_a_match(self):
+        """An object nested inside another is not taken as the answer."""
+        model = MockModel(responses=['{"result": {"answer": "42"}}'])
+        result = generate_from_context(
+            [{"text": "a"}],
+            "p: {text}",
+            model,
+            output_schema={"answer": str},
+            max_retries=0,
+        )
+        assert result == [None]
+
+    def test_extra_keys_are_dropped(self):
+        """Keys outside the schema do not reach the output."""
+        model = MockModel(responses=['{"answer": "42", "crafted_by": "me"}'])
+        result = generate_from_context(
+            [{"text": "a"}], "p: {text}", model, output_schema={"answer": str}
+        )
+        assert result == [{"answer": "42"}]
+
+    def test_extra_keys_are_dropped_with_merge(self):
+        """merge=True attaches only the schema's keys to the input row."""
+        model = MockModel(responses=['{"answer": "42", "crafted_by": "me"}'])
+        result = generate_from_context(
+            [{"text": "a"}],
+            "p: {text}",
+            model,
+            output_schema={"answer": str},
+            merge=True,
+        )
+        assert result == [{"text": "a", "answer": "42"}]
+
+    def test_value_types_are_not_checked(self):
+        """A value of another type than the schema names is kept as is."""
+        model = MockModel(responses=['{"answer": 42}'])
+        result = generate_from_context(
+            [{"text": "a"}], "p: {text}", model, output_schema={"answer": str}
+        )
+        assert result == [{"answer": 42}]
+
+    def test_missing_key_is_retried(self):
+        """An object without a schema key fails to parse and is asked again."""
+        model = MockModel(responses=['```json\n{"reason": "math"}\n```'])
+        result = generate_from_context(
+            [{"text": "a"}],
+            "p: {text}",
+            model,
+            output_schema={"answer": str},
+            max_retries=2,
+        )
+        assert result == [None]
+        assert model._call_count == 3
+
+    @pytest.mark.parametrize("response", ['[{"answer": "42"}]', '"42"', "42"])
+    def test_non_object_json_fails(self, response):
+        """JSON that is not an object (a list, a string, a number) fails."""
+        model = MockModel(responses=[response])
+        result = generate_from_context(
+            [{"text": "a"}],
+            "p: {text}",
+            model,
+            output_schema={"answer": str},
             max_retries=0,
         )
         assert result == [None]
@@ -352,3 +483,108 @@ class TestBatching:
         model = MockModel(responses=["ok"] * 5)
         generate_from_context(items, "p: {text}", model, batch_size=2)
         assert model._call_count == 3  # ceil(5/2) = 3
+
+
+# ---------------------------------------------------------------------------
+# merge / output_field
+# ---------------------------------------------------------------------------
+
+
+class TestMerge:
+    """merge=True returns the input rows with each output attached."""
+
+    def test_merge_one_sample(self):
+        """Each output row is {**item, **parsed}; no sample_idx for one sample."""
+        model = MockModel(responses=['{"answer": "4"}', '{"answer": "9"}'])
+        rows = generate_from_context(
+            [{"q": "2+2"}, {"q": "3*3"}],
+            "Solve {q}",
+            model,
+            output_schema={"answer": str},
+            merge=True,
+        )
+        assert rows == [{"q": "2+2", "answer": "4"}, {"q": "3*3", "answer": "9"}]
+
+    def test_merge_several_samples(self):
+        """With samples_per_item > 1, each sample is a row with its sample_idx."""
+        model = MockModel(responses=[["x0", "x1"], ["y0", "y1"]])
+        rows = generate_from_context(
+            [{"q": "a"}, {"q": "b"}], "{q}", model, samples_per_item=2, merge=True
+        )
+        assert rows == [
+            {"q": "a", "text": "x0", "sample_idx": 0},
+            {"q": "a", "text": "x1", "sample_idx": 1},
+            {"q": "b", "text": "y0", "sample_idx": 0},
+            {"q": "b", "text": "y1", "sample_idx": 1},
+        ]
+
+    def test_output_field_nests_output(self):
+        """output_field keeps the input's keys and nests the output under it."""
+        model = MockModel(responses=["world"], reasoning=["thought"])
+        rows = generate_from_context(
+            [{"text": "hello"}], "{text}", model, merge=True, output_field="reply"
+        )
+        assert rows == [
+            {"text": "hello", "reply": {"text": "world", "thinking_trace": "thought"}}
+        ]
+
+    def test_key_clash_output_wins_and_warns_once(self, caplog):
+        """Clashing keys take the output's value; one warning names them."""
+        model = MockModel(responses=["new a", "new b"])
+        rows = generate_from_context(
+            [{"text": "a"}, {"text": "b"}], "{text}", model, merge=True
+        )
+        assert rows == [{"text": "new a"}, {"text": "new b"}]
+        clash = [r.getMessage() for r in caplog.records if "replace" in r.msg]
+        assert clash == [
+            "alter.generate_from_context: merge=True replaces the input's "
+            "['text']; pass another output_field= (or rename the input keys) to "
+            "keep both"
+        ]
+
+    def test_output_field_clash_warns(self, caplog):
+        """An output_field that already is an input key is replaced with a warning."""
+        model = MockModel(responses=["model answer"])
+        rows = generate_from_context(
+            [{"problem": "1+1", "solution": "gold"}],
+            "{problem}",
+            model,
+            merge=True,
+            output_field="solution",
+        )
+        assert rows == [{"problem": "1+1", "solution": {"text": "model answer"}}]
+        assert "replaces the input's ['solution']" in caplog.text
+
+    def test_sample_idx_clash_warns(self, caplog):
+        """A sample_idx from an earlier merge is replaced with a warning."""
+        model = MockModel(responses=[["x0", "x1"]])
+        rows = generate_from_context(
+            [{"q": "a", "sample_idx": 3}],
+            "{q}",
+            model,
+            samples_per_item=2,
+            merge=True,
+            output_field="out",
+        )
+        assert [row["sample_idx"] for row in rows] == [0, 1]
+        assert "replaces the input's ['sample_idx']" in caplog.text
+
+    def test_merge_drops_parse_failures(self):
+        """Slots that failed to parse are left out of the merged rows."""
+        model = MockModel(responses=['{"k": "v"}', "not json"])
+        rows = generate_from_context(
+            [{"q": 1}, {"q": 2}],
+            "{q}",
+            model,
+            output_schema={"k": str},
+            max_retries=0,
+            merge=True,
+        )
+        assert rows == [{"q": 1, "k": "v"}]
+
+    def test_output_field_needs_merge(self):
+        """output_field without merge=True raises."""
+        with pytest.raises(ValueError, match="merge=True"):
+            generate_from_context(
+                [], "p", MockModel(responses=["ok"]), output_field="out"
+            )

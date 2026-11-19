@@ -7,10 +7,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from rouge_score import rouge_scorer
-
+from pyforger import _tracking
+from pyforger.filter._rouge import rouge_l
 from pyforger.op import op
-from pyforger.utils import canonical, get_field
+from pyforger.utils import canonical, field_text, get_field
 
 
 @op(name="filter.by_exact_agreement")
@@ -38,15 +38,15 @@ def by_exact_agreement(
         A filtered list of data items where the specified fields all agree (or disagree
             if `disagree=True`) by exact match.
     """
-    return [
-        item
-        for item in items
-        if (
+    keep = [
+        (
             str(get_field(item, field_a, "by_exact_agreement")).strip()
             != str(get_field(item, field_b, "by_exact_agreement")).strip()
         )
         == disagree
+        for item in items
     ]
+    return _tracking.keep_where(items, keep)
 
 
 @op(name="filter.by_rouge_l_agreement")
@@ -76,18 +76,18 @@ def by_rouge_l_agreement(
         A filtered list of data items where the specified fields all agree (or disagree
             if `disagree=True`) by ROUGE-L F1.
     """
-    scorer = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=False)
-    return [
-        item
-        for item in items
-        if (
-            scorer.score(
-                get_field(item, field_a, "by_rouge_l_agreement"),
-                get_field(item, field_b, "by_rouge_l_agreement"),
-            )["rougeL"].fmeasure
-            < threshold
+    scores = [
+        rouge_l(
+            field_text(item, field_a, "by_rouge_l_agreement"),
+            field_text(item, field_b, "by_rouge_l_agreement"),
         )
-        == disagree
+        for item in items
+    ]
+    _tracking.record_scores(
+        "rouge_l", scores, keep="lt" if disagree else "ge", threshold=threshold
+    )
+    return [
+        item for item, score in zip(items, scores) if (score < threshold) == disagree
     ]
 
 
@@ -125,14 +125,14 @@ def by_group_agreement(
             conflicting.add(key)
 
     counts: dict[Any, int] = {}
-    result: list[dict] = []
-    for key, item in zip(keys, items):
+    keep: list[bool] = []
+    for key in keys:
         if key in conflicting:
+            keep.append(False)
             continue
         counts[key] = counts.get(key, 0) + 1
-        if max_count is None or counts[key] <= max_count:
-            result.append(item)
-    return result
+        keep.append(max_count is None or counts[key] <= max_count)
+    return _tracking.keep_where(items, keep)
 
 
 def _normalize(value: Any) -> Any:

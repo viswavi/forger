@@ -14,6 +14,7 @@ import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from typing import Any
 
+from pyforger import _tracking
 from pyforger.op import op
 from pyforger.utils import get_field
 
@@ -29,7 +30,11 @@ def by_syntax(
     required_keys: list[str] | None = None,
     json_schema: dict[str, Any] | None = None,
 ) -> list[dict]:
-    """Keep items whose ``field`` parses as valid ``lang``."""
+    """Keep items whose ``field`` parses as valid ``lang``.
+
+    Returns:
+        The kept rows, in input order and unchanged.
+    """
     assert (
         lang in _SUPPORTED_LANGS
     ), f"Unsupported lang {lang!r}. Supported: {sorted(_SUPPORTED_LANGS)}"
@@ -56,13 +61,11 @@ def by_syntax(
                 "Install: pip install jsonschema"
             ) from None
 
-    return [
-        item
+    keep = [
+        _validate(get_field(item, field, "by_syntax"), lang, required_keys, json_schema)
         for item in items
-        if _validate(
-            get_field(item, field, "by_syntax"), lang, required_keys, json_schema
-        )
     ]
+    return _tracking.keep_where(items, keep)
 
 
 def _validate(

@@ -1,3 +1,8 @@
+# The pinned Python hooks predate Python 3.12 f-string tokenization.
+# Use a consistent supported interpreter even when training uses another env.
+default_language_version:
+  python: python3.11
+
 repos:
   - repo: https://github.com/python/black.git
     rev: 22.3.0
